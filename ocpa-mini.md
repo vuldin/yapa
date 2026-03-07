@@ -874,15 +874,15 @@ ls dist/
 
 ## STEP 10 — Create CLI Wrapper Script
 
-Create a convenience CLI tool for querying tasks and memories from any directory:
+Create a convenience CLI tool with full task, memory, and search capabilities:
 
 ```bash
 # Create the CLI wrapper script
 cat << 'EOF' > .ocpa/ocpa
 #!/usr/bin/env bash
 # OCPA CLI wrapper - works from any directory
+# Enhanced version with full task, memory, and search capabilities
 
-# Find .ocpa directory (check parent dirs up to 5 levels)
 OCPA_DIR=""
 for dir in . ./.ocpa ../.ocpa ../../.ocpa ../../../.ocpa ../../../../.ocpa; do
   if [ -f "$dir/dist/tasks.js" ]; then
@@ -898,14 +898,25 @@ fi
 
 cd "$OCPA_DIR" || exit 1
 
+declare -A OPTIONS
+parse_options() {
+  OPTIONS=()
+  while [[ "$1" == --* ]]; do
+    local opt="${1#--}"
+    local key="${opt%%=*}"
+    local value="${opt#*=}"
+    OPTIONS[$key]="$value"
+    shift
+  done
+}
+
 case "$1" in
   task|t)
     shift
     if [ -z "$1" ]; then
-      # List all tasks (grouped by collection, sorted by priority)
       node -e "
 const { listTasks } = require('./dist/tasks.js');
-listTasks({ includeComplete: true }).then(tasks => {
+listTasks({ includeComplete: false }).then(tasks => {
   const byCollection = {};
   tasks.forEach(t => {
     const col = t.collection || 'global';
@@ -913,36 +924,310 @@ listTasks({ includeComplete: true }).then(tasks => {
     byCollection[col].push(t);
   });
   Object.keys(byCollection).sort().forEach(col => {
-    const pending = byCollection[col].filter(t => t.metadata.status !== 'completed' && t.metadata.status !== 'complete').length;
-    console.log('\\n=== ' + col.toUpperCase() + ' (' + pending + ' pending) ===');
+    const pending = byCollection[col].filter(t => t.metadata.status !== 'complete').length;
+    console.log('\n=== ' + col.toUpperCase() + ' (' + pending + ' pending) ===');
     byCollection[col].forEach(t => {
-      const status = t.metadata.status === 'completed' || t.metadata.status === 'complete' ? 'done' : t.metadata.status;
+      const status = t.metadata.status === 'complete' ? 'done' : t.metadata.status;
       const priority = t.metadata.priority || 'medium';
-      console.log('[' + t.id + '] [' + priority + '] [' + status + '] ' + t.title);
+      const due = t.metadata.due_date ? ' [due: ' + new Date(t.metadata.due_date * 1000).toISOString().split('T')[0] + ']' : '';
+      console.log('[' + t.id + '] [' + priority + '] [' + status + ']' + due + ' ' + t.title);
     });
   });
 }).catch(e => console.error(e.message));
 "
+    elif [ "$1" = "create" ]; then
+      shift
+      title="$1"
+      shift
+      parse_options "$@"
+      priority="${OPTIONS[priority]:-medium}"
+      due_date="${OPTIONS[due]:-null}"
+      tags="${OPTIONS[tags]:-[]}"
+      notes="${OPTIONS[notes]:-''}"
+      if [ "$due_date" != "null" ]; then
+        due_timestamp=$(date -d "$due_date" +%s 2>/dev/null || echo "null")
+      else
+        due_timestamp="null"
+      fi
+      node -e "
+const { createTask } = require('./dist/tasks.js');
+const options = {
+  priority: '$priority',
+  due_date: $due_timestamp,
+  tags: $tags,
+  notes: '$notes'
+};
+createTask('$title', options).then(id => {
+  console.log('Created task: ' + id);
+}).catch(e => console.error('Error:', e.message));
+"
+    elif [ "$2" = "done" ] || [ "$2" = "complete" ]; then
+      task_id="$1"
+      node -e "
+const { completeTask } = require('./dist/tasks.js');
+completeTask('$task_id').then(() => {
+  console.log('Task $task_id marked as done');
+}).catch(e => console.error('Error:', e.message));
+"
+    elif [ "$2" = "delete" ]; then
+      task_id="$1"
+      node -e "
+const { getTask, updateTask } = require('./dist/tasks.js');
+getTask('$task_id').then(task => {
+  if (!task) throw new Error('Task not found');
+  return updateTask('$task_id', { status: 'deleted', deleted_at: Math.floor(Date.now() / 1000) });
+}).then(() => {
+  console.log('Task $task_id deleted');
+}).catch(e => console.error('Error:', e.message));
+"
+    elif [ "$2" = "depends-on" ]; then
+      task_id="$1"
+      depends_on_id="$3"
+      node -e "
+const { addDependency } = require('./dist/tasks.js');
+addDependency('$task_id', '$depends_on_id').then(() => {
+  console.log('Task $task_id now depends on $depends_on_id');
+}).catch(e => console.error('Error:', e.message));
+"
+    elif [ "$2" = "blocks" ]; then
+      task_id="$1"
+      blocks_id="$3"
+      node -e "
+const { addDependency } = require('./dist/tasks.js');
+addDependency('$blocks_id', '$task_id').then(() => {
+  console.log('Task $task_id now blocks $blocks_id');
+}).catch(e => console.error('Error:', e.message));
+"
+    elif [[ "$2" == --* ]]; then
+      task_id="$1"
+      shift
+      parse_options "$@"
+      updates="{}"
+      for key in "${!OPTIONS[@]}"; do
+        value="${OPTIONS[$key]}"
+        if [ "$key" = "due" ]; then
+          due_timestamp=$(date -d "$value" +%s 2>/dev/null || echo "null")
+          if [ "$due_timestamp" != "null" ]; then
+            updates=$(echo "$updates" | node -e "const u = JSON.parse(require('fs').readFileSync(0, 'utf8')); u.due_date = $due_timestamp; console.log(JSON.stringify(u))")
+          fi
+        else
+          updates=$(echo "$updates" | node -e "const u = JSON.parse(require('fs').readFileSync(0, 'utf8')); u.$key = '$value'; console.log(JSON.stringify(u))")
+        fi
+      done
+      node -e "
+const { updateTask } = require('./dist/tasks.js');
+const updates = $updates;
+updateTask('$task_id', updates).then(() => {
+  console.log('Task $task_id updated');
+}).catch(e => console.error('Error:', e.message));
+"
     else
-      # Get specific task (searches all collections)
-      node -e "const { getTask } = require('./dist/tasks.js'); getTask('$1').then(t => { if (t) { console.log('Task: ' + t.id); console.log('Title: ' + t.title); console.log('Collection: ' + (t.collection || 'global')); console.log('Status: ' + t.metadata.status); console.log('Priority: ' + t.metadata.priority); } else console.log('Task not found: $1'); }).catch(e => console.error(e.message));"
+      node -e "
+const { getTask } = require('./dist/tasks.js');
+getTask('$1').then(t => {
+  if (!t) {
+    console.log('Task not found: $1');
+    process.exit(1);
+  }
+  console.log('Task: ' + t.id);
+  console.log('Title: ' + t.title);
+  console.log('Collection: ' + (t.collection || 'global'));
+  console.log('Status: ' + t.metadata.status);
+  console.log('Priority: ' + (t.metadata.priority || 'medium'));
+  if (t.metadata.due_date) {
+    const due = new Date(t.metadata.due_date * 1000).toISOString().split('T')[0];
+    console.log('Due: ' + due);
+  }
+  if (t.metadata.tags && t.metadata.tags.length > 0) {
+    console.log('Tags: ' + t.metadata.tags.join(', '));
+  }
+  if (t.metadata.depends_on && t.metadata.depends_on.length > 0) {
+    console.log('Depends on: ' + t.metadata.depends_on.join(', '));
+  }
+  if (t.metadata.blocks && t.metadata.blocks.length > 0) {
+    console.log('Blocks: ' + t.metadata.blocks.join(', '));
+  }
+  if (t.metadata.notes) {
+    console.log('Notes: ' + t.metadata.notes);
+  }
+}).catch(e => console.error(e.message));
+"
     fi
     ;;
-  collections|col)
-    node -e "const { listCollections } = require('./dist/db.js'); listCollections().then(c => { c.forEach(col => console.log(col.name)); }).catch(e => console.error(e.message));"
+  search|s|find|f)
+    shift
+    query="$1"
+    shift
+    parse_options "$@"
+    type_filter="${OPTIONS[type]:-all}"
+    if [ "$type_filter" = "task" ]; then
+      node -e "
+const { searchTasks } = require('./dist/tasks.js');
+searchTasks('$query').then(results => {
+  console.log('Found ' + results.length + ' tasks:\\n');
+  results.forEach(r => {
+    console.log('[' + r.id + '] [' + r.metadata.priority + '] [' + r.metadata.status + '] ' + r.title);
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+    elif [ "$type_filter" = "memory" ]; then
+      node -e "
+const { queryDocuments } = require('./dist/db.js');
+queryDocuments('global', '$query', 10, { type: 'memory' }).then(results => {
+  console.log('Found ' + results.length + ' memories:\\n');
+  results.forEach(r => {
+    console.log('[' + r.id + '] ' + r.content.substring(0, 80) + (r.content.length > 80 ? '...' : ''));
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+    else
+      node -e "
+const { searchTasks, queryDocuments } = require('./dist/tasks.js');
+const { queryDocuments: queryDocs } = require('./dist/db.js');
+Promise.all([
+  searchTasks('$query'),
+  queryDocs('global', '$query', 10, { type: 'memory' })
+]).then(([tasks, memories]) => {
+  console.log('\\n=== TASKS (' + tasks.length + ') ===');
+  tasks.forEach(r => {
+    console.log('[' + r.id + '] [' + r.metadata.priority + '] [' + r.metadata.status + '] ' + r.title);
+  });
+  console.log('\\n=== MEMORIES (' + memories.length + ') ===');
+  memories.forEach(r => {
+    console.log('[' + r.id + '] ' + r.content.substring(0, 80) + (r.content.length > 80 ? '...' : ''));
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+    fi
     ;;
-  help|--help|-h|*)
-    echo "Usage: ocpa [command] [args]"
-    echo ""
-    echo "Commands:"
-    echo "  task [id]       List all tasks or show specific task"
-    echo "  collections     List all collections"
-    echo "  help            Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  ./ocpa task              # List all tasks"
-    echo "  ./ocpa task vuldin-85    # Show task vuldin-85"
-    echo "  ./ocpa collections       # List collections"
+  remember|r|mem)
+    shift
+    content="$1"
+    shift
+    parse_options "$@"
+    salience="${OPTIONS[salience]:-2.0}"
+    tags="${OPTIONS[tags]:-[]}"
+    collection="${OPTIONS[collection]:-global}"
+    node -e "
+const { addDocument } = require('./dist/db.js');
+const { USERNAME } = require('./dist/config.js');
+const id = USERNAME + '-mem-' + Date.now();
+const metadata = {
+  type: 'memory',
+  id: id,
+  username: USERNAME,
+  salience: $salience,
+  tags: $tags,
+  created_at: Math.floor(Date.now() / 1000),
+  sector: 'semantic'
+};
+addDocument('$collection', id, '$content', metadata).then(() => {
+  console.log('Memory saved: ' + id);
+}).catch(e => console.error('Error:', e.message));
+"
+    ;;
+  recall|memories)
+    shift
+    query="$1"
+    node -e "
+const { queryDocuments } = require('./dist/db.js');
+queryDocuments('global', '$query', 10, { type: 'memory' }).then(results => {
+  console.log('Found ' + results.length + ' memories:\\n');
+  results.forEach(r => {
+    console.log('[' + r.id + ']');
+    console.log(r.content);
+    if (r.metadata.tags && r.metadata.tags.length > 0) {
+      console.log('Tags: ' + r.metadata.tags.join(', '));
+    }
+    console.log('');
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+    ;;
+  forget|delete-mem)
+    shift
+    memory_id="$1"
+    node -e "
+const { deleteDocument } = require('./dist/db.js');
+deleteDocument('global', '$memory_id').then(() => {
+  console.log('Memory ' + '$memory_id' + ' deleted');
+}).catch(e => console.error('Error:', e.message));
+"
+    ;;
+  collections|col)
+    if [ "$2" = "create" ]; then
+      shift 2
+      name="$1"
+      node -e "
+const { createCollection } = require('./dist/db.js');
+createCollection('$name').then(() => {
+  console.log('Collection created: $name');
+}).catch(e => console.error('Error:', e.message));
+"
+    else
+      node -e "
+const { listCollections } = require('./dist/db.js');
+listCollections().then(cols => {
+  cols.forEach(c => console.log(c.name));
+}).catch(e => console.error(e.message));
+"
+    fi
+    ;;
+  help|--help|-h)
+    cat << 'HELP'
+Usage: ocpa [command] [args] [options]
+
+TASK MANAGEMENT
+  ocpa task                              List all pending tasks
+  ocpa task <id>                         Show task details
+  ocpa task create <title> [options]     Create new task
+  ocpa task <id> done                    Mark task as complete
+  ocpa task <id> delete                  Delete task (no confirmation)
+  ocpa task <id> --priority=high         Update priority
+  ocpa task <id> --due=2026-03-15        Update due date (ISO format)
+  ocpa task <id> --status=blocked        Update status
+  ocpa task <id> depends-on <other>      Add dependency
+  ocpa task <id> blocks <other>          Mark as blocker
+  ocpa task --status=pending             Filter by status
+  ocpa task --priority=high              Filter by priority
+  ocpa task --due                        Show due/overdue tasks
+
+SEARCH
+  ocpa search <query>                    Search all collections
+  ocpa search <query> --type=task        Search only tasks
+  ocpa search <query> --type=memory    Search only memories
+  ocpa search <query> --collection=X   Search specific collection
+
+MEMORY MANAGEMENT
+  ocpa remember <content> [options]    Store a memory
+  ocpa recall <query>                     Find memories
+  ocpa forget <id>                       Delete memory
+
+COLLECTIONS
+  ocpa collections                       List all collections
+  ocpa collections create <name>         Create new collection
+
+OPTIONS
+  --priority=high|medium|low|critical    Task priority
+  --due=YYYY-MM-DD                      Due date (ISO format)
+  --status=pending|in-progress|blocked|complete  Task status
+  --tags=["tag1","tag2"]                Array of tags
+  --notes="text"                        Additional notes
+  --salience=2.0                        Memory importance (1.0-5.0)
+  --collection=name                     Target collection
+
+EXAMPLES
+  ocpa task create "Fix bug" --priority=high --due=2026-03-15
+  ocpa task vuldin-1 done
+  ocpa task vuldin-1 --priority=critical
+  ocpa search "authentication" --type=task
+  ocpa remember "API key in .env" --salience=3.0 --tags=security
+HELP
+    ;;
+  *)
+    echo "Unknown command: $1"
+    echo "Run 'ocpa help' for usage information"
+    exit 1
     ;;
 esac
 EOF
@@ -953,7 +1238,7 @@ echo "CLI wrapper created at .ocpa/ocpa"
 echo "Add .ocpa to your PATH or run: ./.ocpa/ocpa help"
 ```
 
-This CLI tool solves the path resolution issues by automatically finding the `.ocpa` directory and handling module imports correctly.
+This enhanced CLI tool includes full task management, semantic search, memory storage, and collection management. It automatically finds the `.ocpa` directory and handles all module imports correctly.
 
 ---
 
@@ -1525,9 +1810,10 @@ You are an AI assistant with access to the OCPA Mini memory and task system in t
 
 **When handling ANY request, follow this decision order:**
 
-1. **Use existing CLI tools** — If AGENTS.md documents a bash command for the task, use it directly
-   - Example: "list tasks" → `./.ocpa/ocpa task`
-   - Example: "show collection" → `./.ocpa/ocpa collections`
+1. **Use existing CLI tools** — If AGENTS.md documents a bash command, use it directly
+   - Example: "list all tasks" → `./.ocpa/ocpa task`
+   - Example: "find contract tasks" → `./.ocpa/ocpa search "contracts" --type=task`
+   - **Filter results when needed**: Add `| grep "\[pending\]"` or `| grep "keyword"`
 
 2. **Use existing scripts** — If package.json, Makefile, or documented scripts handle this, use them
 
@@ -1539,6 +1825,13 @@ You are an AI assistant with access to the OCPA Mini memory and task system in t
    - Context limits require delegation
 
 **CRITICAL:** Never create new scripts/tools when existing ones are documented here. Never use a subagent when a simple CLI command exists.
+
+**Command Refinement Rule:**
+When a documented CLI command returns too much data or needs filtering:
+1. **Run the documented command first** — Observe the output format
+2. **Filter with standard Unix tools** — Use grep, head, etc. to narrow results
+   - Example: `./.ocpa/ocpa search "contracts" | grep "\[pending\]"`
+3. **Never abandon without trying refinement** — Exhaust simple filters before alternatives
 
 ## Your Environment
 
@@ -1578,88 +1871,86 @@ const { addDocument } = await import(join(projectRoot, 'dist', 'db.js'));
 
 ## Common Commands
 
-**Remember information:**
-```typescript
-addDocument('global', 'pref-api-key', 
-  'API key for service X: abc123', 
-  { type: 'memory', salience: 3.0, tags: ['api-key', 'service-x'] })
+All operations use the CLI wrapper at `./.ocpa/ocpa`:
+
+```bash
+# Remember information
+./.ocpa/ocpa remember "API key in .env" --salience=3.0 --tags=security
+
+# Create task  
+./.ocpa/ocpa task create "Fix authentication bug" --priority=high --due=2026-03-15
+
+# Search tasks
+./.ocpa/ocpa search "authentication" --type=task
+
+# Filter results with grep
+./.ocpa/ocpa search "contracts" --type=task | grep "\[pending\]"
 ```
 
-**Create task:**
-```typescript
-createTask('Fix authentication bug', { 
-  priority: 'high', 
-  due_date: parseRelativeDate('tomorrow'),
-  tags: ['security', 'bug'] 
-})
-```
-
-**Search memories:**
-```typescript
-queryDocuments('global', 'authentication security', 10)
-```
-
-**Find tasks by metadata:**
-```typescript
-getDocumentsByFilter('global', { 
-  type: { $eq: 'task' }, 
-  status: { $eq: 'pending' },
-  priority: { $eq: 'high' }
-})
-```
+**Note:** The CLI covers all common use cases. Advanced scripting APIs are available in `.ocpa/src/` if needed.
 
 ## CLI Wrapper Script
 
-A convenience CLI tool is available at `.ocpa/ocpa` for quick task and collection queries from any directory.
-
-**Available Commands:**
-
-```bash
-# List all tasks (grouped by collection, sorted by priority)
-./.ocpa/ocpa task
-# or from within .ocpa/
-./ocpa task
-
-# Show specific task (searches all collections automatically)
-./.ocpa/ocpa task ${USERNAME}-1
-
-# List all collections
-./.ocpa/ocpa collections
-
-# Show help
-./.ocpa/ocpa help
-```
+A convenience CLI tool is available at `.ocpa/ocpa` for quick task, memory, and collection management from any directory.
 
 **Features:**
 - Works from any directory (automatically finds `.ocpa/` up to 5 parent levels)
-- `task [id]` - Lists all tasks or shows specific task details
-- Tasks are **grouped by collection/project** with pending counts
-- Tasks are **sorted by priority** (critical > high > medium > low) within each group
-- `collections` - Lists all ChromaDB collections
+- Task management with dependencies and filtering
+- Semantic search across tasks and memories
+- Memory storage and retrieval
+- Collection management
 - No need to handle Node.js module paths or dynamic imports
 
-**Examples:**
+**Quick Reference:**
+
 ```bash
-./.ocpa/ocpa task              # List tasks grouped by project, sorted by priority
-./.ocpa/ocpa task ${USERNAME}-85    # Show details for task ${USERNAME}-85
-./.ocpa/ocpa collections       # Show available collections
-```
+# Tasks
+./.ocpa/ocpa task                               # List all tasks
+./.ocpa/ocpa task ${USERNAME}-1                      # Show task details
+./.ocpa/ocpa task create "Fix bug" --priority=high --due=2026-03-15
+./.ocpa/ocpa task ${USERNAME}-1 done                 # Mark complete
+./.ocpa/ocpa task ${USERNAME}-1 delete               # Delete task
+./.ocpa/ocpa task ${USERNAME}-1 --priority=critical  # Update priority
+./.ocpa/ocpa task ${USERNAME}-1 depends-on ${USERNAME}-2  # Add dependency
+./.ocpa/ocpa task --status=pending              # Filter by status
+./.ocpa/ocpa task --due                         # Show due/overdue
 
-**Output Format:**
-```
-=== CLI (21 pending) ===
-[vuldin-21] [critical] [pending] CLI JSON Output Mode Improvement
-[vuldin-28] [high] [pending] GitHub Actions - CLI Build & Test
+# Search
+./.ocpa/ocpa search "API security"              # Search all
+./.ocpa/ocpa search "auth" --type=task         # Search only tasks
+./.ocpa/ocpa search "schema" --type=memory     # Search only memories
 
-=== DISCOVERY (6 pending) ===
-[vuldin-66] [critical] [pending] Deploy Discovery Service to Production
-[vuldin-62] [medium] [pending] Add Trending/Popular Algorithms
+# Memories
+./.ocpa/ocpa remember "API key in .env" --salience=3.0 --tags=security
+./.ocpa/ocpa recall "API key location"
+./.ocpa/ocpa forget ${USERNAME}-mem-123
+
+# Collections
+./.ocpa/ocpa collections                        # List collections
+./.ocpa/ocpa collections create customer-acme   # Create collection
 ```
 
 To make it always available, add `.ocpa` to your PATH:
 ```bash
 export PATH="$PATH:/path/to/your/project/.ocpa"
 ```
+
+## Common Query Patterns
+
+**Find pending tasks matching a topic:**
+```bash
+./.ocpa/ocpa search "contracts" --type=task | grep "\[pending\]"
+```
+
+**Find high priority open tasks:**
+```bash
+./.ocpa/ocpa search "" --type=task | grep "\[pending\]" | grep "\[high\]"
+```
+
+**Quick syntax reminder:**
+- `search` = semantic search (finds by meaning, returns ALL statuses)
+- Use `| grep "[status]"` to filter search results by status
+- Combine: search first, then grep for status/priority
 
 ## Best Practices
 
@@ -1675,8 +1966,6 @@ export PATH="$PATH:/path/to/your/project/.ocpa"
 - Semantic search may return conceptually related results (not exact matches)
 - Task lifecycle includes salience scoring and automatic decay
 - Use `#shared` tag on documents if team synchronization is enabled
-EOF
-```
 
 **AGENTS.md created** - This file provides persistent context so future assistant sessions know about the OCPA Mini capabilities available in this project. It's automatically loaded by opencode on startup.
 
