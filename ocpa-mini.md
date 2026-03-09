@@ -913,10 +913,29 @@ parse_options() {
 case "$1" in
   task|t)
     shift
-    if [ -z "$1" ]; then
+    # Parse options for --collection, --status, --priority
+    collection_filter=""
+    status_filter=""
+    priority_filter=""
+    args_to_process=("$@")
+    for arg in "${args_to_process[@]}"; do
+      if [[ "$arg" == --collection=* ]]; then
+        collection_filter="${arg#--collection=}"
+      elif [[ "$arg" == --status=* ]]; then
+        status_filter="${arg#--status=}"
+      elif [[ "$arg" == --priority=* ]]; then
+        priority_filter="${arg#--priority=}"
+      fi
+    done
+    
+    if [ -z "$1" ] || [[ "$1" == --* ]]; then
       node -e "
 const { listTasks } = require('./dist/tasks.js');
-listTasks({ includeComplete: false }).then(tasks => {
+const filters = { includeComplete: false };
+if ('$collection_filter') filters.collection = '$collection_filter';
+if ('$status_filter') filters.status = '$status_filter';
+if ('$priority_filter') filters.priority = '$priority_filter';
+listTasks(filters).then(tasks => {
   const byCollection = {};
   tasks.forEach(t => {
     const col = t.collection || 'global';
@@ -944,6 +963,7 @@ listTasks({ includeComplete: false }).then(tasks => {
       due_date="${OPTIONS[due]:-null}"
       tags="${OPTIONS[tags]:-[]}"
       notes="${OPTIONS[notes]:-''}"
+      collection="${OPTIONS[collection]:-global}"
       if [ "$due_date" != "null" ]; then
         due_timestamp=$(date -d "$due_date" +%s 2>/dev/null || echo "null")
       else
@@ -957,7 +977,7 @@ const options = {
   tags: $tags,
   notes: '$notes'
 };
-createTask('$title', options).then(id => {
+createTask('$title', options, '$collection').then(id => {
   console.log('Created task: ' + id);
 }).catch(e => console.error('Error:', e.message));
 "
@@ -1179,6 +1199,7 @@ Usage: ocpa [command] [args] [options]
 
 TASK MANAGEMENT
   ocpa task                              List all pending tasks
+  ocpa task --collection=contracts       List only contracts collection
   ocpa task <id>                         Show task details
   ocpa task create <title> [options]     Create new task
   ocpa task <id> done                    Mark task as complete
@@ -1212,6 +1233,7 @@ OPTIONS
   --due=YYYY-MM-DD                      Due date (ISO format)
   --status=pending|in-progress|blocked|complete  Task status
   --tags=["tag1","tag2"]                Array of tags
+  --collection=name                     Target collection (for task list/create)
   --notes="text"                        Additional notes
   --salience=2.0                        Memory importance (1.0-5.0)
   --collection=name                     Target collection
@@ -1812,7 +1834,7 @@ You are an AI assistant with access to the OCPA Mini memory and task system in t
 
 1. **Use existing CLI tools** — If AGENTS.md documents a bash command, use it directly
    - Example: "list all tasks" → `./.ocpa/ocpa task`
-   - Example: "find contract tasks" → `./.ocpa/ocpa search "contracts" --type=task`
+   - Example: "find contract tasks" → `./.ocpa/ocpa task --collection=contracts`
    - **Filter results when needed**: Add `| grep "\[pending\]"` or `| grep "keyword"`
 
 2. **Use existing scripts** — If package.json, Makefile, or documented scripts handle this, use them
@@ -1879,15 +1901,63 @@ All operations use the CLI wrapper at `./.ocpa/ocpa`:
 
 # Create task  
 ./.ocpa/ocpa task create "Fix authentication bug" --priority=high --due=2026-03-15
+./.ocpa/ocpa task create "Implement feature" --notes="Initial notes"
 
 # Search tasks
 ./.ocpa/ocpa search "authentication" --type=task
 
+# List all contracts tasks (use --collection, not semantic search)
+./.ocpa/ocpa task --collection=contracts
+
 # Filter results with grep
-./.ocpa/ocpa search "contracts" --type=task | grep "\[pending\]"
+./.ocpa/ocpa task --collection=contracts | grep "\[pending\]"
 ```
 
 **Note:** The CLI covers all common use cases. Advanced scripting APIs are available in `.ocpa/src/` if needed.
+
+## CLI Argument Handling
+
+**⚠️ IMPORTANT — Special Character Handling:**
+
+When passing text with quotes, apostrophes, or other special characters to the CLI, follow these guidelines:
+
+### Safe Patterns
+
+**Simple text (no special characters):**
+```bash
+./.ocpa/ocpa task ${USERNAME}-1 --notes="Working on implementation"
+./.ocpa/ocpa remember "API key location" --tags=api,security
+```
+
+**Complex text with quotes or apostrophes:**
+```bash
+# For long descriptions with special characters, use shorter text
+# and store detailed notes as a separate memory instead:
+./.ocpa/ocpa task ${USERNAME}-1 --notes="ERC20 batch payment implemented - see memory for details"
+./.ocpa/ocpa remember "Task full details: Contract changes complete..." --tags=task,progress
+```
+
+### Available Task Update Fields
+
+When updating a task, you can use any of these fields:
+- `--priority=high|medium|low` — Update task priority
+- `--status=pending|in_progress|complete|blocked` — Update task status  
+- `--notes="text"` — Add progress notes (keep brief, under 200 chars)
+- `--due=2026-03-15` — Set due date
+
+### Creating Tasks with Initial Notes
+
+When creating a task, you can add initial notes:
+```bash
+./.ocpa/ocpa task create "Implement feature" --notes="Initial research complete" --priority=high --due=2026-03-15
+```
+
+### Best Practice for Complex Updates
+
+For complex status updates with special characters:
+1. Update the task with a brief summary: `./.ocpa/ocpa task ${USERNAME}-79 --notes="ERC20 support added, 3 tests passing"
+2. Store detailed notes as a memory: `./.ocpa/ocpa remember "Full task details..." --tags=task`
+3. Reference the memory in task notes for full context
 
 ## CLI Wrapper Script
 
@@ -1906,6 +1976,7 @@ A convenience CLI tool is available at `.ocpa/ocpa` for quick task, memory, and 
 ```bash
 # Tasks
 ./.ocpa/ocpa task                               # List all tasks
+./.ocpa/ocpa task --collection=contracts        # List only contracts collection
 ./.ocpa/ocpa task ${USERNAME}-1                      # Show task details
 ./.ocpa/ocpa task create "Fix bug" --priority=high --due=2026-03-15
 ./.ocpa/ocpa task ${USERNAME}-1 done                 # Mark complete
@@ -1937,20 +2008,33 @@ export PATH="$PATH:/path/to/your/project/.ocpa"
 
 ## Common Query Patterns
 
-**Find pending tasks matching a topic:**
+**⚠️ CRITICAL - USE COLLECTION FILTERING FOR PROJECT TASKS:**
+
+Semantic search (`search "contracts"`) finds tasks where "contracts" appears in the title/content. It **MISSES** tasks that are in the contracts collection but have unrelated titles.
+
+**Example:** Task 60 "Achieve 100% Passing BDD Scenarios" is in the contracts collection but won't appear in `search "contracts"` results.
+
+**Find ALL open tasks in a specific collection:**
 ```bash
-./.ocpa/ocpa search "contracts" --type=task | grep "\[pending\]"
+./.ocpa/ocpa task --collection=contracts
+./.ocpa/ocpa task --collection=discovery
+./.ocpa/ocpa task --collection=cli
 ```
 
-**Find high priority open tasks:**
+**List all tasks from all collections:**
 ```bash
-./.ocpa/ocpa search "" --type=task | grep "\[pending\]" | grep "\[high\]"
+./.ocpa/ocpa task
+```
+
+**Create task in specific collection:**
+```bash
+./.ocpa/ocpa task create "New contract feature" --collection=contracts --priority=high
 ```
 
 **Quick syntax reminder:**
-- `search` = semantic search (finds by meaning, returns ALL statuses)
-- Use `| grep "[status]"` to filter search results by status
-- Combine: search first, then grep for status/priority
+- `task --collection=name` = filter tasks by collection (efficient, exact)
+- `search "query"` = semantic search (across all collections, by meaning)
+- Use semantic search for finding content by meaning, use --collection for listing all project tasks
 
 ## Best Practices
 
@@ -2687,22 +2771,24 @@ export async function listTasks(filters: {
   const allTasks: Array<{ id: string; title: string; collection: string; metadata: any }> = [];
   
   for (const collectionName of collections) {
-    // Build where clause using simple equality for ChromaDB v2
-    const conditions: Record<string, any>[] = [{ type: 'task' }];
+    // Use simple filter - ChromaDB get endpoint only supports basic key-value matching
+    const where: Record<string, any> = { type: 'task' };
     
-    if (filters.status) conditions.push({ status: filters.status });
-    if (filters.priority) conditions.push({ priority: filters.priority });
-    if (filters.customer) conditions.push({ customer: filters.customer });
-    if (filters.project) conditions.push({ project: filters.project });
-    if (!filters.includeComplete) conditions.push({ status: { $ne: 'complete' } });
-    
-    // Use $and for multiple conditions, single condition for just type filter
-    const where = conditions.length === 1 ? conditions[0] : { $and: conditions };
+    // Add exact match filters only (ChromaDB doesn't support $eq, $ne, $and in get endpoint)
+    if (filters.status) where.status = filters.status;
+    if (filters.priority) where.priority = filters.priority;
+    if (filters.customer) where.customer = filters.customer;
+    if (filters.project) where.project = filters.project;
     
     try {
       const tasks = await getDocumentsByFilter(collectionName, where, 100);
       
       for (const task of tasks) {
+        // Filter out complete tasks if not including them (ChromaDB doesn't support $ne)
+        if (!filters.includeComplete && task.metadata.status === 'complete') {
+          continue;
+        }
+        
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -2729,7 +2815,7 @@ export async function listTasks(filters: {
 /**
  * Get single task by ID
  */
-export async function getTask(id: string): Promise<{ id: string; title: string; metadata: any } | null> {
+export async function getTask(id: string): Promise<{ id: string; title: string; metadata: any; collection: string } | null> {
   // Try all collections
   const collections = await listCollections();
   
@@ -2757,6 +2843,7 @@ export async function getTask(id: string): Promise<{ id: string; title: string; 
             id: data.ids[0],
             title: data.documents[0],
             metadata: fromChroma(data.metadatas[0]),
+            collection: collection.name,
           };
         }
       }
@@ -2785,7 +2872,9 @@ export async function updateTask(
     updated_at: Math.floor(Date.now() / 1000),
   };
   
-  await updateDocument(collectionName || 'global', id, updatedMetadata);
+  // Use the task's actual collection, or fall back to provided collectionName, or 'global'
+  const targetCollection = task.collection || collectionName || 'global';
+  await updateDocument(targetCollection, id, updatedMetadata);
 }
 
 /**
@@ -2800,7 +2889,7 @@ export async function completeTask(id: string): Promise<void> {
     status: 'complete',
     completed_at: Math.floor(Date.now() / 1000),
     salience: task.metadata.salience * 0.5,  // Retain 50% salience
-  });
+  }, task.collection);
 }
 
 /**
@@ -2874,14 +2963,14 @@ export async function addDependency(taskId: string, dependsOnId: string): Promis
   const taskDeps = task.metadata.depends_on || [];
   if (!taskDeps.includes(dependsOnId)) {
     taskDeps.push(dependsOnId);
-    await updateTask(taskId, { depends_on: taskDeps });
+    await updateTask(taskId, { depends_on: taskDeps }, task.collection);
   }
   
   // Update dependsOn task with blocker info
   const dependsOnBlocks = dependsOn.metadata.blocks || [];
   if (!dependsOnBlocks.includes(taskId)) {
     dependsOnBlocks.push(taskId);
-    await updateTask(dependsOnId, { blocks: dependsOnBlocks });
+    await updateTask(dependsOnId, { blocks: dependsOnBlocks }, dependsOn.collection);
   }
 }
 
