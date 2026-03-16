@@ -949,7 +949,8 @@ listTasks(filters).then(tasks => {
       const status = t.metadata.status === 'complete' ? 'done' : t.metadata.status;
       const priority = t.metadata.priority || 'medium';
       const due = t.metadata.due_date ? ' [due: ' + new Date(t.metadata.due_date * 1000).toISOString().split('T')[0] + ']' : '';
-      console.log('[' + t.id + '] [' + priority + '] [' + status + ']' + due + ' ' + t.title);
+      const blocks = (t.metadata.blocks && t.metadata.blocks.length > 0) ? ' [blocks: ' + t.metadata.blocks.join(', ') + ']' : '';
+      console.log('[' + t.id + '] [' + priority + '] [' + status + ']' + due + blocks + ' ' + t.title);
     });
   });
 }).catch(e => console.error(e.message));
@@ -1080,6 +1081,7 @@ getTask('$1').then(t => {
     shift
     parse_options "$@"
     type_filter="${OPTIONS[type]:-all}"
+    collection_filter="${OPTIONS[collection]:-all}"
     if [ "$type_filter" = "task" ]; then
       node -e "
 const { searchTasks } = require('./dist/tasks.js');
@@ -1091,33 +1093,78 @@ searchTasks('$query').then(results => {
 }).catch(e => console.error('Error:', e.message));
 "
     elif [ "$type_filter" = "memory" ]; then
-      node -e "
+      if [ -n "$collection_filter" ] && [ "$collection_filter" != "all" ]; then
+        node -e "
 const { queryDocuments } = require('./dist/db.js');
-queryDocuments('global', '$query', 10, { type: 'memory' }).then(results => {
-  console.log('Found ' + results.length + ' memories:\\n');
+queryDocuments('$collection_filter', '$query', 10, { type: 'memory' }).then(results => {
+  console.log('Found ' + results.length + ' memories in $collection_filter:\n');
   results.forEach(r => {
     console.log('[' + r.id + '] ' + r.content.substring(0, 80) + (r.content.length > 80 ? '...' : ''));
   });
 }).catch(e => console.error('Error:', e.message));
 "
+      else
+        node -e "
+const { queryDocumentsFromAllCollections } = require('./dist/db.js');
+queryDocumentsFromAllCollections('$query', 10, { type: 'memory' }).then(resultsByCollection => {
+  let totalResults = 0;
+  resultsByCollection.forEach(results => totalResults += results.length);
+  console.log('Found ' + totalResults + ' memories:\n');
+  resultsByCollection.forEach((results, collection) => {
+    console.log('=== ' + collection.toUpperCase() + ' (' + results.length + ') ===');
+    results.forEach(r => {
+      console.log('[' + r.id + '] ' + r.content.substring(0, 80) + (r.content.length > 80 ? '...' : ''));
+    });
+    console.log('');
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+      fi
     else
-      node -e "
-const { searchTasks, queryDocuments } = require('./dist/tasks.js');
-const { queryDocuments: queryDocs } = require('./dist/db.js');
+      if [ -n "$collection_filter" ] && [ "$collection_filter" != "all" ]; then
+        node -e "
+const { searchTasks } = require('./dist/tasks.js');
+const { queryDocuments } = require('./dist/db.js');
 Promise.all([
   searchTasks('$query'),
-  queryDocs('global', '$query', 10, { type: 'memory' })
+  queryDocuments('$collection_filter', '$query', 10, { type: 'memory' })
 ]).then(([tasks, memories]) => {
   console.log('\\n=== TASKS (' + tasks.length + ') ===');
   tasks.forEach(r => {
     console.log('[' + r.id + '] [' + r.metadata.priority + '] [' + r.metadata.status + '] ' + r.title);
   });
-  console.log('\\n=== MEMORIES (' + memories.length + ') ===');
+  console.log('\\n=== MEMORIES IN $collection_filter (' + memories.length + ') ===');
   memories.forEach(r => {
     console.log('[' + r.id + '] ' + r.content.substring(0, 80) + (r.content.length > 80 ? '...' : ''));
   });
 }).catch(e => console.error('Error:', e.message));
 "
+      else
+        node -e "
+const { searchTasks } = require('./dist/tasks.js');
+const { queryDocumentsFromAllCollections } = require('./dist/db.js');
+Promise.all([
+  searchTasks('$query'),
+  queryDocumentsFromAllCollections('$query', 10, { type: 'memory' })
+]).then(([tasks, memoriesByCollection]) => {
+  console.log('\\n=== TASKS (' + tasks.length + ') ===');
+  tasks.forEach(r => {
+    console.log('[' + r.id + '] [' + r.metadata.priority + '] [' + r.metadata.status + '] ' + r.title);
+  });
+  
+  let totalMemories = 0;
+  memoriesByCollection.forEach(results => totalMemories += results.length);
+  console.log('\\n=== MEMORIES (' + totalMemories + ') ===');
+  
+  memoriesByCollection.forEach((memories, collection) => {
+    console.log('\\n--- ' + collection.toUpperCase() + ' (' + memories.length + ') ---');
+    memories.forEach(r => {
+      console.log('[' + r.id + '] ' + r.content.substring(0, 80) + (r.content.length > 80 ? '...' : ''));
+    });
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+      fi
     fi
     ;;
   remember|r|mem)
@@ -1149,10 +1196,16 @@ addDocument('$collection', id, '$content', metadata).then(() => {
   recall|memories)
     shift
     query="$1"
-    node -e "
+    shift
+    parse_options "$@"
+    
+    collection="${OPTIONS[collection]:-}"
+    
+    if [ -n "$collection" ]; then
+      node -e "
 const { queryDocuments } = require('./dist/db.js');
-queryDocuments('global', '$query', 10, { type: 'memory' }).then(results => {
-  console.log('Found ' + results.length + ' memories:\\n');
+queryDocuments('$collection', '$query', 10, { type: 'memory' }).then(results => {
+  console.log('Found ' + results.length + ' memories in $collection:\n');
   results.forEach(r => {
     console.log('[' + r.id + ']');
     console.log(r.content);
@@ -1163,16 +1216,60 @@ queryDocuments('global', '$query', 10, { type: 'memory' }).then(results => {
   });
 }).catch(e => console.error('Error:', e.message));
 "
+    else
+      node -e "
+const { queryDocumentsFromAllCollections } = require('./dist/db.js');
+queryDocumentsFromAllCollections('$query', 10, { type: 'memory' }).then(resultsByCollection => {
+  let totalResults = 0;
+  resultsByCollection.forEach((results, collection) => {
+    totalResults += results.length;
+  });
+  
+  if (totalResults === 0) {
+    console.log('No memories found.\n');
+    return;
+  }
+  
+  console.log('Found ' + totalResults + ' memories:\n');
+  
+  resultsByCollection.forEach((results, collection) => {
+    console.log('=== ' + collection.toUpperCase() + ' (' + results.length + ') ===');
+    results.forEach(r => {
+      console.log('[' + r.id + ']');
+      console.log(r.content);
+      if (r.metadata.tags && r.metadata.tags.length > 0) {
+        console.log('Tags: ' + r.metadata.tags.join(', '));
+      }
+      console.log('');
+    });
+  });
+}).catch(e => console.error('Error:', e.message));
+"
+    fi
     ;;
   forget|delete-mem)
     shift
     memory_id="$1"
-    node -e "
+    shift
+    parse_options "$@"
+    
+    collection="${OPTIONS[collection]:-}"
+    
+    if [ -n "$collection" ]; then
+      node -e "
 const { deleteDocument } = require('./dist/db.js');
-deleteDocument('global', '$memory_id').then(() => {
-  console.log('Memory ' + '$memory_id' + ' deleted');
+deleteDocument('$collection', '$memory_id').then(() => {
+  console.log('Memory ' + '$memory_id' + ' deleted from ' + '$collection');
 }).catch(e => console.error('Error:', e.message));
 "
+    else
+      node -e "
+const { findAndDeleteDocument } = require('./dist/db.js');
+findAndDeleteDocument('$memory_id').then(collection => {
+  console.log('Memory ' + '$memory_id' + ' deleted from ' + collection);
+}).catch(e => console.error('Error:', e.message));
+"
+    fi
     ;;
   collections|col)
     if [ "$2" = "create" ]; then
@@ -1220,9 +1317,11 @@ SEARCH
   ocpa search <query> --collection=X   Search specific collection
 
 MEMORY MANAGEMENT
-  ocpa remember <content> [options]    Store a memory
-  ocpa recall <query>                     Find memories
-  ocpa forget <id>                       Delete memory
+  ocpa remember <content> [options]      Store a memory
+  ocpa recall <query> [options]           Find memories (all collections)
+  ocpa recall <query> --collection=X     Find memories in specific collection
+  ocpa forget <id> [options]              Delete memory (finds in any collection)
+  ocpa forget <id> --collection=X         Delete from specific collection
 
 COLLECTIONS
   ocpa collections                       List all collections
@@ -1244,6 +1343,11 @@ EXAMPLES
   ocpa task vuldin-1 --priority=critical
   ocpa search "authentication" --type=task
   ocpa remember "API key in .env" --salience=3.0 --tags=security
+  ocpa remember "Contract details" --collection=contracts --salience=3.0
+  ocpa recall "payment terms" --collection=contracts
+  ocpa recall "database"                   Search memories across all collections
+  ocpa forget vuldin-mem-123               Finds and deletes from any collection
+  ocpa forget vuldin-mem-123 --collection=contracts
 HELP
     ;;
   *)
@@ -1832,6 +1936,11 @@ You are an AI assistant with access to the OCPA Mini memory and task system in t
 
 **When handling ANY request, follow this decision order:**
 
+0. **Query context first** — Before responding, check memories and tasks
+   - Run: `./.ocpa/ocpa recall "<user query>"` or `./.ocpa/ocpa search "<keywords>"`
+   - Run: `./.ocpa/ocpa task` (add `| grep "\[pending\]"` or `--collection=X` if needed)
+   - Use retrieved context to inform your response
+
 1. **Use existing CLI tools** — If AGENTS.md documents a bash command, use it directly
    - Example: "list all tasks" → `./.ocpa/ocpa task`
    - Example: "find contract tasks" → `./.ocpa/ocpa task --collection=contracts`
@@ -1854,6 +1963,29 @@ When a documented CLI command returns too much data or needs filtering:
 2. **Filter with standard Unix tools** — Use grep, head, etc. to narrow results
    - Example: `./.ocpa/ocpa search "contracts" | grep "\[pending\]"`
 3. **Never abandon without trying refinement** — Exhaust simple filters before alternatives
+
+## Automatic Memory & Task Protocol
+
+**Query Requirements:**
+Query memories/tasks before EVERY response using semantic search. Use collection filters when working on specific projects.
+
+**Auto-Create Memories (salience ≥ 2.0):**
+Create memories automatically when discovering:
+- Technical facts/API details → `./.ocpa/ocpa remember "<fact>" --salience=2.0 --tags=autogenerated,technical`
+- User preferences/requirements → `./.ocpa/ocpa remember "<preference>" --salience=2.5 --tags=autogenerated,preference`
+- Decisions made → `./.ocpa/ocpa remember "<decision>" --salience=2.0 --tags=autogenerated,decision`
+- Configuration details → `./.ocpa/ocpa remember "<config>" --salience=2.0 --tags=autogenerated,config`
+- Error solutions → `./.ocpa/ocpa remember "<solution>" --salience=2.5 --tags=autogenerated,solution`
+
+**Auto-Update Tasks:**
+- Progress made: `./.ocpa/ocpa task <id> --notes="<brief progress>"`
+- Task complete: `./.ocpa/ocpa task <id> done`
+- New work discovered: `./.ocpa/ocpa task create "<new task>" --priority=medium`
+
+**Content Size Guidelines:**
+- Keep task notes brief (under 200 chars) - use memories for detailed content
+- For markdown or complex content, create a memory and reference it in task notes
+- Example workflow: `./.ocpa/ocpa task <id> --notes="See memory for details"` + `./.ocpa/ocpa remember "<full markdown content>" --tags=<taskid>`
 
 ## Your Environment
 
@@ -2618,6 +2750,58 @@ export async function deleteDocument(collectionName: string, id: string): Promis
     const error = await response.text();
     throw new Error(`Failed to delete document: ${response.status} - ${error}`);
   }
+}
+
+export interface CrossCollectionResult {
+  collection: string;
+  id: string;
+  content: string;
+  metadata: Record<string, any>;
+  distance: number;
+}
+
+export async function queryDocumentsFromAllCollections(
+  queryText: string,
+  nResults: number = 5,
+  filter?: Record<string, any>
+): Promise<Map<string, CrossCollectionResult[]>> {
+  const collections = await listCollections();
+  const resultsByCollection = new Map<string, CrossCollectionResult[]>();
+  
+  for (const collection of collections) {
+    try {
+      const results = await queryDocuments(collection.name, queryText, nResults, filter);
+      if (results.length > 0) {
+        resultsByCollection.set(
+          collection.name,
+          results.map(r => ({ ...r, collection: collection.name }))
+        );
+      }
+    } catch (e) {
+      // Skip collections that don't exist or can't be queried
+    }
+  }
+  
+  return resultsByCollection;
+}
+
+export async function findAndDeleteDocument(id: string): Promise<string> {
+  const collections = await listCollections();
+  
+  // First try to find which collection contains this document
+  for (const collection of collections) {
+    try {
+      const results = await getDocumentsByFilter(collection.name, { id }, 1);
+      if (results.length > 0) {
+        await deleteDocument(collection.name, id);
+        return collection.name;
+      }
+    } catch (e) {
+      // Continue to next collection
+    }
+  }
+  
+  throw new Error(`Document '${id}' not found in any collection`);
 }
 ```
 
