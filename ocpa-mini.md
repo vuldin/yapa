@@ -910,6 +910,39 @@ parse_options() {
   done
 }
 
+# Helper to safely encode content for Node.js (handles newlines, quotes, backticks)
+b64_encode() {
+  printf '%s' "$1" | base64 -w0
+}
+
+# Helper to parse comma-separated tags into JSON array
+parse_tags() {
+  local tags_input="$1"
+  if [ -z "$tags_input" ] || [ "$tags_input" = "[]" ]; then
+    echo "[]"
+  elif [[ "$tags_input" == \[* ]]; then
+    # Already JSON array format
+    echo "$tags_input"
+  else
+    # Convert comma-separated to JSON array
+    IFS=',' read -ra TAGS_ARR <<< "$tags_input"
+    local json_tags="["
+    local first=true
+    for tag in "${TAGS_ARR[@]}"; do
+      # Trim whitespace
+      tag=$(echo "$tag" | xargs)
+      if [ "$first" = true ]; then
+        first=false
+      else
+        json_tags="$json_tags,"
+      fi
+      json_tags="$json_tags\"$tag\""
+    done
+    json_tags="$json_tags]"
+    echo "$json_tags"
+  fi
+}
+
 case "$1" in
   task|t)
     shift
@@ -963,7 +996,9 @@ listTasks(filters).then(tasks => {
       priority="${OPTIONS[priority]:-medium}"
       due_date="${OPTIONS[due]:-null}"
       tags="${OPTIONS[tags]:-[]}"
+      tags_json=$(parse_tags "$tags")
       notes="${OPTIONS[notes]:-''}"
+      notes_b64=$(b64_encode "$notes")
       collection="${OPTIONS[collection]:-global}"
       if [ "$due_date" != "null" ]; then
         due_timestamp=$(date -d "$due_date" +%s 2>/dev/null || echo "null")
@@ -975,8 +1010,8 @@ const { createTask } = require('./dist/tasks.js');
 const options = {
   priority: '$priority',
   due_date: $due_timestamp,
-  tags: $tags,
-  notes: '$notes'
+  tags: $tags_json,
+  notes: Buffer.from('$notes_b64', 'base64').toString('utf8')
 };
 createTask('$title', options, '$collection').then(id => {
   console.log('Created task: ' + id);
@@ -1023,21 +1058,50 @@ addDependency('$blocks_id', '$task_id').then(() => {
       task_id="$1"
       shift
       parse_options "$@"
-      updates="{}"
+      # Build updates JSON with base64-encoded values for safe handling
+      declare -a update_keys
+      declare -a update_values
+      declare -a update_types
+      idx=0
       for key in "${!OPTIONS[@]}"; do
         value="${OPTIONS[$key]}"
         if [ "$key" = "due" ]; then
           due_timestamp=$(date -d "$value" +%s 2>/dev/null || echo "null")
           if [ "$due_timestamp" != "null" ]; then
-            updates=$(echo "$updates" | node -e "const u = JSON.parse(require('fs').readFileSync(0, 'utf8')); u.due_date = $due_timestamp; console.log(JSON.stringify(u))")
+            update_keys[$idx]="due_date"
+            update_values[$idx]="$due_timestamp"
+            update_types[$idx]="number"
+            ((idx++))
           fi
+        elif [ "$key" = "tags" ]; then
+          update_keys[$idx]="tags"
+          update_values[$idx]=$(parse_tags "$value")
+          update_types[$idx]="json"
+          ((idx++))
         else
-          updates=$(echo "$updates" | node -e "const u = JSON.parse(require('fs').readFileSync(0, 'utf8')); u.$key = '$value'; console.log(JSON.stringify(u))")
+          update_keys[$idx]="$key"
+          update_values[$idx]=$(b64_encode "$value")
+          update_types[$idx]="string"
+          ((idx++))
+        fi
+      done
+      # Build the Node.js code to construct updates object with decoded values
+      js_updates="const updates = {};"
+      for ((i=0; i<idx; i++)); do
+        k="${update_keys[$i]}"
+        v="${update_values[$i]}"
+        t="${update_types[$i]}"
+        if [ "$t" = "number" ]; then
+          js_updates="${js_updates} updates.$k = $v;"
+        elif [ "$t" = "json" ]; then
+          js_updates="${js_updates} updates.$k = $v;"
+        else
+          js_updates="${js_updates} updates.$k = Buffer.from('$v', 'base64').toString('utf8');"
         fi
       done
       node -e "
 const { updateTask } = require('./dist/tasks.js');
-const updates = $updates;
+$js_updates
 updateTask('$task_id', updates).then(() => {
   console.log('Task $task_id updated');
 }).catch(e => console.error('Error:', e.message));
@@ -1170,10 +1234,12 @@ Promise.all([
   remember|r|mem)
     shift
     content="$1"
+    content_b64=$(b64_encode "$content")
     shift
     parse_options "$@"
     salience="${OPTIONS[salience]:-2.0}"
     tags="${OPTIONS[tags]:-[]}"
+    tags_json=$(parse_tags "$tags")
     collection="${OPTIONS[collection]:-global}"
     node -e "
 const { addDocument } = require('./dist/db.js');
@@ -1184,11 +1250,11 @@ const metadata = {
   id: id,
   username: USERNAME,
   salience: $salience,
-  tags: $tags,
+  tags: $tags_json,
   created_at: Math.floor(Date.now() / 1000),
   sector: 'semantic'
 };
-addDocument('$collection', id, '$content', metadata).then(() => {
+addDocument('$collection', id, Buffer.from('$content_b64', 'base64').toString('utf8'), metadata).then(() => {
   console.log('Memory saved: ' + id);
 }).catch(e => console.error('Error:', e.message));
 "
@@ -2030,6 +2096,9 @@ All operations use the CLI wrapper at `./.ocpa/ocpa`:
 ```bash
 # Remember information
 ./.ocpa/ocpa remember "API key in .env" --salience=3.0 --tags=security
+
+# Tags with hyphens and multiple values work correctly:
+./.ocpa/ocpa remember "Technical finding" --salience=2.5 --tags=storacha,encoding,dag-json
 
 # Create task  
 ./.ocpa/ocpa task create "Fix authentication bug" --priority=high --due=2026-03-15
