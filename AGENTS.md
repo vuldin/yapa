@@ -1,6 +1,6 @@
 # YAPA Install
 
-This is a 3-phase install. You MUST complete each phase in order. Do NOT skip ahead.
+**STOP. Read this entire file before running ANY commands.** This is a 3-phase install. You MUST complete each phase in order. Do NOT skip ahead. Do NOT run `npm install`, `npm run build`, `claude mcp add`, or any other commands until instructed. Phase 2 requires asking the user questions — do NOT assume defaults.
 
 ## Phase 1 — Diagnostics
 

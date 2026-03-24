@@ -31,9 +31,11 @@ All data lives in ChromaDB. YAPA supports ChromaDB's built-in embeddings (zero-c
 
 ## Install
 
-**Claude Code**: `install @path/to/yapa`
+The install is a guided, multi-step process — **do not run `npm install`, `npm run build`, or register the MCP server manually.** The install instructions handle everything including user preferences, scope selection, and optional remote sync.
 
-**OpenCode**: reference the repo directory
+**Claude Code / Cursor**: Open `CLAUDE.md` in this repo and follow the 3-phase process exactly.
+
+**OpenCode**: Open `AGENTS.md` in this repo and follow the 3-phase process exactly.
 
 To uninstall later, say `uninstall yapa` in any session.
 
