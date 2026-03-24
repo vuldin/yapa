@@ -21,8 +21,9 @@ You MUST use the AskUserQuestion tool here. Do NOT skip this phase. Do NOT ask q
 - If neither `~/.claude/`, `~/.cursor/`, nor `.opencode/` was found: question "Which editor are you using?" with options: "Claude Code", "Cursor", "OpenCode"
 - Always ask: "Username for task IDs?" with options: the output of `whoami` (labeled with the actual username), "Custom username"
 - Always ask: "Where should YAPA instructions be installed?" — first option MUST be "This project only", second option "Globally for all sessions". Do not reorder these options.
+- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database". If the user selects either "Yes" option, ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`).
 
-STOP. Wait for the user's answers before proceeding. You need USERNAME and SCOPE from these answers for Phase 3.
+STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and optionally SYNC_DATABASE_URL from these answers for Phase 3.
 
 ## Phase 3 — Install (only after Phase 2 answers are received)
 
@@ -49,12 +50,13 @@ Now execute these steps in order, without asking anything else:
    - NixOS: tell user to add `services.chromadb.enable = true;` and rebuild
    Verify: `curl -sf http://localhost:8000/api/v2/heartbeat` succeeds.
 
-5. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2:
+5. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2. If the user enabled remote syncing, also add the sync env vars shown below:
 
    Claude Code — run:
    ```
    claude mcp add -e YAPA_USERNAME=USERNAME -s user yapa -- node ABSOLUTE_PATH/dist/index.js
    ```
+   If sync enabled, also add: `-e YAPA_SYNC_ENABLED=true -e YAPA_SYNC_DATABASE_URL=SYNC_DATABASE_URL`
 
    Cursor — merge into `mcpServers` in `~/.cursor/mcp.json`:
    ```json
@@ -63,11 +65,16 @@ Now execute these steps in order, without asking anything else:
        "yapa": {
          "command": "node",
          "args": ["ABSOLUTE_PATH/dist/index.js"],
-         "env": { "YAPA_USERNAME": "USERNAME" }
+         "env": {
+           "YAPA_USERNAME": "USERNAME",
+           "YAPA_SYNC_ENABLED": "true",
+           "YAPA_SYNC_DATABASE_URL": "SYNC_DATABASE_URL"
+         }
        }
      }
    }
    ```
+   Omit the `YAPA_SYNC_*` keys if sync is not enabled.
 
    OpenCode — merge into `mcpServers` in `.opencode/config.json`:
    ```json
@@ -76,11 +83,16 @@ Now execute these steps in order, without asking anything else:
        "yapa": {
          "command": "node",
          "args": ["ABSOLUTE_PATH/dist/index.js"],
-         "env": { "YAPA_USERNAME": "USERNAME" }
+         "env": {
+           "YAPA_USERNAME": "USERNAME",
+           "YAPA_SYNC_ENABLED": "true",
+           "YAPA_SYNC_DATABASE_URL": "SYNC_DATABASE_URL"
+         }
        }
      }
    }
    ```
+   Omit the `YAPA_SYNC_*` keys if sync is not enabled.
 
 6. Write the YAPA behavioral instructions. Append the following block to the correct file based on the user's SCOPE and editor choice from Phase 2:
    - If scope=project and Claude Code: append to `CLAUDE.md` in the user's current working directory
@@ -135,6 +147,8 @@ Now execute these steps in order, without asking anything else:
      - Customer name mentioned → `customer-{name}`
      - Project-specific work → `project-{name}` or `customer-{name}`
      - General/cross-cutting knowledge → `global`
+     - Private/personal data → `private-{name}` or `local-{name}` (these do NOT sync to remote)
+   - **Before creating a new collection**, ask the user to confirm the collection name. Suggest a name based on context. Remind the user that `private-` or `local-` prefixed collections won't sync to the shared remote database.
    - When unsure which collection to use, ask the user
    - Use `collection_list` to check what collections exist before creating new ones
    - Always pass the inferred collection explicitly on memory/task tool calls

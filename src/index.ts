@@ -3,11 +3,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-import { CHROMA_URL, EMBEDDING_PROVIDER } from './config.js';
+import { CHROMA_URL, EMBEDDING_PROVIDER, SYNC_ENABLED } from './config.js';
 import { registerTools } from './tools.js';
 import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import { shouldRunDecay, runDecaySweep, markDecayRun } from './memory/decay.js';
+import { startSync } from './sync/index.js';
 
 const server = new McpServer({
   name: 'yapa',
@@ -47,6 +48,10 @@ async function main(): Promise<void> {
     process.stderr.write(`[yapa] Connected to ChromaDB at ${CHROMA_URL} (embeddings: ${EMBEDDING_PROVIDER})\n`);
     // Run decay in background, don't block startup
     startupDecay();
+    // Start remote sync if enabled
+    if (SYNC_ENABLED) {
+      startSync().catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));
+    }
   } else {
     process.stderr.write(`[yapa] Warning: ChromaDB at ${CHROMA_URL} is not reachable. Tools will fail until it's available.\n`);
   }

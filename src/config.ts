@@ -31,6 +31,12 @@ export const USERNAME = get('USERNAME', 'user');
 export const CHUNK_SIZE = 2000;
 export const CHUNK_OVERLAP = 200;
 
+// Remote sync
+export const SYNC_ENABLED = get('SYNC_ENABLED', 'false') === 'true';
+export const SYNC_DATABASE_URL = get('SYNC_DATABASE_URL', '');
+export const SYNC_INTERVAL_MS = parseInt(get('SYNC_INTERVAL_MS', '300000'), 10); // 5 minutes
+export const SYNC_SIMILARITY_THRESHOLD = parseFloat(get('SYNC_SIMILARITY_THRESHOLD', '0.95'));
+
 // Embedding defaults per provider
 export function getEmbeddingModel(): string {
   if (EMBEDDING_MODEL) return EMBEDDING_MODEL;

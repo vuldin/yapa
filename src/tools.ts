@@ -336,6 +336,66 @@ export function registerTools(server: McpServer): void {
     },
   );
 
+  // --- Sync ---
+  server.tool(
+    'sync_status',
+    'Check remote sync status — connection health, last sync times, pending items',
+    {},
+    async () => {
+      const { SYNC_ENABLED, SYNC_DATABASE_URL, SYNC_INTERVAL_MS } = await import('./config.js');
+      if (!SYNC_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled. Set YAPA_SYNC_ENABLED=true to enable.' }] };
+      }
+      const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1000}s)`];
+      lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
+
+      try {
+        const { checkRemoteHealth } = await import('./sync/postgres.js');
+        const health = await checkRemoteHealth();
+        lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
+      } catch (e) {
+        lines.push(`Connection: error — ${e}`);
+      }
+
+      try {
+        const { getSyncPullTimestamp } = await import('./sync/sentinel.js');
+        const lastPull = await getSyncPullTimestamp();
+        lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
+      } catch {
+        lines.push('Last pull: unknown');
+      }
+
+      try {
+        const { getPendingDeletes } = await import('./sync/deletes.js');
+        const pending = await getPendingDeletes();
+        if (pending.length > 0) lines.push(`Pending deletes: ${pending.length}`);
+      } catch {
+        // ignore
+      }
+
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'sync_now',
+    'Trigger an immediate sync cycle (push then pull)',
+    {},
+    async () => {
+      const { SYNC_ENABLED } = await import('./config.js');
+      if (!SYNC_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
+      }
+      try {
+        const { syncCycle } = await import('./sync/index.js');
+        await syncCycle();
+        return { content: [{ type: 'text' as const, text: 'Sync cycle completed.' }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Sync error: ${e}` }] };
+      }
+    },
+  );
+
   // --- Maintenance ---
   server.tool(
     'decay_sweep',

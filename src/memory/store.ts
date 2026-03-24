@@ -1,7 +1,7 @@
 import { addDocument, addDocumentsBatch, getOrCreateCollection } from '../chroma.js';
 import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
-import { SALIENCE_START, USERNAME } from '../config.js';
+import { SALIENCE_START, USERNAME, SYNC_ENABLED } from '../config.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -29,7 +29,7 @@ export async function storeMemory(
 
   if (chunks.length === 1) {
     const id = `mem-${USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-    const metadata = {
+    const metadata: Record<string, any> = {
       type: 'memory',
       username: USERNAME,
       tags: options.tags ?? [],
@@ -38,16 +38,15 @@ export async function storeMemory(
       created_at: now,
       accessed_at: now,
     };
+    if (SYNC_ENABLED) metadata.is_synced = false;
     await addDocument(collection, id, content, metadata);
     return [id];
   }
 
   // Multi-chunk: batch insert
   const baseId = `mem-${USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-  const docs = chunks.map((chunk) => ({
-    id: `${baseId}-${chunk.index}`,
-    content: chunk.content,
-    metadata: {
+  const docs = chunks.map((chunk) => {
+    const chunkMeta: Record<string, any> = {
       type: 'memory',
       username: USERNAME,
       tags: options.tags ?? [],
@@ -58,8 +57,14 @@ export async function storeMemory(
       chunk_index: chunk.index,
       chunk_total: chunk.total,
       parent_id: baseId,
-    },
-  }));
+    };
+    if (SYNC_ENABLED) chunkMeta.is_synced = false;
+    return {
+      id: `${baseId}-${chunk.index}`,
+      content: chunk.content,
+      metadata: chunkMeta,
+    };
+  });
 
   await addDocumentsBatch(collection, docs);
   return docs.map(d => d.id);

@@ -1,6 +1,6 @@
 import { updateDocument, getDocumentsByIds, listCollections, getCollectionId, addDocument } from '../chroma.js';
 import { fromChroma } from '../metadata-adapter.js';
-import { CHROMA_URL } from '../config.js';
+import { CHROMA_URL, SYNC_ENABLED } from '../config.js';
 import type { TaskOptions } from './create.js';
 import { createTask } from './create.js';
 
@@ -42,11 +42,16 @@ export async function updateTask(
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
 
-  const updatedMetadata = {
+  // Structural fields that should trigger re-sync (not salience/accessed_at)
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern'];
+  const hasStructuralChange = SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
+
+  const updatedMetadata: Record<string, any> = {
     ...task.metadata,
     ...updates,
     updated_at: Math.floor(Date.now() / 1000),
   };
+  if (hasStructuralChange) updatedMetadata.is_synced = false;
 
   await updateDocument(task.collection, id, updatedMetadata);
 }

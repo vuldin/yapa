@@ -34,7 +34,7 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
  */
 export function fromChroma(metadata: RawMetadata): Record<string, any> {
   const result: Record<string, any> = {};
-  const arrayFields = ['tags', 'depends_on', 'blocks'];
+  const arrayFields = ['tags', 'depends_on', 'blocks', 'related_ids'];
 
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === 'string') {
