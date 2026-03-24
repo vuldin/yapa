@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "chromadb-default-embed": "^2.14.0",
     "zod": "^3.24.4"
   },
   "devDependencies": {

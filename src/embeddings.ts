@@ -7,25 +7,42 @@ import {
   getEmbeddingModel,
 } from './config.js';
 
-/**
- * Generate embedding for a single text.
- * Returns null when using ChromaDB server-side embeddings (the server handles it).
- */
-export async function generateEmbedding(text: string): Promise<number[] | null> {
-  if (EMBEDDING_PROVIDER === 'chromadb') return null;
-  const batch = await generateEmbeddingsBatch([text]);
-  return batch![0];
+// Lazy-loaded local embedding pipeline (MiniLM-L6-v2, 384 dims)
+let localPipeline: any = null;
+
+async function getLocalPipeline() {
+  if (!localPipeline) {
+    const { pipeline } = await import('chromadb-default-embed');
+    localPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  }
+  return localPipeline;
+}
+
+async function embedLocal(text: string): Promise<number[]> {
+  const pipe = await getLocalPipeline();
+  const output = await pipe(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data);
 }
 
 /**
- * Generate embeddings for multiple texts in a single API call.
- * Returns null when using ChromaDB server-side embeddings.
+ * Generate embedding for a single text.
+ */
+export async function generateEmbedding(text: string): Promise<number[]> {
+  if (EMBEDDING_PROVIDER === 'chromadb') return embedLocal(text);
+  const batch = await generateEmbeddingsBatch([text]);
+  return batch[0];
+}
+
+/**
+ * Generate embeddings for multiple texts.
  */
 export async function generateEmbeddingsBatch(
   texts: string[],
   batchSize: number = 50,
-): Promise<number[][] | null> {
-  if (EMBEDDING_PROVIDER === 'chromadb') return null;
+): Promise<number[][]> {
+  if (EMBEDDING_PROVIDER === 'chromadb') {
+    return Promise.all(texts.map(embedLocal));
+  }
 
   const results: number[][] = [];
   for (let i = 0; i < texts.length; i += batchSize) {
