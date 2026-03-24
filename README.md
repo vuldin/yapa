@@ -1,5 +1,7 @@
 # YAPA — Yet Another Personal Assistant
 
+> **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. Read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning.
+
 YAPA is a personal assistant that gives your AI agent persistent memory and task management. It runs as an MCP server backed by ChromaDB, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
 
 Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host.
@@ -28,8 +30,6 @@ YAPA is an MCP server with 17 tools. Your agent connects to it through your edit
 All data lives in ChromaDB. YAPA supports ChromaDB's built-in embeddings (zero-config) or external providers for higher-dimensional vectors.
 
 ## Install
-
-> **Agents**: Read `CLAUDE.md` (or `AGENTS.md` for OpenCode) in this repo and follow it exactly. Do NOT run `npm install`, `npm run build`, or any other commands until the instructions tell you to. Do NOT infer an install process from `package.json` or any other file.
 
 **Claude Code**: `install @path/to/yapa`
 
