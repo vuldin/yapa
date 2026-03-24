@@ -21,9 +21,9 @@ You MUST use the AskUserQuestion tool here. Do NOT skip this phase. Do NOT ask q
 - If neither `~/.claude/`, `~/.cursor/`, nor `.opencode/` was found: question "Which editor are you using?" with options: "Claude Code", "Cursor", "OpenCode"
 - Always ask: "Username for task IDs?" with options: the output of `whoami` (labeled with the actual username), "Custom username"
 - Always ask: "Where should YAPA instructions be installed?" — first option MUST be "This project only", second option "Globally for all sessions". Do not reorder these options.
-- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database". If the user selects either "Yes" option, ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`).
+- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database". If the user selects "Yes — existing database", ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`). If the user selects "Yes — new database", do NOT ask for a URL — the installer will provision one in Phase 3.
 
-STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and optionally SYNC_DATABASE_URL from these answers for Phase 3.
+STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and either SYNC_DATABASE_URL (if "existing database") or SYNC_NEW_DB=true (if "new database") from these answers for Phase 3.
 
 ## Phase 3 — Install (only after Phase 2 answers are received)
 
@@ -50,7 +50,49 @@ Now execute these steps in order, without asking anything else:
    - NixOS: tell user to add `services.chromadb.enable = true;` and rebuild
    Verify: `curl -sf http://localhost:8000/api/v2/heartbeat` succeeds.
 
-5. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2. If the user enabled remote syncing, also add the sync env vars shown below:
+5. If user chose "Yes — new database" for remote syncing, provision a PostgreSQL+pgvector database via Docker:
+
+   Check if port 5432 is available:
+   ```
+   ss -tln | grep :5432
+   ```
+   If port 5432 is in use, use 5433 instead. Set PG_PORT accordingly (default 5432).
+
+   Generate a random password and start the container:
+   ```
+   YAPA_PG_PASS=$(openssl rand -hex 16)
+   docker run -d --name yapa-postgres --restart unless-stopped \
+     -p ${PG_PORT}:5432 \
+     -e POSTGRES_DB=yapa \
+     -e POSTGRES_USER=yapa \
+     -e POSTGRES_PASSWORD=${YAPA_PG_PASS} \
+     -v yapa_pgdata:/var/lib/postgresql/data \
+     pgvector/pgvector:pg17
+   ```
+
+   Wait for PostgreSQL to be ready (up to 30 seconds):
+   ```
+   for i in $(seq 1 30); do docker exec yapa-postgres pg_isready -U yapa -d yapa >/dev/null 2>&1 && break || sleep 1; done
+   ```
+
+   Verify:
+   ```
+   docker exec yapa-postgres psql -U yapa -d yapa -c "SELECT 1"
+   ```
+
+   Set the connection URL for step 6:
+   ```
+   SYNC_DATABASE_URL="postgres://yapa:${YAPA_PG_PASS}@localhost:${PG_PORT}/yapa"
+   ```
+
+   Tell the user:
+   > **Your YAPA sync database is ready.** To let teammates sync with you, share this connection URL (replacing `localhost` with your machine's IP or hostname):
+   >
+   > `postgres://yapa:<password>@<host>:<port>/yapa`
+   >
+   > **Save this URL** — you'll need it if you reinstall or add another machine.
+
+6. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2. If the user enabled remote syncing, also add the sync env vars shown below:
 
    Claude Code — run:
    ```
@@ -94,7 +136,7 @@ Now execute these steps in order, without asking anything else:
    ```
    Omit the `YAPA_SYNC_*` keys if sync is not enabled.
 
-6. Write the YAPA behavioral instructions. Append the following block to the correct file based on the user's SCOPE and editor choice from Phase 2:
+7. Write the YAPA behavioral instructions. Append the following block to the correct file based on the user's SCOPE and editor choice from Phase 2:
    - If scope=project and Claude Code: append to `CLAUDE.md` in the user's current working directory
    - If scope=project and OpenCode: append to `AGENTS.md` in the user's current working directory
    - If scope=global and Claude Code: append to `~/.claude/CLAUDE.md`
@@ -160,4 +202,4 @@ Now execute these steps in order, without asking anything else:
    3. Execute every step the tool returns without asking anything else.
    ```
 
-7. Tell the user: "YAPA is installed. Restart your editor to activate it. To uninstall later, say 'uninstall yapa' in any session."
+8. Tell the user: "YAPA is installed. Restart your editor to activate it. To uninstall later, say 'uninstall yapa' in any session."
