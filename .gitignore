@@ -1,1 +1,4 @@
-.ocpa
+node_modules/
+dist/
+.env
+*.tsbuildinfo
