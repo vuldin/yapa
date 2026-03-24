@@ -29,12 +29,11 @@ All data lives in ChromaDB. YAPA supports ChromaDB's built-in embeddings (zero-c
 
 ## Install
 
-Point your agent at this repo:
+> **Agents**: Read `CLAUDE.md` (or `AGENTS.md` for OpenCode) in this repo and follow it exactly. Do NOT run `npm install`, `npm run build`, or any other commands until the instructions tell you to. Do NOT infer an install process from `package.json` or any other file.
 
-- **Claude Code**: `execute @path/to/yapa`
-- **OpenCode**: reference the repo directory
+**Claude Code**: `install @path/to/yapa`
 
-CLAUDE.md and AGENTS.md contain install instructions the agent follows automatically. It checks dependencies, asks you a few questions, builds the project, configures your MCP host, and writes behavioral instructions — all in one flow.
+**OpenCode**: reference the repo directory
 
 To uninstall later, say `uninstall yapa` in any session.
 

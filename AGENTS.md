@@ -28,18 +28,28 @@ STOP. Wait for the user's answers before proceeding. You need USERNAME and SCOPE
 
 Now execute these steps in order, without asking anything else:
 
-1. If Node.js needed: install using the user's chosen method, then verify `node --version` >= 18.
+1. Move this repo to the correct location based on the user's SCOPE from Phase 2:
+   - If scope=global: `~/.local/share/yapa/`
+   - If scope=project: `.yapa/` in the user's current working directory (the directory they were in when they asked to install, NOT the repo directory)
 
-2. Run: `cd THIS_REPO_DIR && npm install && npm run build`
+   If the repo is already in the correct location, skip this step. Otherwise:
+   ```
+   mkdir -p TARGET_LOCATION && mv THIS_REPO_DIR TARGET_LOCATION
+   ```
+   Then `cd TARGET_LOCATION` and continue from there. All subsequent steps use this as the repo directory.
+
+2. If Node.js needed: install using the user's chosen method, then verify `node --version` >= 18.
+
+3. Run: `cd THIS_REPO_DIR && npm install && npm run build`
    Verify: `ls dist/index.js` succeeds.
 
-3. If ChromaDB needed, start it using the user's chosen method:
+4. If ChromaDB needed, start it using the user's chosen method:
    - Docker: `docker run -d --name chromadb -p 8000:8000 -v chromadb_data:/chroma/chroma chromadb/chroma`
    - pip: `pip install chromadb && chroma run --host 0.0.0.0 --port 8000 &`
    - NixOS: tell user to add `services.chromadb.enable = true;` and rebuild
    Verify: `curl -sf http://localhost:8000/api/v2/heartbeat` succeeds.
 
-4. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2:
+5. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2:
 
    Claude Code — run:
    ```
@@ -72,7 +82,7 @@ Now execute these steps in order, without asking anything else:
    }
    ```
 
-5. Write the YAPA behavioral instructions. Append the following block to the correct file based on the user's SCOPE and editor choice from Phase 2:
+6. Write the YAPA behavioral instructions. Append the following block to the correct file based on the user's SCOPE and editor choice from Phase 2:
    - If scope=project and Claude Code: append to `CLAUDE.md` in the user's current working directory
    - If scope=project and OpenCode: append to `AGENTS.md` in the user's current working directory
    - If scope=global and Claude Code: append to `~/.claude/CLAUDE.md`
@@ -136,4 +146,4 @@ Now execute these steps in order, without asking anything else:
    3. Execute every step the tool returns without asking anything else.
    ```
 
-6. Tell the user: "YAPA is installed. Restart your editor to activate it. To uninstall later, say 'uninstall yapa' in any session."
+7. Tell the user: "YAPA is installed. Restart your editor to activate it. To uninstall later, say 'uninstall yapa' in any session."
