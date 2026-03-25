@@ -21,9 +21,9 @@ You MUST use the AskUserQuestion tool here. Do NOT skip this phase. Do NOT ask q
 - If neither `~/.claude/`, `~/.cursor/`, nor `.opencode/` was found: question "Which editor are you using?" with options: "Claude Code", "Cursor", "OpenCode"
 - Always ask: "Username for task IDs?" with options: the output of `whoami` (labeled with the actual username), "Custom username"
 - Always ask: "Where should YAPA instructions be installed?" — first option MUST be "This project only", second option "Globally for all sessions". Do not reorder these options.
-- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database". If the user selects "Yes — existing database", ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`). If the user selects "Yes — new database", do NOT ask for a URL — the installer will provision one in Phase 3.
+- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database". If the user selects "Yes — existing database", ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`). If the user selects "Yes — new database", ask a follow-up: "How would you like to host PostgreSQL?" with options: "Docker (local)", "Managed service (Neon, Supabase)", "Cloud provider (AWS, GCP, Azure)". If "Managed service": ask "Which service?" with options: "Neon (free serverless)", "Supabase (free hosted)". If "Cloud provider": ask "Which provider?" with options: "AWS (RDS)", "GCP (Cloud SQL)", "Azure (Flexible Server)". Do NOT ask for a connection URL yet — Phase 3 will handle setup.
 
-STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and either SYNC_DATABASE_URL (if "existing database") or SYNC_NEW_DB=true (if "new database") from these answers for Phase 3.
+STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and either SYNC_DATABASE_URL (if "existing database") or SYNC_PROVIDER (if "new database" — one of: docker, neon, supabase, aws, gcp, azure) from these answers for Phase 3.
 
 ## Phase 3 — Install (only after Phase 2 answers are received)
 
@@ -50,7 +50,9 @@ Now execute these steps in order, without asking anything else:
    - NixOS: tell user to add `services.chromadb.enable = true;` and rebuild
    Verify: `curl -sf http://localhost:8000/api/v2/heartbeat` succeeds.
 
-5. If user chose "Yes — new database" for remote syncing, provision a PostgreSQL+pgvector database via Docker:
+5. If user chose "Yes — new database" for remote syncing, set up PostgreSQL+pgvector using the provider chosen in Phase 2:
+
+   **Docker (local):**
 
    Check if port 5432 is available:
    ```
@@ -75,22 +77,74 @@ Now execute these steps in order, without asking anything else:
    for i in $(seq 1 30); do docker exec yapa-postgres pg_isready -U yapa -d yapa >/dev/null 2>&1 && break || sleep 1; done
    ```
 
-   Verify:
-   ```
-   docker exec yapa-postgres psql -U yapa -d yapa -c "SELECT 1"
-   ```
+   Verify: `docker exec yapa-postgres psql -U yapa -d yapa -c "SELECT 1"`
 
-   Set the connection URL for step 6:
-   ```
-   SYNC_DATABASE_URL="postgres://yapa:${YAPA_PG_PASS}@localhost:${PG_PORT}/yapa"
-   ```
+   Set: `SYNC_DATABASE_URL="postgres://yapa:${YAPA_PG_PASS}@localhost:${PG_PORT}/yapa"`
+
+   **Neon:**
 
    Tell the user:
-   > **Your YAPA sync database is ready.** To let teammates sync with you, share this connection URL (replacing `localhost` with your machine's IP or hostname):
-   >
-   > `postgres://yapa:<password>@<host>:<port>/yapa`
-   >
-   > **Save this URL** — you'll need it if you reinstall or add another machine.
+   1. Go to https://console.neon.tech and sign up (free tier includes 0.5 GB storage)
+   2. Create a new project (any name, e.g. "yapa")
+   3. On the project dashboard, copy the connection string shown
+   4. Neon includes pgvector by default — no extra setup needed
+
+   Ask the user to paste the connection string. Set: `SYNC_DATABASE_URL=<pasted URL>`
+
+   **Supabase:**
+
+   Tell the user:
+   1. Go to https://supabase.com/dashboard and sign up (free tier includes 500 MB)
+   2. Create a new project (any name, e.g. "yapa") — choose a database password
+   3. Go to Settings → Database → Connection string → URI, copy it (replace `[YOUR-PASSWORD]` with your database password)
+   4. Supabase includes pgvector by default — no extra setup needed
+
+   Ask the user to paste the connection string. Set: `SYNC_DATABASE_URL=<pasted URL>`
+
+   **AWS (RDS):**
+
+   Tell the user:
+   1. Go to the RDS console at https://console.aws.amazon.com/rds/
+   2. Click "Create database" → choose PostgreSQL, version 15+
+   3. Choose "Free tier" template if available, or the smallest instance (db.t3.micro)
+   4. Set DB identifier: `yapa`, master username: `yapa`, choose a password
+   5. Under Connectivity, ensure "Public access" is set to Yes (or configure VPC peering as needed)
+   6. Create the database and wait for it to become "Available"
+   7. Copy the endpoint from the database details page
+   8. Connect and enable pgvector: `psql -h <endpoint> -U yapa -d postgres -c "CREATE EXTENSION IF NOT EXISTS vector;"`
+   9. Create the yapa database: `CREATE DATABASE yapa;`
+
+   Ask the user to provide the connection string. Set: `SYNC_DATABASE_URL="postgres://yapa:<password>@<endpoint>:5432/yapa"`
+
+   **GCP (Cloud SQL):**
+
+   Tell the user:
+   1. Go to https://console.cloud.google.com/sql
+   2. Click "Create instance" → choose PostgreSQL, version 15+
+   3. Set instance ID: `yapa`, choose a root password, pick a region
+   4. Choose the smallest machine type (Shared core, 1 vCPU)
+   5. Under Connections, enable "Public IP" and add your IP to authorized networks (or use Cloud SQL Auth Proxy)
+   6. Once created, click the instance → "Databases" tab → "Create database" named `yapa`
+   7. Create a user: "Users" tab → "Add user account" → username `yapa`, choose a password
+   8. pgvector is supported on Cloud SQL — enable it by connecting and running: `CREATE EXTENSION IF NOT EXISTS vector;`
+
+   Ask the user to provide the connection string. Set: `SYNC_DATABASE_URL="postgres://yapa:<password>@<public-ip>:5432/yapa"`
+
+   **Azure (Flexible Server):**
+
+   Tell the user:
+   1. Go to https://portal.azure.com → search "Azure Database for PostgreSQL"
+   2. Click "Create" → choose "Flexible Server"
+   3. Set server name: `yapa`, choose admin username `yapa` and a password, pick a region
+   4. Choose the Burstable tier (B1ms) for lowest cost
+   5. Under Networking, enable "Allow public access" and add your client IP
+   6. Once deployed, go to "Server parameters" → search `azure.extensions` → enable `VECTOR`
+   7. Connect and create the database: `CREATE DATABASE yapa;` then `CREATE EXTENSION IF NOT EXISTS vector;`
+
+   Ask the user to provide the connection string. Set: `SYNC_DATABASE_URL="postgres://yapa:<password>@<server-name>.postgres.database.azure.com:5432/yapa"`
+
+   **For all providers**, after obtaining SYNC_DATABASE_URL, tell the user:
+   > **Save this connection URL** — you'll need it if you reinstall YAPA or add another machine. Share it with teammates who want to sync with you.
 
 6. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2. If the user enabled remote syncing, also add the sync env vars shown below:
 
