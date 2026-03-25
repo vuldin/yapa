@@ -12,8 +12,20 @@ export interface SyncStats {
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let syncRunning = false;
 
+// In-memory sync state for observability
+let lastCycleAt: number | null = null;
+let lastCycleError: string | null = null;
+let cycleCount = 0;
+let timerActive = false;
+
+/** Get the current background sync state (in-memory, not persisted). */
+export function getSyncState() {
+  return { lastCycleAt, lastCycleError, cycleCount, timerActive };
+}
+
 /**
  * Run a single sync cycle: push local changes, then pull remote changes.
+ * Push and pull are independent — a push failure won't block pull.
  * Returns stats, or null if skipped (previous cycle still running).
  */
 export async function syncCycle(): Promise<SyncStats | null> {
@@ -24,8 +36,22 @@ export async function syncCycle(): Promise<SyncStats | null> {
 
   syncRunning = true;
   try {
-    const pushStats = await pushToRemote();
-    const pullStats = await pullFromRemote();
+    let pushStats: PushStats = { pushed: 0, linked: 0, deleted: 0, errors: 0 };
+    let pullStats: PullStats = { pulled: 0, linked: 0, skipped: 0, errors: 0 };
+
+    try {
+      pushStats = await pushToRemote();
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push phase error: ${e}\n`);
+      pushStats.errors++;
+    }
+
+    try {
+      pullStats = await pullFromRemote();
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Pull phase error: ${e}\n`);
+      pullStats.errors++;
+    }
 
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
     const hasPullActivity = pullStats.pulled > 0 || pullStats.linked > 0;
@@ -45,11 +71,19 @@ export async function syncCycle(): Promise<SyncStats | null> {
     }
 
     // Try to create ivfflat index if we have enough data
-    await ensureVectorIndex();
+    try { await ensureVectorIndex(); } catch { /* non-critical */ }
+
+    lastCycleAt = Date.now();
+    lastCycleError = null;
+    cycleCount++;
 
     return { push: pushStats, pull: pullStats };
   } catch (e) {
-    process.stderr.write(`[yapa-sync] Cycle error: ${e}\n`);
+    const msg = `${e}`;
+    process.stderr.write(`[yapa-sync] Cycle error: ${msg}\n`);
+    lastCycleAt = Date.now();
+    lastCycleError = msg;
+    cycleCount++;
     return null;
   } finally {
     syncRunning = false;
@@ -90,6 +124,7 @@ export async function startSync(): Promise<void> {
   syncTimer = setInterval(() => {
     syncCycle().catch(e => process.stderr.write(`[yapa-sync] Sync error: ${e}\n`));
   }, SYNC_INTERVAL_MS);
+  timerActive = true;
 
   process.stderr.write(`[yapa-sync] Background sync started (interval: ${SYNC_INTERVAL_MS / 1000}s)\n`);
 }
@@ -101,6 +136,7 @@ export async function stopSync(): Promise<void> {
   if (syncTimer) {
     clearInterval(syncTimer);
     syncTimer = null;
+    timerActive = false;
   }
   await closePool();
   process.stderr.write('[yapa-sync] Sync stopped\n');

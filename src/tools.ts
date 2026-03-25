@@ -373,6 +373,22 @@ export function registerTools(server: McpServer): void {
         // ignore
       }
 
+      // Background sync state (in-memory)
+      try {
+        const { getSyncState } = await import('./sync/index.js');
+        const state = getSyncState();
+        lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
+        lines.push(`Cycles completed: ${state.cycleCount}`);
+        if (state.lastCycleAt) {
+          lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
+        }
+        if (state.lastCycleError) {
+          lines.push(`Last error: ${state.lastCycleError}`);
+        }
+      } catch {
+        lines.push('Background state: unavailable');
+      }
+
       return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
     },
   );

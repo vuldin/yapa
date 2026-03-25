@@ -141,7 +141,7 @@ export async function queryDocuments(
     body.query_texts = [queryText];
   }
 
-  if (filter) body.where = toChroma(filter);
+  if (filter) body.where = filter;
 
   const response = await chromaFetch(`/collections/${collectionId}/query`, {
     method: 'POST',
@@ -184,7 +184,7 @@ export async function getDocumentsByFilter(
     method: 'POST',
     body: JSON.stringify({
       limit,
-      where: toChroma(filter),
+      where: filter,
       include: ['documents', 'metadatas'],
     }),
   });
