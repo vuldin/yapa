@@ -1,5 +1,5 @@
 import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../chroma.js';
-import { USERNAME, SYNC_ENABLED } from '../config.js';
+import { USERNAME } from '../config.js';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
 export type TaskPriority = 'critical' | 'high' | 'medium' | 'low';
@@ -80,7 +80,7 @@ export async function createTask(
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? 'medium'],
     sector: 'semantic',
   };
-  if (SYNC_ENABLED) metadata.is_synced = false;
+  metadata.is_synced = false;
 
   await addDocument(collection, id, title, metadata);
   return id;

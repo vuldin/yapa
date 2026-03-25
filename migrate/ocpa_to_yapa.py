@@ -103,6 +103,7 @@ def build_memory_doc(mem):
         "sector": sector,
         "created_at": created_at,
         "accessed_at": accessed_at,
+        "is_synced": False,
     }
 
     return {"id": doc_id, "content": content, "metadata": metadata}
@@ -144,6 +145,7 @@ def build_task_doc(task, customer):
         "accessed_at": now,
         "salience": salience,
         "sector": "semantic",
+        "is_synced": False,
     }
 
     if customer and customer != "global":

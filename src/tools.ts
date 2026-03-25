@@ -388,10 +388,131 @@ export function registerTools(server: McpServer): void {
       }
       try {
         const { syncCycle } = await import('./sync/index.js');
-        await syncCycle();
-        return { content: [{ type: 'text' as const, text: 'Sync cycle completed.' }] };
+        const stats = await syncCycle();
+        if (!stats) {
+          return { content: [{ type: 'text' as const, text: 'Sync skipped — previous cycle still running.' }] };
+        }
+        const { push, pull } = stats;
+        const summary = `Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`;
+        return { content: [{ type: 'text' as const, text: summary }] };
       } catch (e) {
         return { content: [{ type: 'text' as const, text: `Sync error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'sync_remote_collections',
+    'List collections available on the remote database with subscription status',
+    {},
+    async () => {
+      const { SYNC_ENABLED } = await import('./config.js');
+      if (!SYNC_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
+      }
+      try {
+        const { getRemoteCollections } = await import('./sync/postgres.js');
+        const { getSyncSubscriptions } = await import('./sync/sentinel.js');
+        const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
+        const subSet = new Set(subscriptions);
+
+        if (remote.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No collections found on remote.' }] };
+        }
+
+        const lines = remote.map(r =>
+          `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? '(subscribed)' : ''}`
+        );
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Error querying remote: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'sync_subscribe',
+    'Subscribe to remote collections for pull sync',
+    {
+      collections: z.array(z.string()).describe('Collection names to subscribe to'),
+    },
+    async ({ collections: requested }) => {
+      const { SYNC_ENABLED } = await import('./config.js');
+      if (!SYNC_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
+      }
+      try {
+        const { getRemoteCollections } = await import('./sync/postgres.js');
+        const { getSyncSubscriptions, updateSyncSubscriptions } = await import('./sync/sentinel.js');
+        const { getOrCreateCollection } = await import('./chroma.js');
+
+        // Validate that requested collections exist on remote
+        const remote = await getRemoteCollections();
+        const remoteNames = new Set(remote.map(r => r.name));
+        const valid: string[] = [];
+        const invalid: string[] = [];
+        for (const name of requested) {
+          if (remoteNames.has(name)) valid.push(name);
+          else invalid.push(name);
+        }
+
+        if (valid.length === 0) {
+          return { content: [{ type: 'text' as const, text: `None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}` }] };
+        }
+
+        // Add to subscriptions (deduped)
+        const existing = await getSyncSubscriptions();
+        const merged = [...new Set([...existing, ...valid])];
+        await updateSyncSubscriptions(merged);
+
+        // Create local collections for any that don't exist yet
+        for (const name of valid) {
+          await getOrCreateCollection(name);
+        }
+
+        // Trigger a sync cycle
+        const { syncCycle } = await import('./sync/index.js');
+        await syncCycle();
+
+        const lines = [`Subscribed to: ${valid.join(', ')}`];
+        if (invalid.length > 0) {
+          lines.push(`Not found on remote: ${invalid.join(', ')}`);
+        }
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'sync_unsubscribe',
+    'Unsubscribe from remote collections (local data is kept)',
+    {
+      collections: z.array(z.string()).describe('Collection names to unsubscribe from'),
+    },
+    async ({ collections: toRemove }) => {
+      const { SYNC_ENABLED } = await import('./config.js');
+      if (!SYNC_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
+      }
+      try {
+        const { getSyncSubscriptions, updateSyncSubscriptions } = await import('./sync/sentinel.js');
+        const existing = await getSyncSubscriptions();
+        const removeSet = new Set(toRemove);
+        const updated = existing.filter(c => !removeSet.has(c));
+        await updateSyncSubscriptions(updated);
+
+        const removed = toRemove.filter(c => existing.includes(c));
+        const notFound = toRemove.filter(c => !existing.includes(c));
+
+        const lines: string[] = [];
+        if (removed.length > 0) lines.push(`Unsubscribed from: ${removed.join(', ')}`);
+        if (notFound.length > 0) lines.push(`Not subscribed: ${notFound.join(', ')}`);
+        lines.push('Local data has been kept.');
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Error: ${e}` }] };
       }
     },
   );

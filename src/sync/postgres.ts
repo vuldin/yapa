@@ -135,6 +135,15 @@ export async function deleteRemoteDocuments(ids: string[]): Promise<number> {
   return result.rowCount ?? 0;
 }
 
+/** Get distinct collection names (with doc counts) from the remote database. */
+export async function getRemoteCollections(): Promise<Array<{ name: string; count: number }>> {
+  const p = getPool();
+  const result = await p.query(
+    'SELECT collection, COUNT(*) AS count FROM documents GROUP BY collection ORDER BY collection',
+  );
+  return result.rows.map(r => ({ name: r.collection, count: parseInt(r.count, 10) }));
+}
+
 /** Check if the remote database is reachable and has the correct schema. */
 export async function checkRemoteHealth(): Promise<{ ok: boolean; error?: string }> {
   try {

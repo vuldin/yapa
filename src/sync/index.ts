@@ -1,19 +1,25 @@
 import { SYNC_ENABLED, SYNC_DATABASE_URL, SYNC_INTERVAL_MS } from '../config.js';
 import { migrateSchema, ensureVectorIndex } from './schema.js';
-import { pushToRemote } from './push.js';
-import { pullFromRemote } from './pull.js';
+import { pushToRemote, PushStats } from './push.js';
+import { pullFromRemote, PullStats } from './pull.js';
 import { checkRemoteHealth, closePool } from './postgres.js';
+
+export interface SyncStats {
+  push: PushStats;
+  pull: PullStats;
+}
 
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let syncRunning = false;
 
 /**
  * Run a single sync cycle: push local changes, then pull remote changes.
+ * Returns stats, or null if skipped (previous cycle still running).
  */
-export async function syncCycle(): Promise<void> {
+export async function syncCycle(): Promise<SyncStats | null> {
   if (syncRunning) {
     process.stderr.write('[yapa-sync] Skipping cycle — previous still running\n');
-    return;
+    return null;
   }
 
   syncRunning = true;
@@ -23,6 +29,7 @@ export async function syncCycle(): Promise<void> {
 
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
     const hasPullActivity = pullStats.pulled > 0 || pullStats.linked > 0;
+    const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
     if (hasPushActivity || hasPullActivity) {
       process.stderr.write(
@@ -31,10 +38,19 @@ export async function syncCycle(): Promise<void> {
       );
     }
 
+    if (hasErrors) {
+      process.stderr.write(
+        `[yapa-sync] Errors: ${pushStats.errors} push, ${pullStats.errors} pull\n`
+      );
+    }
+
     // Try to create ivfflat index if we have enough data
     await ensureVectorIndex();
+
+    return { push: pushStats, pull: pullStats };
   } catch (e) {
     process.stderr.write(`[yapa-sync] Cycle error: ${e}\n`);
+    return null;
   } finally {
     syncRunning = false;
   }

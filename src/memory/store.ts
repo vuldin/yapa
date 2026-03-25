@@ -1,7 +1,7 @@
 import { addDocument, addDocumentsBatch, getOrCreateCollection } from '../chroma.js';
 import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
-import { SALIENCE_START, USERNAME, SYNC_ENABLED } from '../config.js';
+import { SALIENCE_START, USERNAME } from '../config.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -38,7 +38,7 @@ export async function storeMemory(
       created_at: now,
       accessed_at: now,
     };
-    if (SYNC_ENABLED) metadata.is_synced = false;
+    metadata.is_synced = false;
     await addDocument(collection, id, content, metadata);
     return [id];
   }
@@ -58,7 +58,7 @@ export async function storeMemory(
       chunk_total: chunk.total,
       parent_id: baseId,
     };
-    if (SYNC_ENABLED) chunkMeta.is_synced = false;
+    chunkMeta.is_synced = false;
     return {
       id: `${baseId}-${chunk.index}`,
       content: chunk.content,

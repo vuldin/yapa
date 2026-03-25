@@ -103,7 +103,45 @@ Now execute these steps in order, without asking anything else:
 
    **AWS (RDS):**
 
-   Tell the user:
+   Check if `aws` CLI is installed and authenticated:
+   ```
+   aws sts get-caller-identity 2>/dev/null
+   ```
+
+   If the CLI is available and authenticated, offer to provision automatically. If the user accepts:
+   ```
+   YAPA_PG_PASS=$(openssl rand -hex 16)
+   aws rds create-db-instance \
+     --db-instance-identifier yapa \
+     --db-instance-class db.t3.micro \
+     --engine postgres \
+     --engine-version 17 \
+     --master-username yapa \
+     --master-user-password "${YAPA_PG_PASS}" \
+     --allocated-storage 20 \
+     --publicly-accessible \
+     --no-multi-az
+   ```
+
+   Wait for the instance to become available (this can take several minutes):
+   ```
+   aws rds wait db-instance-available --db-instance-identifier yapa
+   ```
+
+   Get the endpoint:
+   ```
+   RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier yapa --query 'DBInstances[0].Endpoint.Address' --output text)
+   ```
+
+   Create the yapa database and enable pgvector:
+   ```
+   PGPASSWORD="${YAPA_PG_PASS}" psql -h "${RDS_ENDPOINT}" -U yapa -d postgres -c "CREATE DATABASE yapa;"
+   PGPASSWORD="${YAPA_PG_PASS}" psql -h "${RDS_ENDPOINT}" -U yapa -d yapa -c "CREATE EXTENSION IF NOT EXISTS vector;"
+   ```
+
+   Set: `SYNC_DATABASE_URL="postgres://yapa:${YAPA_PG_PASS}@${RDS_ENDPOINT}:5432/yapa"`
+
+   If the CLI is NOT available or the user declines automatic setup, tell the user:
    1. Go to the RDS console at https://console.aws.amazon.com/rds/
    2. Click "Create database" → choose PostgreSQL, version 15+
    3. Choose "Free tier" template if available, or the smallest instance (db.t3.micro)
@@ -118,7 +156,45 @@ Now execute these steps in order, without asking anything else:
 
    **GCP (Cloud SQL):**
 
-   Tell the user:
+   Check if `gcloud` CLI is installed and authenticated:
+   ```
+   gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null
+   ```
+
+   If the CLI is available and authenticated, offer to provision automatically. If the user accepts:
+   ```
+   YAPA_PG_PASS=$(openssl rand -hex 16)
+   GCP_PROJECT=$(gcloud config get-value project)
+   gcloud sql instances create yapa \
+     --database-version=POSTGRES_17 \
+     --tier=db-f1-micro \
+     --region=us-central1 \
+     --assign-ip \
+     --project="${GCP_PROJECT}"
+   ```
+
+   Set the root password, create user and database:
+   ```
+   gcloud sql users set-password postgres --instance=yapa --password="${YAPA_PG_PASS}" --project="${GCP_PROJECT}"
+   gcloud sql users create yapa --instance=yapa --password="${YAPA_PG_PASS}" --project="${GCP_PROJECT}"
+   gcloud sql databases create yapa --instance=yapa --project="${GCP_PROJECT}"
+   ```
+
+   Authorize the current IP and get the instance IP:
+   ```
+   MY_IP=$(curl -sf ifconfig.me)
+   gcloud sql instances patch yapa --authorized-networks="${MY_IP}/32" --project="${GCP_PROJECT}"
+   CSQL_IP=$(gcloud sql instances describe yapa --format="value(ipAddresses[0].ipAddress)" --project="${GCP_PROJECT}")
+   ```
+
+   Enable pgvector:
+   ```
+   PGPASSWORD="${YAPA_PG_PASS}" psql -h "${CSQL_IP}" -U yapa -d yapa -c "CREATE EXTENSION IF NOT EXISTS vector;"
+   ```
+
+   Set: `SYNC_DATABASE_URL="postgres://yapa:${YAPA_PG_PASS}@${CSQL_IP}:5432/yapa"`
+
+   If the CLI is NOT available or the user declines automatic setup, tell the user:
    1. Go to https://console.cloud.google.com/sql
    2. Click "Create instance" → choose PostgreSQL, version 15+
    3. Set instance ID: `yapa`, choose a root password, pick a region
@@ -132,7 +208,39 @@ Now execute these steps in order, without asking anything else:
 
    **Azure (Flexible Server):**
 
-   Tell the user:
+   Check if `az` CLI is installed and authenticated:
+   ```
+   az account show 2>/dev/null
+   ```
+
+   If the CLI is available and authenticated, offer to provision automatically. If the user accepts:
+   ```
+   YAPA_PG_PASS=$(openssl rand -hex 16)
+   AZ_RESOURCE_GROUP="yapa-rg"
+   AZ_REGION="eastus"
+   az group create --name "${AZ_RESOURCE_GROUP}" --location "${AZ_REGION}"
+   az postgres flexible-server create \
+     --resource-group "${AZ_RESOURCE_GROUP}" \
+     --name yapa \
+     --location "${AZ_REGION}" \
+     --admin-user yapa \
+     --admin-password "${YAPA_PG_PASS}" \
+     --sku-name Standard_B1ms \
+     --tier Burstable \
+     --public-access 0.0.0.0 \
+     --yes
+   ```
+
+   Create the database and enable pgvector:
+   ```
+   az postgres flexible-server db create --resource-group "${AZ_RESOURCE_GROUP}" --server-name yapa --database-name yapa
+   az postgres flexible-server parameter set --resource-group "${AZ_RESOURCE_GROUP}" --server-name yapa --name azure.extensions --value VECTOR
+   PGPASSWORD="${YAPA_PG_PASS}" psql -h yapa.postgres.database.azure.com -U yapa -d yapa -c "CREATE EXTENSION IF NOT EXISTS vector;"
+   ```
+
+   Set: `SYNC_DATABASE_URL="postgres://yapa:${YAPA_PG_PASS}@yapa.postgres.database.azure.com:5432/yapa"`
+
+   If the CLI is NOT available or the user declines automatic setup, tell the user:
    1. Go to https://portal.azure.com → search "Azure Database for PostgreSQL"
    2. Click "Create" → choose "Flexible Server"
    3. Set server name: `yapa`, choose admin username `yapa` and a password, pick a region

@@ -3,6 +3,7 @@ import { generateEmbedding } from '../embeddings.js';
 import { USERNAME } from '../config.js';
 import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments } from './postgres.js';
 import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
+import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 
 /** Collection prefixes that should not be synced. */
 function isSyncable(collectionName: string): boolean {
@@ -38,14 +39,16 @@ export async function pushToRemote(): Promise<PushStats> {
     stats.errors++;
   }
 
-  // Step 2: Push unsynced documents
+  // Step 2: Push unsynced documents and auto-subscribe pushed collections
   const collections = await listCollections();
+  const pushedCollections: string[] = [];
 
   for (const collection of collections) {
     if (!isSyncable(collection.name)) continue;
 
     try {
       const unsyncedDocs = await getDocumentsByFilter(collection.name, { is_synced: false }, 500);
+      let collectionHadPush = false;
 
       for (const doc of unsyncedDocs) {
         // Skip sentinel/internal documents
@@ -69,6 +72,7 @@ export async function pushToRemote(): Promise<PushStats> {
             });
             await markSynced(collection.name, doc.id, doc.metadata);
             stats.pushed++;
+            collectionHadPush = true;
             continue;
           }
 
@@ -102,6 +106,7 @@ export async function pushToRemote(): Promise<PushStats> {
 
             await markSynced(collection.name, doc.id, { ...doc.metadata, related_ids: existingRelated });
             stats.linked++;
+            collectionHadPush = true;
           } else {
             // No match — fresh insert
             await upsertRemoteDocument({
@@ -117,15 +122,34 @@ export async function pushToRemote(): Promise<PushStats> {
 
             await markSynced(collection.name, doc.id, doc.metadata);
             stats.pushed++;
+            collectionHadPush = true;
           }
         } catch (e) {
           process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}\n`);
           stats.errors++;
         }
       }
+
+      if (collectionHadPush) {
+        pushedCollections.push(collection.name);
+      }
     } catch (e) {
       process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}\n`);
       stats.errors++;
+    }
+  }
+
+  // Auto-subscribe collections that were successfully pushed
+  if (pushedCollections.length > 0) {
+    try {
+      const existing = await getSyncSubscriptions();
+      const existingSet = new Set(existing);
+      const newSubs = pushedCollections.filter(c => !existingSet.has(c));
+      if (newSubs.length > 0) {
+        await updateSyncSubscriptions([...existing, ...newSubs]);
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}\n`);
     }
   }
 

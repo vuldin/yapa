@@ -1,7 +1,7 @@
 import { listCollections, addDocument, getOrCreateCollection, getDocumentsByIds, queryDocuments } from '../chroma.js';
 import { USERNAME, SYNC_SIMILARITY_THRESHOLD } from '../config.js';
 import { getRemoteDocsSince, addRemoteRelatedIds } from './postgres.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions } from './sentinel.js';
 
 /** Collection prefixes that should not be synced. */
 function isSyncable(collectionName: string): boolean {
@@ -26,21 +26,31 @@ export async function pullFromRemote(): Promise<PullStats> {
 
   const collections = await listCollections();
   const lastPull = await getSyncPullTimestamp();
-
-  // Also pull for collections that exist remotely but not locally
   const localCollectionNames = new Set(collections.map(c => c.name));
 
-  for (const collection of collections) {
-    if (!isSyncable(collection.name)) continue;
+  // Build pull list: local syncable collections + subscribed remote-only collections
+  const pullCollectionNames: string[] = [];
+  for (const col of collections) {
+    if (isSyncable(col.name)) pullCollectionNames.push(col.name);
+  }
 
+  const subscriptions = await getSyncSubscriptions();
+  for (const sub of subscriptions) {
+    if (!localCollectionNames.has(sub) && isSyncable(sub)) {
+      await getOrCreateCollection(sub);
+      pullCollectionNames.push(sub);
+    }
+  }
+
+  for (const collectionName of pullCollectionNames) {
     try {
-      const remoteDocs = await getRemoteDocsSince(collection.name, lastPull, USERNAME);
+      const remoteDocs = await getRemoteDocsSince(collectionName, lastPull, USERNAME);
 
       for (const remoteDoc of remoteDocs) {
         try {
           // Check if we already have this doc locally (by ID)
           try {
-            const existing = await getDocumentsByIds(collection.name, [remoteDoc.id]);
+            const existing = await getDocumentsByIds(collectionName, [remoteDoc.id]);
             if (existing.length > 0) {
               stats.skipped++;
               continue;
@@ -52,7 +62,7 @@ export async function pullFromRemote(): Promise<PullStats> {
           // Check for similar docs locally (dedup)
           let linked = false;
           try {
-            const similarLocal = await queryDocuments(collection.name, remoteDoc.content, 1);
+            const similarLocal = await queryDocuments(collectionName, remoteDoc.content, 1);
             if (similarLocal.length > 0) {
               // ChromaDB returns distance (lower = more similar)
               // Cosine distance: similarity = 1 - distance
@@ -64,7 +74,7 @@ export async function pullFromRemote(): Promise<PullStats> {
                 if (!localRelated.includes(remoteDoc.id)) {
                   localRelated.push(remoteDoc.id);
                   const { updateDocument } = await import('../chroma.js');
-                  await updateDocument(collection.name, localDoc.id, {
+                  await updateDocument(collectionName, localDoc.id, {
                     ...localDoc.metadata,
                     related_ids: localRelated,
                   });
@@ -81,7 +91,7 @@ export async function pullFromRemote(): Promise<PullStats> {
           }
 
           // Insert into local ChromaDB (whether or not we found a similar doc — keep both)
-          await getOrCreateCollection(collection.name);
+          await getOrCreateCollection(collectionName);
           const metadata = {
             ...remoteDoc.metadata,
             origin_user: remoteDoc.origin_user,
@@ -89,7 +99,7 @@ export async function pullFromRemote(): Promise<PullStats> {
             is_synced: true, // Already synced from remote
           };
 
-          await addDocument(collection.name, remoteDoc.id, remoteDoc.content, metadata);
+          await addDocument(collectionName, remoteDoc.id, remoteDoc.content, metadata);
           stats.pulled++;
         } catch (e) {
           process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}\n`);
@@ -97,7 +107,7 @@ export async function pullFromRemote(): Promise<PullStats> {
         }
       }
     } catch (e) {
-      process.stderr.write(`[yapa-sync] Pull error for collection ${collection.name}: ${e}\n`);
+      process.stderr.write(`[yapa-sync] Pull error for collection ${collectionName}: ${e}\n`);
       stats.errors++;
     }
   }
