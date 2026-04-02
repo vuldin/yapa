@@ -1,74 +1,65 @@
-# OCPA → YAPA Migration
+# YAPA Migration Tools
 
-Migrates memories and tasks from OCPA's per-folder SQLite databases (`claudeclaw.db`) into YAPA's ChromaDB backend.
+This directory contains migration tools for upgrading between YAPA versions.
 
-## Background
+## Available Migrations
 
-OCPA (formerly claudeclaw) was the predecessor to YAPA. It stored memories and tasks in individual SQLite databases within each customer/project subfolder. YAPA replaces this with a centralized ChromaDB vector store, enabling semantic search across all data.
+### from-v1-to-v3: OCPA → YAPA v3
 
-## Prerequisites
+**Use when:** You have OCPA (SQLite-based predecessor) and want to migrate to YAPA v3.
 
-- ChromaDB running at `localhost:8000`
-- Python 3.10+
-- `chromadb` Python package (the script uses the client's built-in ONNX embedding model)
+**What it does:**
+- Reads SQLite databases (`claudeclaw.db`) from project folders
+- Creates ChromaDB collections with 384-dimension embeddings
+- Maps each project folder to a `customer-{name}` collection
 
-## Usage
+**Location:** `from-v1-to-v3/`
 
-From the projects directory:
-
+**Quick start:**
 ```bash
-uv run --with chromadb python3 .yapa/migrate/ocpa_to_yapa.py
+cd ~/projects/your-project
+python3 ~/.local/share/yapa/migrate/from-v1-to-v3/ocpa_to_yapa.py
 ```
 
-Or with pip:
+### from-v2-to-v3: Embedding Dimension Fix
 
+**Use when:** You have YAPA v2 collections with 768-dimension embeddings (from Fireworks, OpenAI, etc.) and want to switch to ChromaDB's built-in 384-dimension embeddings.
+
+**What it does:**
+- Exports existing v2 collections (with 768-dim embeddings) to JSON backup
+- Creates new v3 collections with 384-dim embeddings
+- Migrates all documents with preserved metadata and task IDs
+- Leaves old collections intact until manually deleted after verification
+
+**Location:** `from-v2-to-v3/`
+
+**Quick start:**
 ```bash
-pip install chromadb
-python3 .yapa/migrate/ocpa_to_yapa.py
+cd ~/projects/your-project
+# 1. Create migration-config.json (see example)
+# 2. Export existing data
+python3 ~/.local/share/yapa/migrate/from-v2-to-v3/01_export.py --config ./migration-config.json
+# 3. Dry-run
+python3 ~/.local/share/yapa/migrate/from-v2-to-v3/02_migrate.py --config ./migration-config.json --dry-run
+# 4. Execute
+python3 ~/.local/share/yapa/migrate/from-v2-to-v3/02_migrate.py --config ./migration-config.json --verify-first
 ```
 
-### Environment Variables
+## Which Migration Do I Need?
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OCPA_BASE_DIR` | Parent of `.yapa/` | Directory containing customer subfolders |
-| `CHROMA_HOST` | `localhost` | ChromaDB host |
-| `CHROMA_PORT` | `8000` | ChromaDB port |
-| `YAPA_USERNAME` | `user` | Username prefix for document IDs |
+| Current State | Migration |
+|---------------|-----------|
+| Using OCPA (SQLite databases) | `from-v1-to-v3` |
+| Using YAPA v2 with 768-dim embeddings (Fireworks/OpenAI) | `from-v2-to-v3` |
+| Using YAPA v3 with 384-dim embeddings (ChromaDB built-in) | No migration needed |
 
-## Collection Mapping
+## Troubleshooting
 
-| OCPA Source | YAPA Collection |
-|-------------|-----------------|
-| `{customer}/claudeclaw.db` | `customer-{customer}` |
-| `global/claudeclaw.db` | `global` |
-| `claudeclaw/store/global.db` | `global` (merged) |
+**"Embedding dimension mismatch" error**
+→ You're trying to use YAPA v3 tools on v2 collections. Run the `from-v2-to-v3` migration.
 
-## Field Mapping
+**"No module named chromadb"**
+→ Install: `pip install chromadb requests`
 
-### Memories
-
-| OCPA (SQLite) | YAPA (ChromaDB) |
-|---------------|-----------------|
-| `content` | document content |
-| `salience` | `metadata.salience` (preserved as-is) |
-| `sector` | `metadata.sector` |
-| `topic_key` | `metadata.tags` |
-| `created_at` | `metadata.created_at` |
-| `accessed_at` | `metadata.accessed_at` |
-
-### Tasks
-
-| OCPA (SQLite) | YAPA (ChromaDB) |
-|---------------|-----------------|
-| `title` | document content + `metadata.title` |
-| `status` | `metadata.status` (pending/in_progress/blocked/complete) |
-| `priority` | `metadata.priority` (critical/high/medium/low) |
-| `description` + `notes` | `metadata.notes` (concatenated) |
-| subfolder name | `metadata.customer` |
-
-## Notes
-
-- The script is idempotent — running it again will upsert (not duplicate) documents since IDs include timestamps and random suffixes.
-- Embeddings are generated client-side by the `chromadb` Python package using ONNX MiniLM-L6-v2 (384 dimensions), matching YAPA's default embedding model.
-- Task IDs are sequential (`{username}-{n}`) and start from 1. If YAPA already has tasks, you may get ID collisions — run against a clean ChromaDB instance.
+**"Connection refused"**
+→ Make sure ChromaDB is running: `curl http://localhost:8000/api/v2/heartbeat`

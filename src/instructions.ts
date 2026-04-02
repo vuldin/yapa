@@ -20,6 +20,26 @@ Before using any YAPA tool, verify ChromaDB is reachable:
 4. After the user installs and starts ChromaDB, re-check the heartbeat before continuing.
 5. Do NOT silently swallow connection errors from YAPA tools — if ChromaDB goes down mid-session, notify the user immediately.
 
+### ChromaDB Version Requirement (v2+ Required)
+YAPA requires **ChromaDB version 2** (0.x.x series, e.g., 0.4.0, 0.5.0 or higher).
+
+**Check version:** \`curl http://localhost:8000/api/v2/version\`
+**Required format:** Version should start with "0." (e.g., "0.4.0")
+
+**If ChromaDB v1 is detected:**
+YAPA will refuse to start with an error message. You must upgrade ChromaDB.
+
+**Upgrade instructions:**
+- **Docker:** \`docker pull chromadb/chroma:latest && docker restart chromadb\`
+- **pip:** \`pip install --upgrade chromadb && chroma run --host 0.0.0.0 --port 8000\`
+- **NixOS:** Update chromadb package to latest version and restart the service
+
+**Troubleshooting:**
+If tasks or memories are not found after migration, ensure metadata has correct 'type' field:
+- Tasks: metadata.type = "task"
+- Memories: metadata.type = "memory"
+Multiple filters require ChromaDB v2 format using $and operators.
+
 ### Auto-Query (every response)
 - Before responding to any question or starting any task, call \`memory_recall\`
   with a semantic query derived from the user's message

@@ -9,6 +9,7 @@ import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import { shouldRunDecay, runDecaySweep, markDecayRun } from './memory/decay.js';
 import { startSync } from './sync/index.js';
+import { detectChromaVersion } from './chroma.js';
 
 const server = new McpServer({
   name: 'yapa',
@@ -19,13 +20,39 @@ registerTools(server);
 registerResources(server);
 registerPrompts(server);
 
-async function healthCheck(): Promise<boolean> {
+async function healthCheck(): Promise<{healthy: boolean, error?: string, version?: string}> {
+  const versionCheck = await detectChromaVersion();
+  
+  if (!versionCheck.isV2) {
+    return {
+      healthy: false,
+      version: versionCheck.version,
+      error: versionCheck.error || 'ChromaDB v2 required'
+    };
+  }
+  
+  // Verify heartbeat works
   try {
     const response = await fetch(`${CHROMA_URL}/api/v2/heartbeat`);
-    return response.ok;
-  } catch {
-    return false;
+    if (!response.ok) {
+      return {
+        healthy: false,
+        version: versionCheck.version,
+        error: `ChromaDB v2 (${versionCheck.version}) is not responding to heartbeat`
+      };
+    }
+  } catch (e) {
+    return {
+      healthy: false,
+      version: versionCheck.version,
+      error: `Cannot connect to ChromaDB v2: ${e}`
+    };
   }
+  
+  return {
+    healthy: true,
+    version: versionCheck.version
+  };
 }
 
 async function startupDecay(): Promise<void> {
@@ -43,17 +70,27 @@ async function startupDecay(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const healthy = await healthCheck();
-  if (healthy) {
-    process.stderr.write(`[yapa] Connected to ChromaDB at ${CHROMA_URL} (embeddings: ${EMBEDDING_PROVIDER})\n`);
-    // Run decay in background, don't block startup
-    startupDecay();
-    // Start remote sync if enabled
-    if (SYNC_ENABLED) {
-      startSync().catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));
-    }
-  } else {
-    process.stderr.write(`[yapa] Warning: ChromaDB at ${CHROMA_URL} is not reachable. Tools will fail until it's available.\n`);
+  const health = await healthCheck();
+  
+  if (!health.healthy) {
+    process.stderr.write(`\n❌ YAPA failed to start:\n`);
+    process.stderr.write(`   ${health.error}\n\n`);
+    process.stderr.write(`To upgrade ChromaDB:\n`);
+    process.stderr.write(`  • Docker: docker pull chromadb/chroma:latest && docker restart chromadb\n`);
+    process.stderr.write(`  • pip: pip install --upgrade chromadb && chroma run --host 0.0.0.0 --port 8000\n`);
+    process.stderr.write(`  • NixOS: Update to latest chromadb package\n\n`);
+    process.stderr.write(`ChromaDB URL: ${CHROMA_URL}\n`);
+    process.exit(1);
+  }
+  
+  process.stderr.write(`✅ YAPA started with ChromaDB v${health.version} at ${CHROMA_URL} (embeddings: ${EMBEDDING_PROVIDER})\n`);
+  
+  // Run decay in background, don't block startup
+  startupDecay();
+  
+  // Start remote sync if enabled
+  if (SYNC_ENABLED) {
+    startSync().catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));
   }
 
   const transport = new StdioServerTransport();

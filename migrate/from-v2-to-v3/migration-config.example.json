@@ -1,0 +1,26 @@
+{
+  "migration": {
+    "name": "v2-to-v3-embedding-fix",
+    "description": "Migrate from 768-dim external embeddings to 384-dim ChromaDB built-in",
+    "created_at": "2026-04-01T00:00:00Z",
+    "chroma_url": "http://localhost:8000",
+    "backup_dir": "./backup/2026-04-01-000000",
+    "username": "user"
+  },
+  "source_collections": {
+    "global": {
+      "target": "project",
+      "migrate": true,
+      "docs_count": 0
+    }
+  },
+  "new_empty_collections": ["global"],
+  "skip_collections": [],
+  "options": {
+    "preserve_task_ids": true,
+    "preserve_salience": true,
+    "generate_new_memory_ids": true,
+    "batch_size": 50,
+    "task_counter_start": "auto"
+  }
+}

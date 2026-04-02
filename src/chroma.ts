@@ -25,6 +25,73 @@ export interface CrossCollectionResult extends QueryResult {
 
 const API_BASE = `${CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database`;
 
+// ChromaDB Version Detection
+export async function detectChromaVersion(): Promise<{version: string, isV2: boolean, error?: string}> {
+  try {
+    // First check if v2 API is available (most reliable method)
+    const v2Heartbeat = await fetch(`${CHROMA_URL}/api/v2/heartbeat`);
+    if (!v2Heartbeat.ok) {
+      // v2 not available, check if it's v1
+      try {
+        const v1Check = await fetch(`${CHROMA_URL}/api/v1/heartbeat`);
+        if (v1Check.ok) {
+          return {
+            version: '1.x (legacy)',
+            isV2: false,
+            error: 'ChromaDB v1 API detected. YAPA requires ChromaDB v2 API. Please upgrade ChromaDB to version 0.4.0 or higher (or 1.0.0+).'
+          };
+        }
+      } catch {
+        // v1 also not available
+      }
+      return {
+        version: 'unknown',
+        isV2: false,
+        error: 'ChromaDB is not responding. Ensure ChromaDB is running at ' + CHROMA_URL
+      };
+    }
+    
+    // v2 API is available, get version for informational purposes
+    let version = 'unknown';
+    try {
+      const versionResp = await fetch(`${CHROMA_URL}/api/v2/version`);
+      if (versionResp.ok) {
+        const data = await versionResp.json();
+        version = data.version || 'unknown';
+      }
+    } catch {
+      // Version endpoint might not be available in some v2 builds
+    }
+    
+    // If we can reach v2 API, we're compatible regardless of version number
+    // ChromaDB changed from 0.x.x to 1.x.x versioning while keeping v2 API
+    return { version, isV2: true };
+  } catch (e) {
+    return {
+      version: 'unreachable',
+      isV2: false,
+      error: `Cannot connect to ChromaDB at ${CHROMA_URL}. Ensure ChromaDB is running.`
+    };
+  }
+}
+
+// Build ChromaDB v2 compatible filter
+function buildChromaFilter(filter: Record<string, any>): Record<string, any> {
+  const entries = Object.entries(filter).filter(([_, v]) => v !== undefined && v !== null);
+  
+  if (entries.length === 0) return {};
+  if (entries.length === 1) {
+    // Single condition doesn't need $and
+    const [key, value] = entries[0];
+    return { [key]: value };
+  }
+  
+  // Multiple conditions need $and operator for ChromaDB v2
+  return {
+    $and: entries.map(([key, value]) => ({ [key]: value }))
+  };
+}
+
 // Cache collection name -> ID mapping
 const collectionIdCache = new Map<string, string>();
 
@@ -141,7 +208,7 @@ export async function queryDocuments(
     body.query_texts = [queryText];
   }
 
-  if (filter) body.where = filter;
+  if (filter) body.where = buildChromaFilter(filter);
 
   const response = await chromaFetch(`/collections/${collectionId}/query`, {
     method: 'POST',
@@ -184,7 +251,7 @@ export async function getDocumentsByFilter(
     method: 'POST',
     body: JSON.stringify({
       limit,
-      where: filter,
+      where: buildChromaFilter(filter),
       include: ['documents', 'metadatas'],
     }),
   });
