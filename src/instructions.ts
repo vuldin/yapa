@@ -14,7 +14,7 @@ Before using any YAPA tool, verify ChromaDB is reachable:
 3. If it fails, tell the user:
    > "YAPA needs ChromaDB to store memories and tasks, but it doesn't appear to be running locally. How would you like to install it?"
    Then offer these options (Docker is recommended):
-   - **Docker (recommended):** \`docker run -d --name chromadb -p 8000:8000 -v chromadb_data:/chroma/chroma chromadb/chroma\`
+   - **Docker (recommended):** \`docker run -d --name chromadb --restart unless-stopped -p 8000:8000 -v chromadb_data:/data chromadb/chroma\`
    - **pip:** \`pip install chromadb && chroma run --host 0.0.0.0 --port 8000\`
    - **NixOS service:** add \`services.chromadb.enable = true;\` to your NixOS config
 4. After the user installs and starts ChromaDB, re-check the heartbeat before continuing.

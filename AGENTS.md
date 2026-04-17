@@ -45,7 +45,7 @@ Now execute these steps in order, without asking anything else:
    Verify: `ls dist/index.js` succeeds.
 
 4. If ChromaDB needed, start it using the user's chosen method:
-   - Docker: `docker run -d --name chromadb -p 8000:8000 -v chromadb_data:/chroma/chroma chromadb/chroma`
+   - Docker: `docker run -d --name chromadb --restart unless-stopped -p 8000:8000 -v chromadb_data:/data chromadb/chroma`
    - pip: `pip install chromadb && chroma run --host 0.0.0.0 --port 8000 &`
    - NixOS: tell user to add `services.chromadb.enable = true;` and rebuild
    Verify: `curl -sf http://localhost:8000/api/v2/heartbeat` succeeds.
@@ -318,7 +318,7 @@ Now execute these steps in order, without asking anything else:
    3. If it fails, tell the user:
       > "YAPA needs ChromaDB to store memories and tasks, but it doesn't appear to be running locally. How would you like to install it?"
       Then offer these options (Docker is recommended):
-      - **Docker (recommended):** `docker run -d --name chromadb -p 8000:8000 -v chromadb_data:/chroma/chroma chromadb/chroma`
+      - **Docker (recommended):** `docker run -d --name chromadb --restart unless-stopped -p 8000:8000 -v chromadb_data:/data chromadb/chroma`
       - **pip:** `pip install chromadb && chroma run --host 0.0.0.0 --port 8000`
       - **NixOS service:** add `services.chromadb.enable = true;` to your NixOS config
    4. After the user installs and starts ChromaDB, re-check the heartbeat before continuing.
