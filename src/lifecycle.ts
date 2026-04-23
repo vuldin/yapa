@@ -5,6 +5,26 @@ export interface LifecycleMetadata {
   accessed_at: number;
   created_at: number;
   sector: 'semantic' | 'episodic';
+
+  // Populated by the Phase 1 classifier; scalar 0.0-1.0.
+  trainable?: number;
+  durability?: number;
+  generalizability?: number;
+  classified_at?: number;
+  classification_rationale?: string;
+  classifier_prompt_version?: string;
+
+  // Promotion state machine (Phase 2+). A memory in the `selected_for`
+  // intermediate state remains fully visible in recall; only `promoted_to`
+  // hides it from default queries.
+  selected_for?: string;
+  selected_at?: number;
+  promoted_to?: string;
+  promoted_at?: number;
+
+  // Per-memory training verification bookkeeping (Phase 4).
+  verification_attempts?: number;
+  verification_last_result?: 'passed' | 'failed';
 }
 
 /** Boost salience when document is accessed. */

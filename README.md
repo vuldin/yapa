@@ -16,7 +16,7 @@ Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host.
 
 **Collection-based organization** — Memories and tasks are grouped into collections: `global` for cross-cutting knowledge, `customer-acme` for client work, `project-api` for a specific codebase. The agent infers the right collection from what you're discussing.
 
-**Data lifecycle** — Not all memories are equally important. YAPA scores each memory by salience (1.0 to 5.0), boosts it when accessed, and decays it over time. Semantic facts (preferences, configs) decay slower than episodic events (what happened Tuesday). Nothing is deleted — low-salience memories just surface less often.
+**Data lifecycle** — Not all memories are equally important. YAPA scores each memory by salience (1.0 to 5.0), boosts it when accessed, and decays it over time. Semantic facts (preferences, configs) decay slower than episodic events (what happened Tuesday). Salience also weights retrieval ranking, so higher-salience memories surface ahead of lower-salience ones at similar vector distance. Nothing is deleted — low-salience memories just surface less often.
 
 **Smart chunking** — Long content is split into 2000-character chunks with 200-character overlap, each independently searchable. Meeting notes, documentation, lengthy explanations — all stored and retrievable.
 
@@ -26,7 +26,7 @@ Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host.
 
 ## How it works
 
-YAPA is an MCP server with 23 tools. Your agent connects to it through your editor's MCP configuration. Once connected:
+YAPA is an MCP server with 41 tools. Your agent connects to it through your editor's MCP configuration. Once connected:
 
 - **Before every response**, the agent queries your memories for relevant context
 - **When it learns something important**, it stores it automatically (bug fixes, preferences, decisions)
@@ -48,9 +48,27 @@ To uninstall later, say `uninstall yapa` in any session.
 |------|-------------|
 | `setup_instructions` | Generate behavioral instructions for CLAUDE.md / AGENTS.md |
 | `memory_store` | Store memory with content, tags, salience, sector, collection |
-| `memory_recall` | Semantic search with optional collection/tag filters |
+| `memory_recall` | Semantic search ranked by distance + salience, with optional collection/tag/score filters |
 | `memory_forget` | Delete memory by ID |
-| `memory_list` | List memories with metadata filters |
+| `memory_list` | List memories with metadata filters (tag, sector, classifier scores) |
+| `curation_now` | Trigger an immediate curation cycle (classifies unscored memories) |
+| `curation_status` | Curation status — provider, last run, cycles, memories scored |
+| `curation_preview` | Dry-run the classifier on a sample without persisting |
+| `bucket_route_preview` | Dry-run bucket routing — show which memories would be routed where |
+| `bucket_route_now` | Route memories and write versioned system-prompt companion + training manifest |
+| `bucket_status` | Counts of memories in `selected_for` vs `promoted_to` state |
+| `system_prompt_activate` | Confirm a companion version is in use — promotes its memories out of RAG |
+| `system_prompt_deactivate` | Rollback — restore a promoted companion's memories to RAG |
+| `training_dataset_preview` | Synthesize chat-format training examples from a manifest and emit a preview JSONL + SHA-256 reference |
+| `training_trigger` | Submit a training job to the configured backend (requires confirm + matching preview ref) |
+| `training_status` | List all training runs in the adapter registry |
+| `training_get` | Details on a single training run; polls the backend for live status |
+| `training_cancel` | Cancel an in-flight training run; restores affected memories to default RAG |
+| `eval_run` | Aggregate eval of a trained adapter against its manifest holdout; returns average score |
+| `eval_compare` | Side-by-side eval comparison of two adapters on the same holdout |
+| `eval_verify` | Per-memory verification — does the adapter actually know each memory's content? |
+| `adapter_promote` | Move verified memories from `selected_for` to `promoted_to` (hide from RAG) |
+| `adapter_demote` | Rollback a promotion — restore memories to default RAG |
 | `task_create` | Create task with title, priority, due date, tags, collection |
 | `task_list` | List tasks with filters |
 | `task_get` | Get single task by ID |
@@ -92,6 +110,27 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_USERNAME` | Username for task ID prefixes | `user` |
 | `YAPA_EMBEDDING_PROVIDER` | Embedding provider | `chromadb` (server-side) |
 | `YAPA_SALIENCE_DECAY_RATE` | Daily decay multiplier | `0.98` |
+| `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.3` |
+| `YAPA_CURATION_ENABLED` | Enable the background classifier | `false` |
+| `YAPA_CURATION_INTERVAL_MS` | Background curation interval in ms | `604800000` (7 days) |
+| `YAPA_CURATION_LLM_PROVIDER` | `fireworks` \| `openai` \| `anthropic` \| `ollama` | `anthropic` |
+| `YAPA_CURATION_MODEL` | Override the default model for the chosen provider | _(provider default)_ |
+| `YAPA_CURATION_BATCH_SIZE` | Memories per classifier call | `20` |
+| `YAPA_ARTIFACTS_DIR` | Where bucket artifacts are written | `~/.yapa/artifacts` |
+| `YAPA_SYSTEM_PROMPT_TRAINABLE_MIN` | Min trainable score for system-prompt bucket | `0.5` |
+| `YAPA_SYSTEM_PROMPT_DURABILITY_MIN` | Min durability score for system-prompt bucket | `0.7` |
+| `YAPA_SYSTEM_PROMPT_GENERALIZABILITY_MIN` | Min generalizability score for system-prompt bucket | `0.5` |
+| `YAPA_TRAINING_TRAINABLE_MIN` | Min trainable score for training bucket | `0.7` |
+| `YAPA_TRAINING_DURABILITY_MIN` | Min durability score for training bucket | `0.8` |
+| `YAPA_TRAINING_GENERALIZABILITY_MIN` | Min generalizability score for training bucket | `0.7` |
+| `YAPA_TRAINING_BACKEND` | Training backend — currently `fireworks` | `fireworks` |
+| `YAPA_TRAINING_BASE_MODEL` | Base model to fine-tune | `accounts/fireworks/models/qwen3-coder-30b-a3b-instruct` |
+| `YAPA_TRAINING_FIRECTL_PATH` | Path to the `firectl` executable | `firectl` |
+| `YAPA_TRAINING_SYNTHESIS_MODEL` | Model used to synthesize chat-format training examples from memories | _(falls back to curation model)_ |
+| `YAPA_VERIFICATION_ENABLED` | Opt-in gate for per-memory verification (incurs adapter inference cost) | `false` |
+| `YAPA_EVAL_HOLDOUT_FRACTION` | Fraction of manifest reserved as holdout for aggregate eval | `0.15` |
+| `YAPA_EVAL_HOLDOUT_MIN` | Minimum number of memories in the holdout regardless of fraction | `3` |
+| `YAPA_INFERENCE_BASE_URL` | OpenAI-compatible endpoint used to query trained adapters | `https://api.fireworks.ai/inference/v1` |
 | `YAPA_SYNC_ENABLED` | Enable remote sync | `false` |
 | `YAPA_SYNC_DATABASE_URL` | PostgreSQL connection string | _(none)_ |
 | `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms | `300000` (5 min) |

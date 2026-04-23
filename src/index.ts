@@ -3,12 +3,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-import { CHROMA_URL, EMBEDDING_PROVIDER, SYNC_ENABLED } from './config.js';
+import { CHROMA_URL, CURATION_ENABLED, EMBEDDING_PROVIDER, SYNC_ENABLED } from './config.js';
 import { registerTools } from './tools.js';
 import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
 import { shouldRunDecay, runDecaySweep, markDecayRun } from './memory/decay.js';
 import { startSync } from './sync/index.js';
+import { startCuration } from './curation/index.js';
 import { detectChromaVersion } from './chroma.js';
 
 const server = new McpServer({
@@ -87,7 +88,12 @@ async function main(): Promise<void> {
   
   // Run decay in background, don't block startup
   startupDecay();
-  
+
+  // Start background curation if enabled
+  if (CURATION_ENABLED) {
+    startCuration().catch(e => process.stderr.write(`[yapa] Curation startup error: ${e}\n`));
+  }
+
   // Start remote sync if enabled
   if (SYNC_ENABLED) {
     startSync().catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));

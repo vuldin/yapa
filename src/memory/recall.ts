@@ -1,10 +1,18 @@
-import { queryDocuments, queryAllCollections, updateDocument, type QueryResult, type CrossCollectionResult } from '../chroma.js';
+import { queryDocuments, queryAllCollections, updateDocument } from '../chroma.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
+import {
+  passesPromotedFilter,
+  passesScoreFilters,
+  rankScore,
+  type RecallFilters,
+} from './filters.js';
 
 export interface RecallOptions {
   collection?: string;
   nResults?: number;
   tags?: string[];
+  include_promoted?: boolean;
+  filters?: RecallFilters;
 }
 
 export interface RecallResult {
@@ -18,17 +26,18 @@ export interface RecallResult {
 /**
  * Semantic search for memories. Boosts salience on access.
  * If no collection specified, searches all collections.
+ *
+ * Ranking combines vector distance with salience (higher salience ranks better)
+ * via a configurable weight. `promoted_to` memories are excluded by default.
+ * Memories in the intermediate `selected_for` state remain visible.
  */
 export async function recallMemory(
   query: string,
   options: RecallOptions = {},
 ): Promise<RecallResult[]> {
   const nResults = options.nResults ?? 5;
+  const includePromoted = options.include_promoted ?? false;
   const filter: Record<string, any> = { type: 'memory' };
-  if (options.tags?.length) {
-    // ChromaDB doesn't support array contains natively on comma-separated strings,
-    // so we filter client-side after retrieval
-  }
 
   let results: RecallResult[];
 
@@ -40,7 +49,7 @@ export async function recallMemory(
     results = docs;
   }
 
-  // Client-side tag filter
+  // Client-side tag filter (ChromaDB can't match comma-separated tag strings natively)
   if (options.tags?.length) {
     results = results.filter(r => {
       const docTags: string[] = Array.isArray(r.metadata.tags)
@@ -50,7 +59,18 @@ export async function recallMemory(
     });
   }
 
-  // Boost salience asynchronously for retrieved docs
+  // Phase 0: exclude promoted memories by default, apply optional range filters
+  results = results.filter(r =>
+    passesPromotedFilter(r.metadata, includePromoted) &&
+    passesScoreFilters(r.metadata, options.filters),
+  );
+
+  // Phase 0: re-rank by combined (distance, salience) score
+  results.sort((a, b) =>
+    rankScore(a.distance, a.metadata.salience) - rankScore(b.distance, b.metadata.salience),
+  );
+
+  // Boost salience asynchronously for retrieved docs (preserves existing behavior)
   for (const r of results) {
     if (r.collection) {
       const lifecycleMeta: LifecycleMetadata = {

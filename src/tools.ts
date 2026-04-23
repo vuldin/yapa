@@ -58,15 +58,28 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'memory_recall',
-    'Semantic search for memories with optional collection/tag filters',
+    'Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. Promoted memories (already moved to the system-prompt companion or a trained adapter) are excluded by default.',
     {
       query: z.string().describe('Semantic search query'),
       collection: z.string().optional().describe('Limit search to this collection'),
       n_results: z.number().optional().describe('Max results (default 5)'),
       tags: z.array(z.string()).optional().describe('Filter by tags'),
+      include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
+      filters: z.object({
+        trainable_min: z.number().min(0).max(1).optional().describe('Minimum trainable score (0-1)'),
+        durability_min: z.number().min(0).max(1).optional().describe('Minimum durability score (0-1)'),
+        generalizability_min: z.number().min(0).max(1).optional().describe('Minimum generalizability score (0-1)'),
+        classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
+      }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ query, collection, n_results, tags }) => {
-      const results = await recallMemory(query, { collection, nResults: n_results, tags });
+    async ({ query, collection, n_results, tags, include_promoted, filters }) => {
+      const results = await recallMemory(query, {
+        collection,
+        nResults: n_results,
+        tags,
+        include_promoted,
+        filters,
+      });
       if (results.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No memories found.' }] };
       }
@@ -93,22 +106,557 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'memory_list',
-    'List memories with optional metadata filters',
+    'List memories with optional metadata filters. Promoted memories are excluded by default.',
     {
       collection: z.string().optional().describe('Filter by collection'),
       tags: z.array(z.string()).optional().describe('Filter by tags'),
       sector: z.enum(['semantic', 'episodic']).optional().describe('Filter by sector'),
       limit: z.number().optional().describe('Max results (default 50)'),
+      include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
+      filters: z.object({
+        trainable_min: z.number().min(0).max(1).optional().describe('Minimum trainable score (0-1)'),
+        durability_min: z.number().min(0).max(1).optional().describe('Minimum durability score (0-1)'),
+        generalizability_min: z.number().min(0).max(1).optional().describe('Minimum generalizability score (0-1)'),
+        classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
+      }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ collection, tags, sector, limit }) => {
-      const results = await listMemories({ collection, tags, sector, limit });
+    async ({ collection, tags, sector, limit, include_promoted, filters }) => {
+      const results = await listMemories({
+        collection,
+        tags,
+        sector,
+        limit,
+        include_promoted,
+        filters,
+      });
       if (results.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No memories found.' }] };
       }
-      const text = results.map(r =>
-        `- **${r.id}** [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, sector: ${r.metadata.sector ?? '?'}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`
-      ).join('\n');
+      const text = results.map(r => {
+        const promoted = r.metadata.promoted_to ? ` promoted: ${r.metadata.promoted_to}` : '';
+        const selected = r.metadata.selected_for ? ` selected: ${r.metadata.selected_for}` : '';
+        return `- **${r.id}** [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, sector: ${r.metadata.sector ?? '?'}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`;
+      }).join('\n');
       return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  // --- Curation ---
+  server.tool(
+    'curation_now',
+    'Trigger an immediate curation cycle: classifies unscored memories with trainable/durability/generalizability scores.',
+    {},
+    async () => {
+      const { CURATION_ENABLED } = await import('./config.js');
+      if (!CURATION_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Curation is disabled. Set YAPA_CURATION_ENABLED=true to enable.' }] };
+      }
+      try {
+        const { curationCycle } = await import('./curation/index.js');
+        const stats = await curationCycle();
+        if (!stats) {
+          return { content: [{ type: 'text' as const, text: 'Curation skipped — previous cycle still running.' }] };
+        }
+        const text = `Curation cycle complete. Scored ${stats.scored}/${stats.pending} pending, ${stats.batches} batch(es), ${stats.errors} error(s).`;
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Curation error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'curation_status',
+    'Check curation status — enabled, provider, last run, cycle count, memories scored.',
+    {},
+    async () => {
+      const { CURATION_ENABLED, CURATION_INTERVAL_MS, CURATION_LLM_PROVIDER, getCurationModel } = await import('./config.js');
+      if (!CURATION_ENABLED) {
+        return { content: [{ type: 'text' as const, text: 'Curation is disabled. Set YAPA_CURATION_ENABLED=true to enable.' }] };
+      }
+      const { getCurationState } = await import('./curation/index.js');
+      const state = getCurationState();
+      const lines = [
+        `Curation: **enabled** (provider: ${CURATION_LLM_PROVIDER}, model: ${getCurationModel()}, interval: ${CURATION_INTERVAL_MS / 1000}s)`,
+        `Background timer: ${state.timerActive ? 'active' : 'inactive'}`,
+        `Cycles completed: ${state.cycleCount}`,
+        `Memories scored this process: ${state.totalScored}`,
+        state.lastRunAt ? `Last cycle: ${new Date(state.lastRunAt).toISOString()}` : 'Last cycle: never',
+      ];
+      if (state.lastError) lines.push(`Last error: ${state.lastError}`);
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'curation_preview',
+    'Dry-run the classifier on a small sample without persisting. Useful for sanity-checking prompt output before running a full cycle.',
+    {
+      collection: z.string().optional().describe('Restrict sampling to this collection'),
+      limit: z.number().optional().describe('Max memories to classify (default 5)'),
+    },
+    async ({ collection, limit }) => {
+      const limitNum = Math.max(1, Math.min(50, limit ?? 5));
+      const { getDocumentsByFilter, listCollections } = await import('./chroma.js');
+      const { classifyMemories } = await import('./curation/classifier.js');
+
+      const collectionNames = collection
+        ? [collection]
+        : (await listCollections()).map(c => c.name);
+
+      const sample: Array<{ id: string; content: string }> = [];
+      for (const name of collectionNames) {
+        if (sample.length >= limitNum) break;
+        try {
+          const docs = await getDocumentsByFilter(name, { type: 'memory' }, limitNum);
+          for (const d of docs) {
+            if (sample.length >= limitNum) break;
+            sample.push({ id: d.id, content: d.content });
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (sample.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No memories found to preview.' }] };
+      }
+
+      try {
+        const scored = await classifyMemories(sample);
+        const blocks = scored.map(s => {
+          const doc = sample.find(d => d.id === s.id);
+          const preview = doc ? doc.content.slice(0, 140) + (doc.content.length > 140 ? '…' : '') : '';
+          return `**${s.id}**\n  trainable: ${s.trainable.toFixed(2)} | durability: ${s.durability.toFixed(2)} | generalizability: ${s.generalizability.toFixed(2)}\n  rationale: ${s.rationale}\n  preview: ${preview}`;
+        });
+        return { content: [{ type: 'text' as const, text: blocks.join('\n\n---\n\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Curation preview error: ${e}` }] };
+      }
+    },
+  );
+
+  // --- Buckets ---
+  server.tool(
+    'bucket_route_preview',
+    'Dry-run: show which memories would be routed to the system-prompt companion and training manifest, and why. No state change.',
+    {},
+    async () => {
+      const { bucketRoutePreview } = await import('./buckets/index.js');
+      const preview = await bucketRoutePreview();
+      const lines: string[] = [
+        `System-prompt bucket (next version v${preview.systemPromptVersion}): ${preview.systemPromptCandidates.length} candidate(s)`,
+        `  thresholds: trainable≥${preview.thresholds.systemPrompt.trainable}, durability≥${preview.thresholds.systemPrompt.durability}, generalizability≥${preview.thresholds.systemPrompt.generalizability}`,
+        `Training bucket (next version v${preview.trainingVersion}): ${preview.trainingCandidates.length} candidate(s)`,
+        `  thresholds: trainable≥${preview.thresholds.training.trainable}, durability≥${preview.thresholds.training.durability}, generalizability≥${preview.thresholds.training.generalizability}`,
+      ];
+      if (preview.systemPromptCandidates.length > 0) {
+        lines.push('', '**System-prompt candidates:**');
+        for (const c of preview.systemPromptCandidates.slice(0, 20)) {
+          lines.push(`  - ${c.id} [${c.collection}]: ${c.reasons['system-prompt']}`);
+        }
+        if (preview.systemPromptCandidates.length > 20) {
+          lines.push(`  ...and ${preview.systemPromptCandidates.length - 20} more`);
+        }
+      }
+      if (preview.trainingCandidates.length > 0) {
+        lines.push('', '**Training candidates:**');
+        for (const c of preview.trainingCandidates.slice(0, 20)) {
+          lines.push(`  - ${c.id} [${c.collection}]: ${c.reasons.training}`);
+        }
+        if (preview.trainingCandidates.length > 20) {
+          lines.push(`  ...and ${preview.trainingCandidates.length - 20} more`);
+        }
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'bucket_route_now',
+    'Execute bucket routing: write the system-prompt companion file and training-manifest JSONL, then tag qualifying memories with `selected_for`. Memories remain visible in default RAG until a bucket-specific activation step runs (system_prompt_activate, or adapter_promote in Phase 4).',
+    {},
+    async () => {
+      const { bucketRouteNow } = await import('./buckets/index.js');
+      const result = await bucketRouteNow();
+      const lines: string[] = [
+        `System-prompt v${result.systemPromptVersion}: ${result.systemPromptCandidates.length} memory(ies)`,
+        `Training v${result.trainingVersion}: ${result.trainingCandidates.length} memory(ies)`,
+        `Tagged with selected_for: ${result.tagged}`,
+        `Routing decisions: ${result.routingDecisionsPath}`,
+      ];
+      if (result.systemPromptArtifact) {
+        lines.push(`System-prompt companion: ${result.systemPromptArtifact.companionPath}`);
+      }
+      if (result.trainingArtifact) {
+        lines.push(`Training manifest: ${result.trainingArtifact.manifestPath}`);
+      }
+      lines.push('', 'Next steps:');
+      if (result.systemPromptCandidates.length > 0) {
+        lines.push(`  - Review the companion file, wire it into your workflow, then run \`system_prompt_activate --version ${result.systemPromptVersion}\` to hide those memories from default RAG.`);
+      }
+      if (result.trainingCandidates.length > 0) {
+        lines.push(`  - Run \`training_dataset_preview --manifest v${result.trainingVersion}\` when Phase 3 is live.`);
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'bucket_status',
+    'Show current bucket state: counts of memories in selected_for vs promoted_to for each bucket + version.',
+    {},
+    async () => {
+      const { bucketStatus } = await import('./buckets/index.js');
+      const status = await bucketStatus();
+      const lines: string[] = [
+        `Pending classification: ${status.pendingClassification}`,
+        '',
+        '**Selected (intermediate — still visible in RAG):**',
+      ];
+      const selKeys = Object.keys(status.bySelection).sort();
+      if (selKeys.length === 0) {
+        lines.push('  (none)');
+      } else {
+        for (const k of selKeys) lines.push(`  - ${k}: ${status.bySelection[k]}`);
+      }
+      lines.push('', '**Promoted (hidden from default RAG):**');
+      const promKeys = Object.keys(status.byPromotion).sort();
+      if (promKeys.length === 0) {
+        lines.push('  (none)');
+      } else {
+        for (const k of promKeys) lines.push(`  - ${k}: ${status.byPromotion[k]}`);
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'system_prompt_activate',
+    'Confirm that a system-prompt companion version is now being consumed by your workflow. Transitions its memories from selected_for → promoted_to so they no longer appear in default memory_recall results.',
+    {
+      version: z.number().int().positive().describe('Companion version to activate (from bucket_route_now output)'),
+      confirm: z.literal(true).describe('Required safety flag — must be true'),
+    },
+    async ({ version, confirm }) => {
+      if (confirm !== true) {
+        return { content: [{ type: 'text' as const, text: 'Refused — `confirm: true` is required.' }] };
+      }
+      const { systemPromptActivate } = await import('./buckets/index.js');
+      const { promoted } = await systemPromptActivate(version);
+      const text = `Activated system-prompt-v${version}. ${promoted} memory(ies) promoted from selected_for → promoted_to and are now hidden from default RAG.`;
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  server.tool(
+    'system_prompt_deactivate',
+    'Rollback a previously-activated system-prompt companion version. Clears promoted_to on all affected memories so they reappear in default RAG.',
+    {
+      version: z.number().int().positive().describe('Companion version to deactivate'),
+      confirm: z.literal(true).describe('Required safety flag — must be true'),
+    },
+    async ({ version, confirm }) => {
+      if (confirm !== true) {
+        return { content: [{ type: 'text' as const, text: 'Refused — `confirm: true` is required.' }] };
+      }
+      const { systemPromptDeactivate } = await import('./buckets/index.js');
+      const { rolledBack } = await systemPromptDeactivate(version);
+      const text = `Deactivated system-prompt-v${version}. ${rolledBack} memory(ies) rolled back — now visible in default RAG again.`;
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  // --- Training ---
+  server.tool(
+    'training_dataset_preview',
+    'Read a training manifest, run synthesis (memory → chat-format training examples), and write a preview JSONL. Returns a SHA-256 reference you must pass back to training_trigger.',
+    {
+      manifest_version: z.number().int().positive().describe('Manifest version from bucket_route_now'),
+    },
+    async ({ manifest_version }) => {
+      try {
+        const { trainingDatasetPreview } = await import('./training/index.js');
+        const result = await trainingDatasetPreview(manifest_version);
+        const lines = [
+          `Preview written: ${result.previewPath}`,
+          `preview_ref (sha256): ${result.previewRef}`,
+          `Examples: ${result.exampleCount}`,
+          `Memories skipped (synthesis returned empty or errored): ${result.skippedMemories}`,
+          '',
+          `Next step: review the preview file, then call training_trigger with manifest_version=${result.manifestVersion}, preview_path=<path above>, preview_ref=<sha256 above>, confirm=true.`,
+        ];
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Preview error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'training_trigger',
+    'Submit a training job. Requires confirm=true AND a matching preview_ref from training_dataset_preview. The preview file on disk must hash to preview_ref — if it was modified, this refuses.',
+    {
+      manifest_version: z.number().int().positive(),
+      preview_path: z.string().describe('Absolute path to the preview JSONL generated by training_dataset_preview'),
+      preview_ref: z.string().describe('SHA-256 hex returned by training_dataset_preview'),
+      confirm: z.literal(true).describe('Required safety flag — must be true'),
+      adapter_id: z.string().optional().describe('Optional custom adapter id (auto-generated otherwise)'),
+      hyperparameters: z.object({
+        epochs: z.number().optional(),
+        learningRate: z.number().optional(),
+        loraRank: z.number().optional(),
+        earlyStop: z.boolean().optional(),
+      }).optional(),
+    },
+    async ({ manifest_version, preview_path, preview_ref, confirm, adapter_id, hyperparameters }) => {
+      try {
+        const { trainingTrigger } = await import('./training/index.js');
+        const result = await trainingTrigger({
+          manifestVersion: manifest_version,
+          previewPath: preview_path,
+          previewRef: preview_ref,
+          confirm,
+          adapterId: adapter_id,
+          hyperparameters,
+        });
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Submitted training job. adapter_id=${result.adapterId} backend=${result.handle.backend} job_id=${result.handle.jobId}`,
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Trigger error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'training_status',
+    'List all training runs in the adapter registry with their current status.',
+    {},
+    async () => {
+      const { trainingStatus } = await import('./training/index.js');
+      const { adapters } = await trainingStatus();
+      if (adapters.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No training runs in the registry.' }] };
+      }
+      const text = adapters.map(a => {
+        const parts = [
+          `**${a.id}** [${a.status}]`,
+          `  base: ${a.baseModel}`,
+          `  backend: ${a.backend}${a.backendJobId ? ' / ' + a.backendJobId : ''}`,
+          `  manifest: v${a.manifestVersion}`,
+        ];
+        if (a.outputModelRef) parts.push(`  output: ${a.outputModelRef}`);
+        if (a.error) parts.push(`  error: ${a.error}`);
+        return parts.join('\n');
+      }).join('\n\n');
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  server.tool(
+    'training_get',
+    'Get details on a single training run. Polls the backend for live status if the run is still pending/running.',
+    {
+      adapter_id: z.string(),
+    },
+    async ({ adapter_id }) => {
+      const { trainingGet } = await import('./training/index.js');
+      const result = await trainingGet(adapter_id);
+      if (!result) {
+        return { content: [{ type: 'text' as const, text: `Adapter ${adapter_id} not found in registry.` }] };
+      }
+      const { entry, remoteStatus } = result;
+      const lines = [
+        `**${entry.id}** [${entry.status}]`,
+        `  base: ${entry.baseModel}`,
+        `  backend: ${entry.backend}${entry.backendJobId ? ' / ' + entry.backendJobId : ''}`,
+        `  manifest: v${entry.manifestVersion}`,
+        `  dataset: ${entry.datasetPath}`,
+        `  preview_ref: ${entry.previewRef.slice(0, 12)}…`,
+        `  created: ${new Date(entry.createdAt * 1000).toISOString()}`,
+        `  updated: ${new Date(entry.updatedAt * 1000).toISOString()}`,
+      ];
+      if (entry.outputModelRef) lines.push(`  output: ${entry.outputModelRef}`);
+      if (entry.error) lines.push(`  error: ${entry.error}`);
+      if (remoteStatus) {
+        lines.push('', `remote state: ${remoteStatus.state}`);
+        if (remoteStatus.error) lines.push(`remote error: ${remoteStatus.error}`);
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'training_cancel',
+    'Cancel an in-flight training run. Also clears selected_for on all memories routed into its manifest (they return to full RAG visibility).',
+    {
+      adapter_id: z.string(),
+      confirm: z.literal(true).describe('Required safety flag — must be true'),
+    },
+    async ({ adapter_id, confirm }) => {
+      if (confirm !== true) {
+        return { content: [{ type: 'text' as const, text: 'Refused — `confirm: true` is required.' }] };
+      }
+      const { trainingCancel } = await import('./training/index.js');
+      const entry = await trainingCancel(adapter_id);
+      if (!entry) {
+        return { content: [{ type: 'text' as const, text: `Adapter ${adapter_id} not found.` }] };
+      }
+      return { content: [{ type: 'text' as const, text: `Cancelled ${adapter_id}. Memories from manifest v${entry.manifestVersion} returned to default RAG visibility.` }] };
+    },
+  );
+
+  // --- Eval + promotion ---
+  server.tool(
+    'eval_run',
+    'Run aggregate eval on a trained adapter against the holdout slice of its training manifest. Returns an average 0-1 score and per-item detail. Incurs inference cost.',
+    {
+      adapter_id: z.string(),
+    },
+    async ({ adapter_id }) => {
+      try {
+        const { getAdapter } = await import('./training/registry.js');
+        const entry = getAdapter(adapter_id);
+        if (!entry) return { content: [{ type: 'text' as const, text: `Adapter ${adapter_id} not in registry.` }] };
+        if (!entry.outputModelRef) {
+          return { content: [{ type: 'text' as const, text: `Adapter ${adapter_id} has no outputModelRef yet. Poll training_get first.` }] };
+        }
+        const { evalRun } = await import('./training/eval.js');
+        const result = await evalRun({ adapterRef: entry.outputModelRef, manifestVersion: entry.manifestVersion });
+        const { updateAdapter } = await import('./training/registry.js');
+        updateAdapter(adapter_id, { evalScore: result.averageScore });
+        const lines = [
+          `Eval for ${adapter_id}:`,
+          `  items: ${result.itemCount}`,
+          `  average score: ${result.averageScore.toFixed(3)}`,
+          '',
+          ...result.items.slice(0, 10).map(i =>
+            `  - ${i.memoryId}: score=${i.score.toFixed(2)} winner=${i.winner} — ${i.rationale}`),
+        ];
+        if (result.items.length > 10) lines.push(`  ...and ${result.items.length - 10} more`);
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Eval error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'eval_compare',
+    'Side-by-side eval comparison of two adapters on the same holdout. Use to decide whether a new adapter beats the incumbent before promoting.',
+    {
+      adapter_id_a: z.string(),
+      adapter_id_b: z.string(),
+    },
+    async ({ adapter_id_a, adapter_id_b }) => {
+      try {
+        const { getAdapter } = await import('./training/registry.js');
+        const a = getAdapter(adapter_id_a);
+        const b = getAdapter(adapter_id_b);
+        if (!a || !b) return { content: [{ type: 'text' as const, text: 'Both adapters must exist in the registry.' }] };
+        if (a.manifestVersion !== b.manifestVersion) {
+          return { content: [{ type: 'text' as const, text: `Refusing — adapters trained on different manifests (v${a.manifestVersion} vs v${b.manifestVersion}).` }] };
+        }
+        if (!a.outputModelRef || !b.outputModelRef) {
+          return { content: [{ type: 'text' as const, text: 'Both adapters must have outputModelRef. Poll training_get.' }] };
+        }
+        const { evalCompare } = await import('./training/eval.js');
+        const result = await evalCompare(a.outputModelRef, b.outputModelRef, a.manifestVersion);
+        const lines = [
+          `${adapter_id_a}: avg ${result.adapterA.averageScore.toFixed(3)}`,
+          `${adapter_id_b}: avg ${result.adapterB.averageScore.toFixed(3)}`,
+          `delta (B-A): ${result.delta.toFixed(3)}`,
+          `winner: ${result.winner}`,
+        ];
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Compare error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'eval_verify',
+    'Per-memory verification: for every memory in the adapter\'s training manifest, query the adapter and judge whether the answer covers the memory. Writes verification_last_result back onto each memory. Requires YAPA_VERIFICATION_ENABLED=true (acknowledges inference cost).',
+    {
+      adapter_id: z.string(),
+    },
+    async ({ adapter_id }) => {
+      try {
+        const { getAdapter } = await import('./training/registry.js');
+        const entry = getAdapter(adapter_id);
+        if (!entry) return { content: [{ type: 'text' as const, text: `Adapter ${adapter_id} not in registry.` }] };
+        if (!entry.outputModelRef) {
+          return { content: [{ type: 'text' as const, text: `Adapter has no outputModelRef yet.` }] };
+        }
+        const { verifyAdapterAgainstManifest } = await import('./training/verification.js');
+        const result = await verifyAdapterAgainstManifest(entry.outputModelRef, entry.manifestVersion);
+        const lines = [
+          `Verification for ${adapter_id}:`,
+          `  passed: ${result.passedCount}`,
+          `  failed: ${result.failedCount}`,
+          '',
+          ...result.items.slice(0, 15).map(i =>
+            `  - ${i.memoryId}: ${i.passed ? 'PASS' : 'FAIL'} (conf ${i.confidence.toFixed(2)}) — ${i.rationale}`),
+        ];
+        if (result.items.length > 15) lines.push(`  ...and ${result.items.length - 15} more`);
+        lines.push('', 'Next: call adapter_promote to move verified memories out of default RAG.');
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Verify error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'adapter_promote',
+    'Promote a trained adapter: transition verified memories from selected_for → promoted_to. Memories that failed verification have their selected_for cleared and return to default RAG. Requires the adapter to be in `completed` status and verification to have been run.',
+    {
+      adapter_id: z.string(),
+      confirm: z.literal(true),
+    },
+    async ({ adapter_id, confirm }) => {
+      if (confirm !== true) {
+        return { content: [{ type: 'text' as const, text: 'Refused — confirm must be true.' }] };
+      }
+      try {
+        const { adapterPromote } = await import('./training/promotion.js');
+        const result = await adapterPromote({ adapterId: adapter_id, confirm: true });
+        const lines = [
+          `Promoted adapter ${result.adapterId} (manifest v${result.manifestVersion}).`,
+          `  Memories promoted (hidden from default RAG): ${result.promoted}`,
+          `  Memories rolled back (failed verification, back in RAG): ${result.rolledBackSelections}`,
+        ];
+        if (result.outputModelRef) lines.push(`  Adapter ref: ${result.outputModelRef}`);
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Promote error: ${e}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'adapter_demote',
+    'Rollback an adapter promotion. Clears promoted_to for every memory associated with the adapter\'s manifest. Restores full RAG visibility.',
+    {
+      adapter_id: z.string(),
+      confirm: z.literal(true),
+    },
+    async ({ adapter_id, confirm }) => {
+      if (confirm !== true) {
+        return { content: [{ type: 'text' as const, text: 'Refused — confirm must be true.' }] };
+      }
+      try {
+        const { adapterDemote } = await import('./training/promotion.js');
+        const result = await adapterDemote(adapter_id);
+        return { content: [{ type: 'text' as const, text: `Demoted ${result.adapterId}. ${result.rolledBack} memory(ies) returned to default RAG.` }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Demote error: ${e}` }] };
+      }
     },
   );
 
