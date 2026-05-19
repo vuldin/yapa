@@ -12,6 +12,7 @@ export interface RecallOptions {
   nResults?: number;
   tags?: string[];
   include_promoted?: boolean;
+  include_archived?: boolean;
   filters?: RecallFilters;
 }
 
@@ -60,9 +61,11 @@ export async function recallMemory(
   }
 
   // Phase 0: exclude promoted memories by default, apply optional range filters
+  const includeArchived = options.include_archived ?? false;
   results = results.filter(r =>
     passesPromotedFilter(r.metadata, includePromoted) &&
-    passesScoreFilters(r.metadata, options.filters),
+    passesScoreFilters(r.metadata, options.filters) &&
+    (includeArchived || r.metadata.archived !== true),
   );
 
   // Phase 0: re-rank by combined (distance, salience) score

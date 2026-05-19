@@ -34,6 +34,31 @@ export const SALIENCE_RANKING_WEIGHT = parseFloat(get('SALIENCE_RANKING_WEIGHT',
 // Task management
 export const USERNAME = get('USERNAME', 'user');
 
+// Contradiction detection — when storing a new memory, search the same
+// collection for near-duplicates. Distances below this threshold are returned
+// as potential conflicts (cosine distance — lower means more similar).
+export const CONTRADICTION_DISTANCE_THRESHOLD = parseFloat(
+  get('CONTRADICTION_DISTANCE_THRESHOLD', '0.25'),
+);
+export const CONTRADICTION_MAX_RESULTS = parseInt(
+  get('CONTRADICTION_MAX_RESULTS', '3'),
+  10,
+);
+
+// Compaction — when a collection has more than this many non-archived
+// memories, the SessionStart hook surfaces it as a compaction candidate.
+export const COMPACTION_THRESHOLD = parseInt(
+  get('COMPACTION_THRESHOLD', '50'),
+  10,
+);
+export const COMPACTION_MIN_GROUP_SIZE = parseInt(
+  get('COMPACTION_MIN_GROUP_SIZE', '3'),
+  10,
+);
+export const COMPACTION_SIMILARITY_DISTANCE = parseFloat(
+  get('COMPACTION_SIMILARITY_DISTANCE', '0.30'),
+);
+
 // Document chunking
 export const CHUNK_SIZE = 2000;
 export const CHUNK_OVERLAP = 200;

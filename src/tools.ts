@@ -7,6 +7,8 @@ import { recallMemory } from './memory/recall.js';
 import { forgetMemory } from './memory/forget.js';
 import { listMemories } from './memory/list.js';
 import { runDecaySweep } from './memory/decay.js';
+import { suggestCompaction, applyCompaction } from './memory/compact.js';
+import { journalAppend, journalConsolidate, listSessionDrafts } from './memory/journal.js';
 import { createTask } from './tasks/create.js';
 import { listTasks, getDueTasks } from './tasks/list.js';
 import { getTask, updateTask, completeTask } from './tasks/update.js';
@@ -40,7 +42,7 @@ export function registerTools(server: McpServer): void {
   // --- Memory ---
   server.tool(
     'memory_store',
-    'Store a memory with content, tags, salience, sector, and collection',
+    'Store a memory with content, tags, salience, sector, and collection. Also runs a contradiction check: if near-duplicate memories already exist in the same collection, they are returned as `potential_conflicts`. When conflicts are surfaced, decide whether to supersede (call `memory_forget` on the old ID then accept this write) or coexist (no action — the new memory has already been stored).',
     {
       content: z.string().describe('The memory content to store'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
@@ -49,9 +51,17 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional().describe('Collection name (default: global)'),
     },
     async ({ content, tags, salience, sector, collection }) => {
-      const ids = await storeMemory(content, { tags, salience, sector, collection });
+      const result = await storeMemory(content, { tags, salience, sector, collection });
+      const lines = [`Stored memory: ${result.ids.join(', ')}`];
+      if (result.potential_conflicts.length) {
+        lines.push('', `⚠ Potential conflicts (${result.potential_conflicts.length}):`);
+        for (const c of result.potential_conflicts) {
+          lines.push(`- **${c.id}** (distance ${c.distance.toFixed(3)}, salience ${c.salience.toFixed(2)}): ${c.content}`);
+        }
+        lines.push('', 'Decide: supersede (call `memory_forget` on the old ID) or coexist (do nothing — the new memory is already stored).');
+      }
       return {
-        content: [{ type: 'text' as const, text: `Stored memory: ${ids.join(', ')}` }],
+        content: [{ type: 'text' as const, text: lines.join('\n') }],
       };
     },
   );
@@ -137,6 +147,106 @@ export function registerTools(server: McpServer): void {
         const selected = r.metadata.selected_for ? ` selected: ${r.metadata.selected_for}` : '';
         return `- **${r.id}** [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, sector: ${r.metadata.sector ?? '?'}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`;
       }).join('\n');
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  // --- Compaction ---
+  server.tool(
+    'compaction_suggest',
+    'Suggest groups of similar non-archived memories that could be compacted into a rolling summary. Use this when SessionStart surfaces a "compaction candidate" collection (or anytime a collection feels crowded). Returns groups of ≥3 similar memories — for each group, write a one-paragraph rolling summary capturing the consolidated knowledge, then submit it via `compaction_apply`.',
+    {
+      collection: z.string().describe('Collection to scan for compaction candidates'),
+    },
+    async ({ collection }) => {
+      const groups = await suggestCompaction(collection);
+      if (groups.length === 0) {
+        return { content: [{ type: 'text' as const, text: `No compaction candidates in "${collection}".` }] };
+      }
+      const lines: string[] = [`Found ${groups.length} group(s) in "${collection}":`];
+      groups.forEach((g, i) => {
+        lines.push('');
+        lines.push(`## Group ${i + 1} — seed ${g.seed_id}`);
+        lines.push(`Members (${g.member_ids.length}): ${g.member_ids.join(', ')}`);
+        if (g.shared_tags.length) lines.push(`Shared tags: ${g.shared_tags.join(', ')}`);
+        lines.push('Contents:');
+        lines.push(`- ${g.seed_content.slice(0, 240)}${g.seed_content.length > 240 ? '…' : ''}`);
+        g.similar_content.forEach(c => {
+          lines.push(`- ${c.slice(0, 240)}${c.length > 240 ? '…' : ''}`);
+        });
+      });
+      lines.push('', 'For each group, draft a rolling summary that captures the consolidated knowledge, then call `compaction_apply` with the member_ids and your summary.');
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
+    'compaction_apply',
+    'Apply a compaction: writes the provided rolling summary as a new memory at salience 2.0 (tagged `compacted`), then marks each member as archived with `compacted_into` pointing at the summary. Archived memories are filtered out of `memory_recall` and `memory_list` by default.',
+    {
+      collection: z.string().describe('Collection containing the members'),
+      member_ids: z.array(z.string()).describe('Memory IDs to archive under the summary'),
+      summary: z.string().describe('Rolling summary text — should consolidate the knowledge from all members'),
+      tags: z.array(z.string()).optional().describe('Additional tags for the summary (the `compacted` tag is always added)'),
+    },
+    async ({ collection, member_ids, summary, tags }) => {
+      const result = await applyCompaction({ collection, member_ids, summary, tags });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Compaction applied. Summary: ${result.summary_id}. Archived: ${result.archived_ids.length}/${member_ids.length}.`,
+        }],
+      };
+    },
+  );
+
+  // --- Journal ---
+  server.tool(
+    'journal_append',
+    'Append a one-line draft entry to the current session\'s journal. Call this whenever a meaningful step completes (decision made, finding confirmed, task closed). Drafts are consolidated into a single `journal`-tagged memory at session end via `journal_consolidate`.',
+    {
+      entry: z.string().describe('One-line summary of what just happened'),
+      collection: z.string().optional().describe('Collection to scope the draft to. Defaults to "global".'),
+    },
+    async ({ entry, collection }) => {
+      const id = await journalAppend(entry, collection);
+      return { content: [{ type: 'text' as const, text: `Journal draft saved: ${id}` }] };
+    },
+  );
+
+  server.tool(
+    'journal_consolidate',
+    'Consolidate the current session\'s journal drafts into a single memory tagged `journal` (salience 1.5), then delete the drafts. Call this before the session ends so the next session\'s recall surfaces the summary.',
+    {
+      collection: z.string().optional().describe('Collection the drafts live in. Defaults to "global".'),
+      summary: z.string().optional().describe('Optional final summary text. If omitted, the consolidated content is the concatenation of all drafts in chronological order.'),
+    },
+    async ({ collection, summary }) => {
+      const result = await journalConsolidate({ collection, summary });
+      if (!result) {
+        return { content: [{ type: 'text' as const, text: 'No journal drafts found for this session — nothing to consolidate.' }] };
+      }
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Journal consolidated. Memory: ${result.memory_id}. Merged ${result.draft_count} draft(s).`,
+        }],
+      };
+    },
+  );
+
+  server.tool(
+    'journal_list_drafts',
+    'List the current session\'s pending journal drafts (debugging / inspection).',
+    {
+      collection: z.string().optional().describe('Collection to scan. Defaults to "global".'),
+    },
+    async ({ collection }) => {
+      const drafts = await listSessionDrafts(collection);
+      if (drafts.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No journal drafts for this session.' }] };
+      }
+      const text = drafts.map(d => `- **${d.id}** [${new Date((d.created_at ?? 0) * 1000).toISOString()}]: ${d.entry}`).join('\n');
       return { content: [{ type: 'text' as const, text }] };
     },
   );

@@ -11,6 +11,7 @@ export interface ListOptions {
   sector?: 'semantic' | 'episodic';
   limit?: number;
   include_promoted?: boolean;
+  include_archived?: boolean;
   filters?: RecallFilters;
 }
 
@@ -61,9 +62,11 @@ export async function listMemories(options: ListOptions = {}): Promise<ListResul
   }
 
   // Phase 0: exclude promoted memories by default, apply optional range filters
+  const includeArchived = options.include_archived ?? false;
   filtered = filtered.filter(r =>
     passesPromotedFilter(r.metadata, includePromoted) &&
-    passesScoreFilters(r.metadata, options.filters),
+    passesScoreFilters(r.metadata, options.filters) &&
+    (includeArchived || r.metadata.archived !== true),
   );
 
   // Sort by salience descending (same as before)

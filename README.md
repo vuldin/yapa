@@ -51,6 +51,11 @@ To uninstall later, say `uninstall yapa` in any session.
 | `memory_recall` | Semantic search ranked by distance + salience, with optional collection/tag/score filters |
 | `memory_forget` | Delete memory by ID |
 | `memory_list` | List memories with metadata filters (tag, sector, classifier scores) |
+| `compaction_suggest` | Group similar non-archived memories for rolling-summary consolidation |
+| `compaction_apply` | Replace a group with a summary memory and archive the originals |
+| `journal_append` | Append a one-line draft entry to the current session's journal |
+| `journal_consolidate` | Roll session drafts into a single `journal`-tagged memory at session end |
+| `journal_list_drafts` | Inspect pending journal drafts for the current session |
 | `curation_now` | Trigger an immediate curation cycle (classifies unscored memories) |
 | `curation_status` | Curation status — provider, last run, cycles, memories scored |
 | `curation_preview` | Dry-run the classifier on a sample without persisting |
@@ -87,6 +92,68 @@ To uninstall later, say `uninstall yapa` in any session.
 | `sync_subscribe` | Subscribe to remote collections for pull sync |
 | `sync_unsubscribe` | Remove subscription (local data preserved) |
 | `uninstall` | Remove YAPA from your system |
+
+## Always-on hooks (Claude Code)
+
+YAPA ships a small `yapa` CLI in addition to the MCP server. It exposes four
+hook entry points designed to be invoked from `~/.claude/settings.json`:
+
+| Hook | What it does |
+|------|--------------|
+| `session-start` | Detects scope from `cwd`, surfaces open tasks + top memories + compaction candidates as `additionalContext` |
+| `user-prompt-submit` | Runs `memory_recall` against the detected scope using the prompt as the query and injects the top 3 matches |
+| `stop` | Reminds the agent to call `memory_store` / `task_create` / `journal_append` for findings from the just-finished turn |
+| `session-end` | Logs the session ending; surfaces pending journal drafts at the next session start |
+
+Register the hooks once in `~/.claude/settings.json` (point the `command` field at the absolute path of `dist/cli/index.js`). After that, recall and task surfacing happen on every prompt without the agent having to remember to call the tools. This is what makes YAPA "always on" rather than best-effort.
+
+Configuration: each hook fails open — if the call errors, the hook emits `{}` and the session continues normally.
+
+## Contradiction detection
+
+`memory_store` runs a similarity check against the destination collection
+before each write. Memories within `YAPA_CONTRADICTION_DISTANCE_THRESHOLD`
+(default `0.25`, normalized cosine) are returned as `potential_conflicts`. The
+agent decides:
+
+- **Supersede** — call `memory_forget` on the conflicting ID, then move on.
+- **Coexist** — leave the older memory in place; the new one is already stored.
+
+Tunables:
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `YAPA_CONTRADICTION_DISTANCE_THRESHOLD` | `0.25` | Distance under which two memories are considered conflicting |
+| `YAPA_CONTRADICTION_MAX_RESULTS` | `3` | Max conflicts surfaced per write |
+
+## End-of-session journal
+
+Two tools record what happened during a session so the next session has continuity:
+
+- `journal_append({ entry, collection? })` — append a one-line note. Drafts are scoped to the current MCP server process via a per-process `SESSION_ID`.
+- `journal_consolidate({ collection?, summary? })` — roll the session's drafts into a single memory tagged `journal` at salience 1.5, then delete the drafts. If no `summary` is provided, the drafts are concatenated chronologically.
+
+The `Stop` hook prompts the agent to journal each turn; the `SessionEnd` hook prompts consolidation.
+
+## Periodic compaction
+
+When a collection grows past `YAPA_COMPACTION_THRESHOLD` non-archived memories
+(default `50`), the SessionStart hook flags it as a compaction candidate. The
+agent then:
+
+1. Calls `compaction_suggest({ collection })` — returns groups of ≥`YAPA_COMPACTION_MIN_GROUP_SIZE` similar memories (similarity gated by `YAPA_COMPACTION_SIMILARITY_DISTANCE`, default `0.30`).
+2. For each group, drafts a one-paragraph rolling summary.
+3. Calls `compaction_apply({ collection, member_ids, summary })` — writes the summary at salience 2.0 with tag `compacted`, then marks each member with `archived: true` and `compacted_into: <summary-id>`.
+
+`memory_recall` and `memory_list` filter `archived: true` out by default. Pass `include_archived: true` to inspect them.
+
+Tunables:
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `YAPA_COMPACTION_THRESHOLD` | `50` | Collection size at which compaction is suggested |
+| `YAPA_COMPACTION_MIN_GROUP_SIZE` | `3` | Minimum members a compaction group must have |
+| `YAPA_COMPACTION_SIMILARITY_DISTANCE` | `0.30` | Distance under which two memories belong to the same group |
 
 ## Embedding Providers
 

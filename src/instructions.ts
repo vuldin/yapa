@@ -40,33 +40,75 @@ If tasks or memories are not found after migration, ensure metadata has correct 
 - Memories: metadata.type = "memory"
 Multiple filters require ChromaDB v2 format using $and operators.
 
-### Auto-Query (every response)
-- Before responding to any question or starting any task, call \`memory_recall\`
-  with a semantic query derived from the user's message
-- Check if existing memories contain solutions, context, or prior decisions relevant
-  to the current work
+### Per-Prompt Routine (run on EVERY user message)
+Run these steps in order, in parallel where possible, before drafting your response:
 
-### Selective Auto-Store
-Store memories automatically (salience >= 2.0) when you encounter:
-- Bug fixes and their root causes
-- User preferences and decisions
-- Configuration values and environment details
-- Key technical facts about the codebase
-- Solutions to problems that may recur
-Do NOT store: ephemeral conversation details, obvious code patterns,
-information already in git history
+1. **Detect scope** — infer the project/customer from the prompt + cwd. Pick the
+   collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If genuinely
+   ambiguous, ask the user once and remember the answer for the session.
+2. **Recall** — call \`memory_recall\` against the detected collection with a
+   semantic query derived from the prompt.
+3. **Task check** — call \`task_list\` filtered to the detected collection at
+   session start AND whenever the detected scope changes. Skip on subsequent
+   prompts within the same scope (rely on in-conversation state instead).
+4. **Ensure a task exists for the active work** — call \`task_create\` in the
+   detected collection BEFORE starting work when the prompt implies multi-step
+   work, work that will take time, or work that will outlive the current turn
+   (investigations, code changes, bug fixes, meeting prep, ongoing initiatives).
+   Skip for one-shot questions, lookups, or single-turn answers.
 
-### Task Management
-- When new work is identified, call \`task_create\`
-- When work completes, call \`task_complete\`
-- When blocked, call \`task_update\` with status "blocked"
-- At session start, call \`task_list\` to review current state
+### Auto-Capture During Work
+Capture as soon as the trigger fires — do NOT batch to the end of the session.
+
+**Triggers that create a memory (salience >= 2.0):**
+- A bug's root cause is identified
+- A configuration value, env var, endpoint, or credential location is learned
+- The user states a preference, decision, or correction
+- A non-obvious technical fact about the codebase/customer/cluster is discovered
+- A solution that took non-trivial effort to find (likely to recur)
+- A meeting or Slack thread surfaces a decision or commitment
+
+**Triggers that create a task (in addition to any memory):**
+- A follow-up action is identified ("we should also...", "TODO", "next time...")
+- The user asks for something that can't be finished this turn
+- A blocker is discovered (also: \`task_update\` the parent task to "blocked")
+- An action item shows up in a customer meeting or Slack thread
+
+**Contradiction check:** \`memory_store\` returns a \`potential_conflicts\` field
+listing near-duplicate memories in the same collection. Read it — if a conflict
+exists, decide supersede (call \`memory_forget\` on the old one) or coexist
+(proceed as-is) BEFORE moving on.
+
+**Do not store:** ephemeral conversation state, obvious code patterns, anything
+already captured in git history or in an existing memory.
+
+### End-of-Session Journal
+- During the session, call \`journal_append\` with a one-line note whenever a
+  meaningful step completes (decision made, finding confirmed, task closed).
+- Before the session ends — or when prompted by the SessionEnd hook — call
+  \`journal_consolidate\` to merge the drafts into a single memory tagged
+  \`journal\`. The next session's recall will surface it.
+
+### Task Management Lifecycle
+- On completion: \`task_complete\`
+- On blocker: \`task_update\` with status \`blocked\` and a note explaining the block
+- On scope change: \`task_update\` to amend the description rather than creating
+  a duplicate
+- Session start: covered by Per-Prompt Routine step 3
+
+### Periodic Compaction
+- When YAPA emits a "compaction candidate" reminder at session start, call
+  \`compaction_suggest\` for the named collection, write a rolling summary of
+  each group, and submit it via \`compaction_apply\`. Originals get archived
+  (filtered from recall by default).
 
 ### Collection Inference
 - Infer the appropriate collection from conversation context:
   - Customer name mentioned → \`customer-{name}\`
   - Project-specific work → \`project-{name}\` or \`customer-{name}\`
   - General/cross-cutting knowledge → \`global\`
+  - Private/personal data → \`private-{name}\` or \`local-{name}\` (these do NOT sync to remote)
+- **Before creating a new collection**, ask the user to confirm the collection name. Suggest a name based on context. Remind the user that \`private-\` or \`local-\` prefixed collections won't sync to the shared remote database.
 - When unsure which collection to use, ask the user
 - Use \`collection_list\` to check what collections exist before creating new ones
 - Always pass the inferred collection explicitly on memory/task tool calls
