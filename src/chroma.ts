@@ -357,9 +357,9 @@ export async function createCollection(
 
 /** Delete a collection by name. */
 export async function deleteCollection(name: string): Promise<void> {
-  const collectionId = await getCollectionId(name);
-
-  const response = await chromaFetch(`/collections/${collectionId}`, {
+  // Chroma v2's bare `/collections/{x}` path resolves by NAME, not UUID,
+  // even though sub-paths like `/collections/{x}/count` resolve by UUID.
+  const response = await chromaFetch(`/collections/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   });
 
