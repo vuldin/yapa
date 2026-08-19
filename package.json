@@ -1,26 +1,17 @@
 {
-  "name": "yapa-mcp",
+  "name": "yapa",
   "version": "0.1.0",
-  "description": "YAPA — Memory & Task MCP Server backed by ChromaDB",
+  "description": "YAPA — Memory & Task assistant: core library, MCP server, and DeepSeek Harness plugin",
+  "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "bin": {
-    "yapa-mcp": "dist/index.js",
-    "yapa": "dist/cli/index.js"
-  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "chromadb-default-embed": "^2.14.0",
-    "pg": "^8.20.0",
-    "zod": "^3.24.4"
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "start": "node packages/mcp/dist/index.js"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
