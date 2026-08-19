@@ -4,9 +4,15 @@ To install, give your AI agent this prompt: `install https://github.com/vuldin/y
 
 > **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. Read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning.
 
-YAPA is a personal assistant that gives your AI agent persistent memory and task management. It runs as an MCP server backed by ChromaDB, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
+YAPA is a personal assistant that gives your AI agent persistent memory and task management. It is backed by ChromaDB, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
 
-Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host.
+Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host via the MCP server (`packages/mcp`). For the DeepSeek Harness, YAPA also ships as a **native DSH plugin** (`packages/dsh`) with always-on recall injection, hot-reloaded settings, and GUI tool cards — see [`packages/dsh/install.md`](packages/dsh/install.md).
+
+## Repository layout (branch `dsh-plugin`)
+
+- `packages/core` (`@yapa/core`) — all logic: memory, tasks, collections, journal, compaction, sync, curation, buckets, training. Config is a `YapaConfig` snapshot (`createConfig(env)` / `setConfig`) instead of module-level env reads, so hosts control configuration.
+- `packages/mcp` (`yapa-mcp`) — the MCP server + Claude-Code hook CLI.
+- `packages/dsh` (`@yapa/dsh-plugin`) — the DeepSeek Harness cordis plugin.
 
 ## What it does
 
