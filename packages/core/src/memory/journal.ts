@@ -30,19 +30,22 @@ export interface JournalDraft {
 const DRAFT_TYPE = 'journal_draft';
 
 /**
- * Append a one-line journal entry as a draft, scoped to the current session.
+ * Append a one-line journal entry as a draft, scoped to the given session
+ * (defaults to this process's SESSION_ID; hosts with multiple live sessions,
+ * e.g. the DSH plugin, pass their own per-session key).
  */
-export async function journalAppend(entry: string, collection?: string): Promise<string> {
+export async function journalAppend(entry: string, collection?: string, sessionId?: string): Promise<string> {
   const col = collection ?? 'global';
+  const sid = sessionId ?? SESSION_ID;
   await getOrCreateCollection(col);
 
   const now = Math.floor(Date.now() / 1000);
-  const id = `journal-${getConfig().USERNAME}-${SESSION_ID}-${now}-${Math.random().toString(36).slice(2, 6)}`;
+  const id = `journal-${getConfig().USERNAME}-${sid}-${now}-${Math.random().toString(36).slice(2, 6)}`;
 
   await addDocument(col, id, entry, {
     type: DRAFT_TYPE,
     username: getConfig().USERNAME,
-    session_id: SESSION_ID,
+    session_id: sid,
     created_at: now,
     is_synced: false,
   });
@@ -53,19 +56,20 @@ export async function journalAppend(entry: string, collection?: string): Promise
 /**
  * Fetch all draft entries for the current session, in chronological order.
  */
-export async function listSessionDrafts(collection?: string): Promise<JournalDraft[]> {
+export async function listSessionDrafts(collection?: string, sessionId?: string): Promise<JournalDraft[]> {
   const col = collection ?? 'global';
+  const sid = sessionId ?? SESSION_ID;
   try {
     const docs = await getDocumentsByFilter(col, {
       type: DRAFT_TYPE,
-      session_id: SESSION_ID,
+      session_id: sid,
     }, 1000);
     return docs
       .map(d => ({
         id: d.id,
         entry: d.content,
         created_at: d.metadata.created_at ?? 0,
-        session_id: d.metadata.session_id ?? SESSION_ID,
+        session_id: d.metadata.session_id ?? sid,
       }))
       .sort((a, b) => a.created_at - b.created_at);
   } catch {
@@ -76,6 +80,8 @@ export async function listSessionDrafts(collection?: string): Promise<JournalDra
 export interface ConsolidateInput {
   collection?: string;
   summary?: string;
+  /** Session whose drafts to roll up (defaults to this process's SESSION_ID). */
+  sessionId?: string;
 }
 
 export interface ConsolidateResult {
@@ -91,14 +97,15 @@ export async function journalConsolidate(
   input: ConsolidateInput = {},
 ): Promise<ConsolidateResult | null> {
   const col = input.collection ?? 'global';
-  const drafts = await listSessionDrafts(col);
+  const sid = input.sessionId ?? SESSION_ID;
+  const drafts = await listSessionDrafts(col, sid);
   if (drafts.length === 0) return null;
 
   const body = input.summary
     ? input.summary
     : drafts.map(d => `- ${d.entry}`).join('\n');
 
-  const stored = await storeMemory(`# Session journal (${SESSION_ID})\n\n${body}`, {
+  const stored = await storeMemory(`# Session journal (${sid})\n\n${body}`, {
     collection: col,
     salience: 1.5,
     sector: 'episodic',

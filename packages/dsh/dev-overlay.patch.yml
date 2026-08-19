@@ -1,0 +1,11 @@
+# Dev overlay: load the yapa plugin into any DSH profile without publishing.
+# Usage: dsh --profile headless --patch packages/dsh/dev-overlay.patch.yml "…"
+#        dsh web --patch packages/dsh/dev-overlay.patch.yml
+# The plugin package must be resolvable from the profile directory first:
+#   dsh plugin --profile web add link:/home/vuldin/projects/yapa/packages/dsh
+- insert:
+    - id: yapa
+      name: '@yapa/dsh-plugin'
+      config:
+        username: !!js process.env.USER ?? 'user'
+        # projectRoots: [/home/vuldin/projects]
