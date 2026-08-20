@@ -6,7 +6,7 @@
  * `render()` projection that preserves the MCP server's model-facing markdown,
  * plus GUI presentation hints (`presentCall`).
  *
- * @module @yapa/dsh-plugin/tools
+ * @module yapa-dsh/tools
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';

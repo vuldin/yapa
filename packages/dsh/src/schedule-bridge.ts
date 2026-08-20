@@ -7,7 +7,7 @@
  * Implemented as a `tools/post-execute` observer so it can't change tool
  * outcomes; failures (schedule plugin absent, non-root agent) are silent.
  *
- * @module @yapa/dsh-plugin/schedule-bridge
+ * @module yapa-dsh/schedule-bridge
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { CallId } from '@deepseek-ai/dsh-llm';

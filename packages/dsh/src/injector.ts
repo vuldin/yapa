@@ -13,7 +13,7 @@
  * Every store call is fail-open: a ChromaDB outage degrades to no injected
  * context, never a blocked or failed step.
  *
- * @module @yapa/dsh-plugin/injector
+ * @module yapa-dsh/injector
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-agent';

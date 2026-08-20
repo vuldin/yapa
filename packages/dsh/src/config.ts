@@ -6,7 +6,7 @@
  *   2. this plugin's cordis `Config` (the profile's cordis.patch.yml row)
  *   3. the hot-reloaded `yapa` settings namespace (`$DSH_HOME/settings.yaml`)
  *
- * @module @yapa/dsh-plugin/config
+ * @module yapa-dsh/config
  */
 import z from '@deepseek-ai/schemastery';
 import { createConfig, type YapaConfig } from '@yapa/core';

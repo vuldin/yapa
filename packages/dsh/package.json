@@ -1,5 +1,5 @@
 {
-  "name": "@yapa/dsh-plugin",
+  "name": "yapa-dsh",
   "version": "0.1.0",
   "description": "YAPA — Memory & Task assistant as a native DeepSeek Harness plugin",
   "type": "module",

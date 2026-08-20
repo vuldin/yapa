@@ -5,7 +5,7 @@
 #   dsh plugin --profile web add link:/home/vuldin/projects/yapa/packages/dsh
 - insert:
     - id: yapa
-      name: '@yapa/dsh-plugin'
+      name: 'yapa-dsh'
       config:
         username: !!js process.env.USER ?? 'user'
         # projectRoots: [/home/vuldin/projects]

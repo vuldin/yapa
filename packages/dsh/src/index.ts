@@ -11,10 +11,10 @@
  *   # then insert into the profile's cordis.patch.yml:
  *   - insert:
  *       - id: yapa
- *         name: '@yapa/dsh-plugin'
+ *         name: 'yapa-dsh'
  *         config: { username: you }
  *
- * @module @yapa/dsh-plugin
+ * @module yapa-dsh
  */
 import type { Context } from '@deepseek-ai/cordis';
 // Pull the cordis Context augmentations for the services this plugin uses.

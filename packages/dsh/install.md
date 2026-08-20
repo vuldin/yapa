@@ -1,6 +1,6 @@
 # Installing the YAPA DeepSeek Harness plugin
 
-YAPA runs natively inside DSH as a cordis plugin (`@yapa/dsh-plugin`). Memory
+YAPA runs natively inside DSH as a cordis plugin (`yapa-dsh`). Memory
 recall and open tasks are injected into every prompt automatically — no hooks,
 no CLAUDE.md/AGENTS.md block, no MCP subprocess.
 
@@ -20,7 +20,7 @@ From the profile you use (`web` shown here; substitute `tui`/`headless` as neede
 # 1. Add the package to the profile (forwards to pnpm in the profile dir).
 #    From a local checkout:
 dsh plugin --profile web add link:/absolute/path/to/yapa/packages/dsh
-#    (once published: dsh plugin --profile web add @yapa/dsh-plugin)
+#    (once published: dsh plugin --profile web add yapa-dsh)
 
 # 2. Register the plugin row in ~/.dsh/profiles/web/cordis.patch.yml:
 ```
@@ -28,7 +28,7 @@ dsh plugin --profile web add link:/absolute/path/to/yapa/packages/dsh
 ```yaml
 - insert:
     - id: yapa
-      name: '@yapa/dsh-plugin'
+      name: 'yapa-dsh'
       config:
         username: YOUR_USERNAME            # used for task ID prefixes
         # chromaUrl: http://localhost:8000 # default
@@ -66,7 +66,7 @@ packages directly instead:
 
 ```sh
 mkdir -p ~/.dsh/profiles/web/node_modules/@yapa
-ln -sfn /absolute/path/to/yapa/packages/dsh  ~/.dsh/profiles/web/node_modules/@yapa/dsh-plugin
+ln -sfn /absolute/path/to/yapa/packages/dsh  ~/.dsh/profiles/web/node_modules/yapa-dsh
 ln -sfn /absolute/path/to/yapa/packages/core ~/.dsh/profiles/web/node_modules/@yapa/core
 ```
 
@@ -83,7 +83,7 @@ In any session:
 ## Uninstall
 
 ```sh
-dsh plugin --profile web remove @yapa/dsh-plugin
+dsh plugin --profile web remove yapa-dsh
 ```
 
 …then delete the `yapa` row from `~/.dsh/profiles/web/cordis.patch.yml`.

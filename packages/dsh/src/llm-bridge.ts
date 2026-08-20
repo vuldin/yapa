@@ -7,7 +7,7 @@
  * Route selection: plugin config `auxProvider`/`auxModel` → the harness's
  * `agent-default-model` settings value → a clear, actionable error.
  *
- * @module @yapa/dsh-plugin/llm-bridge
+ * @module yapa-dsh/llm-bridge
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Message } from '@deepseek-ai/dsh-llm';

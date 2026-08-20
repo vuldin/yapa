@@ -12,7 +12,7 @@ Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host via the MC
 
 - `packages/core` (`@yapa/core`) — all logic: memory, tasks, collections, journal, compaction, sync, curation, buckets, training. Config is a `YapaConfig` snapshot (`createConfig(env)` / `setConfig`) instead of module-level env reads, so hosts control configuration.
 - `packages/mcp` (`yapa-mcp`) — the MCP server + Claude-Code hook CLI.
-- `packages/dsh` (`@yapa/dsh-plugin`) — the DeepSeek Harness cordis plugin.
+- `packages/dsh` (`yapa-dsh`) — the DeepSeek Harness cordis plugin.
 
 ## What it does
 

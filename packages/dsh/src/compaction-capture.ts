@@ -7,7 +7,7 @@
  * Conservative by default: salience 1.5, tagged `compaction`, sector episodic,
  * in the session's detected collection. Disable with `captureCompaction: false`.
  *
- * @module @yapa/dsh-plugin/compaction-capture
+ * @module yapa-dsh/compaction-capture
  */
 import type { Context } from '@deepseek-ai/cordis';
 // Loads the compaction event vocabulary into the session event map.

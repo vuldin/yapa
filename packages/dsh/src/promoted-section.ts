@@ -10,7 +10,7 @@
  * section renders from a cache refreshed on activation, on a 5-minute timer,
  * and after any bucket-routing tool call (via `tools/post-execute`).
  *
- * @module @yapa/dsh-plugin/promoted-section
+ * @module yapa-dsh/promoted-section
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { listMemories } from '@yapa/core';

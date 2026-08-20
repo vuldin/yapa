@@ -4,7 +4,7 @@
  * effect-scoped so plugin reload/disposal cleans them up (replaces the MCP
  * server's process-level setInterval loops).
  *
- * @module @yapa/dsh-plugin/lifecycle
+ * @module yapa-dsh/lifecycle
  */
 import type { Context } from '@deepseek-ai/cordis';
 // ctx.interval augmentation.
