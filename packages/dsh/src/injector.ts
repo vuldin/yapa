@@ -1,21 +1,25 @@
 /**
  * Always-on context injection: replaces the MCP install's Claude-Code hook
- * CLI (`session-start`, `user-prompt-submit`) with in-process listeners.
+ * CLI (`session-start`, `user-prompt-submit`) with an `agent/pre-step`
+ * waterfall listener.
  *
- * - `session/event` tracks the latest direct human prompt per session.
- * - `system-prompt/assemble` (async waterfall, runs before every model step)
- *   injects recalled memories for new prompts and open tasks once per scope
- *   per session into `assembly.contexts`.
+ * Why pre-step (not `system-prompt/assemble`): the loop assembles the prompt
+ * BEFORE appending the turn's `user/message` events, so an assemble-time
+ * listener cannot see the current prompt. `agent/pre-step` runs after the
+ * inbox claim with the actual messages in hand — including the just-submitted
+ * human prompt — and lets us splice an injected context message into the
+ * durable batch (source `{kind: 'plugin', plugin: 'yapa', form: 'recall'}`).
  *
  * Every store call is fail-open: a ChromaDB outage degrades to no injected
- * context, never a blocked request.
+ * context, never a blocked or failed step.
  *
  * @module @yapa/dsh-plugin/injector
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type {} from '@deepseek-ai/dsh-agent';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session';
-import type { PromptAssembly, AssembleContext } from '@deepseek-ai/dsh-system-prompt';
+import type { UserMessage } from '@deepseek-ai/dsh-session';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import {
   recallMemory,
   listTasks,
@@ -25,21 +29,18 @@ import {
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 
-interface SessionState {
-  cwd?: string;
-  /** Latest direct human prompt text observed on this session. */
-  lastPrompt?: string;
-  /** The prompt text the last recall injection ran for (dedupe mid-turn steps). */
-  recalledFor?: string;
+interface AgentState {
+  /** Cache of the detected collection for this agent's session. */
+  collection?: string;
+  /** ID of the human message the last recall injection ran for. */
+  recalledMessageId?: string;
   /** Collections whose open tasks were already surfaced this session. */
   tasksSurfaced: Set<string>;
-  /** Cache of the detected collection for this session. */
-  collection?: string;
 }
 
-/** Extract text from a user/message event's content blocks. */
-function messageText(event: SessionEvent<'user/message'>): string {
-  return event.data.content
+/** Extract text from a user message's content blocks. */
+function messageText(message: UserMessage): string {
+  return message.content
     .filter((b): b is { type: 'text'; text: string } => (b as { type?: string }).type === 'text')
     .map(b => b.text)
     .join('\n');
@@ -66,60 +67,48 @@ async function detectCollection(cwd: string | undefined, roots: string[]): Promi
 }
 
 /**
- * Register session tracking and the assemble-waterfall injector.
- * @returns state cleanup is effect-scoped to the registering context.
+ * Register the pre-step injector. State is keyed by agent (== session) id and
+ * dropped on session disposal; registration is effect-scoped to the plugin.
  */
 export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig): void {
-  const sessions = new Map<SessionId, SessionState>();
-
-  const track = (session: Session) => {
-    if (!sessions.has(session.id)) {
-      sessions.set(session.id, { cwd: session.header.cwd, tasksSurfaced: new Set() });
-    }
-  };
-
-  ctx.on('session/created', track);
-  for (const session of ctx.sessions.list()) track(session);
-
-  ctx.on('session/event', (session, event) => {
-    if (event.type !== 'user/message') return;
-    const source = event.data.source as { kind?: string };
-    if (source?.kind !== 'user') return; // direct human prompts only
-    const st = sessions.get(session.id);
-    if (!st) return;
-    st.lastPrompt = messageText(event as SessionEvent<'user/message'>).trim() || undefined;
-  });
+  const states = new Map<string, AgentState>();
 
   ctx.on('session/disposed', session => {
-    sessions.delete(session.id);
+    states.delete(session.id);
   });
 
-  ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, asctx: AssembleContext, next) => {
+  ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {
+    const decision = await next();
+    if (decision.kind !== 'enter') return decision;
+
     try {
       const resolved = getResolved();
-      // The loop passes the full agent (assembleContextFor); the declared type
-      // exposes only scope+signal, so read it defensively.
-      const agent = (asctx as AssembleContext & { agent?: Agent }).agent;
-      if (!agent) return next();
-      const st = sessions.get(agent.id);
-      if (!st) return next();
+      const state = states.get(agent.id) ?? { tasksSurfaced: new Set<string>() };
+      states.set(agent.id, state);
 
-      const collection = st.collection
-        ?? (st.collection = await detectCollection(st.cwd, resolved.projectRoots));
+      const collection = state.collection
+        ?? (state.collection = await detectCollection(agent.session.header.cwd, resolved.projectRoots));
 
-      const lines: string[] = [];
-      const newPrompt = resolved.injectRecall && st.lastPrompt && st.lastPrompt !== st.recalledFor;
-      const needTasks = resolved.injectTasks && !st.tasksSurfaced.has(collection);
+      // The newest direct human prompt claimed for this step, if any.
+      const human = messages.filter(m => (m.source as { kind?: string }).kind === 'user');
+      const promptMessage = human.at(-1);
+      const promptText = promptMessage ? messageText(promptMessage).trim() : '';
 
-      if (newPrompt || needTasks) {
-        lines.push('# YAPA Context', '', `**Scope:** \`${collection}\``);
-      }
+      const doRecall = resolved.injectRecall
+        && promptMessage
+        && promptText
+        && state.recalledMessageId !== promptMessage.id;
+      const doTasks = resolved.injectTasks && !state.tasksSurfaced.has(collection);
 
-      if (newPrompt && st.lastPrompt) {
-        const results = await recallMemory(st.lastPrompt, {
+      if (!doRecall && !doTasks) return decision;
+      const lines: string[] = ['# YAPA Context', '', `**Scope:** \`${collection}\``];
+
+      if (doRecall && promptMessage) {
+        const results = await recallMemory(promptText, {
           collection,
           nResults: resolved.recallResults,
         }).catch(() => []);
+        signal.throwIfAborted();
         if (results.length) {
           lines.push('', '## Recalled memories (for the current prompt)');
           for (const r of results) {
@@ -128,11 +117,12 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
             lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}): ${snippet}`);
           }
         }
-        st.recalledFor = st.lastPrompt;
+        state.recalledMessageId = promptMessage.id;
       }
 
-      if (needTasks) {
+      if (doTasks) {
         const tasks = await listTasks({ collection, includeComplete: false }).catch(() => []);
+        signal.throwIfAborted();
         if (tasks.length) {
           lines.push('', '## Open tasks');
           for (const t of tasks.slice(0, 10)) {
@@ -142,9 +132,10 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
           }
           if (tasks.length > 10) lines.push(`- _…${tasks.length - 10} more (call \`yapa_task_list\`)_`);
         }
-        st.tasksSurfaced.add(collection);
+        state.tasksSurfaced.add(collection);
 
-        // Surface compaction candidates once per session alongside the task check.
+        // Surface memory-compaction candidates once per session alongside the
+        // task check (long-term store maintenance — not context compaction).
         const threshold = getConfig().COMPACTION_THRESHOLD;
         const candidates: string[] = [];
         for (const c of await listCollections().catch(() => [])) {
@@ -157,18 +148,31 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         }
       }
 
-      if (lines.length) {
-        let text = lines.join('\n');
-        if (text.length > resolved.maxContextBytes) {
-          text = `${text.slice(0, resolved.maxContextBytes)}\n\n_(truncated)_`;
-        }
-        // Replace, never stack: one yapa context per assembly.
-        assembly.contexts = assembly.contexts.filter(c => c.name !== 'yapa');
-        assembly.contexts.push({ name: 'yapa', text });
+      let text = lines.join('\n');
+      if (text.length > resolved.maxContextBytes) {
+        text = `${text.slice(0, resolved.maxContextBytes)}\n\n_(truncated)_`;
       }
+
+      const injected = createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'plugin', plugin: 'yapa', form: 'recall' },
+      });
+      // Splice immediately after the last claimed message (the pattern used by
+      // dsh-agent-instructions), so the context lands right behind the prompt
+      // it describes. (Manual index/copy: engines >=18 lack toSpliced.)
+      let lastClaimed = -1;
+      for (let i = decision.messages.length - 1; i >= 0; i--) {
+        if (messages.includes(decision.messages[i])) { lastClaimed = i; break; }
+      }
+      const nextMessages = [
+        ...decision.messages.slice(0, lastClaimed + 1),
+        injected,
+        ...decision.messages.slice(lastClaimed + 1),
+      ];
+      return { kind: 'enter', messages: nextMessages };
     } catch {
-      // Fail open: injection must never block prompt assembly.
+      // Fail open: injection must never block or break a step.
+      return decision;
     }
-    return next();
   });
 }
