@@ -340,14 +340,23 @@ export async function listCollections(): Promise<Collection[]> {
   return await response.json();
 }
 
-/** Create a new collection. */
+/**
+ * Create a new collection. Collections are pinned to **cosine** vector space:
+ * yapa's salience-weighted ranking and contradiction thresholds are tuned for
+ * cosine distances in [0, 2], while the server default (L2) produces larger
+ * magnitudes that silently break those thresholds.
+ */
 export async function createCollection(
   name: string,
   metadata: Record<string, any> = { created: new Date().toISOString() },
 ): Promise<void> {
   const response = await chromaFetch('/collections', {
     method: 'POST',
-    body: JSON.stringify({ name, metadata: toChroma(metadata) }),
+    body: JSON.stringify({
+      name,
+      metadata: toChroma(metadata),
+      configuration: { hnsw: { space: 'cosine' } },
+    }),
   });
 
   if (!response.ok) {
