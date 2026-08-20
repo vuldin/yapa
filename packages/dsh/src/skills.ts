@@ -1,7 +1,7 @@
 /**
  * Programmatic skill registrations (no filesystem skill dirs needed).
  *
- * @module yapa-dsh/skills
+ * @module yapa/skills
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-skill';

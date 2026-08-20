@@ -5,7 +5,7 @@
 #   dsh plugin --profile web add link:/home/vuldin/projects/yapa/packages/dsh
 - insert:
     - id: yapa
-      name: 'yapa-dsh'
+      name: 'yapa'
       # NOTE: a patch row REPLACES the profile row's whole config — restate it.
       config:
         username: !!js process.env.USER ?? 'user'

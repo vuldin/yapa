@@ -6,7 +6,7 @@
  * Auxiliary LLM calls route through the harness (`installLlmBridge`) unless
  * the legacy `YAPA_CURATION_*` provider config is in force.
  *
- * @module yapa-dsh/tools-advanced
+ * @module yapa/tools-advanced
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';

@@ -7,7 +7,7 @@
  * the boundary rules between yapa's durable tasks and the harness's own
  * todo/goal/schedule systems.
  *
- * @module yapa-dsh/rules
+ * @module yapa/rules
  */
 
 export const RULES_SECTION_NAME = 'yapa:rules';
@@ -63,5 +63,5 @@ When injected context flags a "compaction candidate" collection, call \`yapa_com
 - Always pass the inferred collection explicitly on yapa tool calls.
 
 ### Removal
-To remove YAPA from this harness, the user runs \`dsh plugin --profile <name> remove yapa-dsh\` and deletes the plugin's row from the profile's \`cordis.patch.yml\`. Collections (memories/tasks) are preserved unless the user explicitly deletes them.
+To remove YAPA from this harness, the user runs \`dsh plugin --profile <name> remove yapa\` and deletes the plugin's row from the profile's \`cordis.patch.yml\`. Collections (memories/tasks) are preserved unless the user explicitly deletes them.
 `;
