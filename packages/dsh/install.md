@@ -52,7 +52,23 @@ Three layers, lowest to highest precedence:
 
 Plugin-only knobs (layer 2/3 only): `projectRoots`, `injectRecall`,
 `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
-`decayOnStartup`.
+`decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
+reminders), `captureCompaction` (harness compaction summaries are stored as
+memories), `promotedSection` (system-prompt-bucket memories render as a live
+prompt section), `standupSkill` (registers the `yapa-standup` skill),
+`auxProvider`/`auxModel` (route for curation/synthesis/judge LLM calls;
+defaults to the harness's configured default model).
+
+### Local dev note (no pnpm)
+
+`dsh plugin add` forwards to pnpm; if pnpm is unavailable, symlink the
+packages directly instead:
+
+```sh
+mkdir -p ~/.dsh/profiles/web/node_modules/@yapa
+ln -sfn /absolute/path/to/yapa/packages/dsh  ~/.dsh/profiles/web/node_modules/@yapa/dsh-plugin
+ln -sfn /absolute/path/to/yapa/packages/core ~/.dsh/profiles/web/node_modules/@yapa/core
+```
 
 ## Verify
 
