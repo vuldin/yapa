@@ -1,4 +1,4 @@
-import { addDocument, addDocumentsBatch, getOrCreateCollection, queryDocuments } from '../chroma.js';
+import { addDocument, addDocumentsBatch, getOrCreateCollection, queryDocuments } from '../store/index.js';
 import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
 import { getConfig, SALIENCE_START } from '../config.js';

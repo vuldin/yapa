@@ -3,25 +3,10 @@ import { toChroma, fromChroma, type RawMetadata } from './metadata-adapter.js';
 import { generateEmbedding, generateEmbeddingsBatch } from './embeddings.js';
 import { touchDocument } from './lifecycle.js';
 
-export interface Collection {
-  id: string;
-  name: string;
-  metadata?: Record<string, any>;
-}
-
-export interface DocumentResult {
-  id: string;
-  content: string;
-  metadata: Record<string, any>;
-}
-
-export interface QueryResult extends DocumentResult {
-  distance: number;
-}
-
-export interface CrossCollectionResult extends QueryResult {
-  collection: string;
-}
+// Canonical document/result types live in the store port (store/types.ts);
+// re-exported here for compatibility with long-standing import paths.
+export type { Collection, DocumentResult, QueryResult, CrossCollectionResult } from './store/types.js';
+import type { Collection, DocumentResult, QueryResult, CrossCollectionResult } from './store/types.js';
 
 // Read at call time (not module scope) so a host can swap the active config.
 function apiBase(): string {
@@ -211,7 +196,10 @@ export async function queryDocuments(
     body.query_texts = [queryText];
   }
 
-  if (filter) body.where = buildChromaFilter(filter);
+  if (filter) {
+    const where = buildChromaFilter(filter);
+    if (Object.keys(where).length > 0) body.where = where;
+  }
 
   const response = await chromaFetch(`/collections/${collectionId}/query`, {
     method: 'POST',
@@ -250,13 +238,17 @@ export async function getDocumentsByFilter(
 ): Promise<DocumentResult[]> {
   const collectionId = await getCollectionId(collectionName);
 
+  const body: Record<string, any> = {
+    limit,
+    include: ['documents', 'metadatas'],
+  };
+  const where = buildChromaFilter(filter);
+  // ChromaDB v2 rejects an empty where clause — omit it to fetch all documents.
+  if (Object.keys(where).length > 0) body.where = where;
+
   const response = await chromaFetch(`/collections/${collectionId}/get`, {
     method: 'POST',
-    body: JSON.stringify({
-      limit,
-      where: buildChromaFilter(filter),
-      include: ['documents', 'metadatas'],
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {

@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, listCollections, type Collection } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, type Collection } from '../store/index.js';
 import type { TaskStatus, TaskPriority } from './create.js';
 
 const PRIORITY_ORDER: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };

@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, updateDocument, listCollections } from '../chroma.js';
+import { getDocumentsByFilter, updateDocument, listCollections } from '../store/index.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
 const DECAY_SENTINEL_ID = '__decay_sentinel__';
@@ -63,7 +63,7 @@ export async function shouldRunDecay(): Promise<boolean> {
 
 /** Mark that decay has been run. */
 export async function markDecayRun(): Promise<void> {
-  const { addDocument, getOrCreateCollection } = await import('../chroma.js');
+  const { addDocument, getOrCreateCollection } = await import('../store/index.js');
   await getOrCreateCollection('global');
   await addDocument('global', DECAY_SENTINEL_ID, 'decay sentinel', {
     type: 'decay_sentinel',

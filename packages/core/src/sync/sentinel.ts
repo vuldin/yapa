@@ -1,4 +1,4 @@
-import { addDocument, getOrCreateCollection, getDocumentsByFilter } from '../chroma.js';
+import { addDocument, getOrCreateCollection, getDocumentsByFilter } from '../store/index.js';
 
 const SYNC_PULL_SENTINEL_ID = '__sync_pull_sentinel__';
 const SYNC_SUBSCRIPTIONS_ID = '__sync_subscriptions__';

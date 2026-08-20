@@ -1,6 +1,6 @@
 import { getConfig } from '../config.js';
 import { artifactPath } from '../buckets/artifacts.js';
-import { getDocumentsByFilter, listCollections, updateDocument } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
 
 import { defaultInferenceCaller, type InferenceCaller } from './inference.js';
 import { judgeVerification, type JudgeCaller } from './judge.js';

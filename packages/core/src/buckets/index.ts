@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { getDocumentsByFilter, listCollections, updateDocument } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
 
 import { nextVersion, writeArtifact } from './artifacts.js';
 import {

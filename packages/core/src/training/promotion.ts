@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, listCollections, updateDocument } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
 import { getAdapter, updateAdapter } from './registry.js';
 
 const MAX_PER_COLLECTION = 2000;

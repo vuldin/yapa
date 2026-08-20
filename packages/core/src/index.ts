@@ -10,8 +10,10 @@
 // static lifecycle constants, provider types.
 export * from './config.js';
 
-// ChromaDB document store + embeddings.
-export * from './chroma.js';
+// Document store port (ChromaDB adapter by default; embedded local store when
+// configured) + embeddings. Chroma-specific health detection stays explicit.
+export * from './store/index.js';
+export { detectChromaVersion } from './chroma.js';
 export * from './embeddings.js';
 export * from './chunking.js';
 export * from './lifecycle.js';

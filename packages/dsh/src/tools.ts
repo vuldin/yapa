@@ -98,7 +98,9 @@ export function registerTools(ctx: Context): void {
         additionalProperties: false,
         properties: {
           healthy: { type: 'boolean', required: true },
-          chromaUrl: { type: 'string', required: true },
+          storage: { type: 'string', required: true },
+          chromaUrl: { type: 'string' },
+          storePath: { type: 'string' },
           version: { type: 'string' },
           error: { type: 'string' },
           embeddingProvider: { type: 'string', required: true },
@@ -107,12 +109,19 @@ export function registerTools(ctx: Context): void {
         },
       },
       render: (_args, v) => {
+        if (v.storage === 'local') {
+          return text(
+            `✅ YAPA using the embedded local store at ${v.storePath} — no ChromaDB server needed `
+            + `(embeddings: ${v.embeddingProvider}, user: ${v.username}, sync: ${v.syncEnabled ? 'enabled' : 'disabled'})`,
+          );
+        }
         if (!v.healthy) {
           return text(
             `❌ YAPA cannot reach ChromaDB at ${v.chromaUrl}: ${v.error ?? 'unknown error'}\n`
             + 'Offer the user: Docker (`docker run -d --name chromadb --restart unless-stopped '
             + '-p 8000:8000 -v chromadb_data:/data chromadb/chroma`), pip (`pip install chromadb '
-            + '&& chroma run`), or a NixOS service.',
+            + '&& chroma run`), a NixOS service — or switch to the embedded store '
+            + '(`storage: local` in the plugin config / settings).',
           );
         }
         return text(
@@ -124,9 +133,20 @@ export function registerTools(ctx: Context): void {
     isConcurrencySafe: () => true,
     async execute() {
       const cfg = getConfig();
+      if (cfg.STORAGE === 'local') {
+        return {
+          healthy: true,
+          storage: 'local',
+          storePath: cfg.LOCAL_STORE_PATH,
+          embeddingProvider: cfg.EMBEDDING_PROVIDER,
+          username: cfg.USERNAME,
+          syncEnabled: cfg.SYNC_ENABLED,
+        };
+      }
       const check = await detectChromaVersion();
       return {
         healthy: check.isV2 && !check.error,
+        storage: 'chroma',
         chromaUrl: cfg.CHROMA_URL,
         ...(check.version !== undefined && { version: check.version }),
         ...(check.error !== undefined && { error: check.error }),

@@ -12,6 +12,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import {
+  chromaStore,
+  getStore,
   adapterDemote,
   adapterPromote,
   bucketRouteNow,
@@ -861,5 +863,66 @@ export function registerAdvancedTools(ctx: Context): void {
       }
     },
     presentCall: args => ({ card: 'generic', title: `Unsubscribe ${args.collections.join(', ')}`, kind: 'edit' }),
+  }));
+
+  // --- Storage migration -----------------------------------------------------
+
+  ctx.tools.register(defineTool({
+    name: 'yapa_storage_import',
+    description:
+      'Import all documents from ChromaDB into the embedded local store. Requires the plugin to '
+      + 'be running with storage: local (the import target is the ACTIVE store) and a reachable '
+      + 'ChromaDB at chromaUrl (the source). Re-embeds documents with the current embedder, so '
+      + 'switching embedding providers mid-stream is safe.',
+    parameters: {
+      collections: { type: 'array', items: { type: 'string' }, description: 'Collections to import (default: all on the ChromaDB server)' },
+      confirm: confirmParam,
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: { text: { type: 'string', required: true } },
+      },
+      render: (_a, v) => text(v.text),
+    },
+    timeoutMs: 600_000,
+    async execute(args) {
+      if (args.confirm !== true) return { text: 'Refused — `confirm: true` is required.' };
+      const cfg = getConfig();
+      if (cfg.STORAGE !== 'local') {
+        return { text: 'Refused — the active store is chroma. Set `storage: local` (plugin config or settings.yaml `yapa:`) first, then re-run.' };
+      }
+      const target = getStore();
+      if (target.kind !== 'local') {
+        return { text: `Refused — active store is "${target.kind}", expected local. Restart after changing storage config.` };
+      }
+      try {
+        const sourceCols = args.collections?.length
+          ? args.collections
+          : (await chromaStore.listCollections()).map(c => c.name);
+        const lines: string[] = [`Importing from ChromaDB at ${cfg.CHROMA_URL} → local store at ${cfg.LOCAL_STORE_PATH}:`];
+        let total = 0;
+        for (const name of sourceCols) {
+          const docs = await chromaStore.getDocumentsByFilter(name, {}, 100000);
+          if (docs.length === 0) { lines.push(`  - ${name}: 0 documents`); continue; }
+          await target.getOrCreateCollection(name);
+          await target.addDocumentsBatch(
+            name,
+            docs.map(d => ({ id: d.id, content: d.content, metadata: d.metadata })),
+          );
+          total += docs.length;
+          lines.push(`  - ${name}: ${docs.length} document(s)`);
+        }
+        lines.push('', `Imported ${total} document(s) across ${sourceCols.length} collection(s).`);
+        return { text: lines.join('\n') };
+      } catch (e) {
+        return { text: `Import error: ${e}` };
+      }
+    },
+    presentCall: args => ({
+      card: 'generic',
+      title: `Import from ChromaDB${args.collections?.length ? `: ${args.collections.join(', ')}` : ' (all collections)'}`,
+      kind: 'move',
+    }),
   }));
 }

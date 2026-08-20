@@ -76,20 +76,26 @@ async function startupDecay(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const health = await healthCheck();
-  
-  if (!health.healthy) {
-    process.stderr.write(`\n❌ YAPA failed to start:\n`);
-    process.stderr.write(`   ${health.error}\n\n`);
-    process.stderr.write(`To upgrade ChromaDB:\n`);
-    process.stderr.write(`  • Docker: docker pull chromadb/chroma:latest && docker restart chromadb\n`);
-    process.stderr.write(`  • pip: pip install --upgrade chromadb && chroma run --host 0.0.0.0 --port 8000\n`);
-    process.stderr.write(`  • NixOS: Update to latest chromadb package\n\n`);
-    process.stderr.write(`ChromaDB URL: ${getConfig().CHROMA_URL}\n`);
-    process.exit(1);
+  if (getConfig().STORAGE === 'local') {
+    // Embedded store: no server to health-check.
+    process.stderr.write(`✅ YAPA started with the embedded local store at ${getConfig().LOCAL_STORE_PATH} (embeddings: ${getConfig().EMBEDDING_PROVIDER})\n`);
+  } else {
+    const health = await healthCheck();
+
+    if (!health.healthy) {
+      process.stderr.write(`\n❌ YAPA failed to start:\n`);
+      process.stderr.write(`   ${health.error}\n\n`);
+      process.stderr.write(`To upgrade ChromaDB:\n`);
+      process.stderr.write(`  • Docker: docker pull chromadb/chroma:latest && docker restart chromadb\n`);
+      process.stderr.write(`  • pip: pip install --upgrade chromadb && chroma run --host 0.0.0.0 --port 8000\n`);
+      process.stderr.write(`  • NixOS: Update to latest chromadb package\n\n`);
+      process.stderr.write(`  • Or skip the server entirely: YAPA_STORAGE=local\n\n`);
+      process.stderr.write(`ChromaDB URL: ${getConfig().CHROMA_URL}\n`);
+      process.exit(1);
+    }
+
+    process.stderr.write(`✅ YAPA started with ChromaDB v${health.version} at ${getConfig().CHROMA_URL} (embeddings: ${getConfig().EMBEDDING_PROVIDER})\n`);
   }
-  
-  process.stderr.write(`✅ YAPA started with ChromaDB v${health.version} at ${getConfig().CHROMA_URL} (embeddings: ${getConfig().EMBEDDING_PROVIDER})\n`);
   
   // Run decay in background, don't block startup
   startupDecay();

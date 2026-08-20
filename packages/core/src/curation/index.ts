@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { getDocumentsByFilter, listCollections, updateDocument } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
 
 import { CLASSIFIER_PROMPT_VERSION, classifyMemories } from './classifier.js';
 

@@ -30,8 +30,12 @@ export type TrainingBackendName = 'fireworks';
  * exactly like the env vars they replace.
  */
 export interface YapaConfig {
+  // Storage backend: 'chroma' (HTTP server) or 'local' (embedded JSON store).
+  STORAGE: 'chroma' | 'local';
   // ChromaDB
   CHROMA_URL: string;
+  // Local store root directory (when STORAGE = 'local')
+  LOCAL_STORE_PATH: string;
 
   // Embedding settings
   EMBEDDING_PROVIDER: EmbeddingProvider;
@@ -107,7 +111,9 @@ function get(env: Record<string, string | undefined>, key: string, fallback: str
  */
 export function createConfig(env: Record<string, string | undefined> = process.env): YapaConfig {
   return {
+    STORAGE: get(env, 'STORAGE', 'chroma') as 'chroma' | 'local',
     CHROMA_URL: get(env, 'CHROMA_URL', 'http://localhost:8000'),
+    LOCAL_STORE_PATH: get(env, 'LOCAL_STORE_PATH', pathJoin(homedir(), '.local', 'share', 'yapa', 'store')),
 
     EMBEDDING_PROVIDER: get(env, 'EMBEDDING_PROVIDER', 'chromadb') as EmbeddingProvider,
     EMBEDDING_MODEL: get(env, 'EMBEDDING_MODEL', ''),

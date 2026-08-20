@@ -4,7 +4,7 @@ import {
   deleteCollection as chromaDeleteCollection,
   getCollectionCount,
   type Collection,
-} from '../chroma.js';
+} from '../store/index.js';
 
 export interface CollectionInfo {
   name: string;

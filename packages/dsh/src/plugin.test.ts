@@ -90,9 +90,10 @@ describe('tool registration', () => {
       'yapa_adapter_promote', 'yapa_adapter_demote',
       'yapa_sync_status', 'yapa_sync_now', 'yapa_sync_remote_collections',
       'yapa_sync_subscribe', 'yapa_sync_unsubscribe',
+      'yapa_storage_import',
     ].sort());
     expect(names.every(n => n.startsWith('yapa_'))).toBe(true);
-    expect(names.length).toBe(45);
+    expect(names.length).toBe(46);
   });
 
   it('task_create parses relative due dates and returns a structured value', async () => {

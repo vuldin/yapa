@@ -3,7 +3,7 @@ import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-import { getDocumentsByFilter, listCollections, updateDocument } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
 import { artifactPath } from '../buckets/artifacts.js';
 import { FireworksBackend } from './fireworks.js';
 import {

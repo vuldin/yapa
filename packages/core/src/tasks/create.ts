@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../chroma.js';
+import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../store/index.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';

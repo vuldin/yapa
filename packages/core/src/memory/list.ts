@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, listCollections, type DocumentResult } from '../chroma.js';
+import { getDocumentsByFilter, listCollections, type DocumentResult } from '../store/index.js';
 import {
   passesPromotedFilter,
   passesScoreFilters,

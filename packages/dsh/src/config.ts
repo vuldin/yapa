@@ -13,6 +13,10 @@ import { createConfig, type YapaConfig } from '@yapa/core';
 
 /** User-facing plugin configuration (cordis patch row + settings namespace). */
 export interface Config {
+  /** Storage backend: 'chroma' (ChromaDB server) or 'local' (embedded JSON store, no server). */
+  storage?: 'chroma' | 'local';
+  /** Root directory for the embedded store (default: ~/.local/share/yapa/store). */
+  localStorePath?: string;
   /** ChromaDB base URL. */
   chromaUrl?: string;
   /** Username used for task ID prefixes. */
@@ -58,6 +62,8 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  storage: z.union([z.const('chroma'), z.const('local')]),
+  localStorePath: z.string(),
   chromaUrl: z.string(),
   username: z.string(),
   embeddingProvider: z.union([
@@ -131,6 +137,8 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
   const envBase = createConfig();
   const core: YapaConfig = {
     ...envBase,
+    ...(merged.storage !== undefined && { STORAGE: merged.storage }),
+    ...(merged.localStorePath !== undefined && { LOCAL_STORE_PATH: merged.localStorePath }),
     ...(merged.chromaUrl !== undefined && { CHROMA_URL: merged.chromaUrl }),
     ...(merged.username !== undefined && { USERNAME: merged.username }),
     ...(merged.embeddingProvider !== undefined && { EMBEDDING_PROVIDER: merged.embeddingProvider }),

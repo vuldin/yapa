@@ -4,7 +4,7 @@ import {
   getDocumentsByIds,
   queryDocuments,
   updateDocument,
-} from '../chroma.js';
+} from '../store/index.js';
 
 import { storeMemory } from './store.js';
 

@@ -1,4 +1,4 @@
-import { addDocument, getOrCreateCollection, getDocumentsByFilter } from '../chroma.js';
+import { addDocument, getOrCreateCollection, getDocumentsByFilter } from '../store/index.js';
 
 const SYNC_DELETES_ID = '__sync_deletes__';
 

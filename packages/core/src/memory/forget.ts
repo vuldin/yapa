@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { findAndDeleteDocument } from '../chroma.js';
+import { findAndDeleteDocument } from '../store/index.js';
 
 import { queueSyncDelete } from '../sync/deletes.js';
 

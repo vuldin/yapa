@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { updateDocument, getDocumentsByIds, listCollections, getCollectionId, addDocument } from '../chroma.js';
+import { updateDocument, getDocumentsByIds, listCollections, addDocument } from '../store/index.js';
 import { fromChroma } from '../metadata-adapter.js';
 
 import type { TaskOptions } from './create.js';

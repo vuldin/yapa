@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { listCollections, getDocumentsByFilter, updateDocument } from '../chroma.js';
+import { listCollections, getDocumentsByFilter, updateDocument } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
 import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments } from './postgres.js';

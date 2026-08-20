@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { listCollections, addDocument, getOrCreateCollection, getDocumentsByIds, queryDocuments } from '../chroma.js';
+import { listCollections, addDocument, getOrCreateCollection, getDocumentsByIds, queryDocuments } from '../store/index.js';
 
 import { getRemoteDocsSince, addRemoteRelatedIds } from './postgres.js';
 import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions } from './sentinel.js';
@@ -74,7 +74,7 @@ export async function pullFromRemote(): Promise<PullStats> {
                 const localRelated = Array.isArray(localDoc.metadata.related_ids) ? localDoc.metadata.related_ids : [];
                 if (!localRelated.includes(remoteDoc.id)) {
                   localRelated.push(remoteDoc.id);
-                  const { updateDocument } = await import('../chroma.js');
+                  const { updateDocument } = await import('../store/index.js');
                   await updateDocument(collectionName, localDoc.id, {
                     ...localDoc.metadata,
                     related_ids: localRelated,

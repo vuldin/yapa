@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-session';
 import type {} from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-skill';
-import { setConfig } from '@yapa/core';
+import { setConfig, setStore, chromaStore, createLocalStore, type YapaConfig } from '@yapa/core';
 import { Config, resolveConfig, type ResolvedConfig } from './config.js';
 import { registerTools } from './tools.js';
 import { registerAdvancedTools } from './tools-advanced.js';
@@ -58,6 +58,12 @@ export function apply(ctx: Context, config: Config): void {
   const getResolved = () => resolved;
   const getConfigValues = () => currentConfig;
 
+  // --- Storage backend (ChromaDB server or embedded local store) -------------
+  const applyStore = (core: YapaConfig) => {
+    setStore(core.STORAGE === 'local' ? createLocalStore(core.LOCAL_STORE_PATH) : chromaStore);
+  };
+  applyStore(resolved.core);
+
   // --- Model-facing surface ---------------------------------------------------
   registerTools(ctx);
   registerAdvancedTools(ctx);
@@ -84,9 +90,13 @@ export function apply(ctx: Context, config: Config): void {
   scope.watch(next => {
     const prevSync = resolved.core.SYNC_ENABLED && resolved.core.SYNC_DATABASE_URL;
     const prevInterval = resolved.core.SYNC_INTERVAL_MS;
+    const prevStore = `${resolved.core.STORAGE}:${resolved.core.LOCAL_STORE_PATH}`;
     currentConfig = { ...config, ...definedOnly(next as Config) };
     resolved = resolveConfig(currentConfig);
     setConfig(resolved.core);
+    if (prevStore !== `${resolved.core.STORAGE}:${resolved.core.LOCAL_STORE_PATH}`) {
+      applyStore(resolved.core);
+    }
     const nextSync = resolved.core.SYNC_ENABLED && resolved.core.SYNC_DATABASE_URL;
     if (prevSync !== nextSync || prevInterval !== resolved.core.SYNC_INTERVAL_MS) {
       lifecycle.syncChanged();

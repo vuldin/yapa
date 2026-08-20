@@ -1,4 +1,4 @@
-import { queryDocuments, queryAllCollections, updateDocument } from '../chroma.js';
+import { queryDocuments, queryAllCollections, updateDocument } from '../store/index.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
 import {
   passesPromotedFilter,

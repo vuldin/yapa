@@ -1,4 +1,4 @@
-import { queryDocuments, listCollections, type Collection } from '../chroma.js';
+import { queryDocuments, listCollections, type Collection } from '../store/index.js';
 
 export interface TaskSearchResult {
   id: string;
