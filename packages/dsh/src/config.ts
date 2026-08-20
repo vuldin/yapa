@@ -43,6 +43,18 @@ export interface Config {
   autoJournalConsolidate?: boolean;
   /** Run the salience decay sweep on plugin activation (if due). */
   decayOnStartup?: boolean;
+  /** Provider route for auxiliary LLM calls (curation/synthesis/judge). Default: harness default model. */
+  auxProvider?: string;
+  /** Model for auxiliary LLM calls. Default: harness default model. */
+  auxModel?: string;
+  /** Bridge due-dated tasks into schedule_create reminders (when the schedule plugin is loaded). */
+  scheduleBridge?: boolean;
+  /** Store harness compaction summaries as memories before history is replaced. */
+  captureCompaction?: boolean;
+  /** Render promoted system-prompt memories as a live prompt section. */
+  promotedSection?: boolean;
+  /** Register the `yapa-standup` skill. */
+  standupSkill?: boolean;
 }
 
 export const Config: z<Config> = z.object({
@@ -68,6 +80,12 @@ export const Config: z<Config> = z.object({
   maxContextBytes: z.number(),
   autoJournalConsolidate: z.boolean(),
   decayOnStartup: z.boolean(),
+  auxProvider: z.string(),
+  auxModel: z.string(),
+  scheduleBridge: z.boolean(),
+  captureCompaction: z.boolean(),
+  promotedSection: z.boolean(),
+  standupSkill: z.boolean(),
 });
 
 /** Defaults for the plugin's own (non-core) knobs. */
@@ -79,6 +97,10 @@ export const PLUGIN_DEFAULTS = {
   maxContextBytes: 6000,
   autoJournalConsolidate: true,
   decayOnStartup: true,
+  scheduleBridge: true,
+  captureCompaction: true,
+  promotedSection: true,
+  standupSkill: true,
 };
 
 /** Resolved runtime view: the core config plus plugin-only knobs. */
@@ -91,6 +113,10 @@ export interface ResolvedConfig {
   maxContextBytes: number;
   autoJournalConsolidate: boolean;
   decayOnStartup: boolean;
+  scheduleBridge: boolean;
+  captureCompaction: boolean;
+  promotedSection: boolean;
+  standupSkill: boolean;
 }
 
 /**
@@ -127,5 +153,9 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     maxContextBytes: merged.maxContextBytes ?? PLUGIN_DEFAULTS.maxContextBytes,
     autoJournalConsolidate: merged.autoJournalConsolidate ?? PLUGIN_DEFAULTS.autoJournalConsolidate,
     decayOnStartup: merged.decayOnStartup ?? PLUGIN_DEFAULTS.decayOnStartup,
+    scheduleBridge: merged.scheduleBridge ?? PLUGIN_DEFAULTS.scheduleBridge,
+    captureCompaction: merged.captureCompaction ?? PLUGIN_DEFAULTS.captureCompaction,
+    promotedSection: merged.promotedSection ?? PLUGIN_DEFAULTS.promotedSection,
+    standupSkill: merged.standupSkill ?? PLUGIN_DEFAULTS.standupSkill,
   };
 }

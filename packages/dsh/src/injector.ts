@@ -51,7 +51,7 @@ function messageText(message: UserMessage): string {
  * rule: first path segment under a configured project root, preferring an
  * existing `customer-`/`project-` collection, else `global`.
  */
-async function detectCollection(cwd: string | undefined, roots: string[]): Promise<string> {
+export async function detectCollection(cwd: string | undefined, roots: string[]): Promise<string> {
   if (!cwd) return 'global';
   for (const root of roots) {
     if (!cwd.startsWith(root)) continue;

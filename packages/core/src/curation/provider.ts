@@ -14,10 +14,27 @@ export interface LLMRequestOptions {
 }
 
 /**
+ * Host-installed override for the curation/auxiliary LLM. A host harness
+ * (e.g. the DSH plugin) routes these calls through its own model registry —
+ * provider routes, credentials, and retries included — instead of yapa's
+ * per-provider HTTP config. classifier/judge/synthesis all funnel through
+ * `callCurationLLM`, so this one override covers every auxiliary call.
+ */
+export type HostLLMCaller = (options: LLMRequestOptions) => Promise<string>;
+
+let hostCaller: HostLLMCaller | undefined;
+
+/** Install (or clear, with `undefined`) the host LLM caller. */
+export function setHostLLMCaller(caller: HostLLMCaller | undefined): void {
+  hostCaller = caller;
+}
+
+/**
  * Call the configured curation LLM and return raw text content.
  * Follows the same switch pattern as src/embeddings.ts.
  */
 export async function callCurationLLM(options: LLMRequestOptions): Promise<string> {
+  if (hostCaller) return hostCaller(options);
   const model = getCurationModel();
   switch (getConfig().CURATION_LLM_PROVIDER) {
     case 'fireworks':
