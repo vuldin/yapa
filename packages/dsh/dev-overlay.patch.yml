@@ -6,6 +6,9 @@
 - insert:
     - id: yapa
       name: 'yapa-dsh'
+      # NOTE: a patch row REPLACES the profile row's whole config — restate it.
       config:
         username: !!js process.env.USER ?? 'user'
-        # projectRoots: [/home/vuldin/projects]
+        projectRoots: [/home/vuldin/projects]
+        storage: local
+        # localStorePath: /custom/path  # default ~/.local/share/yapa/store
