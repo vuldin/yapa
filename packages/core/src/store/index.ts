@@ -74,6 +74,10 @@ export const getDocumentsByIds = (collection: string, ids: string[]): Promise<Do
 
 export const updateDocument = (collection: string, id: string, metadata: Record<string, any>): Promise<void> =>
   getStore().updateDocument(collection, id, metadata);
+export const updateDocumentsBatch = (
+  collection: string,
+  entries: Array<{ id: string; metadata: Record<string, any> }>,
+): Promise<void> => getStore().updateDocumentsBatch(collection, entries);
 export const deleteDocument = (collection: string, id: string): Promise<void> =>
   getStore().deleteDocument(collection, id);
 export const findAndDeleteDocument = (id: string): Promise<string> => getStore().findAndDeleteDocument(id);

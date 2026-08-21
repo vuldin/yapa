@@ -59,6 +59,8 @@ export interface Config {
   promotedSection?: boolean;
   /** Register the `yapa-standup` skill. */
   standupSkill?: boolean;
+  /** Gate destructive/costly yapa_* tools behind the harness approval prompt (ask-mode sessions). */
+  approvalGate?: boolean;
 }
 
 export const Config: z<Config> = z.object({
@@ -92,6 +94,7 @@ export const Config: z<Config> = z.object({
   captureCompaction: z.boolean(),
   promotedSection: z.boolean(),
   standupSkill: z.boolean(),
+  approvalGate: z.boolean(),
 });
 
 /** Defaults for the plugin's own (non-core) knobs. */
@@ -107,6 +110,7 @@ export const PLUGIN_DEFAULTS = {
   captureCompaction: true,
   promotedSection: true,
   standupSkill: true,
+  approvalGate: true,
 };
 
 /** Resolved runtime view: the core config plus plugin-only knobs. */
@@ -123,6 +127,7 @@ export interface ResolvedConfig {
   captureCompaction: boolean;
   promotedSection: boolean;
   standupSkill: boolean;
+  approvalGate: boolean;
 }
 
 /**
@@ -165,5 +170,6 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     captureCompaction: merged.captureCompaction ?? PLUGIN_DEFAULTS.captureCompaction,
     promotedSection: merged.promotedSection ?? PLUGIN_DEFAULTS.promotedSection,
     standupSkill: merged.standupSkill ?? PLUGIN_DEFAULTS.standupSkill,
+    approvalGate: merged.approvalGate ?? PLUGIN_DEFAULTS.approvalGate,
   };
 }

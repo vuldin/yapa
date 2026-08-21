@@ -35,6 +35,7 @@ import { registerPromotedSection } from './promoted-section.js';
 import { registerSkills } from './skills.js';
 import { registerScheduleBridge } from './schedule-bridge.js';
 import { registerCompactionCapture } from './compaction-capture.js';
+import { registerApprovalGate } from './approval-gate.js';
 import { RULES_SECTION_NAME, RULES_SECTION_ORDER, RULES_TEXT } from './rules.js';
 
 export { Config } from './config.js';
@@ -79,6 +80,7 @@ export function apply(ctx: Context, config: Config): void {
   installLlmBridge(ctx, getConfigValues);
   registerScheduleBridge(ctx, getResolved);
   registerCompactionCapture(ctx, getResolved);
+  registerApprovalGate(ctx, getResolved);
 
   // --- Always-on context injection + session lifecycle + timers ---------------
   registerInjector(ctx, getResolved);

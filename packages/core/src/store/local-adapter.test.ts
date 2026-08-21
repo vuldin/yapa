@@ -112,4 +112,36 @@ describe('local store', () => {
     const cols = new Set(results.map(r => r.collection));
     expect(cols.has('alpha')).toBe(true);
   });
+
+  it('batch-updates metadata in one flush, skipping unknown ids', async () => {
+    await store.addDocument('alpha', 'b1', 'batch one', { type: 'memory', salience: 1 });
+    await store.addDocument('alpha', 'b2', 'batch two', { type: 'memory', salience: 1 });
+    await store.updateDocumentsBatch('alpha', [
+      { id: 'b1', metadata: { type: 'memory', salience: 3 } },
+      { id: 'b2', metadata: { type: 'memory', salience: 4 } },
+      { id: 'missing', metadata: { type: 'memory' } }, // unknown ids are skipped
+    ]);
+    const docs = await store.getDocumentsByIds('alpha', ['b1', 'b2']);
+    expect(docs.map(d => d.metadata.salience).sort()).toEqual([3, 4]);
+  });
+
+  it('sees another process\'s writes (mtime freshness)', async () => {
+    // Two store instances over one directory simulate two DSH processes.
+    const procA = createLocalStore(dir);
+    const procB = createLocalStore(dir);
+    await procA.createCollection('shared');
+    await procA.addDocument('shared', 'from-a', 'written by process A', { type: 'memory' });
+
+    // B has never loaded 'shared' — reads straight from disk.
+    expect((await procB.getDocumentsByIds('shared', ['from-a'])).length).toBe(1);
+
+    // A writes again while B holds a warm cache; B must notice via mtime.
+    await procB.getDocumentsByIds('shared', ['from-a']); // populate B's cache
+    await procA.addDocument('shared', 'from-a2', 'second write by A', { type: 'memory' });
+    expect((await procB.getDocumentsByIds('shared', ['from-a2'])).length).toBe(1);
+
+    // A's deletion is visible to B as well.
+    await procA.deleteCollection('shared');
+    expect(await procB.getCollectionCount('shared')).toBe(0);
+  });
 });

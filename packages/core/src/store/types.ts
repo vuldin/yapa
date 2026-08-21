@@ -66,6 +66,15 @@ export interface VectorStore {
 
   /** Replace a document's metadata wholesale (callers merge first). */
   updateDocument(collection: string, id: string, metadata: Record<string, any>): Promise<void>;
+  /**
+   * Batch metadata replacement. Chroma sends one request; the local store
+   * flushes once per collection. Sweep-style maintenance (decay) must use
+   * this instead of per-document `updateDocument` loops.
+   */
+  updateDocumentsBatch(
+    collection: string,
+    entries: Array<{ id: string; metadata: Record<string, any> }>,
+  ): Promise<void>;
   deleteDocument(collection: string, id: string): Promise<void>;
   /** Cross-collection delete; resolves to the collection that held the id. */
   findAndDeleteDocument(id: string): Promise<string>;

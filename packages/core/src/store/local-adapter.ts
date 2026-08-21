@@ -14,7 +14,7 @@
  *
  * @module @yapa/core/store/local-adapter
  */
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { generateEmbedding } from '../embeddings.js';
@@ -82,22 +82,52 @@ function matchesFilter(metadata: Record<string, any>, filter: Record<string, any
 
 export function createLocalStore(rootDir: string): VectorStore {
   const cache = new Map<string, CollectionFile>();
+  /** mtime of the file as of our last read or write (per collection). */
+  const cacheMtimes = new Map<string, number>();
   const writeChains = new Map<string, Promise<void>>();
 
   const fileFor = (name: string) => join(rootDir, `${encodeURIComponent(name)}.json`);
 
-  async function load(name: string): Promise<CollectionFile | undefined> {
-    const cached = cache.get(name);
-    if (cached) return cached;
+  async function readFromDisk(name: string): Promise<CollectionFile | undefined> {
     try {
       const parsed = JSON.parse(await readFile(fileFor(name), 'utf-8')) as CollectionFile;
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
       cache.set(name, parsed);
+      cacheMtimes.set(name, (await stat(fileFor(name))).mtimeMs);
       return parsed;
     } catch (e: any) {
-      if (e?.code === 'ENOENT') return undefined;
+      if (e?.code === 'ENOENT') {
+        cache.delete(name);
+        cacheMtimes.delete(name);
+        return undefined;
+      }
       throw new Error(`local store: collection "${name}" is unreadable: ${e.message ?? e}`);
     }
+  }
+
+  /**
+   * Load a collection, reloading from disk when another process rewrote the
+   * file since our last read/write. One user may run several DSH processes
+   * against the same store (GUI + headless); this keeps every reader/writer
+   * current. Writes are atomic renames, so a mid-write reader sees either
+   * whole revision; the residual same-instant writer race is documented in
+   * the module notes.
+   */
+  async function load(name: string): Promise<CollectionFile | undefined> {
+    const cached = cache.get(name);
+    if (!cached) return readFromDisk(name);
+    try {
+      const st = await stat(fileFor(name));
+      if (st.mtimeMs > (cacheMtimes.get(name) ?? 0)) return readFromDisk(name);
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') {
+        cache.delete(name);
+        cacheMtimes.delete(name);
+        return undefined;
+      }
+      throw e;
+    }
+    return cached;
   }
 
   async function loadOrCreate(name: string): Promise<CollectionFile> {
@@ -117,6 +147,8 @@ export function createLocalStore(rootDir: string): VectorStore {
       const tmp = `${fileFor(cf.name)}.tmp`;
       await writeFile(tmp, JSON.stringify(cf));
       await rename(tmp, fileFor(cf.name));
+      // Track our own write's mtime so the next load() doesn't re-read it.
+      cacheMtimes.set(cf.name, (await stat(fileFor(cf.name))).mtimeMs);
     });
     writeChains.set(cf.name, next.catch(() => {}));
     return next;
@@ -250,6 +282,19 @@ export function createLocalStore(rootDir: string): VectorStore {
       if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
       cf.docs[id].metadata = toChroma(metadata);
       await persist(cf);
+    },
+
+    async updateDocumentsBatch(collection, entries): Promise<void> {
+      if (entries.length === 0) return;
+      const cf = await load(collection);
+      if (!cf) throw new Error(`Collection "${collection}" not found`);
+      let changed = 0;
+      for (const e of entries) {
+        if (!cf.docs[e.id]) continue;
+        cf.docs[e.id].metadata = toChroma(e.metadata);
+        changed++;
+      }
+      if (changed > 0) await persist(cf); // one flush for the whole sweep
     },
 
     async deleteDocument(collection, id): Promise<void> {

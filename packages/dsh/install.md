@@ -83,11 +83,18 @@ ln -sfn /absolute/path/to/yapa/packages/core ~/.dsh/profiles/web/node_modules/@y
 
 In any session:
 
-- `yapa_status` — ChromaDB connectivity, embedding provider, sync state.
+- `yapa_status` — storage backend (embedded store path or ChromaDB health),
+  embedding provider, sync state.
 - Store something: `yapa_memory_store` → start a **new** session → ask about
   the topic → the recalled memory appears in the injected context.
-- `yapa_task_create` with a due date → `yapa_task_list` shows it across
-  sessions.
+- `yapa_task_create` with a due date → it also becomes a `schedule_create`
+  reminder (`scheduleBridge`).
+- Destructive calls (`yapa_collection_delete`, `yapa_memory_forget`,
+  `yapa_task_delete`, training/promotion tools, `yapa_storage_import`) trigger
+  the harness approval prompt in ask-policy sessions (`approvalGate`, default
+  on; under `DSH_PERMISSION_MODE=danger-full-access` no prompts are shown and
+  calls proceed — the `confirm: true` params remain as a second gate where
+  money is spent).
 
 ## Uninstall
 
@@ -96,8 +103,25 @@ dsh plugin --profile web remove yapa
 ```
 
 …then delete the `yapa` row from `~/.dsh/profiles/web/cordis.patch.yml`.
-ChromaDB collections (memories and tasks) are preserved; delete them with
+Collections (memories and tasks) are preserved — in `~/.local/share/yapa/store`
+(local store) or ChromaDB, per your `storage` setting; delete them with
 `yapa_collection_delete` first if you want a clean removal.
+
+## Deferred (upstream-limited)
+
+- **GUI settings card.** The Plugins → "Plugin configuration" tab can host a
+  card for yapa's settings namespace (which is registered and hot-reloads via
+  `settings.yaml`), but the card needs a browser bundle built in DSH's
+  lazy-CJS factory format whose build preset (`packages/client/tsdown.client.ts`)
+  is not published — an external plugin must reproduce that build. Until then,
+  edit `~/.dsh/settings.yaml` (`yapa:` section) directly; changes apply live.
+- **Session-log traceability markers.** Recording yapa mutations as log-only
+  session events (e.g. `yapa/mutation`) requires a custom event type, and DSH's
+  persistence read path refuses logs with unregistered event types unless they
+  carry `ignorable: true` — which `Session.append` cannot currently set
+  (upstream note: "a registration surface for them is deferred until such a
+  consumer exists"). Adding markers before that surface lands would break
+  session resume, so this waits for upstream.
 
 ## Coexistence note
 

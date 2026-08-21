@@ -311,6 +311,27 @@ export async function updateDocument(
   }
 }
 
+/** Batch metadata replacement in a single request. */
+export async function updateDocumentsBatch(
+  collectionName: string,
+  entries: Array<{ id: string; metadata: Record<string, any> }>,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const collectionId = await getCollectionId(collectionName);
+
+  const response = await chromaFetch(`/collections/${collectionId}/update`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ids: entries.map(e => e.id),
+      metadatas: entries.map(e => toChroma(e.metadata)),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Batch update failed: ${response.status} - ${await response.text()}`);
+  }
+}
+
 /** Delete a document by ID. */
 export async function deleteDocument(collectionName: string, id: string): Promise<void> {
   const collectionId = await getCollectionId(collectionName);

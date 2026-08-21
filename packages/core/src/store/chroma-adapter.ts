@@ -27,6 +27,7 @@ export const chromaStore: VectorStore = {
   getDocumentsByIds: (col, ids) => chroma.getDocumentsByIds(col, ids),
 
   updateDocument: (col, id, metadata) => chroma.updateDocument(col, id, metadata),
+  updateDocumentsBatch: (col, entries) => chroma.updateDocumentsBatch(col, entries),
   deleteDocument: (col, id) => chroma.deleteDocument(col, id),
   findAndDeleteDocument: id => chroma.findAndDeleteDocument(id),
 };

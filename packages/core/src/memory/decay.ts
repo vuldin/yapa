@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, updateDocument, listCollections } from '../store/index.js';
+import { getDocumentsByFilter, updateDocumentsBatch, listCollections } from '../store/index.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
 const DECAY_SENTINEL_ID = '__decay_sentinel__';
@@ -16,6 +16,9 @@ export async function runDecaySweep(): Promise<number> {
     try {
       const docs = await getDocumentsByFilter(collection.name, { type: 'memory' }, 1000);
 
+      // Batch: one store mutation per collection (single HTTP request on
+      // ChromaDB, single file flush on the local store) instead of N rewrites.
+      const updates: Array<{ id: string; metadata: Record<string, any> }> = [];
       for (const doc of docs) {
         const lifecycleMeta: LifecycleMetadata = {
           salience: doc.metadata.salience ?? 1.0,
@@ -26,12 +29,15 @@ export async function runDecaySweep(): Promise<number> {
 
         const decayed = applyDecay(lifecycleMeta);
         if (decayed.salience !== lifecycleMeta.salience) {
-          await updateDocument(collection.name, doc.id, {
-            ...doc.metadata,
-            salience: decayed.salience,
+          updates.push({
+            id: doc.id,
+            metadata: { ...doc.metadata, salience: decayed.salience },
           });
-          decayedCount++;
         }
+      }
+      if (updates.length > 0) {
+        await updateDocumentsBatch(collection.name, updates);
+        decayedCount += updates.length;
       }
     } catch {
       continue;
