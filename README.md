@@ -1,16 +1,21 @@
 # YAPA — Yet Another Personal Assistant
 
-To install, give your AI agent this prompt: `install https://github.com/vuldin/yapa`
+**DeepSeek Harness:** see [`packages/dsh/install.md`](packages/dsh/install.md) — the native plugin needs no wizard (and no database server under the default embedded store).
 
-> **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. Read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning.
+**Claude Code / Cursor / OpenCode:** give your AI agent this prompt: `install https://github.com/vuldin/yapa`
 
-YAPA is a personal assistant that gives your AI agent persistent memory and task management. It is backed by ChromaDB, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
+> **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. For MCP hosts, read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning. For the DeepSeek Harness, follow `packages/dsh/install.md` instead (no agent-driven wizard).
 
-Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host via the MCP server (`packages/mcp`). For the DeepSeek Harness, YAPA also ships as a **native DSH plugin** (`packages/dsh`) with always-on recall injection, hot-reloaded settings, and GUI tool cards — see [`packages/dsh/install.md`](packages/dsh/install.md).
+YAPA is a personal assistant that gives your AI agent persistent memory and task management, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
 
-## Repository layout (branch `dsh-plugin`)
+YAPA runs two frontends over one core:
 
-- `packages/core` (`@yapa/core`) — all logic: memory, tasks, collections, journal, compaction, sync, curation, buckets, training. Config is a `YapaConfig` snapshot (`createConfig(env)` / `setConfig`) instead of module-level env reads, so hosts control configuration.
+- **Native DeepSeek Harness plugin** (`yapa`, in `packages/dsh`) — 46 tools with structured outputs and GUI cards, always-on recall injected at the turn seam, hot-reloaded settings, schedule-bridged due dates, compaction capture, approval gating, and an embedded zero-server storage option. Docs: [install](packages/dsh/install.md) · [architecture](packages/dsh/architecture.md) · [future work & investigation record](docs/future-work.md).
+- **MCP server** (`yapa-mcp`, in `packages/mcp`) — the original stdio server plus the Claude-Code hook CLI. Everything below the "Repository layout" section primarily describes this frontend.
+
+## Repository layout
+
+- `packages/core` (`@yapa/core`) — all logic: memory, tasks, collections, journal, compaction, sync, curation, buckets, training. Config is a `YapaConfig` snapshot (`createConfig(env)` / `setConfig`) instead of module-level env reads, so hosts control configuration. Storage goes through the `VectorStore` port (`src/store/`): the ChromaDB HTTP adapter, or the embedded local adapter (one JSON file per collection, in-process embeddings, brute-force cosine — no server).
 - `packages/mcp` (`yapa-mcp`) — the MCP server + Claude-Code hook CLI.
 - `packages/dsh` (`yapa`) — the DeepSeek Harness cordis plugin.
 
@@ -32,7 +37,9 @@ Works with Claude Code, OpenCode, Cursor, and any MCP-compatible host via the MC
 
 ## How it works
 
-YAPA is an MCP server with 41 tools. Your agent connects to it through your editor's MCP configuration. Once connected:
+**Under DSH**, the plugin registers 46 `yapa_*` tools natively, injects recall + open tasks into every turn at the `agent/pre-step` seam (no hooks, no wiring), and stores data in the embedded local store by default. See `packages/dsh/architecture.md` for the full seam map.
+
+**Under MCP hosts**, YAPA is an MCP server with 41 tools. Your agent connects to it through your editor's MCP configuration. Once connected:
 
 - **Before every response**, the agent queries your memories for relevant context
 - **When it learns something important**, it stores it automatically (bug fixes, preferences, decisions)
@@ -40,7 +47,7 @@ YAPA is an MCP server with 41 tools. Your agent connects to it through your edit
 - **Collections** are inferred from conversation context — no manual filing
 - **If sync is enabled**, a background cycle pushes local changes and pulls remote updates every 5 minutes
 
-All data lives in ChromaDB. YAPA supports ChromaDB's built-in embeddings (zero-config) or external providers for higher-dimensional vectors. When remote sync is enabled, documents are also stored in PostgreSQL with pgvector for cross-machine search and deduplication.
+Data lives in ChromaDB (default for MCP) or the embedded local store (default for the DSH plugin; `YAPA_STORAGE=local` enables it for MCP too). Embeddings are always computed in-process (MiniLM by default, or an HTTP provider); no backend embeds server-side. When remote sync is enabled, documents are also stored in PostgreSQL with pgvector for cross-machine search and deduplication.
 
 ## Install
 
@@ -49,6 +56,11 @@ To install, give your AI agent this prompt: `install https://github.com/vuldin/y
 To uninstall later, say `uninstall yapa` in any session.
 
 ## Tools
+
+The table below lists the **MCP** tool names. The DSH plugin exposes the same
+capabilities with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`),
+plus `yapa_status` and `yapa_storage_import`. `setup_instructions` and
+`uninstall` are MCP-only (the plugin has nothing to write into config files).
 
 | Tool | Description |
 |------|-------------|
@@ -99,7 +111,11 @@ To uninstall later, say `uninstall yapa` in any session.
 | `sync_unsubscribe` | Remove subscription (local data preserved) |
 | `uninstall` | Remove YAPA from your system |
 
-## Always-on hooks (Claude Code)
+## Always-on hooks (Claude Code / MCP frontend only)
+
+> Under the DSH plugin this section does not apply: recall and task surfacing
+> are built into the turn seam (`agent/pre-step`) with nothing to register —
+> see `packages/dsh/architecture.md`.
 
 YAPA ships a small `yapa` CLI in addition to the MCP server. It exposes four
 hook entry points designed to be invoked from `~/.claude/settings.json`:
@@ -111,7 +127,7 @@ hook entry points designed to be invoked from `~/.claude/settings.json`:
 | `stop` | Reminds the agent to call `memory_store` / `task_create` / `journal_append` for findings from the just-finished turn |
 | `session-end` | Logs the session ending; surfaces pending journal drafts at the next session start |
 
-Register the hooks once in `~/.claude/settings.json` (point the `command` field at the absolute path of `dist/cli/index.js`). After that, recall and task surfacing happen on every prompt without the agent having to remember to call the tools. This is what makes YAPA "always on" rather than best-effort.
+Register the hooks once in `~/.claude/settings.json` (point the `command` field at the absolute path of `packages/mcp/dist/cli/index.js`). After that, recall and task surfacing happen on every prompt without the agent having to remember to call the tools. This is what makes YAPA "always on" rather than best-effort.
 
 Configuration: each hook fails open — if the call errors, the hook emits `{}` and the session continues normally.
 
@@ -175,13 +191,15 @@ To use a non-default provider, add the relevant env vars to your MCP host config
 
 ## Configuration
 
-All options use the `YAPA_` prefix and are set as environment variables in your MCP host config. See `.env.example` for the full list.
+All options use the `YAPA_` prefix and are set as environment variables in your MCP host config. Under the DSH plugin, the same values live in the cordis row `config:` or the hot-reloaded `yapa:` section of `~/.dsh/settings.yaml` (camelCase: `chromaUrl`, `syncEnabled`, …). See `.env.example` for the full list.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `YAPA_CHROMA_URL` | ChromaDB server URL | `http://localhost:8000` |
+| `YAPA_STORAGE` | `chroma` \| `local` (embedded store, no server) | `chroma` |
+| `YAPA_LOCAL_STORE_PATH` | Root dir for the embedded store | `~/.local/share/yapa/store` |
+| `YAPA_CHROMA_URL` | ChromaDB server URL (when `YAPA_STORAGE=chroma`) | `http://localhost:8000` |
 | `YAPA_USERNAME` | Username for task ID prefixes | `user` |
-| `YAPA_EMBEDDING_PROVIDER` | Embedding provider | `chromadb` (server-side) |
+| `YAPA_EMBEDDING_PROVIDER` | Embedding provider — `chromadb` is in-process MiniLM (zero-config, no server call); `fireworks`/`openai`/`voyage`/`ollama` use HTTP APIs | `chromadb` |
 | `YAPA_SALIENCE_DECAY_RATE` | Daily decay multiplier | `0.98` |
 | `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.3` |
 | `YAPA_CURATION_ENABLED` | Enable the background classifier | `false` |
