@@ -55,6 +55,16 @@ export interface Config {
   scheduleBridge?: boolean;
   /** Store harness compaction summaries as memories before history is replaced. */
   captureCompaction?: boolean;
+  /** Run the aux-LLM extractor over each completed turn and auto-store durable findings. */
+  captureResponses?: boolean;
+  /** Minimum combined user+assistant characters in a turn before extraction runs. */
+  captureMinChars?: number;
+  /** Hard cap on memories auto-stored per turn. */
+  captureMaxMemories?: number;
+  /** Salience ceiling for auto-captured memories (agent-stored memories are uncapped). */
+  captureMaxSalience?: number;
+  /** Below this cosine distance, an extracted candidate is a known duplicate and skipped. */
+  captureDedupeDistance?: number;
   /** Render promoted system-prompt memories as a live prompt section. */
   promotedSection?: boolean;
   /** Register the `yapa-standup` skill. */
@@ -92,6 +102,11 @@ export const Config: z<Config> = z.object({
   auxModel: z.string(),
   scheduleBridge: z.boolean(),
   captureCompaction: z.boolean(),
+  captureResponses: z.boolean(),
+  captureMinChars: z.number(),
+  captureMaxMemories: z.number(),
+  captureMaxSalience: z.number(),
+  captureDedupeDistance: z.number(),
   promotedSection: z.boolean(),
   standupSkill: z.boolean(),
   approvalGate: z.boolean(),
@@ -108,6 +123,11 @@ export const PLUGIN_DEFAULTS = {
   decayOnStartup: true,
   scheduleBridge: true,
   captureCompaction: true,
+  captureResponses: true,
+  captureMinChars: 280,
+  captureMaxMemories: 3,
+  captureMaxSalience: 2.0,
+  captureDedupeDistance: 0.25,
   promotedSection: true,
   standupSkill: true,
   approvalGate: true,
@@ -125,6 +145,11 @@ export interface ResolvedConfig {
   decayOnStartup: boolean;
   scheduleBridge: boolean;
   captureCompaction: boolean;
+  captureResponses: boolean;
+  captureMinChars: number;
+  captureMaxMemories: number;
+  captureMaxSalience: number;
+  captureDedupeDistance: number;
   promotedSection: boolean;
   standupSkill: boolean;
   approvalGate: boolean;
@@ -168,6 +193,11 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     decayOnStartup: merged.decayOnStartup ?? PLUGIN_DEFAULTS.decayOnStartup,
     scheduleBridge: merged.scheduleBridge ?? PLUGIN_DEFAULTS.scheduleBridge,
     captureCompaction: merged.captureCompaction ?? PLUGIN_DEFAULTS.captureCompaction,
+    captureResponses: merged.captureResponses ?? PLUGIN_DEFAULTS.captureResponses,
+    captureMinChars: merged.captureMinChars ?? PLUGIN_DEFAULTS.captureMinChars,
+    captureMaxMemories: merged.captureMaxMemories ?? PLUGIN_DEFAULTS.captureMaxMemories,
+    captureMaxSalience: merged.captureMaxSalience ?? PLUGIN_DEFAULTS.captureMaxSalience,
+    captureDedupeDistance: merged.captureDedupeDistance ?? PLUGIN_DEFAULTS.captureDedupeDistance,
     promotedSection: merged.promotedSection ?? PLUGIN_DEFAULTS.promotedSection,
     standupSkill: merged.standupSkill ?? PLUGIN_DEFAULTS.standupSkill,
     approvalGate: merged.approvalGate ?? PLUGIN_DEFAULTS.approvalGate,

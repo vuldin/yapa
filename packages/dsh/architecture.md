@@ -20,6 +20,7 @@ layer works, how to run it, and how to verify it. For install steps see
 │  ├── LLM bridge ................... aux calls (curation/judge) via ctx.llm      │
 │  ├── schedule bridge .............. due tasks → schedule_create reminders       │
 │  ├── compaction capture ........... compaction/summary → memory                 │
+│  ├── response capture ............. turn buffer → aux extractor → memory        │
 │  ├── approval gate ................ tools/pre-execute → ask (ask-policy only)   │
 │  └── timers ....................... cordis interval: decay sweep, sync cycle    │
 │                          │                                                      │
@@ -47,6 +48,7 @@ layer works, how to run it, and how to verify it. For install steps see
 | Auxiliary LLM (curation, synthesis, judge) | `ctx.llm.stream()` | `setHostLLMCaller` in core funnels every aux call through one override; the plugin routes to `auxProvider`/`auxModel` or the harness default model. No separate API keys. |
 | Durable reminders | `schedule_create` tool dispatch | `tools/result` observer on `yapa_task_create`/`yapa_task_update` bridges due dates. Best-effort: absent schedule plugin or non-root agent → silent skip. |
 | Knowledge surviving context compaction | `session/event` → `compaction/summary` | The harness's own distilled summary is stored as an episodic memory (salience 1.5, tagged `compaction`). |
+| Capturing findings from agent responses | `session/event` → `user/message` / `assistant/message` / `turn/end` | Per-session turn buffer judged once per turn by the aux-LLM **extractor** (`curation/extractor.ts`, versioned prompt). Heuristic prefilter (min chars, skip blocked turns) gates the LLM call; candidates dedupe by cosine distance before storing, so agent-side `yapa_memory_store` calls never double-store. Auto-captured memories are clamped (salience ≤ `captureMaxSalience`, default 2.0), tagged `auto-capture`, and carry provenance metadata (`session_id`, `turn`, prompt version). The next injection surfaces a one-line "Auto-captured N memories" notice. Fully async and fail-open — extraction never blocks the agent loop. |
 | Destructive-op safety | `tools/pre-execute` → `{kind: 'ask'}` | Gated list; only fires when the session's effective approval policy is `ask` (danger-full-access = `never` = no prompts). Headless without an answerer fails closed. |
 
 ## Storage layer

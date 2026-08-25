@@ -36,7 +36,10 @@ type surfaces and bundles):
 
 Always-on pre-step injection; rules + promoted-memories prompt sections;
 settings namespace with hot reload; LLM bridge; schedule bridge; compaction
-capture; approval gate; programmatic standup skill; per-session journals with
+capture; **response capture** (per-turn aux-LLM extraction from
+`assistant/message` buffers, dedup-by-distance before store, salience-capped
+`auto-capture` memories with session/turn provenance, next-injection notice);
+approval gate; programmatic standup skill; per-session journals with
 dispose-time consolidation; effect-scoped decay/sync timers; embedded local
 store (cosine contract, embedding-model partition, batch flush, mtime
 freshness); Chroma→local importer.
@@ -72,13 +75,59 @@ freshness); Chroma→local importer.
   can offer "open the conversation this came from" via `sessionQuery`.
 - **Decay sweep batching is done; sync needs a live-pgvector run** against
   the local store (unit-covered via a mocked Postgres seam only).
-- **Store lockfile** if multi-writer same-instant races ever bite (mtime
-  freshness covers everything but the last millisecond).
+- **Store durability & concurrency hardening** (residual risks accepted at
+  the 2026-08-24 review; resolutions designed, not yet built):
+  - **Cross-process write exclusion.** Write chains serialize writers within
+    one process and mtime freshness keeps sibling processes current, but a
+    same-instant write from two processes is last-writer-wins. Resolution:
+    a per-store lockfile (`store.lock` created `O_EXCL`, holding pid +
+    heartbeat mtime; stale locks reclaimed when the pid is dead or the
+    heartbeat ages out) — or a single-writer broker socket if queued
+    multi-process writes ever become a real need. Trigger: first observed
+    clobber, or any move to shared/multi-machine store dirs.
+  - **Snapshots.** With sync disabled, the JSON files are the sole copy of
+    all memories/tasks. Resolution: a periodic snapshot sweep on the existing
+    decay-timer seam — copy the store dir (writes are atomic renames, so a
+    plain recursive copy is already crash-safe) into `store/backups/<ts>/`
+    with N-generation rotation, plus a `yapa_store_snapshot_now` tool. Cheap
+    at personal-memory scale (<1 MB typical).
+  - **Archived-doc purge.** Compaction archives (`compacted_into`) filter
+    docs from recall but leave them in the file, so files keep growing even
+    as recall shrinks, and `getCollectionCount` diverges from the
+    recall-visible count. Resolution: fold a purge step into the decay
+    sweep — physically delete docs archived longer than a retention window
+    (default 30d), guarded on the summary memory existing.
+  - **Write amplification.** Every write rewrites the whole collection file;
+    fine to low-MB, wrong past that. Resolution: the embedded DB backend
+    below (incremental pages / WAL), or as an interim, per-doc segment files
+    with a manifest. No action needed at current scale.
 
 **Medium**
-- **ANN option for large corpora** behind the same `VectorStore` port:
-  `sqlite-vec` on `node:sqlite` (follows DSH's own precedent) or pure-JS HNSW.
-  Brute force is the right default at the single-user design point.
+- **Embedded DB backend bundled with DSH** (raised by vuldin 2026-08-24: a
+  database that ships inside the plugin and starts along with it — possibly a
+  WASM module; supersedes the older "ANN option" note). All candidates sit
+  behind the existing `VectorStore` port, and the plugin already owns startup
+  (`setStore(...)` at boot), so "started along with DSH" is free for any
+  in-process option. This backend class also resolves the hardening items
+  above in one move: real file locking (cross-process), incremental page/WAL
+  writes (no whole-file rewrite), cheap indexed DELETE (purge), and online
+  backup APIs (snapshots). Candidates:
+
+  | Candidate | Packaging | Vectors | Notes |
+  |---|---|---|---|
+  | **PGlite** (`@electric-sql/pglite` + vector ext) | Postgres compiled to WASM, in-process, data dir on disk | pgvector, HNSW/IVFFlat indexes | Same Postgres semantics as the sync/sharing layer — push/pull could target the embedded instance through a query seam instead of a URL seam. Single-connection, single-process; WASM bundle is heavy (tens of MB). Strongest conceptual fit. |
+  | **`node:sqlite`** (built into Node) | zero deps; DSH precedent (`dsh-session-query-sqlite`) | vectors-as-blobs + JS cosine (today's scan), or `sqlite-vec` native ext via `loadExtension` | Without the native ext we keep brute-force search but gain SQL persistence, locking, and backup. Extension loading reintroduces platform binaries. Cheapest step; keeps zero-dep install. |
+  | **Pure-WASM SQLite** (`wa-sqlite`, `sql.js`) | fully portable WASM, no native bits | `sqlite-vec` WASM build | `sql.js` persists by exporting the whole DB file (same write-amplification problem); `wa-sqlite` VFS backends give incremental file writes. Most portable, most integration work. |
+  | **LanceDB** (`@lancedb/lancedb`) | napi-rs prebuilt binaries per platform | native ANN, columnar | Real ANN and mature vector-store semantics, but native prebuilds break the zero-native-dep property that makes the plugin trivially installable via npx/pnpm. |
+
+  Decision drivers: bundle size vs zero-native-dep install, whether the sync
+  layer should gain an embedded-Postgres target (PGlite), and how much ANN
+  headroom we actually need. Brute force remains the right default at the
+  single-user design point — this switch is about durability and write cost
+  first, search speed second. Version-sensitive facts (PGlite vector support,
+  `node:sqlite` `loadExtension` stability, LanceDB prebuilt coverage) need
+  verification at implementation time. Also unblocks Part 3's `vector` facet:
+  a SQLite/PGlite backend is a natural hub citizen if the facet lands.
 - **Sync redesign over change sets.** With both ends record-oriented (local
   store + Postgres), the embedding-dedup push/pull could simplify to
   domain-style change-set merge. `private-`/`local-` exclusion could move from
@@ -86,6 +135,12 @@ freshness); Chroma→local importer.
 - **Compaction-capture enrichment.** Today we store the harness summary
   verbatim; an aux-LLM pass could additionally extract *decisions and open
   loops* as higher-salience semantic memories.
+- **Response-capture refinement** (shipped baseline 2026-08-24; possible
+  upgrades): retrieve-then-decide (feed the top-k existing memories into the
+  extractor prompt so it can judge ADD vs UPDATE vs skip, mem0-style, instead
+  of store-time dedup only); optional tool-result visibility in the turn
+  buffer (findings the assistant never restated); a per-deployment quality
+  eval once enough `auto-capture` memories exist to judge precision.
 - **`/standup` slash command** alongside the skill; **journal recap section**
   at session start (last session's journal memory in the first injection).
 

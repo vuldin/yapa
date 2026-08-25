@@ -28,6 +28,7 @@ import {
   getConfig,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
+import { takeCaptureNotice } from './response-capture.js';
 
 interface AgentState {
   /** Cache of the detected collection for this agent's session. */
@@ -99,9 +100,12 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         && promptText
         && state.recalledMessageId !== promptMessage.id;
       const doTasks = resolved.injectTasks && !state.tasksSurfaced.has(collection);
+      const captureNotice = takeCaptureNotice(agent.id);
 
-      if (!doRecall && !doTasks) return decision;
+      if (!doRecall && !doTasks && !captureNotice) return decision;
       const lines: string[] = ['# YAPA Context', '', `**Scope:** \`${collection}\``];
+
+      if (captureNotice) lines.push('', `## Auto-capture\n${captureNotice}`);
 
       if (doRecall && promptMessage) {
         const results = await recallMemory(promptText, {

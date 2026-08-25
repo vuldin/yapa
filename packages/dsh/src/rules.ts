@@ -20,7 +20,7 @@ export const RULES_TEXT = `## YAPA — Memory & Task Assistant
 You have access to YAPA persistent memory and durable task tools (the \`yapa_*\` tools). YAPA context (recalled memories, open tasks) is injected automatically at prompt assembly — you do not need to re-run recall for the current prompt unless you need a more specific query.
 
 ### Storage prerequisite
-YAPA stores data in ChromaDB (default \`http://localhost:8000\`). If a \`yapa_*\` tool errors with a connection failure, do NOT silently swallow it — tell the user ChromaDB appears to be down and offer: \`docker run -d --name chromadb --restart unless-stopped -p 8000:8000 -v chromadb_data:/data chromadb/chroma\`, \`pip install chromadb && chroma run\`, or a NixOS service. Call \`yapa_status\` to check health.
+YAPA stores data either in an embedded local store (no server, the default) or in ChromaDB, depending on the plugin's \`storage\` setting. If a \`yapa_*\` tool errors with a storage failure, do NOT silently swallow it — call \`yapa_status\` to check health and report what it says. Only ChromaDB mode can go down independently; local-store errors usually mean a disk/permissions problem.
 
 ### Choosing the right tracking tool
 - \`todo_write\` — this session's working checklist (ephemeral, gone at session end)
@@ -38,6 +38,8 @@ When in doubt: if the work outlives this conversation, it is a yapa task (possib
 
 ### Auto-capture during work
 Capture as soon as the trigger fires — do NOT batch to the end of the session.
+
+**Background capture is always on:** after each turn, a harness-side extractor reviews the exchange and stores durable findings automatically (tagged \`auto-capture\`, salience ≤ 2.0, deduplicated against existing memories). You do NOT need to restate findings just so they get stored. Still call \`yapa_memory_store\` yourself when a fact matters: agent-stored memories carry full salience (>= 2.0), exact wording you choose, and immediate timing.
 
 **Store a memory (\`yapa_memory_store\`, salience >= 2.0) when:** a bug's root cause is identified; a config value, env var, endpoint, or credential location is learned; the user states a preference, decision, or correction; a non-obvious technical fact about the codebase/customer/cluster is discovered; a solution took non-trivial effort to find; a decision or commitment surfaces.
 

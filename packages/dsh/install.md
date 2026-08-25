@@ -63,10 +63,15 @@ Plugin-only knobs (layer 2/3 only): `projectRoots`, `injectRecall`,
 `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
 `decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
 reminders), `captureCompaction` (harness compaction summaries are stored as
-memories), `promotedSection` (system-prompt-bucket memories render as a live
-prompt section), `standupSkill` (registers the `yapa-standup` skill),
-`auxProvider`/`auxModel` (route for curation/synthesis/judge LLM calls;
-defaults to the harness's configured default model).
+memories), `captureResponses` (every completed turn is judged by the aux-LLM
+extractor and durable findings are auto-stored, deduplicated, tagged
+`auto-capture`, salience-capped — see `captureMinChars`, `captureMaxMemories`,
+`captureMaxSalience`, `captureDedupeDistance`), `promotedSection`
+(system-prompt-bucket memories render as a live prompt section),
+`standupSkill` (registers the `yapa-standup` skill),
+`auxProvider`/`auxModel` (route for curation/synthesis/judge/extractor LLM
+calls; defaults to the harness's configured default model — point it at a
+cheap model if you want response capture to cost less).
 
 ### Local dev note (no pnpm)
 
@@ -89,6 +94,11 @@ In any session:
   the topic → the recalled memory appears in the injected context.
 - `yapa_task_create` with a due date → it also becomes a `schedule_create`
   reminder (`scheduleBridge`).
+- Response capture (`captureResponses`): have a substantive exchange (a real
+  finding or decision), then check `yapa_memory_list` — a new memory tagged
+  `auto-capture` with `source: auto-capture` metadata appears within seconds
+  of the turn ending; the next prompt's injected context notes it. Near-
+  duplicates of existing memories are skipped, not double-stored.
 - Destructive calls (`yapa_collection_delete`, `yapa_memory_forget`,
   `yapa_task_delete`, training/promotion tools, `yapa_storage_import`) trigger
   the harness approval prompt in ask-policy sessions (`approvalGate`, default

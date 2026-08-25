@@ -41,9 +41,10 @@ export * from './tasks/dates.js';
 // Collections.
 export * from './collections/manage.js';
 
-// Curation (LLM classifier).
+// Curation (LLM classifier) + response extractor (turn → memory candidates).
 export * from './curation/index.js';
 export * from './curation/classifier.js';
+export * from './curation/extractor.js';
 export * from './curation/provider.js';
 export * from './curation/prompts.js';
 

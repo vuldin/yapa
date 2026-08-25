@@ -8,6 +8,13 @@ export interface StoreOptions {
   salience?: number;
   sector?: 'semantic' | 'episodic';
   collection?: string;
+  /**
+   * Extra metadata merged into the stored document(s) — provenance for
+   * host-driven capture (e.g. `{ source: 'auto-capture', session_id, turn }`).
+   * Core-owned keys (type, username, salience, sector, timestamps) win on
+   * conflict.
+   */
+  metadata?: Record<string, any>;
 }
 
 export interface ConflictRecord {
@@ -89,6 +96,7 @@ export async function storeMemory(
   if (chunks.length === 1) {
     const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
     const metadata: Record<string, any> = {
+      ...(options.metadata ?? {}),
       type: 'memory',
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -106,6 +114,7 @@ export async function storeMemory(
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
   const docs = chunks.map((chunk) => {
     const chunkMeta: Record<string, any> = {
+      ...(options.metadata ?? {}),
       type: 'memory',
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
