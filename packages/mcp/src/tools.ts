@@ -35,6 +35,7 @@ import {
   getSyncState,
   getSyncSubscriptions,
   getTask,
+  janitorSweep,
   journalAppend,
   journalConsolidate,
   listCollections,
@@ -87,23 +88,25 @@ export function registerTools(server: McpServer): void {
   // --- Memory ---
   server.tool(
     'memory_store',
-    'Store a memory with content, tags, salience, sector, and collection. Also runs a contradiction check: if near-duplicate memories already exist in the same collection, they are returned as `potential_conflicts`. When conflicts are surfaced, decide whether to supersede (call `memory_forget` on the old ID then accept this write) or coexist (no action — the new memory has already been stored).',
+    'Store a memory with content, tags, salience, sector, and collection. Also runs a contradiction check: if near-duplicate memories already exist in the same collection, they are returned as `potential_conflicts`. When conflicts are surfaced, decide whether to supersede (re-store with `supersedes: "<old ID>"` — archives the old memory, recoverable) or coexist (no action — the new memory has already been stored). Reserve `memory_forget` for memories that should never have existed.',
     {
       content: z.string().describe('The memory content to store'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
       salience: z.number().optional().describe('Importance score (0.0-5.0, default 1.0)'),
       sector: z.enum(['semantic', 'episodic']).optional().describe('Memory type (auto-detected if omitted)'),
+      supersedes: z.string().optional().describe('ID of an existing memory this one corrects/replaces — the old memory is archived (filtered from recall, recoverable), never hard-deleted'),
       collection: z.string().optional().describe('Collection name (default: global)'),
     },
-    async ({ content, tags, salience, sector, collection }) => {
-      const result = await storeMemory(content, { tags, salience, sector, collection });
+    async ({ content, tags, salience, sector, collection, supersedes }) => {
+      const result = await storeMemory(content, { tags, salience, sector, collection, supersedes });
       const lines = [`Stored memory: ${result.ids.join(', ')}`];
+      if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
         lines.push('', `⚠ Potential conflicts (${result.potential_conflicts.length}):`);
         for (const c of result.potential_conflicts) {
           lines.push(`- **${c.id}** (distance ${c.distance.toFixed(3)}, salience ${c.salience.toFixed(2)}): ${c.content}`);
         }
-        lines.push('', 'Decide: supersede (call `memory_forget` on the old ID) or coexist (do nothing — the new memory is already stored).');
+        lines.push('', 'Decide: supersede (re-store with `supersedes: "<old ID>"` — archives, recoverable), hard-delete (`memory_forget`), or coexist (do nothing — the new memory is already stored).');
       }
       return {
         content: [{ type: 'text' as const, text: lines.join('\n') }],
@@ -297,6 +300,27 @@ export function registerTools(server: McpServer): void {
   );
 
   // --- Curation ---
+  server.tool(
+    'janitor_now',
+    'Run the contradiction janitor: scan for near-duplicate memory pairs and judge each with the conservative resolver — duplicates are archived (recoverable via include_archived), stale memories are superseded by merged updates, distinct facts are kept. Bounded by maxPairs per run.',
+    {
+      collection: z.string().optional().describe('Restrict the sweep to this collection (default: all)'),
+      maxPairs: z.number().optional().describe('Max pairs to judge this run (default 20)'),
+    },
+    async ({ collection, maxPairs }) => {
+      try {
+        const stats = await janitorSweep({
+          ...(collection && { collection }),
+          ...(maxPairs !== undefined && { maxPairs: Math.max(1, Math.min(200, maxPairs)) }),
+        });
+        const text = `Janitor sweep complete: ${stats.pairsConsidered} pairs judged across ${stats.collectionsScanned} collection(s) — ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.errors} error(s).`;
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Janitor error: ${e}` }] };
+      }
+    },
+  );
+
   server.tool(
     'curation_now',
     'Trigger an immediate curation cycle: classifies unscored memories with trainable/durability/generalizability scores.',

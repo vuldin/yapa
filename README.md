@@ -10,7 +10,7 @@ YAPA is a personal assistant that gives your AI agent persistent memory and task
 
 YAPA runs two frontends over one core:
 
-- **Native DeepSeek Harness plugin** (`yapa`, in `packages/dsh`) — 46 tools with structured outputs and GUI cards, always-on recall injected at the turn seam, hot-reloaded settings, schedule-bridged due dates, compaction capture, approval gating, and an embedded zero-server storage option. Docs: [install](packages/dsh/install.md) · [architecture](packages/dsh/architecture.md) · [future work & investigation record](docs/future-work.md).
+- **Native DeepSeek Harness plugin** (`yapa`, in `packages/dsh`) — 47 tools with structured outputs and GUI cards, always-on recall injected at the turn seam, **automatic capture of durable findings from every agent turn** (aux-LLM extractor + conservative conflict resolver), a **daily contradiction janitor** that archives duplicates and supersedes stale memories, hot-reloaded settings, schedule-bridged due dates, compaction capture, approval gating, and an embedded zero-server storage option. Docs: [install](packages/dsh/install.md) · [architecture](packages/dsh/architecture.md) · [future work & investigation record](docs/future-work.md).
 - **MCP server** (`yapa-mcp`, in `packages/mcp`) — the original stdio server plus the Claude-Code hook CLI. Everything below the "Repository layout" section primarily describes this frontend.
 
 ## Repository layout
@@ -37,9 +37,9 @@ YAPA runs two frontends over one core:
 
 ## How it works
 
-**Under DSH**, the plugin registers 46 `yapa_*` tools natively, injects recall + open tasks into every turn at the `agent/pre-step` seam (no hooks, no wiring), and stores data in the embedded local store by default. See `packages/dsh/architecture.md` for the full seam map.
+**Under DSH**, the plugin registers 47 `yapa_*` tools natively, injects recall + open tasks into every turn at the `agent/pre-step` seam (no hooks, no wiring), judges every completed turn for durable findings via a background aux-LLM extractor (auto-stored, deduplicated, contradictions resolved by superseding stale memories), runs a daily janitor sweep over the existing store, and stores data in the embedded local store by default. See `packages/dsh/architecture.md` for the full seam map.
 
-**Under MCP hosts**, YAPA is an MCP server with 41 tools. Your agent connects to it through your editor's MCP configuration. Once connected:
+**Under MCP hosts**, YAPA is an MCP server with 47 tools. Your agent connects to it through your editor's MCP configuration. Once connected:
 
 - **Before every response**, the agent queries your memories for relevant context
 - **When it learns something important**, it stores it automatically (bug fixes, preferences, decisions)
@@ -77,6 +77,7 @@ plus `yapa_status` and `yapa_storage_import`. `setup_instructions` and
 | `curation_now` | Trigger an immediate curation cycle (classifies unscored memories) |
 | `curation_status` | Curation status — provider, last run, cycles, memories scored |
 | `curation_preview` | Dry-run the classifier on a sample without persisting |
+| `janitor_now` | Run the contradiction janitor: resolve near-duplicate pairs (archive duplicates, supersede stale memories, keep distinct facts) |
 | `bucket_route_preview` | Dry-run bucket routing — show which memories would be routed where |
 | `bucket_route_now` | Route memories and write versioned system-prompt companion + training manifest |
 | `bucket_status` | Counts of memories in `selected_for` vs `promoted_to` state |
@@ -138,8 +139,21 @@ before each write. Memories within `YAPA_CONTRADICTION_DISTANCE_THRESHOLD`
 (default `0.25`, normalized cosine) are returned as `potential_conflicts`. The
 agent decides:
 
-- **Supersede** — call `memory_forget` on the conflicting ID, then move on.
+- **Supersede** — re-store with `supersedes: "<conflicting ID>"`: the old
+  memory is **archived** (`archived: true` + a `superseded_by` link) instead
+  of hard-deleted — filtered from `memory_recall`/`memory_list` by default,
+  recoverable anytime with `include_archived: true`.
 - **Coexist** — leave the older memory in place; the new one is already stored.
+
+`memory_forget` (hard delete) is reserved for memories that should never have
+existed.
+
+**Under DSH**, contradiction handling is also automatic: the response-capture
+pipeline routes every auto-captured candidate with near neighbors through a
+conservative LLM resolver (skip / add / supersede), and a daily **janitor
+sweep** resolves duplicate pairs already in the store (`yapa_janitor_now` /
+`janitor_now` runs it on demand). The resolver only supersedes when a fact
+clearly changed; when unsure it keeps both.
 
 Tunables:
 

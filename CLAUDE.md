@@ -371,8 +371,9 @@ Now execute these steps in order, without asking anything else:
 
    **Contradiction check:** `memory_store` returns a `potential_conflicts` field
    listing near-duplicate memories in the same collection. Read it — if a conflict
-   exists, decide supersede (call `memory_forget` on the old one) or coexist
-   (proceed as-is) BEFORE moving on.
+   exists, decide supersede (re-store with `supersedes: "<old ID>"` — archives the
+   old memory, recoverable via include_archived) or coexist (proceed as-is) BEFORE
+   moving on. Reserve `memory_forget` for memories that should never have existed.
 
    **Do not store:** ephemeral conversation state, obvious code patterns, anything
    already captured in git history or in an existing memory.

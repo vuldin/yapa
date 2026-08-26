@@ -37,8 +37,13 @@ type surfaces and bundles):
 Always-on pre-step injection; rules + promoted-memories prompt sections;
 settings namespace with hot reload; LLM bridge; schedule bridge; compaction
 capture; **response capture** (per-turn aux-LLM extraction from
-`assistant/message` buffers, dedup-by-distance before store, salience-capped
-`auto-capture` memories with session/turn provenance, next-injection notice);
+`assistant/message` buffers, retrieve-then-decide conflict resolution —
+skip/add/supersede — salience-capped `auto-capture` memories with
+session/turn provenance, next-injection notice, strict-distance fallback
+when the resolver is unreachable); **contradiction janitor** (daily sweep +
+`janitor_now`/`yapa_janitor_now` on both frontends) and the reversible
+archive-based `supersedes` contract on `memory_store` (agent path, capture
+path, and janitor all share it);
 approval gate; programmatic standup skill; per-session journals with
 dispose-time consolidation; effect-scoped decay/sync timers; embedded local
 store (cosine contract, embedding-model partition, batch flush, mtime
