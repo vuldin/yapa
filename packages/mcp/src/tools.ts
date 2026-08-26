@@ -283,21 +283,6 @@ export function registerTools(server: McpServer): void {
     },
   );
 
-  server.tool(
-    'journal_list_drafts',
-    'List the current session\'s pending journal drafts (debugging / inspection).',
-    {
-      collection: z.string().optional().describe('Collection to scan. Defaults to "global".'),
-    },
-    async ({ collection }) => {
-      const drafts = await listSessionDrafts(collection);
-      if (drafts.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No journal drafts for this session.' }] };
-      }
-      const text = drafts.map(d => `- **${d.id}** [${new Date((d.created_at ?? 0) * 1000).toISOString()}]: ${d.entry}`).join('\n');
-      return { content: [{ type: 'text' as const, text }] };
-    },
-  );
 
   // --- Curation ---
   server.tool(
@@ -321,6 +306,10 @@ export function registerTools(server: McpServer): void {
     },
   );
 
+  if (getConfig().TRAINING_PIPELINE) {
+  // ML-ops surface (curation classifier / buckets / system-prompt companion /
+  // training / eval / adapter promotion): operator workflows, gated on
+  // YAPA_TRAINING_PIPELINE=true. 18 tools.
   server.tool(
     'curation_now',
     'Trigger an immediate curation cycle: classifies unscored memories with trainable/durability/generalizability scores.',
@@ -415,6 +404,9 @@ export function registerTools(server: McpServer): void {
     },
   );
 
+  }
+
+  if (getConfig().TRAINING_PIPELINE) {
   // --- Buckets ---
   server.tool(
     'bucket_route_preview',
@@ -839,6 +831,8 @@ export function registerTools(server: McpServer): void {
     },
   );
 
+  }
+
   // --- Tasks ---
   server.tool(
     'task_create',
@@ -869,8 +863,9 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'task_list',
-    'List tasks with optional filters (status, priority, collection, due)',
+    'List tasks with optional filters (status, priority, collection, due) — or pass `id` to fetch one task with full detail (notes, dependencies)',
     {
+      id: z.string().optional().describe('Fetch a single task by ID (e.g., user-1) with full detail instead of listing'),
       status: z.enum(['pending', 'in_progress', 'blocked', 'complete']).optional(),
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
       customer: z.string().optional(),
@@ -878,7 +873,28 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional(),
       include_complete: z.boolean().optional().describe('Include completed tasks (default: false)'),
     },
-    async ({ status, priority, customer, project, collection, include_complete }) => {
+    async ({ id, status, priority, customer, project, collection, include_complete }) => {
+      if (id) {
+        const task = await getTask(id);
+        if (!task) {
+          return { content: [{ type: 'text' as const, text: `Task ${id} not found.` }] };
+        }
+        const norm = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toString().split(',').filter(Boolean);
+        const lines = [
+          `**${task.id}**: ${task.title}`,
+          `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
+          `Collection: ${task.collection}`,
+        ];
+        if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
+        if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
+        const tags = norm(task.metadata.tags);
+        if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
+        const deps = norm(task.metadata.depends_on);
+        if (deps.length) lines.push(`Depends on: ${deps.join(', ')}`);
+        const blocks = norm(task.metadata.blocks);
+        if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      }
       const tasks = await listTasks({
         status, priority, customer, project, collection,
         includeComplete: include_complete,
@@ -896,36 +912,6 @@ export function registerTools(server: McpServer): void {
     },
   );
 
-  server.tool(
-    'task_get',
-    'Get a single task by ID',
-    {
-      id: z.string().describe('Task ID (e.g., user-1)'),
-    },
-    async ({ id }) => {
-      const task = await getTask(id);
-      if (!task) {
-        return { content: [{ type: 'text' as const, text: `Task ${id} not found.` }] };
-      }
-      const lines = [
-        `**${task.id}**: ${task.title}`,
-        `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
-        `Collection: ${task.collection}`,
-      ];
-      if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
-      if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
-      if (task.metadata.tags) {
-        const tags = Array.isArray(task.metadata.tags) ? task.metadata.tags : (task.metadata.tags ?? '').split(',').filter(Boolean);
-        if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
-      }
-      const deps = Array.isArray(task.metadata.depends_on) ? task.metadata.depends_on : (task.metadata.depends_on ?? '').split(',').filter(Boolean);
-      if (deps.length) lines.push(`Depends on: ${deps.join(', ')}`);
-      const blocks = Array.isArray(task.metadata.blocks) ? task.metadata.blocks : (task.metadata.blocks ?? '').split(',').filter(Boolean);
-      if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
-
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-    },
-  );
 
   server.tool(
     'task_update',
@@ -1063,199 +1049,120 @@ export function registerTools(server: McpServer): void {
     },
   );
 
-  // --- Sync ---
+  // --- Sync (consolidated: one tool, action-dispatched) ---
   server.tool(
-    'sync_status',
-    'Check remote sync status — connection health, last sync times, pending items',
-    {},
-    async () => {
+    'sync',
+    'Remote sync (PostgreSQL+pgvector) control. Actions: `status` (health, last sync, pending), `now` (run a push+pull cycle immediately), `collections` (list remote collections with subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions — pass `collections`; unsubscribe keeps local data).',
+    {
+      action: z.enum(['status', 'now', 'collections', 'subscribe', 'unsubscribe']).describe('Sync operation to perform'),
+      collections: z.array(z.string()).optional().describe('Collection names (required for subscribe/unsubscribe)'),
+    },
+    async ({ action, collections }) => {
       const { SYNC_ENABLED, SYNC_DATABASE_URL, SYNC_INTERVAL_MS } = getConfig();
       if (!SYNC_ENABLED) {
         return { content: [{ type: 'text' as const, text: 'Remote sync is disabled. Set YAPA_SYNC_ENABLED=true to enable.' }] };
       }
-      const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1000}s)`];
-      lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
+      const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
 
-      try {
-        
-        const health = await checkRemoteHealth();
-        lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
-      } catch (e) {
-        lines.push(`Connection: error — ${e}`);
-      }
-
-      try {
-        
-        const lastPull = await getSyncPullTimestamp();
-        lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
-      } catch {
-        lines.push('Last pull: unknown');
-      }
-
-      try {
-        
-        const pending = await getPendingDeletes();
-        if (pending.length > 0) lines.push(`Pending deletes: ${pending.length}`);
-      } catch {
-        // ignore
-      }
-
-      // Background sync state (in-memory)
-      try {
-        
-        const state = getSyncState();
-        lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
-        lines.push(`Cycles completed: ${state.cycleCount}`);
-        if (state.lastCycleAt) {
-          lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
-        }
-        if (state.lastCycleError) {
-          lines.push(`Last error: ${state.lastCycleError}`);
-        }
-      } catch {
-        lines.push('Background state: unavailable');
-      }
-
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-    },
-  );
-
-  server.tool(
-    'sync_now',
-    'Trigger an immediate sync cycle (push then pull)',
-    {},
-    async () => {
-      const { SYNC_ENABLED } = getConfig();
-      if (!SYNC_ENABLED) {
-        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
-      }
-      try {
-        
-        const stats = await syncCycle();
-        if (!stats) {
-          return { content: [{ type: 'text' as const, text: 'Sync skipped — previous cycle still running.' }] };
-        }
-        const { push, pull } = stats;
-        const summary = `Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`;
-        return { content: [{ type: 'text' as const, text: summary }] };
-      } catch (e) {
-        return { content: [{ type: 'text' as const, text: `Sync error: ${e}` }] };
-      }
-    },
-  );
-
-  server.tool(
-    'sync_remote_collections',
-    'List collections available on the remote database with subscription status',
-    {},
-    async () => {
-      const { SYNC_ENABLED } = getConfig();
-      if (!SYNC_ENABLED) {
-        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
-      }
-      try {
-        
-        
-        const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
-        const subSet = new Set(subscriptions);
-
-        if (remote.length === 0) {
-          return { content: [{ type: 'text' as const, text: 'No collections found on remote.' }] };
+      switch (action) {
+        case 'status': {
+          const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1000}s)`];
+          lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
+          try {
+            const health = await checkRemoteHealth();
+            lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
+          } catch (e) {
+            lines.push(`Connection: error — ${e}`);
+          }
+          try {
+            const lastPull = await getSyncPullTimestamp();
+            lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
+          } catch {
+            lines.push('Last pull: unknown');
+          }
+          try {
+            const pending = await getPendingDeletes();
+            if (pending.length > 0) lines.push(`Pending deletes: ${pending.length}`);
+          } catch {
+            // ignore
+          }
+          try {
+            const state = getSyncState();
+            lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
+            lines.push(`Cycles completed: ${state.cycleCount}`);
+            if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
+            if (state.lastCycleError) lines.push(`Last error: ${state.lastCycleError}`);
+          } catch {
+            lines.push('Background state: unavailable');
+          }
+          return text(lines.join('\n'));
         }
 
-        const lines = remote.map(r =>
-          `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? '(subscribed)' : ''}`
-        );
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-      } catch (e) {
-        return { content: [{ type: 'text' as const, text: `Error querying remote: ${e}` }] };
-      }
-    },
-  );
-
-  server.tool(
-    'sync_subscribe',
-    'Subscribe to remote collections for pull sync',
-    {
-      collections: z.array(z.string()).describe('Collection names to subscribe to'),
-    },
-    async ({ collections: requested }) => {
-      const { SYNC_ENABLED } = getConfig();
-      if (!SYNC_ENABLED) {
-        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
-      }
-      try {
-        
-        
-        
-
-        // Validate that requested collections exist on remote
-        const remote = await getRemoteCollections();
-        const remoteNames = new Set(remote.map(r => r.name));
-        const valid: string[] = [];
-        const invalid: string[] = [];
-        for (const name of requested) {
-          if (remoteNames.has(name)) valid.push(name);
-          else invalid.push(name);
+        case 'now': {
+          try {
+            const stats = await syncCycle();
+            if (!stats) return text('Sync skipped — previous cycle still running.');
+            const { push, pull } = stats;
+            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
+          } catch (e) {
+            return text(`Sync error: ${e}`);
+          }
         }
 
-        if (valid.length === 0) {
-          return { content: [{ type: 'text' as const, text: `None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}` }] };
+        case 'collections': {
+          try {
+            const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
+            const subSet = new Set(subscriptions);
+            if (remote.length === 0) return text('No collections found on remote.');
+            return text(remote.map(r => `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? '(subscribed)' : ''}`).join('\n'));
+          } catch (e) {
+            return text(`Error querying remote: ${e}`);
+          }
         }
 
-        // Add to subscriptions (deduped)
-        const existing = await getSyncSubscriptions();
-        const merged = [...new Set([...existing, ...valid])];
-        await updateSyncSubscriptions(merged);
-
-        // Create local collections for any that don't exist yet
-        for (const name of valid) {
-          await getOrCreateCollection(name);
+        case 'subscribe': {
+          if (!collections?.length) return text('Refused — `collections` is required for subscribe.');
+          try {
+            const remote = await getRemoteCollections();
+            const remoteNames = new Set(remote.map(r => r.name));
+            const valid: string[] = [];
+            const invalid: string[] = [];
+            for (const name of collections) {
+              if (remoteNames.has(name)) valid.push(name);
+              else invalid.push(name);
+            }
+            if (valid.length === 0) {
+              return text(`None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}`);
+            }
+            const existing = await getSyncSubscriptions();
+            await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
+            for (const name of valid) await getOrCreateCollection(name);
+            await syncCycle();
+            const lines = [`Subscribed to: ${valid.join(', ')}`];
+            if (invalid.length > 0) lines.push(`Not found on remote: ${invalid.join(', ')}`);
+            return text(lines.join('\n'));
+          } catch (e) {
+            return text(`Error: ${e}`);
+          }
         }
 
-        // Trigger a sync cycle
-        
-        await syncCycle();
-
-        const lines = [`Subscribed to: ${valid.join(', ')}`];
-        if (invalid.length > 0) {
-          lines.push(`Not found on remote: ${invalid.join(', ')}`);
+        case 'unsubscribe': {
+          if (!collections?.length) return text('Refused — `collections` is required for unsubscribe.');
+          try {
+            const existing = await getSyncSubscriptions();
+            const removeSet = new Set(collections);
+            await updateSyncSubscriptions(existing.filter(c => !removeSet.has(c)));
+            const removed = collections.filter(c => existing.includes(c));
+            const notFound = collections.filter(c => !existing.includes(c));
+            const lines: string[] = [];
+            if (removed.length > 0) lines.push(`Unsubscribed from: ${removed.join(', ')}`);
+            if (notFound.length > 0) lines.push(`Not subscribed: ${notFound.join(', ')}`);
+            lines.push('Local data has been kept.');
+            return text(lines.join('\n'));
+          } catch (e) {
+            return text(`Error: ${e}`);
+          }
         }
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-      } catch (e) {
-        return { content: [{ type: 'text' as const, text: `Error: ${e}` }] };
-      }
-    },
-  );
-
-  server.tool(
-    'sync_unsubscribe',
-    'Unsubscribe from remote collections (local data is kept)',
-    {
-      collections: z.array(z.string()).describe('Collection names to unsubscribe from'),
-    },
-    async ({ collections: toRemove }) => {
-      const { SYNC_ENABLED } = getConfig();
-      if (!SYNC_ENABLED) {
-        return { content: [{ type: 'text' as const, text: 'Remote sync is disabled.' }] };
-      }
-      try {
-        
-        const existing = await getSyncSubscriptions();
-        const removeSet = new Set(toRemove);
-        const updated = existing.filter(c => !removeSet.has(c));
-        await updateSyncSubscriptions(updated);
-
-        const removed = toRemove.filter(c => existing.includes(c));
-        const notFound = toRemove.filter(c => !existing.includes(c));
-
-        const lines: string[] = [];
-        if (removed.length > 0) lines.push(`Unsubscribed from: ${removed.join(', ')}`);
-        if (notFound.length > 0) lines.push(`Not subscribed: ${notFound.join(', ')}`);
-        lines.push('Local data has been kept.');
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-      } catch (e) {
-        return { content: [{ type: 'text' as const, text: `Error: ${e}` }] };
       }
     },
   );

@@ -64,6 +64,8 @@ export interface YapaConfig {
 
   // Curation (Phase 1)
   CURATION_ENABLED: boolean;
+  /** Expose the training/buckets/eval tool surface (agent-driven ML ops). Default false — the pipeline runs via core APIs; tools appear when enabled. */
+  TRAINING_PIPELINE: boolean;
   CURATION_INTERVAL_MS: number;
   CURATION_LLM_PROVIDER: CurationLLMProvider;
   CURATION_MODEL: string;
@@ -136,6 +138,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     COMPACTION_SIMILARITY_DISTANCE: parseFloat(get(env, 'COMPACTION_SIMILARITY_DISTANCE', '0.30')),
 
     CURATION_ENABLED: get(env, 'CURATION_ENABLED', 'false') === 'true',
+    TRAINING_PIPELINE: get(env, 'TRAINING_PIPELINE', 'false') === 'true',
     CURATION_INTERVAL_MS: parseInt(get(env, 'CURATION_INTERVAL_MS', '604800000'), 10), // 7 days
     CURATION_LLM_PROVIDER: get(env, 'CURATION_LLM_PROVIDER', 'anthropic') as CurationLLMProvider,
     CURATION_MODEL: get(env, 'CURATION_MODEL', ''),

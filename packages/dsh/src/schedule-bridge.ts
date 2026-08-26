@@ -53,7 +53,7 @@ export function registerScheduleBridge(ctx: Context, getResolved: () => Resolved
           callId: mintCallId(),
           name: 'schedule_create',
           arguments: {
-            prompt: `YAPA task ${taskId} is due${title ? `: ${title}` : ''}. Check it with yapa_task_get and nudge or act as appropriate.`,
+            prompt: `YAPA task ${taskId} is due${title ? `: ${title}` : ''}. Check it with yapa_task_list({ id }) and nudge or act as appropriate.`,
             at: new Date(dueSeconds * 1000).toISOString(),
           },
           agent,

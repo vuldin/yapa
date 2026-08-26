@@ -68,7 +68,10 @@ export function apply(ctx: Context, config: Config): void {
 
   // --- Model-facing surface ---------------------------------------------------
   registerTools(ctx);
-  registerAdvancedTools(ctx);
+  // Advanced tools are re-registrable: the settings watcher disposes and
+  // re-registers this group when the `trainingPipeline` gate flips, so the
+  // tool catalog follows the knob without a process restart.
+  let disposeAdvanced = registerAdvancedTools(ctx, getResolved);
   ctx.systemPrompt.section({
     name: RULES_SECTION_NAME,
     order: RULES_SECTION_ORDER,
@@ -95,11 +98,16 @@ export function apply(ctx: Context, config: Config): void {
     const prevSync = resolved.core.SYNC_ENABLED && resolved.core.SYNC_DATABASE_URL;
     const prevInterval = resolved.core.SYNC_INTERVAL_MS;
     const prevStore = `${resolved.core.STORAGE}:${resolved.core.LOCAL_STORE_PATH}`;
+    const prevPipeline = resolved.trainingPipeline;
     currentConfig = { ...config, ...definedOnly(next as Config) };
     resolved = resolveConfig(currentConfig);
     setConfig(resolved.core);
     if (prevStore !== `${resolved.core.STORAGE}:${resolved.core.LOCAL_STORE_PATH}`) {
       applyStore(resolved.core);
+    }
+    if (prevPipeline !== resolved.trainingPipeline) {
+      disposeAdvanced();
+      disposeAdvanced = registerAdvancedTools(ctx, getResolved);
     }
     const nextSync = resolved.core.SYNC_ENABLED && resolved.core.SYNC_DATABASE_URL;
     if (prevSync !== nextSync || prevInterval !== resolved.core.SYNC_INTERVAL_MS) {

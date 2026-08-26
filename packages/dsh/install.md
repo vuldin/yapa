@@ -70,7 +70,9 @@ salience-capped — see `captureMinChars`, `captureMaxMemories`,
 existing memories go through the conservative resolver, which can supersede
 — archive — a stale memory when a fact has changed), `janitorEnabled` /
 `janitorMaxPairs` (daily contradiction sweep over the existing store; manual
-trigger: `yapa_janitor_now`), `promotedSection`
+trigger: `yapa_janitor_now`), `trainingPipeline` (expose the 18 ML-ops
+tools — curation/buckets/system-prompt/training/eval/adapter — default off;
+flipping it hot-reloads the tool catalog without a restart), `promotedSection`
 (system-prompt-bucket memories render as a live prompt section),
 `standupSkill` (registers the `yapa-standup` skill),
 `auxProvider`/`auxModel` (route for curation/synthesis/judge/extractor LLM

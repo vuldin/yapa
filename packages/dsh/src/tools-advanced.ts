@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import type { ResolvedConfig } from './config.js';
 import {
   chromaStore,
   getStore,
@@ -63,10 +64,25 @@ const confirmParam = {
   description: 'Required safety flag — must be true',
 } as const;
 
-export function registerAdvancedTools(ctx: Context): void {
+/**
+ * Returns a disposer that unregisters everything registered here — the
+ * settings watcher disposes + re-registers when the `trainingPipeline` gate
+ * flips, so the tool catalog follows the knob without a process restart.
+ */
+export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedConfig): () => void {
+  const disposers: Array<() => void> = [];
+  const reg = (def: Parameters<Context['tools']['register']>[0]): void => {
+    disposers.push(ctx.tools.register(def));
+  };
+  // The ML-ops subsystem (curation classifier, bucket routing, system-prompt
+  // companion, training, eval, adapter promotion) is operator workflow, not
+  // daily agent surface — gated off by default (18 tools).
+  const pipeline = getResolved().trainingPipeline;
+
   // --- Curation -----------------------------------------------------------
 
-  ctx.tools.register(defineTool({
+  if (pipeline) {
+  reg(defineTool({
     name: 'yapa_curation_now',
     description:
       'Trigger an immediate curation cycle: classifies unscored memories with '
@@ -104,7 +120,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Run curation cycle', kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_curation_status',
     description: 'Check curation status — enabled, model route, last run, cycle count, memories scored.',
     parameters: {},
@@ -135,7 +151,9 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Curation status', kind: 'read' }),
   }));
 
-  ctx.tools.register(defineTool({
+  }
+
+  reg(defineTool({
     name: 'yapa_janitor_now',
     description:
       'Run the contradiction janitor now: scan for near-duplicate memory pairs and judge each '
@@ -177,7 +195,8 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Run contradiction janitor', kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  if (pipeline) {
+  reg(defineTool({
     name: 'yapa_curation_preview',
     description: 'Dry-run the classifier on a small sample without persisting.',
     parameters: {
@@ -228,7 +247,7 @@ export function registerAdvancedTools(ctx: Context): void {
 
   // --- Buckets --------------------------------------------------------------
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_bucket_route_preview',
     description:
       'Dry-run: show which memories would be routed to the system-prompt prompt section and the '
@@ -269,7 +288,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Preview bucket routing', kind: 'search' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_bucket_route_now',
     description:
       'Execute bucket routing: tag qualifying memories with `selected_for` and write the '
@@ -307,7 +326,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Route memories into buckets', kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_bucket_status',
     description: 'Show current bucket state: counts of memories in selected_for vs promoted_to for each bucket + version.',
     parameters: {},
@@ -338,7 +357,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Bucket status', kind: 'read' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_system_prompt_activate',
     description:
       'Confirm a system-prompt companion version is live (the DSH promoted section renders it '
@@ -362,7 +381,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Activate system-prompt v${args.version}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_system_prompt_deactivate',
     description: 'Rollback a previously-activated system-prompt companion version; memories reappear in default RAG.',
     parameters: {
@@ -385,7 +404,7 @@ export function registerAdvancedTools(ctx: Context): void {
 
   // --- Training / eval / promotion -------------------------------------------
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_training_dataset_preview',
     description:
       'Read a training manifest, run synthesis (memory → chat-format training examples), and '
@@ -420,7 +439,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Preview training dataset v${args.manifest_version}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_training_trigger',
     description:
       'Submit a training job (spends money on the training backend). Requires confirm=true AND '
@@ -464,7 +483,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Trigger training on manifest v${args.manifest_version}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_training_status',
     description: 'List all training runs in the adapter registry with their current status.',
     parameters: {},
@@ -495,7 +514,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'List training runs', kind: 'read' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_training_get',
     description: 'Get details on a single training run. Polls the backend for live status if still pending/running.',
     parameters: {
@@ -534,7 +553,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Get training run ${args.adapter_id}`, kind: 'read' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_training_cancel',
     description: 'Cancel an in-flight training run. Also clears selected_for on all memories routed into its manifest.',
     parameters: {
@@ -557,7 +576,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Cancel training run ${args.adapter_id}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_eval_run',
     description:
       'Run aggregate eval on a trained adapter against the holdout slice of its training '
@@ -596,7 +615,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Eval adapter ${args.adapter_id}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_eval_compare',
     description: 'Side-by-side eval comparison of two adapters on the same holdout.',
     parameters: {
@@ -637,7 +656,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Compare ${args.adapter_id_a} vs ${args.adapter_id_b}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_eval_verify',
     description:
       'Per-memory verification: for every memory in the adapter\'s training manifest, query the '
@@ -676,7 +695,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Verify adapter ${args.adapter_id} per-memory`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_adapter_promote',
     description:
       'Promote a trained adapter: transition verified memories from selected_for → promoted_to. '
@@ -709,7 +728,7 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Promote adapter ${args.adapter_id}`, kind: 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_adapter_demote',
     description: 'Rollback an adapter promotion; restores full RAG visibility for its memories.',
     parameters: {
@@ -734,12 +753,21 @@ export function registerAdvancedTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `Demote adapter ${args.adapter_id}`, kind: 'execute' }),
   }));
 
-  // --- Sync -----------------------------------------------------------------
+  }
 
-  ctx.tools.register(defineTool({
-    name: 'yapa_sync_status',
-    description: 'Check remote sync status — connection health, last sync times, pending items.',
-    parameters: {},
+  // --- Sync (consolidated: one tool, action-dispatched) ------------------------
+
+  reg(defineTool({
+    name: 'yapa_sync',
+    description:
+      'Remote sync (PostgreSQL+pgvector) control. Actions: `status` (health, last sync, pending), '
+      + '`now` (run a push+pull cycle immediately), `collections` (list remote collections with '
+      + 'subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions — pass '
+      + '`collections`; unsubscribe keeps local data).',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['status', 'now', 'collections', 'subscribe', 'unsubscribe'], description: 'Sync operation to perform' },
+      collections: { type: 'array', items: { type: 'string' }, description: 'Collection names (required for subscribe/unsubscribe)' },
+    },
     output: {
       schema: {
         type: 'object', additionalProperties: false,
@@ -747,170 +775,115 @@ export function registerAdvancedTools(ctx: Context): void {
       },
       render: (_a, v) => text(v.text),
     },
-    isConcurrencySafe: () => true,
-    timeoutMs: 30_000,
-    async execute() {
+    isConcurrencySafe: args => args.action === 'status' || args.action === 'collections',
+    timeoutMs: 300_000,
+    async execute(args) {
       const cfg = getConfig();
       if (!cfg.SYNC_ENABLED) return { text: 'Remote sync is disabled. Set syncEnabled in the plugin config or YAPA_SYNC_ENABLED=true to enable.' };
-      const lines = [`Sync: **enabled** (interval: ${cfg.SYNC_INTERVAL_MS / 1000}s)`];
-      lines.push(`Remote: ${cfg.SYNC_DATABASE_URL ? cfg.SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
-      try {
-        const health = await checkRemoteHealth();
-        lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
-      } catch (e) {
-        lines.push(`Connection: error — ${e}`);
-      }
-      try {
-        const lastPull = await getSyncPullTimestamp();
-        lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
-      } catch { lines.push('Last pull: unknown'); }
-      try {
-        const pending = await getPendingDeletes();
-        if (pending.length > 0) lines.push(`Pending deletes: ${pending.length}`);
-      } catch { /* ignore */ }
-      try {
-        const state = getSyncState();
-        lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
-        lines.push(`Cycles completed: ${state.cycleCount}`);
-        if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
-        if (state.lastCycleError) lines.push(`Last error: ${state.lastCycleError}`);
-      } catch { lines.push('Background state: unavailable'); }
-      return { text: lines.join('\n') };
-    },
-    presentCall: () => ({ card: 'generic', title: 'Sync status', kind: 'read' }),
-  }));
 
-  ctx.tools.register(defineTool({
-    name: 'yapa_sync_now',
-    description: 'Trigger an immediate sync cycle (push then pull).',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object', additionalProperties: false,
-        properties: { text: { type: 'string', required: true } },
-      },
-      render: (_a, v) => text(v.text),
-    },
-    timeoutMs: 300_000,
-    async execute() {
-      if (!getConfig().SYNC_ENABLED) return { text: 'Remote sync is disabled.' };
-      try {
-        const stats = await syncCycle();
-        if (!stats) return { text: 'Sync skipped — previous cycle still running.' };
-        const { push, pull } = stats;
-        return { text: `Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors` };
-      } catch (e) {
-        return { text: `Sync error: ${e}` };
-      }
-    },
-    presentCall: () => ({ card: 'generic', title: 'Run sync cycle', kind: 'execute' }),
-  }));
-
-  ctx.tools.register(defineTool({
-    name: 'yapa_sync_remote_collections',
-    description: 'List collections available on the remote database with subscription status.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object', additionalProperties: false,
-        properties: { text: { type: 'string', required: true } },
-      },
-      render: (_a, v) => text(v.text),
-    },
-    isConcurrencySafe: () => true,
-    timeoutMs: 30_000,
-    async execute() {
-      if (!getConfig().SYNC_ENABLED) return { text: 'Remote sync is disabled.' };
-      try {
-        const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
-        const subSet = new Set(subscriptions);
-        if (remote.length === 0) return { text: 'No collections found on remote.' };
-        return { text: remote.map(r => `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? '(subscribed)' : ''}`).join('\n') };
-      } catch (e) {
-        return { text: `Error querying remote: ${e}` };
-      }
-    },
-    presentCall: () => ({ card: 'generic', title: 'List remote collections', kind: 'search' }),
-  }));
-
-  ctx.tools.register(defineTool({
-    name: 'yapa_sync_subscribe',
-    description: 'Subscribe to remote collections for pull sync.',
-    parameters: {
-      collections: { type: 'array', required: true, items: { type: 'string' }, description: 'Collection names to subscribe to' },
-    },
-    output: {
-      schema: {
-        type: 'object', additionalProperties: false,
-        properties: { text: { type: 'string', required: true } },
-      },
-      render: (_a, v) => text(v.text),
-    },
-    timeoutMs: 120_000,
-    async execute(args) {
-      if (!getConfig().SYNC_ENABLED) return { text: 'Remote sync is disabled.' };
-      try {
-        const remote = await getRemoteCollections();
-        const remoteNames = new Set(remote.map(r => r.name));
-        const valid: string[] = [];
-        const invalid: string[] = [];
-        for (const name of args.collections) {
-          if (remoteNames.has(name)) valid.push(name);
-          else invalid.push(name);
+      switch (args.action) {
+        case 'status': {
+          const lines = [`Sync: **enabled** (interval: ${cfg.SYNC_INTERVAL_MS / 1000}s)`];
+          lines.push(`Remote: ${cfg.SYNC_DATABASE_URL ? cfg.SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
+          try {
+            const health = await checkRemoteHealth();
+            lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
+          } catch (e) {
+            lines.push(`Connection: error — ${e}`);
+          }
+          try {
+            const lastPull = await getSyncPullTimestamp();
+            lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
+          } catch { lines.push('Last pull: unknown'); }
+          try {
+            const pending = await getPendingDeletes();
+            if (pending.length > 0) lines.push(`Pending deletes: ${pending.length}`);
+          } catch { /* ignore */ }
+          try {
+            const state = getSyncState();
+            lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
+            lines.push(`Cycles completed: ${state.cycleCount}`);
+            if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
+            if (state.lastCycleError) lines.push(`Last error: ${state.lastCycleError}`);
+          } catch { lines.push('Background state: unavailable'); }
+          return { text: lines.join('\n') };
         }
-        if (valid.length === 0) {
-          return { text: `None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}` };
+
+        case 'now': {
+          try {
+            const stats = await syncCycle();
+            if (!stats) return { text: 'Sync skipped — previous cycle still running.' };
+            const { push, pull } = stats;
+            return { text: `Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors` };
+          } catch (e) {
+            return { text: `Sync error: ${e}` };
+          }
         }
-        const existing = await getSyncSubscriptions();
-        await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
-        for (const name of valid) await getOrCreateCollection(name);
-        await syncCycle();
-        const lines = [`Subscribed to: ${valid.join(', ')}`];
-        if (invalid.length > 0) lines.push(`Not found on remote: ${invalid.join(', ')}`);
-        return { text: lines.join('\n') };
-      } catch (e) {
-        return { text: `Error: ${e}` };
+
+        case 'collections': {
+          try {
+            const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
+            const subSet = new Set(subscriptions);
+            if (remote.length === 0) return { text: 'No collections found on remote.' };
+            return { text: remote.map(r => `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? '(subscribed)' : ''}`).join('\n') };
+          } catch (e) {
+            return { text: `Error querying remote: ${e}` };
+          }
+        }
+
+        case 'subscribe': {
+          if (!args.collections?.length) return { text: 'Refused — `collections` is required for subscribe.' };
+          try {
+            const remote = await getRemoteCollections();
+            const remoteNames = new Set(remote.map(r => r.name));
+            const valid: string[] = [];
+            const invalid: string[] = [];
+            for (const name of args.collections) {
+              if (remoteNames.has(name)) valid.push(name);
+              else invalid.push(name);
+            }
+            if (valid.length === 0) {
+              return { text: `None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}` };
+            }
+            const existing = await getSyncSubscriptions();
+            await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
+            for (const name of valid) await getOrCreateCollection(name);
+            await syncCycle();
+            const lines = [`Subscribed to: ${valid.join(', ')}`];
+            if (invalid.length > 0) lines.push(`Not found on remote: ${invalid.join(', ')}`);
+            return { text: lines.join('\n') };
+          } catch (e) {
+            return { text: `Error: ${e}` };
+          }
+        }
+
+        case 'unsubscribe': {
+          if (!args.collections?.length) return { text: 'Refused — `collections` is required for unsubscribe.' };
+          try {
+            const existing = await getSyncSubscriptions();
+            const removeSet = new Set(args.collections);
+            await updateSyncSubscriptions(existing.filter(c => !removeSet.has(c)));
+            const removed = args.collections.filter(c => existing.includes(c));
+            const notFound = args.collections.filter(c => !existing.includes(c));
+            const lines: string[] = [];
+            if (removed.length > 0) lines.push(`Unsubscribed from: ${removed.join(', ')}`);
+            if (notFound.length > 0) lines.push(`Not subscribed: ${notFound.join(', ')}`);
+            lines.push('Local data has been kept.');
+            return { text: lines.join('\n') };
+          } catch (e) {
+            return { text: `Error: ${e}` };
+          }
+        }
       }
     },
-    presentCall: args => ({ card: 'generic', title: `Subscribe to ${args.collections.join(', ')}`, kind: 'edit' }),
+    presentCall: args => ({ card: 'generic', title: `Sync: ${args.action}`, kind: args.action === 'status' || args.action === 'collections' ? 'read' : 'execute' }),
   }));
 
-  ctx.tools.register(defineTool({
-    name: 'yapa_sync_unsubscribe',
-    description: 'Unsubscribe from remote collections (local data is kept).',
-    parameters: {
-      collections: { type: 'array', required: true, items: { type: 'string' } },
-    },
-    output: {
-      schema: {
-        type: 'object', additionalProperties: false,
-        properties: { text: { type: 'string', required: true } },
-      },
-      render: (_a, v) => text(v.text),
-    },
-    async execute(args) {
-      if (!getConfig().SYNC_ENABLED) return { text: 'Remote sync is disabled.' };
-      try {
-        const existing = await getSyncSubscriptions();
-        const removeSet = new Set(args.collections);
-        await updateSyncSubscriptions(existing.filter(c => !removeSet.has(c)));
-        const removed = args.collections.filter(c => existing.includes(c));
-        const notFound = args.collections.filter(c => !existing.includes(c));
-        const lines: string[] = [];
-        if (removed.length > 0) lines.push(`Unsubscribed from: ${removed.join(', ')}`);
-        if (notFound.length > 0) lines.push(`Not subscribed: ${notFound.join(', ')}`);
-        lines.push('Local data has been kept.');
-        return { text: lines.join('\n') };
-      } catch (e) {
-        return { text: `Error: ${e}` };
-      }
-    },
-    presentCall: args => ({ card: 'generic', title: `Unsubscribe ${args.collections.join(', ')}`, kind: 'edit' }),
-  }));
+
 
   // --- Storage migration -----------------------------------------------------
 
-  ctx.tools.register(defineTool({
+  reg(defineTool({
     name: 'yapa_storage_import',
     description:
       'Import all documents from ChromaDB into the embedded local store. Requires the plugin to '
@@ -968,4 +941,6 @@ export function registerAdvancedTools(ctx: Context): void {
       kind: 'move',
     }),
   }));
+
+  return () => { for (const d of disposers) d(); };
 }

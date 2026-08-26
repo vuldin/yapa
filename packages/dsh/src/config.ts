@@ -67,6 +67,8 @@ export interface Config {
   captureDedupeDistance?: number;
   /** Run the daily contradiction sweep over existing memories (conservative resolver). */
   janitorEnabled?: boolean;
+  /** Expose the 18 ML-ops tools (curation/buckets/system-prompt/training/eval/adapter). Default off — operator workflow, not daily agent surface. */
+  trainingPipeline?: boolean;
   /** Max duplicate pairs judged per janitor sweep. */
   janitorMaxPairs?: number;
   /** Render promoted system-prompt memories as a live prompt section. */
@@ -112,6 +114,7 @@ export const Config: z<Config> = z.object({
   captureMaxSalience: z.number(),
   captureDedupeDistance: z.number(),
   janitorEnabled: z.boolean(),
+  trainingPipeline: z.boolean(),
   janitorMaxPairs: z.number(),
   promotedSection: z.boolean(),
   standupSkill: z.boolean(),
@@ -135,6 +138,7 @@ export const PLUGIN_DEFAULTS = {
   captureMaxSalience: 2.0,
   captureDedupeDistance: 0.25,
   janitorEnabled: true,
+  trainingPipeline: false,
   janitorMaxPairs: 20,
   promotedSection: true,
   standupSkill: true,
@@ -160,6 +164,7 @@ export interface ResolvedConfig {
   captureDedupeDistance: number;
   janitorEnabled: boolean;
   janitorMaxPairs: number;
+  trainingPipeline: boolean;
   promotedSection: boolean;
   standupSkill: boolean;
   approvalGate: boolean;
@@ -191,6 +196,7 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     ...(merged.syncEnabled !== undefined && { SYNC_ENABLED: merged.syncEnabled }),
     ...(merged.syncDatabaseUrl !== undefined && { SYNC_DATABASE_URL: merged.syncDatabaseUrl }),
     ...(merged.syncIntervalMs !== undefined && { SYNC_INTERVAL_MS: merged.syncIntervalMs }),
+    ...(merged.trainingPipeline !== undefined && { TRAINING_PIPELINE: merged.trainingPipeline }),
   };
   return {
     core,
@@ -209,6 +215,7 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     captureMaxSalience: merged.captureMaxSalience ?? PLUGIN_DEFAULTS.captureMaxSalience,
     captureDedupeDistance: merged.captureDedupeDistance ?? PLUGIN_DEFAULTS.captureDedupeDistance,
     janitorEnabled: merged.janitorEnabled ?? PLUGIN_DEFAULTS.janitorEnabled,
+    trainingPipeline: merged.trainingPipeline ?? PLUGIN_DEFAULTS.trainingPipeline,
     janitorMaxPairs: merged.janitorMaxPairs ?? PLUGIN_DEFAULTS.janitorMaxPairs,
     promotedSection: merged.promotedSection ?? PLUGIN_DEFAULTS.promotedSection,
     standupSkill: merged.standupSkill ?? PLUGIN_DEFAULTS.standupSkill,

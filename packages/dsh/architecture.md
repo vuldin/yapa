@@ -10,7 +10,8 @@ layer works, how to run it, and how to verify it. For install steps see
 ┌──────────────────────────── DeepSeek Harness process ───────────────────────────┐
 │                                                                                 │
 │  yapa plugin (cordis, effect-scoped)                                            │
-│  ├── 46 yapa_* tools .............. ctx.tools.register(defineTool(...))         │
+│  ├── 23 yapa_* tools .............. ctx.tools.register(defineTool(...))         │
+│  │   (+18 ML-ops gated off by default — `trainingPipeline`)                     │
 │  ├── rules prompt section ......... ctx.systemPrompt.section (order 190)        │
 │  ├── promoted-memories section .... ctx.systemPrompt.section (order 50, cached) │
 │  ├── pre-step injector ............ ctx.on('agent/pre-step', ...) waterfall     │
@@ -38,7 +39,7 @@ layer works, how to run it, and how to verify it. For install steps see
 
 | YAPA need | DSH seam | Notes |
 |---|---|---|
-| Tools | `ctx.tools.register(defineTool)` | Structured outputs validated against `output.schema`; `render()` projects to model-facing markdown (parity with the MCP server's text); `presentCall`/`presentResult` give GUI cards; `timeoutMs`, `isConcurrencySafe` opt into scheduling. |
+| Tools | `ctx.tools.register(defineTool)` | Structured outputs validated against `output.schema`; `render()` projects to model-facing markdown (parity with the MCP server's text); `presentCall`/`presentResult` give GUI cards; `timeoutMs`, `isConcurrencySafe` opt into scheduling. 23 tools register by default; the 18-tool ML-ops subsystem (curation/buckets/system-prompt/training/eval/adapter) is gated behind `trainingPipeline` (default off) — the settings watcher disposes and re-registers the advanced group when the gate flips, hot-reloading the tool catalog. |
 | Standing behavioral rules | `ctx.systemPrompt.section({name: 'yapa:rules', order: 190, text})` | Replaces the CLAUDE.md/AGENTS.md install block. Includes the boundary rules vs `todo_write` / `create_goal` / `schedule_create`. |
 | Promoted memories in the system prompt | second section, `yapa:promoted`, order 50 | Sections render synchronously, so content comes from a cache refreshed on activation, every 5 min, and after bucket tool calls (`tools/result` observer). |
 | Per-prompt recall + task surfacing | `agent/pre-step` waterfall | Runs after the inbox claim with the turn's actual messages. Splice position: immediately after the last claimed message (same pattern as `dsh-agent-instructions`). Injected as a durable `source: {kind: 'plugin', plugin: 'yapa', form: 'recall'}` message. Fail-open: store errors degrade to no context. **Not** `system-prompt/assemble` — the loop assembles before appending `user/message`, so the current prompt is invisible there (found in acceptance testing). |

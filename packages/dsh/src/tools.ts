@@ -28,7 +28,6 @@ import {
   listCollections,
   listCollectionsWithCounts,
   listMemories,
-  listSessionDrafts,
   listTasks,
   parseRelativeDate,
   recallMemory,
@@ -68,8 +67,25 @@ const taskItem = {
     priority: { type: 'string' },
     due_date: { type: 'number' },
     collection: { type: 'string', required: true },
+    notes: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+    depends_on: { type: 'array', items: { type: 'string' } },
+    blocks: { type: 'array', items: { type: 'string' } },
   },
 } as const;
+
+const normList = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toString().split(',').filter(Boolean);
+
+/** Full-detail projection (notes/dependencies) for single-task fetches. */
+function toTaskDetail(t: { id: string; title: string; collection: string; metadata: Record<string, any> }) {
+  return {
+    ...toTaskItem(t),
+    ...(t.metadata.notes !== undefined && { notes: t.metadata.notes }),
+    ...(normList(t.metadata.tags).length && { tags: normList(t.metadata.tags) }),
+    ...(normList(t.metadata.depends_on).length && { depends_on: normList(t.metadata.depends_on) }),
+    ...(normList(t.metadata.blocks).length && { blocks: normList(t.metadata.blocks) }),
+  };
+}
 
 /** Project a core task record onto the canonical task item. */
 function toTaskItem(t: { id: string; title: string; collection: string; metadata: Record<string, any> }) {
@@ -516,43 +532,6 @@ export function registerTools(ctx: Context): void {
     presentCall: () => ({ card: 'generic', title: 'Consolidate session journal', kind: 'other' }),
   }));
 
-  ctx.tools.register(defineTool({
-    name: 'yapa_journal_list_drafts',
-    description: 'List the current session\'s pending journal drafts (inspection/debugging).',
-    parameters: {
-      collection: { type: 'string', description: 'Collection to scan (default: global)' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          drafts: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                id: { type: 'string', required: true },
-                entry: { type: 'string', required: true },
-                created_at: { type: 'integer', required: true },
-              },
-            },
-          },
-        },
-      },
-      render: (_args, v) => v.drafts.length === 0
-        ? text('No journal drafts for this session.')
-        : text(v.drafts.map(d => `- **${d.id}** [${new Date(d.created_at * 1000).toISOString()}]: ${d.entry}`).join('\n')),
-    },
-    isConcurrencySafe: () => true,
-    async execute(args, exec) {
-      const drafts = await listSessionDrafts(args.collection, exec.agent?.id);
-      return { drafts: drafts.map(d => ({ id: d.id, entry: d.entry, created_at: d.created_at })) };
-    },
-    presentCall: () => ({ card: 'generic', title: 'List journal drafts', kind: 'search' }),
-  }));
 
   // --- Tasks (durable, cross-session — see the boundary rules in the rules
   //     section: todo_write is session-scoped, goals drive continuation,
@@ -609,8 +588,9 @@ export function registerTools(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'yapa_task_list',
-    description: 'List durable tasks with optional filters (status, priority, collection, customer, project).',
+    description: 'List durable tasks with optional filters (status, priority, collection, customer, project) — or pass `id` to fetch one task with full detail (notes, dependencies).',
     parameters: {
+      id: { type: 'string', description: 'Fetch a single task by ID (e.g., user-1) with full detail instead of listing' },
       status: { type: 'string', enum: ['pending', 'in_progress', 'blocked', 'complete'] },
       priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
       customer: { type: 'string' },
@@ -624,7 +604,22 @@ export function registerTools(ctx: Context): void {
         additionalProperties: false,
         properties: { tasks: { type: 'array', required: true, items: taskItem } },
       },
-      render: (_args, v) => {
+      render: (args, v) => {
+        if (args.id) {
+          const t = v.tasks[0] as Record<string, any> | undefined;
+          if (!t) return text('Task not found.');
+          const lines = [
+            `**${t.id}**: ${t.title}`,
+            `Status: ${t.status} | Priority: ${t.priority ?? 'medium'}`,
+            `Collection: ${t.collection}`,
+          ];
+          if (t.due_date) lines.push(`Due: ${formatTaskDate(t.due_date)}`);
+          if (t.notes) lines.push(`Notes: ${t.notes}`);
+          if (t.tags?.length) lines.push(`Tags: ${t.tags.join(', ')}`);
+          if (t.depends_on?.length) lines.push(`Depends on: ${t.depends_on.join(', ')}`);
+          if (t.blocks?.length) lines.push(`Blocks: ${t.blocks.join(', ')}`);
+          return text(lines.join('\n'));
+        }
         if (v.tasks.length === 0) return text('No tasks found.');
         return text(v.tasks.map(t => {
           let line = `- **${t.id}** [${t.status}] ${t.priority ?? 'medium'} | ${t.title}`;
@@ -635,6 +630,10 @@ export function registerTools(ctx: Context): void {
     },
     isConcurrencySafe: () => true,
     async execute(args) {
+      if (args.id) {
+        const task = await getTask(args.id);
+        return { tasks: task ? [toTaskDetail(task)] : [] };
+      }
       const tasks = await listTasks({
         status: args.status,
         priority: args.priority,
@@ -647,54 +646,11 @@ export function registerTools(ctx: Context): void {
     },
     presentCall: args => ({
       card: 'generic',
-      title: `List tasks${args.collection ? ` in ${args.collection}` : ''}`,
+      title: args.id ? `Get task ${args.id}` : `List tasks${args.collection ? ` in ${args.collection}` : ''}`,
       kind: 'search',
     }),
   }));
 
-  ctx.tools.register(defineTool({
-    name: 'yapa_task_get',
-    description: 'Get a single durable task by ID.',
-    parameters: {
-      id: { type: 'string', required: true, description: 'Task ID (e.g., user-1)' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          found: { type: 'boolean', required: true },
-          task: { ...openObject },
-        },
-      },
-      render: (_args, v) => {
-        if (!v.found || !v.task) return text(`Task not found.`);
-        const t = v.task as Record<string, any>;
-        const lines = [
-          `**${t.id}**: ${t.title}`,
-          `Status: ${t.metadata.status} | Priority: ${t.metadata.priority}`,
-          `Collection: ${t.collection}`,
-        ];
-        if (t.metadata.due_date) lines.push(`Due: ${formatTaskDate(t.metadata.due_date)}`);
-        if (t.metadata.notes) lines.push(`Notes: ${t.metadata.notes}`);
-        const norm = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toString().split(',').filter(Boolean);
-        const tags = norm(t.metadata.tags);
-        if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
-        const deps = norm(t.metadata.depends_on);
-        if (deps.length) lines.push(`Depends on: ${deps.join(', ')}`);
-        const blocks = norm(t.metadata.blocks);
-        if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
-        return text(lines.join('\n'));
-      },
-    },
-    isConcurrencySafe: () => true,
-    async execute(args) {
-      const task = await getTask(args.id);
-      if (!task) return { found: false };
-      return { found: true, task: JSON.parse(JSON.stringify(task)) };
-    },
-    presentCall: args => ({ card: 'generic', title: `Get task ${args.id}`, kind: 'read' }),
-  }));
 
   ctx.tools.register(defineTool({
     name: 'yapa_task_update',
