@@ -106,7 +106,8 @@ In any session:
   of the turn ending; the next prompt's injected context notes it. Near-
   duplicates of existing memories are skipped, not double-stored.
 - Destructive calls (`yapa_collection_delete`, `yapa_memory_forget`,
-  `yapa_task_delete`, training/promotion tools, `yapa_storage_import`) trigger
+  `yapa_task_delete`, training/promotion tools — visible only with
+  `trainingPipeline: true` — `yapa_storage_import`) trigger
   the harness approval prompt in ask-policy sessions (`approvalGate`, default
   on; under `DSH_PERMISSION_MODE=danger-full-access` no prompts are shown and
   calls proceed — the `confirm: true` params remain as a second gate where

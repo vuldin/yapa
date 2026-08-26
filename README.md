@@ -62,11 +62,13 @@ capabilities with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`),
 plus `yapa_status` and `yapa_storage_import`. `setup_instructions` and
 `uninstall` are MCP-only (the plugin has nothing to write into config files).
 
-**Tool surface, kept lean:** 23 tools are visible by default. The ML-ops
-subsystem (curation classifier, bucket routing, system-prompt companion,
-training, eval, adapter promotion — 18 more) is operator workflow, not daily
-agent surface: it appears only when `trainingPipeline: true` (DSH plugin
-config / settings) or `YAPA_TRAINING_PIPELINE=true` (MCP) is set.
+**Tool surface, kept lean:** the 23 tools below are visible by default. The
+ML-ops subsystem (curation classifier, bucket routing, system-prompt
+companion, training, eval, adapter promotion — 18 more) is operator workflow,
+not daily agent surface: it appears only when `trainingPipeline: true` (DSH
+plugin config / settings) or `YAPA_TRAINING_PIPELINE=true` (MCP) is set. See
+[docs/training-pipeline.md](docs/training-pipeline.md) for the full pipeline
+walkthrough and its tools.
 
 | Tool | Description |
 |------|-------------|
@@ -79,25 +81,7 @@ config / settings) or `YAPA_TRAINING_PIPELINE=true` (MCP) is set.
 | `compaction_apply` | Replace a group with a summary memory and archive the originals |
 | `journal_append` | Append a one-line draft entry to the current session's journal |
 | `journal_consolidate` | Roll session drafts into a single `journal`-tagged memory at session end |
-| `curation_now` | Trigger an immediate curation cycle (classifies unscored memories) |
-| `curation_status` | Curation status — provider, last run, cycles, memories scored |
-| `curation_preview` | Dry-run the classifier on a sample without persisting |
 | `janitor_now` | Run the contradiction janitor: resolve near-duplicate pairs (archive duplicates, supersede stale memories, keep distinct facts) |
-| `bucket_route_preview` | Dry-run bucket routing — show which memories would be routed where |
-| `bucket_route_now` | Route memories and write versioned system-prompt companion + training manifest |
-| `bucket_status` | Counts of memories in `selected_for` vs `promoted_to` state |
-| `system_prompt_activate` | Confirm a companion version is in use — promotes its memories out of RAG |
-| `system_prompt_deactivate` | Rollback — restore a promoted companion's memories to RAG |
-| `training_dataset_preview` | Synthesize chat-format training examples from a manifest and emit a preview JSONL + SHA-256 reference |
-| `training_trigger` | Submit a training job to the configured backend (requires confirm + matching preview ref) |
-| `training_status` | List all training runs in the adapter registry |
-| `training_get` | Details on a single training run; polls the backend for live status |
-| `training_cancel` | Cancel an in-flight training run; restores affected memories to default RAG |
-| `eval_run` | Aggregate eval of a trained adapter against its manifest holdout; returns average score |
-| `eval_compare` | Side-by-side eval comparison of two adapters on the same holdout |
-| `eval_verify` | Per-memory verification — does the adapter actually know each memory's content? |
-| `adapter_promote` | Move verified memories from `selected_for` to `promoted_to` (hide from RAG) |
-| `adapter_demote` | Rollback a promotion — restore memories to default RAG |
 | `task_create` | Create task with title, priority, due date, tags, collection |
 | `task_list` | List tasks with filters; pass `id` for a single task with full detail (notes, dependencies) |
 | `task_update` | Update task fields |
@@ -216,30 +200,15 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_EMBEDDING_PROVIDER` | Embedding provider — `chromadb` is in-process MiniLM (zero-config, no server call); `fireworks`/`openai`/`voyage`/`ollama` use HTTP APIs | `chromadb` |
 | `YAPA_SALIENCE_DECAY_RATE` | Daily decay multiplier | `0.98` |
 | `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.3` |
-| `YAPA_CURATION_ENABLED` | Enable the background classifier | `false` |
-| `YAPA_CURATION_INTERVAL_MS` | Background curation interval in ms | `604800000` (7 days) |
-| `YAPA_CURATION_LLM_PROVIDER` | `fireworks` \| `openai` \| `anthropic` \| `ollama` | `anthropic` |
-| `YAPA_CURATION_MODEL` | Override the default model for the chosen provider | _(provider default)_ |
-| `YAPA_CURATION_BATCH_SIZE` | Memories per classifier call | `20` |
-| `YAPA_ARTIFACTS_DIR` | Where bucket artifacts are written | `~/.yapa/artifacts` |
-| `YAPA_SYSTEM_PROMPT_TRAINABLE_MIN` | Min trainable score for system-prompt bucket | `0.5` |
-| `YAPA_SYSTEM_PROMPT_DURABILITY_MIN` | Min durability score for system-prompt bucket | `0.7` |
-| `YAPA_SYSTEM_PROMPT_GENERALIZABILITY_MIN` | Min generalizability score for system-prompt bucket | `0.5` |
-| `YAPA_TRAINING_TRAINABLE_MIN` | Min trainable score for training bucket | `0.7` |
-| `YAPA_TRAINING_DURABILITY_MIN` | Min durability score for training bucket | `0.8` |
-| `YAPA_TRAINING_GENERALIZABILITY_MIN` | Min generalizability score for training bucket | `0.7` |
-| `YAPA_TRAINING_BACKEND` | Training backend — currently `fireworks` | `fireworks` |
-| `YAPA_TRAINING_BASE_MODEL` | Base model to fine-tune | `accounts/fireworks/models/qwen3-coder-30b-a3b-instruct` |
-| `YAPA_TRAINING_FIRECTL_PATH` | Path to the `firectl` executable | `firectl` |
-| `YAPA_TRAINING_SYNTHESIS_MODEL` | Model used to synthesize chat-format training examples from memories | _(falls back to curation model)_ |
-| `YAPA_VERIFICATION_ENABLED` | Opt-in gate for per-memory verification (incurs adapter inference cost) | `false` |
-| `YAPA_EVAL_HOLDOUT_FRACTION` | Fraction of manifest reserved as holdout for aggregate eval | `0.15` |
-| `YAPA_EVAL_HOLDOUT_MIN` | Minimum number of memories in the holdout regardless of fraction | `3` |
-| `YAPA_INFERENCE_BASE_URL` | OpenAI-compatible endpoint used to query trained adapters | `https://api.fireworks.ai/inference/v1` |
+| `YAPA_TRAINING_PIPELINE` | Expose the 18 ML-ops tools (curation/buckets/training/eval/adapter) | `false` |
 | `YAPA_SYNC_ENABLED` | Enable remote sync | `false` |
 | `YAPA_SYNC_DATABASE_URL` | PostgreSQL connection string | _(none)_ |
 | `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms | `300000` (5 min) |
 | `YAPA_SYNC_SIMILARITY_THRESHOLD` | Cosine similarity threshold for dedup | `0.95` |
+
+ML-ops configuration (curation models, bucket thresholds, training backend,
+eval holdout, …) lives in
+[docs/training-pipeline.md](docs/training-pipeline.md#configuration).
 
 ## Remote Sync
 

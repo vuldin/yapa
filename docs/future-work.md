@@ -12,7 +12,7 @@ type surfaces and bundles):
 
 | Seam | API | What yapa uses it for |
 |---|---|---|
-| Tool registry | `ctx.tools.register(defineTool({...}))` (`dsh-tools`) | All 46 tools. Structured outputs are **mandatory** (`output.schema` + pure `render()`); `presentCall`/`presentResult` drive GUI cards; `isConcurrencySafe`, `timeoutMs` feed the scheduler. Code mode (`run_code`) compatibility comes free. |
+| Tool registry | `ctx.tools.register(defineTool({...}))` (`dsh-tools`) | 23 visible by default (+18 gated ML-ops). Structured outputs are **mandatory** (`output.schema` + pure `render()`); `presentCall`/`presentResult` drive GUI cards; `isConcurrencySafe`, `timeoutMs` feed the scheduler. Code mode (`run_code`) compatibility comes free. |
 | Tool policy | `tools/pre-execute` / `tools/post-execute` / `tools/result` (waterfall/emit) | Approval gate (pre), schedule bridge + promoted-section refresh (result). |
 | Prompt sections | `ctx.systemPrompt.section({name, order, text\|fn})` | Rules (order 190), promoted memories (order 50). `-100` identity, `0` persona, `100–199` tool guidance. Section text fns are **synchronous** — dynamic content needs a cache. |
 | Prompt assembly | `system-prompt/assemble` waterfall (async, mutable assembly) | **Not** usable for per-prompt recall: the loop assembles before appending `user/message`. (Learned by acceptance-test failure.) |
