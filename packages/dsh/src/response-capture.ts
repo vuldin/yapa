@@ -202,10 +202,19 @@ async function captureTurn(
           neighbors.map(n => ({ id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience })),
         );
       } catch (e) {
-        // Resolver failure must never lose a candidate: keep both (the
-        // conservative direction) and let the janitor sweep revisit later.
-        log(`Resolver failed for a candidate in ${collection} (storing anyway): ${e}`);
-        decision = { action: 'add' as const, rationale: 'resolver error' };
+        // Resolver failure (LLM outage, or process teardown mid-capture —
+        // llm-bridge's disposer clears the aux route as the plugin scope
+        // disposes, so calls in flight at shutdown always land here). Never
+        // blind-store: that's a double-store when the agent already captured
+        // the fact mid-turn. Fall back to a STRICT distance gate instead —
+        // skip near-exact duplicates, store the rest.
+        log(`Resolver failed for a candidate in ${collection}: ${e}`);
+        const strictThreshold = resolved.captureDedupeDistance / 2;
+        if (neighbors.some(n => n.distance < strictThreshold)) {
+          skipped++;
+          continue;
+        }
+        decision = { action: 'add' as const, rationale: 'resolver error, passed strict distance gate' };
       }
 
       if (decision.action === 'skip') {

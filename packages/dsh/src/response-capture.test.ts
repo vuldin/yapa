@@ -132,9 +132,11 @@ describe('response capture', () => {
     expect(takeCaptureNotice('s1')).toContain('superseding stale memory');
   });
 
-  it('stores anyway (keep-both) when the resolver fails', async () => {
+  it('stores when the resolver fails and the neighbor is only loosely similar', async () => {
+    // 0.2 is inside the resolver gate (0.25) but outside the strict fallback
+    // gate (0.125) — a resolver outage must not lose genuinely novel facts.
     queryDocuments.mockResolvedValue([
-      { id: 'mem-old', content: 'similar', distance: 0.1, metadata: {} },
+      { id: 'mem-old', content: 'similar', distance: 0.2, metadata: {} },
     ]);
     resolveConflict.mockRejectedValue(new Error('aux route down'));
     const { listeners } = makeCtx(resolved);
@@ -143,6 +145,20 @@ describe('response capture', () => {
 
     expect(storeMemory).toHaveBeenCalledOnce();
     expect(storeMemory.mock.calls[0][1].supersedes).toBeUndefined();
+  });
+
+  it('skips when the resolver fails and the neighbor is a near-exact duplicate', async () => {
+    // 0.05 < strict fallback (0.125): blind-storing here would double-store
+    // facts the agent captured mid-turn itself.
+    queryDocuments.mockResolvedValue([
+      { id: 'mem-old', content: 'same fact', distance: 0.05, metadata: {} },
+    ]);
+    resolveConflict.mockRejectedValue(new Error('aux route down'));
+    const { listeners } = makeCtx(resolved);
+    driveTurn(listeners, { userText: longText, assistantText: longText });
+    await whenCapturesIdle();
+
+    expect(storeMemory).not.toHaveBeenCalled();
   });
 
   it('sets a visibility notice consumed exactly once', async () => {
