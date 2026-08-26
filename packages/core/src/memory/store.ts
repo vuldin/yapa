@@ -1,4 +1,4 @@
-import { addDocument, addDocumentsBatch, getOrCreateCollection, queryDocuments } from '../store/index.js';
+import { addDocument, addDocumentsBatch, getDocumentsByIds, getOrCreateCollection, queryDocuments, updateDocument } from '../store/index.js';
 import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
 import { getConfig, SALIENCE_START } from '../config.js';
@@ -15,6 +15,13 @@ export interface StoreOptions {
    * conflict.
    */
   metadata?: Record<string, any>;
+  /**
+   * ID of an existing memory this one supersedes (corrects/updates). The old
+   * memory is ARCHIVED — `archived: true` + `superseded_by` back-reference,
+   * filtered from recall/list by default, recoverable via include_archived —
+   * never hard-deleted. The new memory gets a `supersedes` forward reference.
+   */
+  supersedes?: string;
 }
 
 export interface ConflictRecord {
@@ -73,10 +80,32 @@ async function detectConflicts(collection: string, content: string): Promise<Con
 }
 
 /**
+ * Archive `oldId` as superseded by `newId` in `collection`. Metadata-only
+ * update (embeddings don't change); failures are logged, not thrown —
+ * supersession must never lose the NEW memory that was just stored.
+ */
+async function archiveSuperseded(collection: string, oldId: string, newId: string): Promise<void> {
+  try {
+    const existing = await getDocumentsByIds(collection, [oldId]);
+    if (!existing.length) {
+      process.stderr.write(`[yapa] store: supersedes target "${oldId}" not found in ${collection} — skipped\n`);
+      return;
+    }
+    await updateDocument(collection, oldId, {
+      ...existing[0].metadata,
+      archived: true,
+      superseded_by: newId,
+    });
+  } catch (e) {
+    process.stderr.write(`[yapa] store: failed to archive superseded ${oldId}: ${e}\n`);
+  }
+}
+
+/**
  * Store a memory. Long content is automatically chunked.
  * Returns the ID(s) of stored documents plus any potential conflicts found
  * in the same collection (near-duplicates that the caller should consider
- * superseding via `memory_forget`).
+ * superseding via the `supersedes` option or `memory_forget`).
  */
 export async function storeMemory(
   content: string,
@@ -105,8 +134,10 @@ export async function storeMemory(
       created_at: now,
       accessed_at: now,
     };
+    if (options.supersedes) metadata.supersedes = options.supersedes;
     metadata.is_synced = false;
     await addDocument(collection, id, content, metadata);
+    if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
     return { ids: [id], potential_conflicts };
   }
 
@@ -126,6 +157,7 @@ export async function storeMemory(
       chunk_total: chunk.total,
       parent_id: baseId,
     };
+    if (options.supersedes) chunkMeta.supersedes = options.supersedes;
     chunkMeta.is_synced = false;
     return {
       id: `${baseId}-${chunk.index}`,
@@ -135,5 +167,6 @@ export async function storeMemory(
   });
 
   await addDocumentsBatch(collection, docs);
+  if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
   return { ids: docs.map(d => d.id), potential_conflicts };
 }

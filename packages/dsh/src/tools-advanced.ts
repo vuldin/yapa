@@ -35,6 +35,7 @@ import {
   getSyncPullTimestamp,
   getSyncState,
   getSyncSubscriptions,
+  janitorSweep,
   listCollections,
   systemPromptActivate,
   systemPromptDeactivate,
@@ -132,6 +133,48 @@ export function registerAdvancedTools(ctx: Context): void {
       return { lines };
     },
     presentCall: () => ({ card: 'generic', title: 'Curation status', kind: 'read' }),
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'yapa_janitor_now',
+    description:
+      'Run the contradiction janitor now: scan for near-duplicate memory pairs and judge each '
+      + 'with the conservative resolver — duplicates are archived (recoverable via '
+      + 'include_archived), stale memories are superseded by merged updates, distinct facts are '
+      + 'kept. Runs daily on a timer when `janitorEnabled` (default on); this tool is the manual '
+      + 'trigger and works even when the timer is disabled.',
+    parameters: {
+      collection: { type: 'string', description: 'Restrict the sweep to this collection (default: all)' },
+      maxPairs: { type: 'number', description: 'Max pairs to judge this run (default 20)' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          message: { type: 'string', required: true },
+          stats: { ...openObject },
+        },
+      },
+      render: (_a, v) => text(v.message),
+    },
+    timeoutMs: 300_000,
+    async execute(args) {
+      try {
+        const stats = await janitorSweep({
+          ...(args.collection && { collection: args.collection }),
+          ...(args.maxPairs !== undefined && { maxPairs: Math.max(1, Math.min(200, args.maxPairs)) }),
+        });
+        return {
+          message: `Janitor sweep complete: ${stats.pairsConsidered} pairs judged across ${stats.collectionsScanned} collection(s) — `
+            + `${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, `
+            + `${stats.keptDistinct} kept distinct, ${stats.errors} error(s).`,
+          stats: JSON.parse(JSON.stringify(stats)),
+        };
+      } catch (e) {
+        return { message: `Janitor error: ${e}`, stats: {} };
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Run contradiction janitor', kind: 'execute' }),
   }));
 
   ctx.tools.register(defineTool({

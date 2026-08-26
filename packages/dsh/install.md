@@ -64,9 +64,13 @@ Plugin-only knobs (layer 2/3 only): `projectRoots`, `injectRecall`,
 `decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
 reminders), `captureCompaction` (harness compaction summaries are stored as
 memories), `captureResponses` (every completed turn is judged by the aux-LLM
-extractor and durable findings are auto-stored, deduplicated, tagged
-`auto-capture`, salience-capped — see `captureMinChars`, `captureMaxMemories`,
-`captureMaxSalience`, `captureDedupeDistance`), `promotedSection`
+extractor and durable findings are auto-stored, tagged `auto-capture`,
+salience-capped — see `captureMinChars`, `captureMaxMemories`,
+`captureMaxSalience`, `captureDedupeDistance`; candidates that collide with
+existing memories go through the conservative resolver, which can supersede
+— archive — a stale memory when a fact has changed), `janitorEnabled` /
+`janitorMaxPairs` (daily contradiction sweep over the existing store; manual
+trigger: `yapa_janitor_now`), `promotedSection`
 (system-prompt-bucket memories render as a live prompt section),
 `standupSkill` (registers the `yapa-standup` skill),
 `auxProvider`/`auxModel` (route for curation/synthesis/judge/extractor LLM

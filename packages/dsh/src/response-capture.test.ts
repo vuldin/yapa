@@ -2,10 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock the core before importing the plugin modules that use it.
 // (vi.hoisted: the vi.mock factory is hoisted above plain const declarations.)
-const { extractMemories, queryDocuments, storeMemory } = vi.hoisted(() => ({
+const { extractMemories, queryDocuments, storeMemory, resolveConflict } = vi.hoisted(() => ({
   extractMemories: vi.fn(),
   queryDocuments: vi.fn(),
   storeMemory: vi.fn(),
+  resolveConflict: vi.fn(),
 }));
 
 vi.mock('@yapa/core', async importOriginal => {
@@ -18,6 +19,10 @@ vi.mock('@yapa/core', async importOriginal => {
     extractMemories,
     queryDocuments,
     storeMemory,
+    resolveConflict,
+    // Stale dist lacks these until core is rebuilt; pin them in the mock.
+    RESOLVER_PROMPT_VERSION: 'v1',
+    EXTRACTOR_PROMPT_VERSION: 'v1',
   };
 });
 
@@ -91,16 +96,53 @@ describe('response capture', () => {
     expect(opts.metadata).toMatchObject({ source: 'auto-capture', session_id: 's1', turn: 1 });
   });
 
-  it('skips candidates that near-duplicate an existing memory', async () => {
+  it('skips candidates the resolver judges already known', async () => {
     queryDocuments.mockResolvedValue([
-      { id: 'mem-old', content: 'FD codec alignment is 8 bytes.', distance: 0.1, salience: 2, metadata: {} },
+      { id: 'mem-old', content: 'FD codec alignment is 8 bytes.', distance: 0.1, metadata: { salience: 2 } },
     ]);
+    resolveConflict.mockResolvedValue({ action: 'skip', rationale: 'same fact' });
     const { listeners } = makeCtx(resolved);
     driveTurn(listeners, { userText: longText, assistantText: longText });
     await whenCapturesIdle();
 
+    expect(resolveConflict).toHaveBeenCalledOnce();
     expect(storeMemory).not.toHaveBeenCalled();
     expect(takeCaptureNotice('s1')).toContain('skipped as already known');
+  });
+
+  it('supersedes a stale memory when the resolver says the fact changed', async () => {
+    queryDocuments.mockResolvedValue([
+      { id: 'mem-old', content: 'FD codec alignment is 4 bytes.', distance: 0.12, metadata: { salience: 2 } },
+    ]);
+    resolveConflict.mockResolvedValue({
+      action: 'supersede',
+      targetId: 'mem-old',
+      mergedContent: 'The FD codec requires 8-byte alignment (previously 4).',
+      rationale: 'value changed',
+    });
+    const { listeners } = makeCtx(resolved);
+    driveTurn(listeners, { userText: longText, assistantText: longText });
+    await whenCapturesIdle();
+
+    expect(storeMemory).toHaveBeenCalledOnce();
+    const [content, opts] = storeMemory.mock.calls[0];
+    expect(content).toBe('The FD codec requires 8-byte alignment (previously 4).');
+    expect(opts.supersedes).toBe('mem-old');
+    expect(opts.metadata.resolver_rationale).toBe('value changed');
+    expect(takeCaptureNotice('s1')).toContain('superseding stale memory');
+  });
+
+  it('stores anyway (keep-both) when the resolver fails', async () => {
+    queryDocuments.mockResolvedValue([
+      { id: 'mem-old', content: 'similar', distance: 0.1, metadata: {} },
+    ]);
+    resolveConflict.mockRejectedValue(new Error('aux route down'));
+    const { listeners } = makeCtx(resolved);
+    driveTurn(listeners, { userText: longText, assistantText: longText });
+    await whenCapturesIdle();
+
+    expect(storeMemory).toHaveBeenCalledOnce();
+    expect(storeMemory.mock.calls[0][1].supersedes).toBeUndefined();
   });
 
   it('sets a visibility notice consumed exactly once', async () => {

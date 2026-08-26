@@ -45,7 +45,7 @@ Capture as soon as the trigger fires — do NOT batch to the end of the session.
 
 **Create a task (\`yapa_task_create\`) when:** a follow-up action is identified; the user asks for something that can't finish this turn; a blocker is discovered (also \`yapa_task_update\` the parent to \`blocked\`).
 
-**Contradiction check:** \`yapa_memory_store\` returns \`potential_conflicts\` — near-duplicate memories in the same collection. If a conflict exists, decide supersede (\`yapa_memory_forget\` the old ID) or coexist BEFORE moving on.
+**Contradiction check:** \`yapa_memory_store\` returns \`potential_conflicts\` — near-duplicate memories in the same collection. If a conflict exists, decide supersede (re-store with \`supersedes: "<old ID>"\` — archives the old memory, recoverable) or coexist BEFORE moving on. Reserve \`yapa_memory_forget\` for memories that should never have existed. A daily background janitor also resolves duplicate/contradictory pairs on its own (conservative: when unsure it keeps both), so do not bulk-store restatements "just in case".
 
 **Do not store:** ephemeral conversation state, obvious code patterns, anything already captured in git history or an existing memory.
 

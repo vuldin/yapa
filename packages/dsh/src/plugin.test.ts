@@ -81,7 +81,7 @@ describe('tool registration', () => {
       'yapa_status', 'yapa_task_add_dependency', 'yapa_task_complete', 'yapa_task_create',
       'yapa_task_delete', 'yapa_task_get', 'yapa_task_list', 'yapa_task_search', 'yapa_task_update',
       // advanced groups
-      'yapa_curation_now', 'yapa_curation_status', 'yapa_curation_preview',
+      'yapa_curation_now', 'yapa_curation_status', 'yapa_curation_preview', 'yapa_janitor_now',
       'yapa_bucket_route_preview', 'yapa_bucket_route_now', 'yapa_bucket_status',
       'yapa_system_prompt_activate', 'yapa_system_prompt_deactivate',
       'yapa_training_dataset_preview', 'yapa_training_trigger', 'yapa_training_status',
@@ -93,7 +93,7 @@ describe('tool registration', () => {
       'yapa_storage_import',
     ].sort());
     expect(names.every(n => n.startsWith('yapa_'))).toBe(true);
-    expect(names.length).toBe(46);
+    expect(names.length).toBe(47);
   });
 
   it('task_create parses relative due dates and returns a structured value', async () => {

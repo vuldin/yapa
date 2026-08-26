@@ -165,12 +165,14 @@ export function registerTools(ctx: Context): void {
     description:
       'Store a durable memory with content, tags, salience, sector, and collection. Runs a '
       + 'contradiction check: near-duplicates already in the collection are returned as '
-      + '`conflicts` — decide supersede (yapa_memory_forget the old ID) or coexist (no action; '
-      + 'the new memory is already stored).',
+      + '`conflicts` — decide supersede or coexist (no action; the new memory is already '
+      + 'stored). Prefer the `supersedes` param when this memory replaces an existing one: '
+      + 'it archives the old memory (recoverable) instead of hard-deleting it.',
     parameters: {
       content: { type: 'string', required: true, description: 'The memory content to store' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization' },
       salience: { type: 'number', description: 'Importance score (0.0-5.0, default 1.0)' },
+      supersedes: { type: 'string', description: 'ID of an existing memory this one corrects/replaces — the old memory is archived (filtered from recall, recoverable), never hard-deleted' },
       sector: { type: 'string', enum: ['semantic', 'episodic'], description: 'Memory type (auto-detected if omitted)' },
       collection: { type: 'string', description: 'Collection name (default: global)' },
     },
@@ -202,7 +204,7 @@ export function registerTools(ctx: Context): void {
           for (const c of v.conflicts) {
             lines.push(`- **${c.id}** (distance ${c.distance.toFixed(3)}, salience ${c.salience.toFixed(2)}): ${c.content}`);
           }
-          lines.push('', 'Decide: supersede (call `yapa_memory_forget` on the old ID) or coexist (do nothing — the new memory is already stored).');
+          lines.push('', 'Decide: supersede (re-store with `supersedes: "<old ID>"` — archives, recoverable), hard-delete (`yapa_memory_forget`), or coexist (do nothing — the new memory is already stored).');
         }
         return text(lines.join('\n'));
       },
@@ -213,6 +215,7 @@ export function registerTools(ctx: Context): void {
         salience: args.salience,
         sector: args.sector,
         collection: args.collection,
+        supersedes: args.supersedes,
       });
       return {
         ids: result.ids,

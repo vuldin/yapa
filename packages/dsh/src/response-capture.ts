@@ -7,11 +7,12 @@
  * buffer the turn's direct human prompt and the assistant's visible text
  * (`assistant/message` text blocks; reasoning/tool-call blocks excluded), and
  * at `turn/end` run ONE extraction call through the aux LLM route
- * (curation/provider → llm-bridge → ctx.llm). Candidates are deduped against
- * the collection by cosine distance before storing: a near-duplicate means
- * the fact is already known — including the case where the agent DID call
- * yapa_memory_store mid-turn (that store lands before turn/end, so the
- * extractor's candidate dedupes against it and no double-store happens).
+ * (curation/provider → llm-bridge → ctx.llm). Candidates then go through
+ * retrieve-then-decide against the collection: near neighbors (cosine gate)
+ * are presented to the conservative resolver, which decides skip / add /
+ * supersede — so a CHANGED fact updates the stale memory instead of being
+ * lost to dedup, and an agent-side yapa_memory_store mid-turn still dedupes
+ * to a skip (its store lands before turn/end).
  *
  * Auto-captured memories are deliberately weaker than agent-curated ones:
  * salience clamped to `captureMaxSalience`, tagged `auto-capture`, carrying
@@ -28,10 +29,11 @@ import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-session';
 import {
   extractMemories,
-  findConflicts,
   queryDocuments,
+  resolveConflict,
   storeMemory,
   EXTRACTOR_PROMPT_VERSION,
+  RESOLVER_PROMPT_VERSION,
 } from '@yapa/core';
 import { detectCollection } from './injector.js';
 import type { ResolvedConfig } from './config.js';
@@ -176,36 +178,72 @@ async function captureTurn(
 
   let stored = 0;
   let skipped = 0;
+  let superseded = 0;
   for (const candidate of candidates) {
-    // Dedup BEFORE storing: a near-duplicate means the fact is already known.
-    // (storeMemory always stores — its conflict list is advisory for the
-    // agent-facing tool; here we need a real gate.)
-    const near = await queryDocuments(collection, candidate.content, 3, { type: 'memory' })
-      .then(results => findConflicts(results, resolved.captureDedupeDistance, 1))
+    // Retrieve-then-decide: near neighbors gate the candidate. No neighbors
+    // → store. Neighbors → the conservative resolver judges: skip (same
+    // fact), add (distinct despite similar embedding), or supersede (the
+    // fact CHANGED — store the update, archive the stale memory). This is
+    // what keeps "X is now on port 9000" from being lost to dedup against
+    // "X runs on port 8000".
+    const neighbors = await queryDocuments(collection, candidate.content, 3, { type: 'memory' })
+      .then(results => results.filter(r => r.distance < resolved.captureDedupeDistance && r.metadata?.archived !== true))
       .catch(() => []); // collection may not exist yet → nothing to conflict with
-    if (near.length > 0) {
-      skipped++;
-      continue;
+
+    let content = candidate.content;
+    let supersedes: string | undefined;
+    let resolverRationale: string | undefined;
+
+    if (neighbors.length > 0) {
+      let decision;
+      try {
+        decision = await resolveConflict(
+          candidate.content,
+          neighbors.map(n => ({ id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience })),
+        );
+      } catch (e) {
+        // Resolver failure must never lose a candidate: keep both (the
+        // conservative direction) and let the janitor sweep revisit later.
+        log(`Resolver failed for a candidate in ${collection} (storing anyway): ${e}`);
+        decision = { action: 'add' as const, rationale: 'resolver error' };
+      }
+
+      if (decision.action === 'skip') {
+        skipped++;
+        continue;
+      }
+      if (decision.action === 'supersede' && decision.targetId) {
+        supersedes = decision.targetId;
+        content = decision.mergedContent ?? candidate.content;
+        resolverRationale = decision.rationale;
+      }
     }
 
-    await storeMemory(candidate.content, {
+    await storeMemory(content, {
       collection,
       tags: [...new Set([...candidate.tags, 'auto-capture'])],
       salience: Math.min(candidate.salience, resolved.captureMaxSalience),
       sector: candidate.sector,
+      supersedes,
       metadata: {
         source: 'auto-capture',
         session_id: sessionId,
         turn,
         extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
         rationale: candidate.rationale,
+        ...(resolverRationale !== undefined && {
+          resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+          resolver_rationale: resolverRationale,
+        }),
       },
     });
     stored++;
+    if (supersedes) superseded++;
   }
 
   if (stored > 0 || skipped > 0) {
     const note = `Auto-captured ${stored} ${stored === 1 ? 'memory' : 'memories'} from last turn`
+      + (superseded ? `, ${superseded} superseding stale ${superseded === 1 ? 'memory' : 'memories'}` : '')
       + (skipped ? ` (${skipped} skipped as already known)` : '')
       + ` → \`${collection}\``;
     captureNotices.set(sessionId, note);

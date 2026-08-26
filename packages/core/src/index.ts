@@ -41,10 +41,13 @@ export * from './tasks/dates.js';
 // Collections.
 export * from './collections/manage.js';
 
-// Curation (LLM classifier) + response extractor (turn → memory candidates).
+// Curation (LLM classifier) + response extractor (turn → memory candidates)
+// + conflict resolver (candidate/pair → skip/add/supersede) + janitor sweep.
 export * from './curation/index.js';
 export * from './curation/classifier.js';
 export * from './curation/extractor.js';
+export * from './curation/resolver.js';
+export * from './curation/janitor.js';
 export * from './curation/provider.js';
 export * from './curation/prompts.js';
 

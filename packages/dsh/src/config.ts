@@ -63,8 +63,12 @@ export interface Config {
   captureMaxMemories?: number;
   /** Salience ceiling for auto-captured memories (agent-stored memories are uncapped). */
   captureMaxSalience?: number;
-  /** Below this cosine distance, an extracted candidate is a known duplicate and skipped. */
+  /** Below this cosine distance, an extracted candidate goes to the conflict resolver. */
   captureDedupeDistance?: number;
+  /** Run the daily contradiction sweep over existing memories (conservative resolver). */
+  janitorEnabled?: boolean;
+  /** Max duplicate pairs judged per janitor sweep. */
+  janitorMaxPairs?: number;
   /** Render promoted system-prompt memories as a live prompt section. */
   promotedSection?: boolean;
   /** Register the `yapa-standup` skill. */
@@ -107,6 +111,8 @@ export const Config: z<Config> = z.object({
   captureMaxMemories: z.number(),
   captureMaxSalience: z.number(),
   captureDedupeDistance: z.number(),
+  janitorEnabled: z.boolean(),
+  janitorMaxPairs: z.number(),
   promotedSection: z.boolean(),
   standupSkill: z.boolean(),
   approvalGate: z.boolean(),
@@ -128,6 +134,8 @@ export const PLUGIN_DEFAULTS = {
   captureMaxMemories: 3,
   captureMaxSalience: 2.0,
   captureDedupeDistance: 0.25,
+  janitorEnabled: true,
+  janitorMaxPairs: 20,
   promotedSection: true,
   standupSkill: true,
   approvalGate: true,
@@ -150,6 +158,8 @@ export interface ResolvedConfig {
   captureMaxMemories: number;
   captureMaxSalience: number;
   captureDedupeDistance: number;
+  janitorEnabled: boolean;
+  janitorMaxPairs: number;
   promotedSection: boolean;
   standupSkill: boolean;
   approvalGate: boolean;
@@ -198,6 +208,8 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     captureMaxMemories: merged.captureMaxMemories ?? PLUGIN_DEFAULTS.captureMaxMemories,
     captureMaxSalience: merged.captureMaxSalience ?? PLUGIN_DEFAULTS.captureMaxSalience,
     captureDedupeDistance: merged.captureDedupeDistance ?? PLUGIN_DEFAULTS.captureDedupeDistance,
+    janitorEnabled: merged.janitorEnabled ?? PLUGIN_DEFAULTS.janitorEnabled,
+    janitorMaxPairs: merged.janitorMaxPairs ?? PLUGIN_DEFAULTS.janitorMaxPairs,
     promotedSection: merged.promotedSection ?? PLUGIN_DEFAULTS.promotedSection,
     standupSkill: merged.standupSkill ?? PLUGIN_DEFAULTS.standupSkill,
     approvalGate: merged.approvalGate ?? PLUGIN_DEFAULTS.approvalGate,

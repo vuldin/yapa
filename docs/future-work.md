@@ -135,12 +135,13 @@ freshness); Chroma→local importer.
 - **Compaction-capture enrichment.** Today we store the harness summary
   verbatim; an aux-LLM pass could additionally extract *decisions and open
   loops* as higher-salience semantic memories.
-- **Response-capture refinement** (shipped baseline 2026-08-24; possible
-  upgrades): retrieve-then-decide (feed the top-k existing memories into the
-  extractor prompt so it can judge ADD vs UPDATE vs skip, mem0-style, instead
-  of store-time dedup only); optional tool-result visibility in the turn
-  buffer (findings the assistant never restated); a per-deployment quality
-  eval once enough `auto-capture` memories exist to judge precision.
+- **Response-capture refinement** (baseline + retrieve-then-decide resolver
+  + janitor sweep shipped 2026-08-25; possible upgrades): optional tool-result
+  visibility in the turn buffer (findings the assistant never restated);
+  batching the resolver pass (one call for all of a turn's conflicted
+  candidates); a per-deployment quality eval once enough `auto-capture`
+  memories exist to judge precision; janitor clustering (N-way merge of
+  duplicate clusters, not just pairs).
 - **`/standup` slash command** alongside the skill; **journal recap section**
   at session start (last session's journal memory in the first injection).
 
