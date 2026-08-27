@@ -1,5 +1,11 @@
 # YAPA Install
 
+> **DeepSeek Harness (DSH)?** This wizard installs the MCP server for Claude
+> Code / Cursor / OpenCode. For DSH, skip this file entirely and follow
+> `packages/dsh/install.md` — the native plugin needs no agent-driven install
+> (and no database server under the default embedded store).
+
+
 **STOP. Read this entire file before running ANY commands.** This is a 3-phase install. You MUST complete each phase in order. Do NOT skip ahead. Do NOT run `npm install`, `npm run build`, `claude mcp add`, or any other commands until instructed. Phase 2 requires asking the user questions — do NOT assume defaults.
 
 ## Phase 1 — Diagnostics
@@ -7,7 +13,7 @@
 Run this command now and read the output carefully:
 
 ```
-node --version && npm --version && curl -sf http://localhost:8000/api/v2/heartbeat && whoami && ls dist/index.js 2>/dev/null; ls ~/.claude/ 2>/dev/null && ls ~/.cursor/ 2>/dev/null && ls .opencode/ 2>/dev/null
+node --version && npm --version && curl -sf http://localhost:8000/api/v2/heartbeat && whoami && ls packages/mcp/dist/index.js 2>/dev/null; ls ~/.claude/ 2>/dev/null && ls ~/.cursor/ 2>/dev/null && ls .opencode/ 2>/dev/null
 ```
 
 STOP. Do not run npm install, npm run build, or any other install command yet. Read the output and proceed to Phase 2.
@@ -42,7 +48,7 @@ Now execute these steps in order, without asking anything else:
 2. If Node.js needed: install using the user's chosen method, then verify `node --version` >= 18.
 
 3. Run: `cd THIS_REPO_DIR && npm install && npm run build`
-   Verify: `ls dist/index.js` succeeds.
+   Verify: `ls packages/mcp/dist/index.js` succeeds.
 
 4. If ChromaDB needed, start it using the user's chosen method:
    - Docker: `docker run -d --name chromadb --restart unless-stopped -p 8000:8000 -v chromadb_data:/data chromadb/chroma`
@@ -258,7 +264,7 @@ Now execute these steps in order, without asking anything else:
 
    Claude Code — run:
    ```
-   claude mcp add -e YAPA_USERNAME=USERNAME -s user yapa -- node ABSOLUTE_PATH/dist/index.js
+   claude mcp add -e YAPA_USERNAME=USERNAME -s user yapa -- node ABSOLUTE_PATH/packages/mcp/dist/index.js
    ```
    If sync enabled, also add: `-e YAPA_SYNC_ENABLED=true -e YAPA_SYNC_DATABASE_URL=SYNC_DATABASE_URL`
 
@@ -268,7 +274,7 @@ Now execute these steps in order, without asking anything else:
      "mcpServers": {
        "yapa": {
          "command": "node",
-         "args": ["ABSOLUTE_PATH/dist/index.js"],
+         "args": ["ABSOLUTE_PATH/packages/mcp/dist/index.js"],
          "env": {
            "YAPA_USERNAME": "USERNAME",
            "YAPA_SYNC_ENABLED": "true",
@@ -286,7 +292,7 @@ Now execute these steps in order, without asking anything else:
      "mcpServers": {
        "yapa": {
          "command": "node",
-         "args": ["ABSOLUTE_PATH/dist/index.js"],
+         "args": ["ABSOLUTE_PATH/packages/mcp/dist/index.js"],
          "env": {
            "YAPA_USERNAME": "USERNAME",
            "YAPA_SYNC_ENABLED": "true",
@@ -365,8 +371,9 @@ Now execute these steps in order, without asking anything else:
 
    **Contradiction check:** `memory_store` returns a `potential_conflicts` field
    listing near-duplicate memories in the same collection. Read it — if a conflict
-   exists, decide supersede (call `memory_forget` on the old one) or coexist
-   (proceed as-is) BEFORE moving on.
+   exists, decide supersede (re-store with `supersedes: "<old ID>"` — archives the
+   old memory, recoverable via include_archived) or coexist (proceed as-is) BEFORE
+   moving on. Reserve `memory_forget` for memories that should never have existed.
 
    **Do not store:** ephemeral conversation state, obvious code patterns, anything
    already captured in git history or in an existing memory.

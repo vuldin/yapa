@@ -1,0 +1,172 @@
+import { addDocument, addDocumentsBatch, getDocumentsByIds, getOrCreateCollection, queryDocuments, updateDocument } from '../store/index.js';
+import { detectSector } from '../lifecycle.js';
+import { chunkText } from '../chunking.js';
+import { getConfig, SALIENCE_START } from '../config.js';
+
+export interface StoreOptions {
+  tags?: string[];
+  salience?: number;
+  sector?: 'semantic' | 'episodic';
+  collection?: string;
+  /**
+   * Extra metadata merged into the stored document(s) — provenance for
+   * host-driven capture (e.g. `{ source: 'auto-capture', session_id, turn }`).
+   * Core-owned keys (type, username, salience, sector, timestamps) win on
+   * conflict.
+   */
+  metadata?: Record<string, any>;
+  /**
+   * ID of an existing memory this one supersedes (corrects/updates). The old
+   * memory is ARCHIVED — `archived: true` + `superseded_by` back-reference,
+   * filtered from recall/list by default, recoverable via include_archived —
+   * never hard-deleted. The new memory gets a `supersedes` forward reference.
+   */
+  supersedes?: string;
+}
+
+export interface ConflictRecord {
+  id: string;
+  content: string;
+  distance: number;
+  salience: number;
+}
+
+export interface StoreMemoryResult {
+  ids: string[];
+  potential_conflicts: ConflictRecord[];
+}
+
+interface ConflictCandidate {
+  id: string;
+  content: string;
+  distance: number;
+  metadata: Record<string, any>;
+}
+
+/**
+ * Pure helper — takes raw query results and returns the entries that look
+ * like near-duplicates of the content being stored.
+ */
+export function findConflicts(
+  candidates: ConflictCandidate[],
+  threshold: number = getConfig().CONTRADICTION_DISTANCE_THRESHOLD,
+  maxResults: number = getConfig().CONTRADICTION_MAX_RESULTS,
+): ConflictRecord[] {
+  return candidates
+    .filter(c => c.distance < threshold)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, maxResults)
+    .map(c => ({
+      id: c.id,
+      content: c.content.length > 200 ? c.content.slice(0, 200) + '…' : c.content,
+      distance: c.distance,
+      salience: c.metadata.salience ?? 1.0,
+    }));
+}
+
+async function detectConflicts(collection: string, content: string): Promise<ConflictRecord[]> {
+  try {
+    const candidates = await queryDocuments(
+      collection,
+      content,
+      getConfig().CONTRADICTION_MAX_RESULTS * 2,
+      { type: 'memory' },
+    );
+    return findConflicts(candidates);
+  } catch {
+    // Collection may not exist yet — no conflicts to surface.
+    return [];
+  }
+}
+
+/**
+ * Archive `oldId` as superseded by `newId` in `collection`. Metadata-only
+ * update (embeddings don't change); failures are logged, not thrown —
+ * supersession must never lose the NEW memory that was just stored.
+ */
+async function archiveSuperseded(collection: string, oldId: string, newId: string): Promise<void> {
+  try {
+    const existing = await getDocumentsByIds(collection, [oldId]);
+    if (!existing.length) {
+      process.stderr.write(`[yapa] store: supersedes target "${oldId}" not found in ${collection} — skipped\n`);
+      return;
+    }
+    await updateDocument(collection, oldId, {
+      ...existing[0].metadata,
+      archived: true,
+      superseded_by: newId,
+    });
+  } catch (e) {
+    process.stderr.write(`[yapa] store: failed to archive superseded ${oldId}: ${e}\n`);
+  }
+}
+
+/**
+ * Store a memory. Long content is automatically chunked.
+ * Returns the ID(s) of stored documents plus any potential conflicts found
+ * in the same collection (near-duplicates that the caller should consider
+ * superseding via the `supersedes` option or `memory_forget`).
+ */
+export async function storeMemory(
+  content: string,
+  options: StoreOptions = {},
+): Promise<StoreMemoryResult> {
+  const collection = options.collection ?? 'global';
+  await getOrCreateCollection(collection);
+
+  const potential_conflicts = await detectConflicts(collection, content);
+
+  const now = Math.floor(Date.now() / 1000);
+  const sector = options.sector ?? detectSector(content);
+  const salience = options.salience ?? SALIENCE_START;
+
+  const chunks = chunkText(content);
+
+  if (chunks.length === 1) {
+    const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const metadata: Record<string, any> = {
+      ...(options.metadata ?? {}),
+      type: 'memory',
+      username: getConfig().USERNAME,
+      tags: options.tags ?? [],
+      salience,
+      sector,
+      created_at: now,
+      accessed_at: now,
+    };
+    if (options.supersedes) metadata.supersedes = options.supersedes;
+    metadata.is_synced = false;
+    await addDocument(collection, id, content, metadata);
+    if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
+    return { ids: [id], potential_conflicts };
+  }
+
+  // Multi-chunk: batch insert
+  const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
+  const docs = chunks.map((chunk) => {
+    const chunkMeta: Record<string, any> = {
+      ...(options.metadata ?? {}),
+      type: 'memory',
+      username: getConfig().USERNAME,
+      tags: options.tags ?? [],
+      salience,
+      sector,
+      created_at: now,
+      accessed_at: now,
+      chunk_index: chunk.index,
+      chunk_total: chunk.total,
+      parent_id: baseId,
+    };
+    if (options.supersedes) chunkMeta.supersedes = options.supersedes;
+    chunkMeta.is_synced = false;
+    return {
+      id: `${baseId}-${chunk.index}`,
+      content: chunk.content,
+      metadata: chunkMeta,
+    };
+  });
+
+  await addDocumentsBatch(collection, docs);
+  if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
+  return { ids: docs.map(d => d.id), potential_conflicts };
+}
