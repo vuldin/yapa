@@ -9,17 +9,18 @@ no CLAUDE.md/AGENTS.md block, no MCP subprocess.
 - DSH 0.1.0-rc.7+ (`dsh --version`)
 - This repository built: `npm install && npm run build`
 - **Storage, one of:**
-  - **Embedded (default-free option)** — set `storage: local` in the config
-    row below; nothing else to install. Documents + vectors live in
-    `~/.local/share/yapa/store` (override with `localStorePath`).
-  - **ChromaDB v2** (default; needed for remote sync today):
+  - **Embedded (the plugin default)** — nothing to install and nothing to
+    set: with no `storage` configured, the plugin uses the embedded store.
+    Documents + vectors live in `~/.local/share/yapa/store` (override with
+    `localStorePath`).
+  - **ChromaDB v2** (opt-in via `storage: chroma`; needed for remote sync today):
     - Docker: `docker run -d --name chromadb --restart unless-stopped -p 8000:8000 -v chromadb_data:/data chromadb/chroma`
     - pip: `pip install chromadb && chroma run --host 0.0.0.0 --port 8000`
     - uv: `uvx --from chromadb chroma run --host 127.0.0.1 --port 8000 --path ~/.local/share/yapa/chroma`
 
-Migrating an existing ChromaDB install to the embedded store: set
-`storage: local`, keep ChromaDB running, then call `yapa_storage_import`
-with `confirm: true`.
+Migrating an existing ChromaDB install to the embedded store: keep ChromaDB
+running, then call `yapa_storage_import` with `confirm: true` (the plugin is
+already on the embedded store by default).
 
 ## Install into a profile
 

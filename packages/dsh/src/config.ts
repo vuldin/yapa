@@ -182,7 +182,10 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
   const envBase = createConfig();
   const core: YapaConfig = {
     ...envBase,
-    ...(merged.storage !== undefined && { STORAGE: merged.storage }),
+    // The plugin's default store is the embedded one (no server). An explicit
+    // YAPA_STORAGE env var still wins over the built-in default; the cordis
+    // row / settings beat both via the merge above.
+    STORAGE: merged.storage ?? (process.env.YAPA_STORAGE ? envBase.STORAGE : 'local'),
     ...(merged.localStorePath !== undefined && { LOCAL_STORE_PATH: merged.localStorePath }),
     ...(merged.chromaUrl !== undefined && { CHROMA_URL: merged.chromaUrl }),
     ...(merged.username !== undefined && { USERNAME: merged.username }),

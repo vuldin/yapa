@@ -177,15 +177,25 @@ Tunables:
 
 ## Embedding Providers
 
+Embeddings always run **in-process** — no storage backend embeds server-side,
+and the default needs no server and no API key. (The default provider is named
+`chromadb` for historical reasons: it's the `chromadb-default-embed` package —
+MiniLM-L6-v2 on `onnxruntime-web` (WASM) — and has nothing to do with running
+a ChromaDB *server*.)
+
 | Provider | Model | Dimensions | Config |
 |----------|-------|------------|--------|
-| ChromaDB (default) | all-MiniLM-L6-v2 | 384 | Zero-config |
+| In-process MiniLM (default) | all-MiniLM-L6-v2 | 384 | Zero-config |
 | Fireworks | nomic-embed-text-v1 | 768 | `YAPA_EMBEDDING_PROVIDER=fireworks` |
 | OpenAI | text-embedding-3-small | 768 | `YAPA_EMBEDDING_PROVIDER=openai` |
 | Voyage AI | voyage-3-lite | 512 | `YAPA_EMBEDDING_PROVIDER=voyage` |
 | Ollama | nomic-embed-text | 768 | `YAPA_EMBEDDING_PROVIDER=ollama` |
 
-To use a non-default provider, add the relevant env vars to your MCP host config's `env` block. See `.env.example` for all options.
+To use a non-default provider, add the relevant env vars to your MCP host config's `env` block (or the plugin's cordis `config:` under DSH). See `.env.example` for all options.
+
+Note: the embedding provider and the **storage backend** are independent
+choices — the in-process embedder pairs with both the embedded local store
+(default under the DSH plugin) and a ChromaDB server (default under MCP).
 
 ## Configuration
 
@@ -193,7 +203,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `YAPA_STORAGE` | `chroma` \| `local` (embedded store, no server) | `chroma` |
+| `YAPA_STORAGE` | `chroma` \| `local` (embedded store, no server) | `chroma` for MCP; the DSH plugin defaults to `local` |
 | `YAPA_LOCAL_STORE_PATH` | Root dir for the embedded store | `~/.local/share/yapa/store` |
 | `YAPA_CHROMA_URL` | ChromaDB server URL (when `YAPA_STORAGE=chroma`) | `http://localhost:8000` |
 | `YAPA_USERNAME` | Username for task ID prefixes | `user` |

@@ -21,6 +21,20 @@ describe('resolveConfig', () => {
     expect(r).toMatchObject(PLUGIN_DEFAULTS);
   });
 
+  it('defaults storage to the embedded local store', () => {
+    delete process.env.YAPA_STORAGE;
+    expect(resolveConfig({}).core.STORAGE).toBe('local');
+  });
+
+  it('honors an explicit YAPA_STORAGE env override over the plugin default', () => {
+    process.env.YAPA_STORAGE = 'chroma';
+    try {
+      expect(resolveConfig({}).core.STORAGE).toBe('chroma');
+    } finally {
+      delete process.env.YAPA_STORAGE;
+    }
+  });
+
   it('gives cordis config precedence over env-derived core defaults', () => {
     const r = resolveConfig({ chromaUrl: 'http://example:9999', username: 'ada' });
     expect(r.core.CHROMA_URL).toBe('http://example:9999');
