@@ -31,7 +31,7 @@ YAPA stores data either in an embedded local store (no server, the default) or i
 When in doubt: if the work outlives this conversation, it is a yapa task (possibly in ADDITION to a todo entry).
 
 ### Per-prompt routine
-1. **Scope** — the injected context names the active collection (e.g. \`customer-{name}\`, \`project-{name}\`, \`global\`). If genuinely ambiguous, ask the user once and remember the answer for the session.
+1. **Scope** — the injected context names the active collection (e.g. \`customer-{name}\`, \`project-{name}\`, \`global\`). If the injected scope is flagged AMBIGUOUS (both a \`customer-\` and a \`project-\` collection exist for the folder), ask the user which one to use BEFORE storing anything, then pass that collection explicitly for the rest of the session. If scope is otherwise genuinely ambiguous, ask the user once and remember the answer for the session.
 2. **Recall** — already injected for each new human prompt. Call \`yapa_memory_recall\` yourself only for a different/more specific query.
 3. **Task check** — open tasks for the active scope are injected at first use per session. Call \`yapa_task_list\` again only if you suspect drift.
 4. **Ensure a task exists** — call \`yapa_task_create\` in the detected collection BEFORE starting multi-step or long-lived work. Skip for one-shot questions.
@@ -60,7 +60,8 @@ Capture as soon as the trigger fires — do NOT batch to the end of the session.
 When injected context flags a "compaction candidate" collection, call \`yapa_compaction_suggest\`, write a rolling summary per group, and submit via \`yapa_compaction_apply\`. This consolidates LONG-TERM memories — unrelated to harness context-window compaction.
 
 ### Collections
-- Infer from context: customer name → \`customer-{name}\`; project work → \`project-{name}\`; cross-cutting → \`global\`; private/personal → \`private-{name}\` or \`local-{name}\` (these do NOT sync to the shared remote database).
+- Folder scopes default to \`project-{name}\` — most folders are projects. Use \`customer-{name}\` only for folders that are customer names (via the plugin's \`customers\` config, an existing \`customer-{name}\` collection, or the user saying so). Cross-cutting → \`global\`; private/personal → \`private-{name}\` or \`local-{name}\` (these do NOT sync to the shared remote database).
+- If you are ever unsure which collection (or prefix) applies, ask the user rather than guessing.
 - Before creating a new collection, confirm the name with the user. Use \`yapa_collection_list\` to check what exists.
 - Always pass the inferred collection explicitly on yapa tool calls.
 

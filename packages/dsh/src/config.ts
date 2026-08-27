@@ -35,6 +35,8 @@ export interface Config {
   syncIntervalMs?: number;
   /** Absolute workspace roots used for collection detection from session cwd. */
   projectRoots?: string[];
+  /** Folder names (first path segment under a project root) that are customers → `customer-{name}` scope. Everything else defaults to `project-{name}`. */
+  customers?: string[];
   /** Inject semantic recall into prompt assembly on new human prompts. */
   injectRecall?: boolean;
   /** Inject open tasks into prompt assembly once per scope per session. */
@@ -98,6 +100,7 @@ export const Config: z<Config> = z.object({
   syncDatabaseUrl: z.string(),
   syncIntervalMs: z.number(),
   projectRoots: z.array(z.string()),
+  customers: z.array(z.string()),
   injectRecall: z.boolean(),
   injectTasks: z.boolean(),
   recallResults: z.number(),
@@ -124,6 +127,7 @@ export const Config: z<Config> = z.object({
 /** Defaults for the plugin's own (non-core) knobs. */
 export const PLUGIN_DEFAULTS = {
   projectRoots: [] as string[],
+  customers: [] as string[],
   injectRecall: true,
   injectTasks: true,
   recallResults: 3,
@@ -149,6 +153,7 @@ export const PLUGIN_DEFAULTS = {
 export interface ResolvedConfig {
   core: YapaConfig;
   projectRoots: string[];
+  customers: string[];
   injectRecall: boolean;
   injectTasks: boolean;
   recallResults: number;
@@ -204,6 +209,7 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
   return {
     core,
     projectRoots: merged.projectRoots ?? PLUGIN_DEFAULTS.projectRoots,
+    customers: merged.customers ?? PLUGIN_DEFAULTS.customers,
     injectRecall: merged.injectRecall ?? PLUGIN_DEFAULTS.injectRecall,
     injectTasks: merged.injectTasks ?? PLUGIN_DEFAULTS.injectTasks,
     recallResults: merged.recallResults ?? PLUGIN_DEFAULTS.recallResults,

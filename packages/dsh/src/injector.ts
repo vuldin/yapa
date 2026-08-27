@@ -29,10 +29,11 @@ import {
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
+import { detectCollection, type CollectionDetection } from './scope.js';
 
 interface AgentState {
   /** Cache of the detected collection for this agent's session. */
-  collection?: string;
+  detection?: CollectionDetection;
   /** ID of the human message the last recall injection ran for. */
   recalledMessageId?: string;
   /** Collections whose open tasks were already surfaced this session. */
@@ -48,24 +49,10 @@ function messageText(message: UserMessage): string {
 }
 
 /**
- * Infer the active collection from the session cwd, mirroring the hook CLI's
- * rule: first path segment under a configured project root, preferring an
- * existing `customer-`/`project-` collection, else `global`.
+ * Re-exported for the compaction/response capture modules (they only need the
+ * collection string, never the ambiguity flag).
  */
-export async function detectCollection(cwd: string | undefined, roots: string[]): Promise<string> {
-  if (!cwd) return 'global';
-  for (const root of roots) {
-    if (!cwd.startsWith(root)) continue;
-    const relative = cwd.slice(root.length).replace(/^\/+/, '');
-    const segment = relative.split('/')[0];
-    if (!segment || segment.startsWith('.')) return 'global';
-    const existing = (await listCollections().catch(() => [])).map(c => c.name);
-    if (existing.includes(`customer-${segment}`)) return `customer-${segment}`;
-    if (existing.includes(`project-${segment}`)) return `project-${segment}`;
-    return `customer-${segment}`;
-  }
-  return 'global';
-}
+export { detectCollection } from './scope.js';
 
 /**
  * Register the pre-step injector. State is keyed by agent (== session) id and
@@ -87,8 +74,9 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       const state = states.get(agent.id) ?? { tasksSurfaced: new Set<string>() };
       states.set(agent.id, state);
 
-      const collection = state.collection
-        ?? (state.collection = await detectCollection(agent.session.header.cwd, resolved.projectRoots));
+      const detection = state.detection
+        ?? (state.detection = await detectCollection(agent.session.header.cwd, resolved.projectRoots, resolved.customers));
+      const collection = detection.collection;
 
       // The newest direct human prompt claimed for this step, if any.
       const human = messages.filter(m => (m.source as { kind?: string }).kind === 'user');
@@ -103,7 +91,16 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       const captureNotice = takeCaptureNotice(agent.id);
 
       if (!doRecall && !doTasks && !captureNotice) return decision;
-      const lines: string[] = ['# YAPA Context', '', `**Scope:** \`${collection}\``];
+      const lines: string[] = ['# YAPA Context', ''];
+      if (detection.ambiguous) {
+        lines.push(
+          `**Scope:** AMBIGUOUS — both \`${detection.ambiguous[0]}\` and \`${detection.ambiguous[1]}\` exist for this folder. `
+          + 'Ask the user which collection to use BEFORE storing anything, then pass that collection explicitly on all yapa_* calls for the rest of this session.',
+          `_(Recalls/tasks below default to \`${collection}\` until the user answers.)_`,
+        );
+      } else {
+        lines.push(`**Scope:** \`${collection}\``);
+      }
 
       if (captureNotice) lines.push('', `## Auto-capture\n${captureNotice}`);
 

@@ -33,23 +33,54 @@ interface SessionEndInput extends BaseHookInput {
 const PROJECTS_ROOT = '/home/josh/redpanda/projects';
 
 /**
- * Infer the active collection from cwd. Returns the most specific collection
- * that exists, falling back through customer-{name} → project-{name} → global.
+ * Folder names under PROJECTS_ROOT that are customers (→ `customer-{name}`).
+ * Everything else defaults to `project-{name}`. (The dsh plugin exposes this
+ * as the `customers` config knob; this CLI is a per-install artifact.)
  */
-async function detectCollection(cwd: string | undefined): Promise<string> {
-  if (!cwd) return 'global';
-  if (!cwd.startsWith(PROJECTS_ROOT)) return 'global';
+const CUSTOMER_SEGMENTS: string[] = [];
+
+/**
+ * Outcome of scope inference: the collection to use, plus the two candidates
+ * when BOTH `customer-` and `project-` exist for the folder — genuinely
+ * ambiguous, so the emitted context tells the agent to ask the user.
+ */
+interface CollectionDetection {
+  collection: string;
+  ambiguous?: [string, string];
+}
+
+/**
+ * Infer the active collection from cwd: only `customer-` existing → customer-;
+ * only `project-` → project-; both → ambiguous (reads default to project-);
+ * neither → CUSTOMER_SEGMENTS decides, else project- (the common case).
+ * Anything outside PROJECTS_ROOT → global.
+ */
+async function detectCollection(cwd: string | undefined): Promise<CollectionDetection> {
+  if (!cwd) return { collection: 'global' };
+  if (!cwd.startsWith(PROJECTS_ROOT)) return { collection: 'global' };
 
   const relative = cwd.slice(PROJECTS_ROOT.length).replace(/^\/+/, '');
-  if (!relative) return 'global';
+  if (!relative) return { collection: 'global' };
 
   const segment = relative.split('/')[0];
-  if (!segment || segment.startsWith('.')) return 'global';
+  if (!segment || segment.startsWith('.')) return { collection: 'global' };
 
   const existing = (await listCollections().catch(() => [])).map(c => c.name);
-  if (existing.includes(`customer-${segment}`)) return `customer-${segment}`;
-  if (existing.includes(`project-${segment}`)) return `project-${segment}`;
-  return `customer-${segment}`;
+  const hasCustomer = existing.includes(`customer-${segment}`);
+  const hasProject = existing.includes(`project-${segment}`);
+  if (hasCustomer && hasProject) {
+    return { collection: `project-${segment}`, ambiguous: [`project-${segment}`, `customer-${segment}`] };
+  }
+  if (hasCustomer) return { collection: `customer-${segment}` };
+  if (hasProject) return { collection: `project-${segment}` };
+  if (CUSTOMER_SEGMENTS.includes(segment)) return { collection: `customer-${segment}` };
+  return { collection: `project-${segment}` };
+}
+
+/** The `**Scope:**` line for emitted context, flagging ambiguity if present. */
+function scopeLine(d: CollectionDetection): string {
+  if (!d.ambiguous) return `**Scope:** \`${d.collection}\``;
+  return `**Scope:** AMBIGUOUS — both \`${d.ambiguous[0]}\` and \`${d.ambiguous[1]}\` exist for this folder. Ask the user which collection to use BEFORE storing anything. (Reads here default to \`${d.collection}\`.)`;
 }
 
 function emit(payload: Record<string, unknown>): void {
@@ -67,9 +98,10 @@ async function findCompactionCandidates(): Promise<string[]> {
 }
 
 export async function sessionStart(input: SessionStartInput): Promise<void> {
-  const collection = await detectCollection(input.cwd);
+  const detection = await detectCollection(input.cwd);
+  const collection = detection.collection;
 
-  const lines: string[] = ['# YAPA Context', '', `**Scope:** \`${collection}\``];
+  const lines: string[] = ['# YAPA Context', '', scopeLine(detection)];
 
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
@@ -125,7 +157,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
 }
 
 export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<void> {
-  const collection = await detectCollection(input.cwd);
+  const detection = await detectCollection(input.cwd);
+  const collection = detection.collection;
   const prompt = (input.prompt ?? '').trim();
 
   if (!prompt) {
@@ -133,7 +166,7 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
     return;
   }
 
-  const lines: string[] = ['# YAPA Recall', '', `**Scope:** \`${collection}\`  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`];
+  const lines: string[] = ['# YAPA Recall', '', `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`];
 
   try {
     const recall = await recallMemory(prompt, { collection, nResults: 3 });

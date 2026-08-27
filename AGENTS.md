@@ -334,8 +334,11 @@ Now execute these steps in order, without asking anything else:
    Run these steps in order, in parallel where possible, before drafting your response:
 
    1. **Detect scope** — infer the project/customer from the prompt + cwd. Pick the
-      collection (`customer-{name}`, `project-{name}`, or `global`). If genuinely
-      ambiguous, ask the user once and remember the answer for the session.
+      collection (`customer-{name}`, `project-{name}`, or `global`). Folder scopes
+      default to `project-{name}` — most folders are projects; use `customer-{name}`
+      only for folders known to be customer names. If the injected scope is flagged
+      AMBIGUOUS (both collections exist), or you are otherwise genuinely unsure,
+      ask the user once and remember the answer for the session.
    2. **Recall** — call `memory_recall` against the detected collection with a
       semantic query derived from the prompt.
    3. **Task check** — call `task_list` filtered to the detected collection at
@@ -394,12 +397,12 @@ Now execute these steps in order, without asking anything else:
 
    ### Collection Inference
    - Infer the appropriate collection from conversation context:
-     - Customer name mentioned → `customer-{name}`
-     - Project-specific work → `project-{name}` or `customer-{name}`
+     - Folder/scope is a known customer name → `customer-{name}`
+     - Project-specific work → `project-{name}` (the default for folder scopes)
      - General/cross-cutting knowledge → `global`
      - Private/personal data → `private-{name}` or `local-{name}` (these do NOT sync to remote)
    - **Before creating a new collection**, ask the user to confirm the collection name. Suggest a name based on context. Remind the user that `private-` or `local-` prefixed collections won't sync to the shared remote database.
-   - When unsure which collection to use, ask the user
+   - When unsure which collection or prefix to use, ask the user rather than guessing
    - Use `collection_list` to check what collections exist before creating new ones
    - Always pass the inferred collection explicitly on memory/task tool calls
 

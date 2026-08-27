@@ -43,6 +43,9 @@ dsh plugin --profile web add link:/absolute/path/to/yapa/packages/dsh
         username: YOUR_USERNAME            # used for task ID prefixes
         # chromaUrl: http://localhost:8000 # default
         # projectRoots: [/home/you/projects]  # cwd → collection detection
+        # customers: [acme]                   # folder names under projectRoots that are
+                                              # customers (→ customer-{name}); all other
+                                              # folders default to project-{name}
         # syncEnabled: false
         # syncDatabaseUrl: postgres://…    # optional remote sync
 ```
@@ -60,8 +63,11 @@ Three layers, lowest to highest precedence:
 3. **`~/.dsh/settings.yaml` under `yapa:`** — user overrides, hot-reloaded
    (change `syncIntervalMs`, `chromaUrl`, etc. without a restart).
 
-Plugin-only knobs (layer 2/3 only): `projectRoots`, `injectRecall`,
-`injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
+Plugin-only knobs (layer 2/3 only): `projectRoots`, `customers` (folder names
+under a project root that are customers — they get `customer-{name}` scope;
+every other folder defaults to `project-{name}`; if both collections exist for
+a folder the injected scope is flagged ambiguous and the agent asks),
+`injectRecall`, `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
 `decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
 reminders), `captureCompaction` (harness compaction summaries are stored as
 memories), `captureResponses` (every completed turn is judged by the aux-LLM

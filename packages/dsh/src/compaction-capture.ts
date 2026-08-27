@@ -37,7 +37,7 @@ export function registerCompactionCapture(ctx: Context, getResolved: () => Resol
           .trim();
         if (!summaryText) return;
 
-        const collection = await detectCollection(session.header.cwd, getResolved().projectRoots);
+        const { collection } = await detectCollection(session.header.cwd, getResolved().projectRoots, getResolved().customers);
         await storeMemory(
           `# Conversation compaction summary\n\n${summaryText}`,
           {

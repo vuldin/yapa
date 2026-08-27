@@ -164,7 +164,7 @@ async function captureTurn(
   assistantTextJoined: string,
   resolved: ResolvedConfig,
 ): Promise<void> {
-  const collection = await detectCollection(cwd, resolved.projectRoots);
+  const { collection } = await detectCollection(cwd, resolved.projectRoots, resolved.customers);
 
   const candidates = await extractMemories(
     {

@@ -83,13 +83,13 @@ describe('response capture', () => {
 
     expect(extractMemories).toHaveBeenCalledOnce();
     const input = extractMemories.mock.calls[0][0];
-    expect(input.collection).toBe('customer-acme');
+    expect(input.collection).toBe('project-acme');
     expect(input.userText).toBe(longText);
 
     expect(storeMemory).toHaveBeenCalledOnce();
     const [content, opts] = storeMemory.mock.calls[0];
     expect(content).toContain('8-byte alignment');
-    expect(opts.collection).toBe('customer-acme');
+    expect(opts.collection).toBe('project-acme');
     expect(opts.salience).toBe(2); // clamped from 3 to captureMaxSalience
     expect(opts.tags).toContain('auto-capture');
     expect(opts.tags).toContain('codec');
