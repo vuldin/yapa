@@ -20,6 +20,7 @@ import {
   storeMemory,
   consolidateStaleDrafts,
   type CollectionDetection,
+  isSyncableCollection,
 } from '@yapa/core';
 
 import { CLAUDE_CODE_RULES } from '../rules.js';
@@ -92,6 +93,8 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
 export async function freshenFromRemote(collection: string): Promise<number> {
   const config = getConfig();
   if (!isSyncConfigured(config)) return 0;
+  // global/private-*/local-* never sync: skip the sign-in and the request.
+  if (!isSyncableCollection(collection)) return 0;
   try {
     const since = Math.max(0, (await getSyncPullTimestamp()) - HOOK_PULL_OVERLAP_SECONDS);
     // The service's username (Google account) drives "by <user>" attribution.

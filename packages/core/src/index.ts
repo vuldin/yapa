@@ -66,6 +66,7 @@ export * from './sync/backend.js';
 export { HttpBackend, IdTokenProvider, ServiceError } from './sync/http-backend.js';
 export { PostgresBackend } from './sync/postgres-backend.js';
 export * from './sync/pull.js';
+export { isSyncableCollection } from './sync/syncable.js';
 export * from './sync/push.js';
 export * from './sync/deletes.js';
 export * from './sync/sentinel.js';

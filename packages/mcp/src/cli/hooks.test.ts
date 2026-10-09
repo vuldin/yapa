@@ -71,6 +71,11 @@ describe('freshenFromRemote', () => {
     expect(Date.now() - t0).toBeLessThan(2000);
   });
 
+  it('never contacts the remote for local-only collections (global, private-*, local-*)', async () => {
+    for (const c of ['global', 'private-notes', 'local-x']) expect(await freshenFromRemote(c)).toBe(0);
+    expect(pullCollection).not.toHaveBeenCalled();
+  });
+
   it('is a no-op with sync disabled', async () => {
     configure({ YAPA_SYNC_ENABLED: 'false' });
     expect(await freshenFromRemote('project-acme')).toBe(0);
