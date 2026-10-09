@@ -1,0 +1,25 @@
+project_id            = "<TEAM_PROJECT_ID>"
+region                = "us-central1"
+cloudsql_state_bucket = "<STATE_BUCKET>"
+allowed_hd            = "<COMPANY_DOMAIN>"
+
+# v1: individual users; switch to a group when it exists.
+invoker_members = [
+  "user:someone@<COMPANY_DOMAIN>",
+  # "group:yapa-users@<COMPANY_DOMAIN>",
+  # "serviceAccount:ci@<TEAM_PROJECT_ID>.iam.gserviceaccount.com",
+]
+
+# YAPA desktop OAuth client id (README, "Manual steps"). Empty until created.
+custom_audiences = [
+  # "<DESKTOP_CLIENT_ID>.apps.googleusercontent.com",
+]
+
+# Pilot fallback before the desktop client exists (README, "Token spike").
+# accept_gcloud_tokens = true
+
+# min_instances         = 0
+# max_instances         = 3
+# notification_channels = ["projects/<TEAM_PROJECT_ID>/notificationChannels/<ID>"]
+
+# image is passed by deploy.sh (digest-pinned); do not set it here.

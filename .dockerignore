@@ -1,0 +1,13 @@
+# Docker build context is the repo root (packages/service/Dockerfile).
+# Allow-list: only what the service image needs.
+*
+!package.json
+!package-lock.json
+!tsconfig.base.json
+!packages/core/package.json
+!packages/mcp/package.json
+!packages/dsh/package.json
+!packages/service/package.json
+!packages/service/tsconfig.json
+!packages/service/src/
+packages/service/src/**/*.test.ts
