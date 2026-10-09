@@ -899,9 +899,17 @@ SLA; acceptable for a pilot.
   `X-Serverless-Authorization` is sent), so clients send the same ID token in
   `X-Yapa-Id-Token`, which the app verifies fully. A stripped token is never
   accepted.
-- **Membership (v1).** No YAPA Google group exists yet: Cloud Run
-  `roles/run.invoker` is bound per person, and the app requires an active
-  `users` row (the group check of section 3 is deferred until a group exists).
+- **Membership (decided 2026-10-09, Josh): the whole company.** Anyone with a
+  verified company Google account can use YAPA: Cloud Run `roles/run.invoker`
+  is bound to `domain:<company domain>`, and with `YAPA_AUTO_PROVISION=true` the
+  service creates the `users` row on first sign-in (username = email local part,
+  lowercased, other characters -> `-`; deterministic, so not claimable).
+  Existing rows are never changed (a disabled user stays disabled; a username
+  held by another email needs an admin). The runtime role has INSERT
+  (username, email) on `users` only. Offboarding: the Google account is
+  disabled (no tokens), and/or `users.active=false`. Consequence: every
+  employee can read every shared collection (decision 7, no ACLs in v1);
+  restricted material stays in `private-` collections.
 - **Pilot tokens.** `gcloud auth print-identity-token` user tokens (gcloud's
   client id as audience) are accepted for the pilot; switch to the YAPA
   desktop OAuth client audience before team rollout (josh-318).
