@@ -38,14 +38,14 @@ describe('deny by default', () => {
   it('registers every API v1 route', () => {
     const paths = new Set(routes.map(r => `${r.method} ${r.path}`));
     for (const p of [
-      'GET /healthz', 'GET /v1/health', 'GET /v1/me', 'GET /v1/me/collections', 'GET /v1/me/max-task-number',
+      'GET /healthz', 'GET /health', 'GET /v1/health', 'GET /v1/me', 'GET /v1/me/collections', 'GET /v1/me/max-task-number',
       'GET /v1/collections', 'GET /v1/collections/:c/documents', 'POST /v1/documents:batchUpsert', 'PUT /v1/documents/:id',
       'POST /v1/documents:batchDelete', 'POST /v1/documents:collections', 'POST /v1/documents:owners',
       'GET /v1/documents/:id/created-at', 'POST /v1/documents/:id/related-ids', 'POST /v1/collections/:spec',
     ]) expect(paths).toContain(p);
   });
 
-  for (const r of app().routes.filter(x => x.method !== 'ALL' && x.path !== '/healthz')) {
+  for (const r of app().routes.filter(x => x.method !== 'ALL' && x.path !== '/healthz' && x.path !== '/health')) {
     it(`${r.method} ${r.path} rejects missing and invalid tokens`, async () => {
       const init = { method: r.method, headers: { 'content-type': 'application/json' }, body: r.method === 'GET' ? undefined : '{}' };
       const none = await a.request(concrete(r.path), init);

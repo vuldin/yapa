@@ -102,14 +102,18 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.notFound(c => c.json(errorBody('not_found', 'no such route', c.get('requestId')), 404));
 
   // Unauthenticated liveness probe: no DB, no auth.
-  app.get('/healthz', c => {
-    c.set('route', 'GET /healthz');
-    return c.json({ ok: true });
-  });
+  // /health too: Cloud Run's front end reserves some paths ending in `z`, so
+  // /healthz only answers the platform's own probes, not external callers.
+  for (const path of ['/healthz', '/health']) {
+    app.get(path, c => {
+      c.set('route', `GET ${path}`);
+      return c.json({ ok: true });
+    });
+  }
 
   // Deny by default: everything below /healthz needs a verified, active user.
   app.use('*', async (c, next) => {
-    if (c.req.path === '/healthz' && c.req.method === 'GET') return next();
+    if ((c.req.path === '/healthz' || c.req.path === '/health') && c.req.method === 'GET') return next();
     const caller = await authenticate(c.req.header('authorization'), deps.verifier, lookupUser, c.get('requestId'));
     c.set('caller', caller);
     const rawDevice = c.req.header('x-yapa-device');

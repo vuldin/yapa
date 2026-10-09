@@ -61,7 +61,13 @@ export class GoogleTokenVerifier implements TokenVerifier {
       const ticket = await this.client.verifyIdToken({ idToken: token, audience: this.audiences });
       payload = ticket.getPayload();
     } catch (e) {
-      throw new AuthFailure(classifyVerifyError(e));
+      const reason = classifyVerifyError(e);
+      // Diagnostics without token material: whether the platform stripped the
+      // signature, and the library message with anything JWT-like redacted.
+      const sigRemoved = token.split('.')[2] === 'SIGNATURE_REMOVED_BY_GOOGLE';
+      const detail = (e instanceof Error ? e.message : String(e)).replace(/[A-Za-z0-9_-]{20,}(\.[A-Za-z0-9_-]{10,}){1,2}/g, '<jwt>').slice(0, 200);
+      log('WARNING', 'token verification failed', { event: 'auth_verify_detail', reason, sig_removed: sigRemoved, detail });
+      throw new AuthFailure(reason);
     }
     return checkGoogleClaims(payload, this.allowedHd);
   }
