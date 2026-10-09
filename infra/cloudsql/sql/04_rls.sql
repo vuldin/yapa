@@ -1,6 +1,6 @@
 -- 04_rls.sql: row-level security as defense in depth (design section 6).
 -- Apply together with the first josh-311 service release, which must run
--- `SET LOCAL yapa.user = '<username>'` in every transaction. Before that it is
+-- `SELECT set_config('yapa.user', $1, true)` (SET LOCAL yapa.user fails: `user` is reserved) in every transaction. Before that it is
 -- harmless (no runtime traffic yet). The admin bypasses RLS as a member of the
 -- table owner, so migrations and restores are unaffected.
 -- Run as the admin with -v runtime_user=... Idempotent.
