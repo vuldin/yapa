@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type pg from 'pg';
-import { authenticate, type Caller, type TokenVerifier, type UserLookup } from './auth.js';
+import { APP_TOKEN_HEADER, authenticate, type Caller, type TokenVerifier, type UserLookup } from './auth.js';
 import type { RateLimitClass, RateLimits, ServiceConfig } from './config.js';
 import { decodeCursor, posFromSince } from './cursor.js';
 import { isUnavailableError } from './db.js';
@@ -114,7 +114,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   // Deny by default: everything below /healthz needs a verified, active user.
   app.use('*', async (c, next) => {
     if ((c.req.path === '/healthz' || c.req.path === '/health') && c.req.method === 'GET') return next();
-    const caller = await authenticate(c.req.header('authorization'), deps.verifier, lookupUser, c.get('requestId'));
+    const caller = await authenticate(c.req.header('authorization'), deps.verifier, lookupUser, c.get('requestId'), c.req.header(APP_TOKEN_HEADER));
     c.set('caller', caller);
     const rawDevice = c.req.header('x-yapa-device');
     const device = checkDevice(rawDevice);

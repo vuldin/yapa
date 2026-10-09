@@ -1,7 +1,7 @@
 import { createSign, generateKeyPairSync } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OAuth2Client } from 'google-auth-library';
-import { authenticate, bearerToken, checkGoogleClaims, GoogleTokenVerifier, InsecureTestVerifier, type UserRow } from './auth.js';
+import { appToken, authenticate, bearerToken, checkGoogleClaims, GoogleTokenVerifier, InsecureTestVerifier, type UserRow } from './auth.js';
 import { ApiError } from './errors.js';
 import { loadConfig, ConfigError } from './config.js';
 import { setLogSink } from './log.js';
@@ -134,5 +134,21 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ YAPA_AUDIENCES: 'a', YAPA_ALLOWED_HD: 'h', YAPA_INSTANCE_CONNECTION_NAME: 'p:r:i' })).toThrow(/YAPA_DB_USER/);
     const c = loadConfig({ YAPA_AUDIENCES: 'a', YAPA_ALLOWED_HD: 'h', YAPA_INSTANCE_CONNECTION_NAME: 'p:r:i', YAPA_DB_USER: 'sa@p.iam', YAPA_DB_NAME: 'yapa' });
     expect(c.dbIpType).toBe('PRIVATE');
+  });
+});
+
+describe('appToken (Cloud Run strips the Authorization signature)', () => {
+  it('prefers the X-Yapa-Id-Token header, raw or Bearer-prefixed', () => {
+    expect(appToken('a.b.c', 'Bearer x.y.SIGNATURE_REMOVED_BY_GOOGLE')).toBe('a.b.c');
+    expect(appToken('Bearer a.b.c', undefined)).toBe('a.b.c');
+  });
+  it('falls back to the Authorization bearer token (local, self-host)', () => {
+    expect(appToken(undefined, 'Bearer a.b.c')).toBe('a.b.c');
+    expect(appToken('  ', 'Bearer a.b.c')).toBe('a.b.c');
+  });
+  it('a stripped-signature token still fails verification (never trusted)', async () => {
+    const v = new InsecureTestVerifier();
+    expect(appToken(undefined, 'Bearer h.p.SIGNATURE_REMOVED_BY_GOOGLE')).toBe('h.p.SIGNATURE_REMOVED_BY_GOOGLE');
+    void v;
   });
 });

@@ -106,6 +106,21 @@ export function createVerifier(cfg: ServiceConfig): TokenVerifier {
   return new GoogleTokenVerifier(cfg.audiences, cfg.allowedHd);
 }
 
+/**
+ * Header carrying the token the app verifies. Cloud Run's IAM check consumes
+ * `Authorization` and forwards it with the signature replaced by
+ * SIGNATURE_REMOVED_BY_GOOGLE (also when X-Serverless-Authorization is sent),
+ * so clients behind Cloud Run send the same ID token here as well.
+ */
+export const APP_TOKEN_HEADER = 'x-yapa-id-token';
+
+/** The token to verify: the app header when present, else the bearer token. */
+export function appToken(appHeader: string | undefined, authorization: string | undefined): string | undefined {
+  const raw = appHeader?.trim();
+  if (raw) return /^Bearer\s+/i.test(raw) ? bearerToken(raw) : raw;
+  return bearerToken(authorization);
+}
+
 export function bearerToken(header: string | undefined): string | undefined {
   if (!header) return undefined;
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header);
@@ -134,8 +149,9 @@ export async function authenticate(
   verifier: TokenVerifier,
   lookup: UserLookup,
   requestId?: string,
+  appHeader?: string,
 ): Promise<Caller> {
-  const token = bearerToken(authorization);
+  const token = appToken(appHeader, authorization);
   if (!token) {
     logAuthFailure('missing_token', requestId);
     throw new ApiError('unauthenticated', 'missing bearer token');
