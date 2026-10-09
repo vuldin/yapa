@@ -1,6 +1,6 @@
 {
   "name": "yapa-claude-code-plugin",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Runtime dependencies for the bundled YAPA plugin (installed by Claude Code)",

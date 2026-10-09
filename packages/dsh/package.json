@@ -1,6 +1,6 @@
 {
   "name": "yapa",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "YAPA — Memory & Task assistant as a native DeepSeek Harness plugin",
   "type": "module",
   "main": "dist/index.js",
@@ -19,7 +19,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@yapa/core": "^0.2.0"
+    "@yapa/core": "^1.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
