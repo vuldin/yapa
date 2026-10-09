@@ -98,7 +98,7 @@ async function serviceHarness(dir: string): Promise<Harness> {
   return {
     name: 'service',
     as(user, device) {
-      setConfig(createConfig({ YAPA_USERNAME: user, YAPA_DEVICE_ID: device, YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_SYNC_PUSH_DEBOUNCE_MS: '0' }));
+      setConfig(createConfig({ YAPA_USERNAME: user, YAPA_DEVICE_ID: device, YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_SYNC_PUSH_DEBOUNCE_MS: '0', YAPA_SYNC_ID_TOKEN_CACHE: 'off' }));
       if (!stores.has(device)) stores.set(device, createLocalStore(join(dir, `svc-${device}`)));
       setStore(stores.get(device)!);
       if (!backends.has(user)) {

@@ -9,9 +9,14 @@
  *   Idempotency-Key: <uuid>         on writes, reused on the 401 retry
  *
  * Tokens come from `gcloud auth print-identity-token` (or the command in
- * YAPA_SYNC_ID_TOKEN_CMD), are cached in memory only until ~5 minutes before
- * `exp`, and are never logged or written anywhere.
+ * YAPA_SYNC_ID_TOKEN_CMD) and are reused until ~5 minutes before `exp`. They
+ * are never logged. Hooks are short-lived processes and minting costs ~1 s, so
+ * the current token is also cached in a 0600 file (YAPA_SYNC_ID_TOKEN_CACHE,
+ * 'off' disables): it is short-lived (1 h) and far less powerful than the
+ * refresh token gcloud itself keeps on disk.
  */
+import { readFileSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { exec, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { getConfig, getEmbeddingModel } from '../config.js';
@@ -91,12 +96,17 @@ export class IdTokenProvider {
   /** Bumped on every newly minted token (identity caches key on it). */
   generation = 0;
 
-  constructor(cmd: string | TokenCommandRunner = '', private readonly now: () => number = Date.now) {
+  constructor(
+    cmd: string | TokenCommandRunner = '',
+    private readonly now: () => number = Date.now,
+    private readonly cachePath: string = '',
+  ) {
     this.run = typeof cmd === 'function' ? cmd : () => runTokenCommand(cmd);
   }
 
   async get(): Promise<string> {
     if (this.token && this.now() < this.validUntil) return this.token;
+    if (this.loadCached()) return this.token!;
     this.inFlight ??= this.fetch().finally(() => { this.inFlight = undefined; });
     return this.inFlight;
   }
@@ -104,6 +114,43 @@ export class IdTokenProvider {
   invalidate(): void {
     this.token = undefined;
     this.validUntil = 0;
+    if (this.cachePath) rmSync(this.cachePath, { force: true });
+  }
+
+  private validity(token: string, now: number): number {
+    const exp = Number(decodeJwtPayload(token)?.exp);
+    if (!Number.isFinite(exp) || exp <= 0) return now + OPAQUE_TOKEN_TTL_MS;
+    const life = exp * 1000 - now;
+    return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
+  }
+
+  /** Adopt a still-valid token cached by an earlier process (JWTs with `exp` only). */
+  private loadCached(): boolean {
+    if (!this.cachePath) return false;
+    try {
+      const token = readFileSync(this.cachePath, 'utf-8').trim();
+      if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
+      const until = this.validity(token, this.now());
+      if (this.now() >= until) return false;
+      this.token = token;
+      this.validUntil = until;
+      this.generation++;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private saveCached(token: string): void {
+    if (!this.cachePath) return;
+    try {
+      mkdirSync(dirname(this.cachePath), { recursive: true, mode: 0o700 });
+      const tmp = `${this.cachePath}.${process.pid}.tmp`;
+      writeFileSync(tmp, token, { mode: 0o600 });
+      renameSync(tmp, this.cachePath);
+    } catch {
+      // Cache is an optimization only.
+    }
   }
 
   /** `email` claim of the cached token, if any (display only; the service verifies). */
@@ -116,18 +163,10 @@ export class IdTokenProvider {
     const out = (await this.run()).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     const token = out[out.length - 1];
     if (!token || /\s/.test(token)) throw new Error('the ID token command printed no token. Run `gcloud auth login`.');
-    const now = this.now();
-    const exp = Number(decodeJwtPayload(token)?.exp);
-    let until: number;
-    if (Number.isFinite(exp) && exp > 0) {
-      const life = exp * 1000 - now;
-      until = now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
-    } else {
-      until = now + OPAQUE_TOKEN_TTL_MS;
-    }
     this.token = token;
-    this.validUntil = until;
+    this.validUntil = this.validity(token, this.now());
     this.generation++;
+    this.saveCached(token);
     return token;
   }
 }
@@ -195,7 +234,7 @@ export class HttpBackend implements SyncBackend {
     const config = getConfig();
     this.target = (opts.baseUrl ?? config.SYNC_SERVICE_URL).replace(/\/+$/, '');
     if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
-    this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD);
+    this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD, Date.now, config.SYNC_ID_TOKEN_CACHE);
     this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
     this.device = opts.device ?? getDeviceId;
   }

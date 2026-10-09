@@ -7283,6 +7283,7 @@ function createConfig(env = process.env) {
     SYNC_ENABLED: get(env, "SYNC_ENABLED", "false") === "true",
     SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
     SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
+    SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
@@ -8238,6 +8239,8 @@ __export(http_backend_exports, {
   decodeJwtPayload: () => decodeJwtPayload,
   redactTokens: () => redactTokens
 });
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync3, rmSync, renameSync } from "node:fs";
+import { dirname as dirname2 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 function redactTokens(text) {
@@ -8355,11 +8358,13 @@ var init_http_backend = __esm({
       "not_owner"
     ]);
     IdTokenProvider = class {
-      constructor(cmd = "", now = Date.now) {
+      constructor(cmd = "", now = Date.now, cachePath = "") {
         this.now = now;
+        this.cachePath = cachePath;
         this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
       }
       now;
+      cachePath;
       token;
       validUntil = 0;
       inFlight;
@@ -8368,6 +8373,7 @@ var init_http_backend = __esm({
       generation = 0;
       async get() {
         if (this.token && this.now() < this.validUntil) return this.token;
+        if (this.loadCached()) return this.token;
         this.inFlight ??= this.fetch().finally(() => {
           this.inFlight = void 0;
         });
@@ -8376,6 +8382,39 @@ var init_http_backend = __esm({
       invalidate() {
         this.token = void 0;
         this.validUntil = 0;
+        if (this.cachePath) rmSync(this.cachePath, { force: true });
+      }
+      validity(token, now) {
+        const exp = Number(decodeJwtPayload(token)?.exp);
+        if (!Number.isFinite(exp) || exp <= 0) return now + OPAQUE_TOKEN_TTL_MS;
+        const life = exp * 1e3 - now;
+        return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
+      }
+      /** Adopt a still-valid token cached by an earlier process (JWTs with `exp` only). */
+      loadCached() {
+        if (!this.cachePath) return false;
+        try {
+          const token = readFileSync3(this.cachePath, "utf-8").trim();
+          if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
+          const until = this.validity(token, this.now());
+          if (this.now() >= until) return false;
+          this.token = token;
+          this.validUntil = until;
+          this.generation++;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      saveCached(token) {
+        if (!this.cachePath) return;
+        try {
+          mkdirSync3(dirname2(this.cachePath), { recursive: true, mode: 448 });
+          const tmp = `${this.cachePath}.${process.pid}.tmp`;
+          writeFileSync3(tmp, token, { mode: 384 });
+          renameSync(tmp, this.cachePath);
+        } catch {
+        }
       }
       /** `email` claim of the cached token, if any (display only; the service verifies). */
       email() {
@@ -8386,18 +8425,10 @@ var init_http_backend = __esm({
         const out = (await this.run()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
         const token = out[out.length - 1];
         if (!token || /\s/.test(token)) throw new Error("the ID token command printed no token. Run `gcloud auth login`.");
-        const now = this.now();
-        const exp = Number(decodeJwtPayload(token)?.exp);
-        let until;
-        if (Number.isFinite(exp) && exp > 0) {
-          const life = exp * 1e3 - now;
-          until = now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
-        } else {
-          until = now + OPAQUE_TOKEN_TTL_MS;
-        }
         this.token = token;
-        this.validUntil = until;
+        this.validUntil = this.validity(token, this.now());
         this.generation++;
+        this.saveCached(token);
         return token;
       }
     };
@@ -8427,7 +8458,7 @@ var init_http_backend = __esm({
         const config2 = getConfig();
         this.target = (opts.baseUrl ?? config2.SYNC_SERVICE_URL).replace(/\/+$/, "");
         if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
-        this.tokens = opts.tokens ?? new IdTokenProvider(config2.SYNC_ID_TOKEN_CMD);
+        this.tokens = opts.tokens ?? new IdTokenProvider(config2.SYNC_ID_TOKEN_CMD, Date.now, config2.SYNC_ID_TOKEN_CACHE);
         this.timeoutMs = opts.timeoutMs ?? config2.SYNC_HTTP_TIMEOUT_MS;
         this.device = opts.device ?? getDeviceId;
       }
@@ -8616,7 +8647,7 @@ var init_http_backend = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync3 } from "node:fs";
+import { readFileSync as readFileSync4 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url2;
@@ -8628,7 +8659,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -8637,7 +8668,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url2.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -40266,14 +40297,14 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync4, readdirSync, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
 import { join as join3 } from "path";
 function artifactDir(kind) {
   return join3(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync2(dir)) mkdirSync3(dir, { recursive: true });
+  if (!existsSync2(dir)) mkdirSync4(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -40292,7 +40323,7 @@ function nextVersion(kind) {
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
   const path = join3(dir, filename);
-  writeFileSync3(path, content);
+  writeFileSync4(path, content);
   return path;
 }
 function artifactPath(kind, filename) {
@@ -41294,7 +41325,7 @@ init_device();
 init_config();
 init_store();
 import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync6 } from "fs";
 import { join as join5 } from "path";
 
 // packages/core/src/training/fireworks.ts
@@ -41457,21 +41488,21 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "fs";
 import { join as join4 } from "path";
 function registryPath() {
   return join4(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
   const dir = join4(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync3(dir)) mkdirSync4(dir, { recursive: true });
+  if (!existsSync3(dir)) mkdirSync5(dir, { recursive: true });
 }
 function load() {
   ensureDir();
   const path = registryPath();
   if (!existsSync3(path)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync5(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync6(path, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -41482,7 +41513,7 @@ function load() {
 }
 function save(file2) {
   ensureDir();
-  writeFileSync4(registryPath(), JSON.stringify(file2, null, 2) + "\n");
+  writeFileSync5(registryPath(), JSON.stringify(file2, null, 2) + "\n");
 }
 function addAdapter(entry) {
   const file2 = load();
@@ -41513,7 +41544,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -41616,7 +41647,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path) {
-  const content = readFileSync6(path, "utf-8");
+  const content = readFileSync7(path, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -41645,7 +41676,7 @@ function getBackend() {
 }
 function previewDir() {
   const dir = join5(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync4(dir)) mkdirSync5(dir, { recursive: true });
+  if (!existsSync4(dir)) mkdirSync6(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
@@ -41679,7 +41710,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
   const previewPath = join5(dir, filename);
-  writeFileSync5(previewPath, jsonl);
+  writeFileSync6(previewPath, jsonl);
   return {
     manifestVersion,
     previewPath,
@@ -41695,7 +41726,7 @@ async function trainingTrigger(args) {
   if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync7(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync8(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(

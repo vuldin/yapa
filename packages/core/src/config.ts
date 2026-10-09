@@ -123,6 +123,8 @@ export interface YapaConfig {
    * `gcloud auth print-identity-token` (user accounts, after `gcloud auth login`).
    */
   SYNC_ID_TOKEN_CMD: string;
+  /** File caching the current ID token (0600) across short-lived hook processes; '' = memory only. */
+  SYNC_ID_TOKEN_CACHE: string;
   /** Per-request timeout for the sync service. */
   SYNC_HTTP_TIMEOUT_MS: number;
   /** Advanced/self-host: direct PostgreSQL URL (ignored when SYNC_SERVICE_URL is set). */
@@ -259,6 +261,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_ENABLED: get(env, 'SYNC_ENABLED', 'false') === 'true',
     SYNC_SERVICE_URL: get(env, 'SYNC_SERVICE_URL', '').replace(/\/+$/, ''),
     SYNC_ID_TOKEN_CMD: get(env, 'SYNC_ID_TOKEN_CMD', ''),
+    SYNC_ID_TOKEN_CACHE: ((v: string) => (v === 'off' ? '' : v))(get(env, 'SYNC_ID_TOKEN_CACHE', pathJoin(homedir(), '.local', 'share', 'yapa', 'id-token'))),
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, 'SYNC_HTTP_TIMEOUT_MS', '15000'), 10),
     SYNC_DATABASE_URL: get(env, 'SYNC_DATABASE_URL', ''),
     SYNC_INTERVAL_MS: parseInt(get(env, 'SYNC_INTERVAL_MS', '300000'), 10), // 5 minutes

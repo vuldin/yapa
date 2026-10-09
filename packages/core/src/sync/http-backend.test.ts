@@ -70,7 +70,7 @@ beforeAll(async () => {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base }));
+  setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_SYNC_ID_TOKEN_CACHE: 'off' }));
 });
 
 afterAll(async () => {
@@ -561,5 +561,31 @@ describe('username comes from the service (GET /v1/me)', () => {
     const stats = await pushToRemote();
     expect(stats.renamed).toBe(1);
     expect((await getDocumentsByIds('project-dana', ['dana-smith-20'])).length).toBe(1);
+  });
+});
+
+describe('IdTokenProvider disk cache', () => {
+  const jwt = (exp: number) => `h.${Buffer.from(JSON.stringify({ exp, email: 'a@example.com' })).toString('base64url')}.s`;
+
+  it('a second process reuses a still-valid cached token instead of minting', async () => {
+    const { mkdtempSync, statSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const path = join(mkdtempSync(join(tmpdir(), 'yapa-tok-')), 'sub', 'id-token');
+    const now = 1_800_000_000_000;
+    let minted = 0;
+    const mint = async () => { minted++; return jwt(now / 1000 + 3600); };
+    const a = new IdTokenProvider(mint, () => now, path);
+    const t1 = await a.get();
+    expect(minted).toBe(1);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    const b = new IdTokenProvider(mint, () => now + 60_000, path);
+    expect(await b.get()).toBe(t1);
+    expect(minted).toBe(1);
+    const late = new IdTokenProvider(mint, () => now + 3600_000, path);
+    await late.get();
+    expect(minted).toBe(2);
+    late.invalidate();
+    expect(existsSync(path)).toBe(false);
   });
 });

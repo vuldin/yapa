@@ -90,6 +90,7 @@ function createConfig(env = process.env) {
     SYNC_ENABLED: get(env, "SYNC_ENABLED", "false") === "true",
     SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
     SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
+    SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
@@ -1436,6 +1437,8 @@ __export(http_backend_exports, {
   decodeJwtPayload: () => decodeJwtPayload,
   redactTokens: () => redactTokens
 });
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, rmSync, renameSync } from "node:fs";
+import { dirname as dirname2 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 function redactTokens(text) {
@@ -1553,11 +1556,13 @@ var init_http_backend = __esm({
       "not_owner"
     ]);
     IdTokenProvider = class {
-      constructor(cmd = "", now = Date.now) {
+      constructor(cmd = "", now = Date.now, cachePath = "") {
         this.now = now;
+        this.cachePath = cachePath;
         this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
       }
       now;
+      cachePath;
       token;
       validUntil = 0;
       inFlight;
@@ -1566,6 +1571,7 @@ var init_http_backend = __esm({
       generation = 0;
       async get() {
         if (this.token && this.now() < this.validUntil) return this.token;
+        if (this.loadCached()) return this.token;
         this.inFlight ??= this.fetch().finally(() => {
           this.inFlight = void 0;
         });
@@ -1574,6 +1580,39 @@ var init_http_backend = __esm({
       invalidate() {
         this.token = void 0;
         this.validUntil = 0;
+        if (this.cachePath) rmSync(this.cachePath, { force: true });
+      }
+      validity(token, now) {
+        const exp = Number(decodeJwtPayload(token)?.exp);
+        if (!Number.isFinite(exp) || exp <= 0) return now + OPAQUE_TOKEN_TTL_MS;
+        const life = exp * 1e3 - now;
+        return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
+      }
+      /** Adopt a still-valid token cached by an earlier process (JWTs with `exp` only). */
+      loadCached() {
+        if (!this.cachePath) return false;
+        try {
+          const token = readFileSync3(this.cachePath, "utf-8").trim();
+          if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
+          const until = this.validity(token, this.now());
+          if (this.now() >= until) return false;
+          this.token = token;
+          this.validUntil = until;
+          this.generation++;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      saveCached(token) {
+        if (!this.cachePath) return;
+        try {
+          mkdirSync2(dirname2(this.cachePath), { recursive: true, mode: 448 });
+          const tmp = `${this.cachePath}.${process.pid}.tmp`;
+          writeFileSync2(tmp, token, { mode: 384 });
+          renameSync(tmp, this.cachePath);
+        } catch {
+        }
       }
       /** `email` claim of the cached token, if any (display only; the service verifies). */
       email() {
@@ -1584,18 +1623,10 @@ var init_http_backend = __esm({
         const out = (await this.run()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
         const token = out[out.length - 1];
         if (!token || /\s/.test(token)) throw new Error("the ID token command printed no token. Run `gcloud auth login`.");
-        const now = this.now();
-        const exp = Number(decodeJwtPayload(token)?.exp);
-        let until;
-        if (Number.isFinite(exp) && exp > 0) {
-          const life = exp * 1e3 - now;
-          until = now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
-        } else {
-          until = now + OPAQUE_TOKEN_TTL_MS;
-        }
         this.token = token;
-        this.validUntil = until;
+        this.validUntil = this.validity(token, this.now());
         this.generation++;
+        this.saveCached(token);
         return token;
       }
     };
@@ -1625,7 +1656,7 @@ var init_http_backend = __esm({
         const config = getConfig();
         this.target = (opts.baseUrl ?? config.SYNC_SERVICE_URL).replace(/\/+$/, "");
         if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
-        this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD);
+        this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD, Date.now, config.SYNC_ID_TOKEN_CACHE);
         this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
         this.device = opts.device ?? getDeviceId;
       }
@@ -1814,7 +1845,7 @@ var init_http_backend = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync3 } from "node:fs";
+import { readFileSync as readFileSync4 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url;
@@ -1826,7 +1857,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -1835,7 +1866,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -3393,7 +3424,7 @@ __export(hooks_exports, {
   stop: () => stop,
   userPromptSubmit: () => userPromptSubmit
 });
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync4, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join3 } from "node:path";
 function emit(payload) {
@@ -3434,7 +3465,7 @@ async function freshenFromRemote(collection) {
 function stateDir() {
   const base = process.env.CLAUDE_PLUGIN_DATA || join3(tmpdir(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
   const dir = join3(base, "sessions");
-  mkdirSync2(dir, { recursive: true });
+  mkdirSync3(dir, { recursive: true });
   return dir;
 }
 function stateFile(sessionId, kind) {
@@ -3442,7 +3473,7 @@ function stateFile(sessionId, kind) {
 }
 function readTurn(sessionId) {
   try {
-    return JSON.parse(readFileSync4(stateFile(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync5(stateFile(sessionId, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -3451,7 +3482,7 @@ function recordPrompt(sessionId, prompt) {
   if (!sessionId) return;
   try {
     const turn = (readTurn(sessionId)?.turn ?? 0) + 1;
-    writeFileSync2(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
+    writeFileSync3(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
@@ -3461,8 +3492,8 @@ function takeNotice(sessionId) {
   if (!sessionId) return void 0;
   const file = stateFile(sessionId, "notice");
   try {
-    const notice = readFileSync4(file, "utf-8").trim();
-    rmSync(file, { force: true });
+    const notice = readFileSync5(file, "utf-8").trim();
+    rmSync2(file, { force: true });
     return notice || void 0;
   } catch {
     return void 0;
@@ -3588,7 +3619,7 @@ async function stop(input) {
       { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText, assistantText },
       { maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE }
     );
-    if (result.notice) writeFileSync2(stateFile(input.session_id, "notice"), result.notice);
+    if (result.notice) writeFileSync3(stateFile(input.session_id, "notice"), result.notice);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -3619,7 +3650,7 @@ async function sessionEnd(input) {
   if (!input.session_id) return;
   for (const kind of ["turn", "notice"]) {
     try {
-      rmSync(stateFile(input.session_id, kind), { force: true });
+      rmSync2(stateFile(input.session_id, kind), { force: true });
     } catch {
     }
   }
@@ -3649,9 +3680,9 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname2, join as join4 } from "node:path";
+import { dirname as dirname3, join as join4 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -3685,7 +3716,7 @@ function selfCommand() {
 }
 function readSettings(path) {
   try {
-    return JSON.parse(readFileSync5(path, "utf-8"));
+    return JSON.parse(readFileSync6(path, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);
@@ -3693,12 +3724,12 @@ function readSettings(path) {
 }
 function installHooks(path = defaultSettingsPath(), command = selfCommand()) {
   const merged = mergeHooks(readSettings(path), command);
-  mkdirSync3(dirname2(path), { recursive: true });
-  writeFileSync3(path, JSON.stringify(merged, null, 2) + "\n");
+  mkdirSync4(dirname3(path), { recursive: true });
+  writeFileSync4(path, JSON.stringify(merged, null, 2) + "\n");
   return path;
 }
 function uninstallHooks(path = defaultSettingsPath()) {
-  writeFileSync3(path, JSON.stringify(removeHooks(readSettings(path)), null, 2) + "\n");
+  writeFileSync4(path, JSON.stringify(removeHooks(readSettings(path)), null, 2) + "\n");
   return path;
 }
 var HOOK_EVENTS, MARKER;
