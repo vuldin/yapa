@@ -13,7 +13,9 @@
     "test": "npm run test --workspaces --if-present",
     "start": "node packages/mcp/dist/index.js",
     "build:plugin": "node scripts/build-plugin.mjs",
-    "build:all": "npm run build && npm run build:plugin"
+    "build:all": "npm run build && npm run build:plugin",
+    "test:service": "npm test -w packages/service",
+    "test:service:integration": "npm run test:integration -w packages/service"
   },
   "devDependencies": {
     "@types/node": "^25.9.9",
