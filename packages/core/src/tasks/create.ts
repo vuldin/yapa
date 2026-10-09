@@ -18,6 +18,8 @@ export interface TaskOptions {
   is_recurring?: boolean;
   recurrence_pattern?: 'daily' | 'weekly' | 'monthly';
   salience?: number;
+  duration_minutes?: number;
+  completed_at?: number;
 }
 
 const PRIORITY_SALIENCE: Record<string, number> = {
@@ -78,6 +80,8 @@ export async function createTask(
     created_at: now,
     updated_at: now,
     accessed_at: now,
+    completed_at: options.completed_at ?? null,
+    duration_minutes: options.duration_minutes ?? null,
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? 'medium'],
     sector: 'semantic',
   };

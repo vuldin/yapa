@@ -15,6 +15,9 @@ import {
   shouldRunDecay,
   startCuration,
   startSync,
+  stopSync,
+  flushPendingSync,
+  consolidateSessionEverywhere,
 } from '@yapa/core';
 
 const server = new McpServer({
@@ -97,8 +100,11 @@ async function main(): Promise<void> {
     process.stderr.write(`✅ YAPA started with ChromaDB v${health.version} at ${getConfig().CHROMA_URL} (embeddings: ${getConfig().EMBEDDING_PROVIDER})\n`);
   }
   
-  // Run decay in background, don't block startup
+  // Run decay in background, don't block startup — and keep checking hourly,
+  // since a server can stay up for days (decay is wall-clock, so checking
+  // often never over-decays; the 24h gate just bounds write volume).
   startupDecay();
+  setInterval(() => { startupDecay(); }, 3600_000).unref();
 
   // Start background curation if enabled
   if (getConfig().CURATION_ENABLED) {
@@ -113,6 +119,39 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
+
+const SHUTDOWN_BUDGET_MS = 8000;
+let shuttingDown = false;
+
+/**
+ * One MCP server process == one Claude Code session, so its exit is the
+ * reliable session-end seam: roll this session's journal drafts into a memory
+ * and push anything still waiting on the sync debounce, within a fixed budget.
+ * (Claude Code's SessionEnd hook can't do this — it runs in another process
+ * that doesn't know this server's journal session id.)
+ */
+async function shutdown(reason: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const work = (async () => {
+    try {
+      const rolled = await consolidateSessionEverywhere();
+      if (rolled.length) process.stderr.write(`[yapa] ${reason}: consolidated ${rolled.length} session journal(s)\n`);
+    } catch (e) {
+      process.stderr.write(`[yapa] journal consolidation at shutdown failed: ${e}\n`);
+    }
+    if (getConfig().SYNC_ENABLED) {
+      await flushPendingSync(SHUTDOWN_BUDGET_MS / 2).catch(() => undefined);
+      await stopSync().catch(() => undefined);
+    }
+  })();
+  await Promise.race([work, new Promise(resolve => setTimeout(resolve, SHUTDOWN_BUDGET_MS).unref())]);
+  process.exit(0);
+}
+
+process.stdin.on('end', () => void shutdown('stdin closed'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 
 main().catch((e) => {
   process.stderr.write(`[yapa] Fatal: ${e}\n`);

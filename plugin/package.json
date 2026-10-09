@@ -1,0 +1,14 @@
+{
+  "name": "yapa-claude-code-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime dependencies for the bundled YAPA plugin (installed by Claude Code)",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
+    "pg": "^8.23.1"
+  }
+}

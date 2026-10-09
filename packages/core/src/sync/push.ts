@@ -1,10 +1,11 @@
 import { getConfig } from '../config.js';
-import { listCollections, getDocumentsByFilter, updateDocument } from '../store/index.js';
+import { listCollections, getDocumentsByFilter, updateDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
 import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments } from './postgres.js';
 import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
+import { getDeviceId } from './device.js';
 
 /** Collection prefixes that should not be synced. */
 function isSyncable(collectionName: string): boolean {
@@ -31,7 +32,7 @@ export async function pushToRemote(): Promise<PushStats> {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
       const docIds = pendingDeletes.map(entry => entry.split(':')[1]).filter(Boolean);
-      const deletedCount = await deleteRemoteDocuments(docIds);
+      const deletedCount = await deleteRemoteDocuments(docIds, getConfig().USERNAME);
       stats.deleted = deletedCount;
       await clearPendingDeletes();
     }
@@ -51,9 +52,15 @@ export async function pushToRemote(): Promise<PushStats> {
       const unsyncedDocs = await getDocumentsByFilter(collection.name, { is_synced: false }, 500);
       let collectionHadPush = false;
 
-      for (const doc of unsyncedDocs) {
+      for (const unsynced of unsyncedDocs) {
         // Skip sentinel/internal documents
-        if (doc.id.startsWith('__')) continue;
+        if (unsynced.id.startsWith('__')) continue;
+        // Journal drafts are per-session scratch; only the consolidated
+        // journal memory is worth sharing.
+        if (unsynced.metadata.type === 'journal_draft') continue;
+        // Stamp the last writer's device: pull on this device skips its own
+        // echoes, while the same user's other devices still receive the row.
+        const doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
 
         try {
           // Generate embedding for similarity search
@@ -78,7 +85,8 @@ export async function pushToRemote(): Promise<PushStats> {
           }
 
           // Check for similar documents in remote
-          const similar = await findSimilarRemote(collection.name, embedding);
+          // A re-push of an edited doc matches its own remote row; never self-link.
+          const similar = (await findSimilarRemote(collection.name, embedding)).filter(s => s.id !== doc.id);
 
           if (similar.length > 0) {
             // Found similar doc(s) — link them via related_ids

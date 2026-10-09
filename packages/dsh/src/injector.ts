@@ -108,6 +108,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         const results = await recallMemory(promptText, {
           collection,
           nResults: resolved.recallResults,
+          crossCollection: resolved.core.CROSS_COLLECTION_RESULTS,
         }).catch(() => []);
         signal.throwIfAborted();
         if (results.length) {
@@ -115,7 +116,8 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
           for (const r of results) {
             const sal = r.metadata.salience?.toFixed(2) ?? '?';
             const snippet = r.content.length > 240 ? `${r.content.slice(0, 240)}…` : r.content;
-            lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}): ${snippet}`);
+            const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : '';
+            lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}${where}): ${snippet}`);
           }
         }
         state.recalledMessageId = promptMessage.id;

@@ -11,7 +11,8 @@ vi.mock('./postgres.js', () => ({
   deleteRemoteDocuments: vi.fn(async () => 0),
 }));
 
-import { upsertRemoteDocument, findSimilarRemote } from './postgres.js';
+import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments } from './postgres.js';
+import { queueSyncDelete } from './deletes.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getDocumentsByFilter } from '../store/index.js';
 import { pushToRemote } from './push.js';
@@ -20,8 +21,7 @@ let dir: string;
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'yapa-sync-test-'));
-  process.env.YAPA_USERNAME = 'tester';
-  setConfig(createConfig(process.env));
+  setConfig(createConfig({ ...process.env, YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A' }));
   setStore(createLocalStore(dir));
 });
 
@@ -71,5 +71,35 @@ describe('pushToRemote over the local store', () => {
     const [doc] = (await getDocumentsByFilter('global', {}, 10)).filter(d => d.id === 'mem-3');
     expect(doc.metadata.is_synced).toBe(true);
     expect(String(doc.metadata.related_ids)).toContain('remote-9');
+  });
+
+  it('stamps the pushing device as origin_device', async () => {
+    vi.mocked(upsertRemoteDocument).mockClear();
+    const store = (await import('../store/index.js')).getStore();
+    await store.addDocument('global', 'mem-4', 'stamped with the device', { type: 'memory', is_synced: false });
+
+    await pushToRemote();
+    const pushed = vi.mocked(upsertRemoteDocument).mock.calls.find(c => (c[0] as any).id === 'mem-4')![0] as any;
+    expect(pushed.metadata.origin_device).toBe('dev-A');
+  });
+
+  it('never links a re-pushed doc to its own remote row', async () => {
+    vi.mocked(addRemoteRelatedIds).mockClear();
+    vi.mocked(findSimilarRemote).mockResolvedValueOnce([{ id: 'mem-5', similarity: 0.99 } as any]);
+    const store = (await import('../store/index.js')).getStore();
+    await store.addDocument('global', 'mem-5', 'edited after the first push', { type: 'memory', is_synced: false });
+
+    const stats = await pushToRemote();
+    expect(stats.linked).toBe(0);
+    expect(stats.pushed).toBe(1);
+    expect(addRemoteRelatedIds).not.toHaveBeenCalled();
+  });
+
+  it('propagates queued deletes scoped to the pushing user', async () => {
+    vi.mocked(deleteRemoteDocuments).mockClear();
+    await queueSyncDelete('mem-1', 'global');
+
+    await pushToRemote();
+    expect(deleteRemoteDocuments).toHaveBeenCalledWith(['mem-1'], 'tester');
   });
 });

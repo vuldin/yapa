@@ -19,8 +19,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "chromadb-default-embed": "^2.14.0",
-    "pg": "^8.20.0"
+    "@huggingface/transformers": "^4.3.1",
+    "pg": "^8.23.1"
   },
   "engines": {
     "node": ">=18"

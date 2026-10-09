@@ -16,6 +16,7 @@
  *
  * @module yapa/curation/janitor
  */
+import { archivedMetadata } from '../memory/archive.js';
 import { getConfig } from '../config.js';
 import { getDocumentsByFilter, getDocumentsByIds, listCollections, queryDocuments, updateDocument } from '../store/index.js';
 import { storeMemory } from '../memory/store.js';
@@ -88,11 +89,7 @@ export async function findDuplicatePairs(
 async function archiveDuplicate(collection: string, loserId: string, winnerId: string): Promise<void> {
   const existing = await getDocumentsByIds(collection, [loserId]);
   if (!existing.length) return;
-  await updateDocument(collection, loserId, {
-    ...existing[0].metadata,
-    archived: true,
-    duplicate_of: winnerId,
-  });
+  await updateDocument(collection, loserId, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId }));
 }
 
 /**

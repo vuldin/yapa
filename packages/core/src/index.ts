@@ -17,6 +17,7 @@ export { detectChromaVersion } from './chroma.js';
 export * from './embeddings.js';
 export * from './chunking.js';
 export * from './lifecycle.js';
+export * from './scope.js';
 export * from './metadata-adapter.js';
 
 // Memory subsystem.
@@ -48,6 +49,7 @@ export * from './curation/classifier.js';
 export * from './curation/extractor.js';
 export * from './curation/resolver.js';
 export * from './curation/janitor.js';
+export * from './curation/capture.js';
 export * from './curation/provider.js';
 export * from './curation/prompts.js';
 
@@ -66,6 +68,7 @@ export * from './sync/push.js';
 export * from './sync/deletes.js';
 export * from './sync/sentinel.js';
 export * from './sync/schema.js';
+export * from './sync/device.js';
 
 // Training / eval / promotion.
 export * from './training/index.js';

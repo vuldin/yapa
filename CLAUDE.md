@@ -1,5 +1,10 @@
 # YAPA Install
 
+> **Claude Code?** Prefer the plugin: `claude plugin marketplace add vuldin/yapa`
+> then `claude plugin install yapa@yapa` (server, hooks, and rules in one step;
+> see README "Install"). Use this wizard only if the user asks for the
+> `claude mcp add` install, or uses Cursor / OpenCode.
+>
 > **DeepSeek Harness (DSH)?** This wizard installs the MCP server for Claude
 > Code / Cursor / OpenCode. For DSH, skip this file entirely and follow
 > `packages/dsh/install.md` — the native plugin needs no agent-driven install
@@ -268,6 +273,12 @@ Now execute these steps in order, without asking anything else:
    ```
    If sync enabled, also add: `-e YAPA_SYNC_ENABLED=true -e YAPA_SYNC_DATABASE_URL=SYNC_DATABASE_URL`
 
+   Then install the always-on hooks (they read the same `-e` settings from `~/.claude.json`):
+   ```
+   node ABSOLUTE_PATH/packages/mcp/dist/cli/index.js hooks install
+   ```
+   If the user keeps work under a projects folder, also add `-e YAPA_PROJECT_ROOTS=<that folder>` to the `claude mcp add` command so each subfolder gets its own collection.
+
    Cursor — merge into `mcpServers` in `~/.cursor/mcp.json`:
    ```json
    {
@@ -381,9 +392,10 @@ Now execute these steps in order, without asking anything else:
    ### End-of-Session Journal
    - During the session, call `journal_append` with a one-line note whenever a
      meaningful step completes (decision made, finding confirmed, task closed).
-   - Before the session ends — or when prompted by the SessionEnd hook — call
-     `journal_consolidate` to merge the drafts into a single memory tagged
-     `journal`. The next session's recall will surface it.
+   - Drafts are consolidated into a single memory tagged `journal` automatically
+     when the session ends (the MCP server does it on shutdown). Call
+     `journal_consolidate` earlier if the work reaches a natural close. The next
+     session's recall will surface it.
 
    ### Task Management Lifecycle
    - On completion: `task_complete`

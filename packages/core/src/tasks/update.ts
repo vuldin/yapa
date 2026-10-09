@@ -44,7 +44,7 @@ export async function updateTask(
   if (!task) throw new Error(`Task ${id} not found`);
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   const updatedMetadata: Record<string, any> = {
@@ -58,14 +58,24 @@ export async function updateTask(
 }
 
 /** Mark task as complete. Handles recurring regeneration. */
-export async function completeTask(id: string): Promise<{ regeneratedId?: string }> {
+export async function completeTask(id: string, durationMinutes?: number): Promise<{ regeneratedId?: string }> {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
 
-  await updateTask(id, {
+  const completionUpdates: Partial<TaskOptions> = {
     status: 'complete',
     salience: (task.metadata.salience ?? 2.0) * 0.5,
-  });
+  };
+  // Set completed_at exactly once (first-completion-wins). A later reopen -> re-complete
+  // preserves the original close time, and editing duration later never moves it.
+  if (task.metadata.completed_at == null) {
+    completionUpdates.completed_at = Math.floor(Date.now() / 1000);
+  }
+  if (durationMinutes != null) {
+    completionUpdates.duration_minutes = durationMinutes;
+  }
+
+  await updateTask(id, completionUpdates);
 
   // Handle recurring tasks
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
@@ -74,6 +84,7 @@ export async function completeTask(id: string): Promise<{ regeneratedId?: string
       task.metadata.recurrence_pattern,
     );
 
+    // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
     const newId = await createTask(task.title, {
       priority: task.metadata.priority,
       tags: Array.isArray(task.metadata.tags)

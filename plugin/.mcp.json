@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "yapa": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/yapa-mcp.mjs"
+      ],
+      "env": {
+        "YAPA_USERNAME": "${user_config.username}",
+        "YAPA_STORAGE": "${user_config.storage}",
+        "YAPA_CHROMA_URL": "${user_config.chroma_url}",
+        "YAPA_PROJECT_ROOTS": "${user_config.project_roots}",
+        "YAPA_CUSTOMERS": "${user_config.customers}",
+        "YAPA_SYNC_ENABLED": "${user_config.sync_enabled}",
+        "YAPA_SYNC_DATABASE_URL": "${user_config.sync_database_url}",
+        "YAPA_SYNC_SHARE_GLOBAL": "${user_config.sync_share_global}",
+        "YAPA_RESPONSE_CAPTURE": "${user_config.response_capture}",
+        "YAPA_MODEL_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/models"
+      }
+    }
+  }
+}

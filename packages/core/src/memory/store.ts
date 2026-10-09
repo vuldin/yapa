@@ -1,4 +1,5 @@
 import { addDocument, addDocumentsBatch, getDocumentsByIds, getOrCreateCollection, queryDocuments, updateDocument } from '../store/index.js';
+import { archivedMetadata } from './archive.js';
 import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
 import { getConfig, SALIENCE_START } from '../config.js';
@@ -91,11 +92,7 @@ async function archiveSuperseded(collection: string, oldId: string, newId: strin
       process.stderr.write(`[yapa] store: supersedes target "${oldId}" not found in ${collection} — skipped\n`);
       return;
     }
-    await updateDocument(collection, oldId, {
-      ...existing[0].metadata,
-      archived: true,
-      superseded_by: newId,
-    });
+    await updateDocument(collection, oldId, archivedMetadata(existing[0].metadata, { superseded_by: newId }));
   } catch (e) {
     process.stderr.write(`[yapa] store: failed to archive superseded ${oldId}: ${e}\n`);
   }

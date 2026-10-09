@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { getConfig, getCurationModel } from '../config.js';
 
 export interface ChatMessage {
@@ -55,6 +56,8 @@ export async function callCurationLLM(options: LLMRequestOptions): Promise<strin
       return fetchAnthropic(getConfig().ANTHROPIC_API_KEY, model, options);
     case 'ollama':
       return fetchOllama(getConfig().OLLAMA_URL, model, options);
+    case 'claude-cli':
+      return callClaudeCli(model, options);
     default:
       throw new Error(`Unknown curation LLM provider: ${getConfig().CURATION_LLM_PROVIDER}`);
   }
@@ -165,4 +168,51 @@ async function fetchOllama(
     throw new Error(`Unexpected Ollama response shape: ${JSON.stringify(data).slice(0, 200)}`);
   }
   return data.message.content;
+}
+
+/** Env marker set on aux `claude -p` children so YAPA's own hooks no-op there. */
+export const HOOK_CHILD_ENV = 'YAPA_HOOK_CHILD';
+
+const CLAUDE_CLI_TIMEOUT_MS = 120_000;
+
+/**
+ * Run the aux call through the local Claude Code CLI, so subscription users
+ * need no separate API key. `--safe-mode` drops hooks, plugins, MCP servers and
+ * CLAUDE.md (auth is kept, unlike `--bare`), `--tools ""` makes it a pure
+ * completion, and HOOK_CHILD_ENV is a second guard against hook recursion.
+ */
+export function buildClaudeCliArgs(model: string, system: string): string[] {
+  const args = ['-p', '--safe-mode', '--model', model, '--tools', '', '--no-session-persistence', '--output-format', 'text'];
+  if (system) args.push('--system-prompt', system);
+  return args;
+}
+
+async function callClaudeCli(model: string, options: LLMRequestOptions): Promise<string> {
+  const system = options.messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+  const prompt = options.messages
+    .filter(m => m.role !== 'system')
+    .map(m => (m.role === 'assistant' ? `Assistant: ${m.content}` : m.content))
+    .join('\n\n');
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', buildClaudeCliArgs(model, system), {
+      env: { ...process.env, [HOOK_CHILD_ENV]: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`claude -p timed out after ${CLAUDE_CLI_TIMEOUT_MS}ms`));
+    }, CLAUDE_CLI_TIMEOUT_MS);
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { err += d; });
+    child.on('error', e => { clearTimeout(timer); reject(e); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(`claude -p exited ${code}: ${err.trim().slice(0, 300)}`));
+    });
+    child.stdin.end(prompt);
+  });
 }

@@ -1,0 +1,79 @@
+{
+  "name": "yapa",
+  "version": "0.1.0",
+  "description": "Persistent, team-shareable memory and tasks for Claude Code: per-prompt recall, teammate sync over PostgreSQL+pgvector, journal and compaction capture.",
+  "author": {
+    "name": "Josh Purcell"
+  },
+  "homepage": "https://github.com/vuldin/yapa",
+  "repository": "https://github.com/vuldin/yapa",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "tasks",
+    "mcp",
+    "sync",
+    "team"
+  ],
+  "userConfig": {
+    "username": {
+      "type": "string",
+      "title": "Username",
+      "description": "Your name in task IDs and on everything you sync (teammates see items as 'from <username>'). Empty = your OS login name. Use the same value on all of your machines.",
+      "default": ""
+    },
+    "storage": {
+      "type": "string",
+      "title": "Storage backend",
+      "description": "'local' = embedded store, no server needed. 'chroma' = a ChromaDB server at the URL below.",
+      "options": [
+        "local",
+        "chroma"
+      ],
+      "default": "local"
+    },
+    "chroma_url": {
+      "type": "string",
+      "title": "ChromaDB URL",
+      "description": "Only used when storage is 'chroma'.",
+      "default": "http://localhost:8000"
+    },
+    "project_roots": {
+      "type": "string",
+      "title": "Project roots",
+      "description": "Comma-separated folders whose subfolders are projects/customers, e.g. ~/work. A session in ~/work/acme uses the project-acme (or customer-acme) collection. Empty = everything is 'global'.",
+      "default": ""
+    },
+    "customers": {
+      "type": "string",
+      "title": "Customer folders",
+      "description": "Comma-separated folder names under a project root that are customers (customer-{name} instead of project-{name}).",
+      "default": ""
+    },
+    "sync_enabled": {
+      "type": "boolean",
+      "title": "Team sync",
+      "description": "Share memories and tasks through a PostgreSQL+pgvector database.",
+      "default": false
+    },
+    "sync_database_url": {
+      "type": "string",
+      "title": "Sync database URL",
+      "description": "postgres://user:pass@host:5432/yapa (stored in the system credential store).",
+      "sensitive": true,
+      "default": ""
+    },
+    "sync_share_global": {
+      "type": "boolean",
+      "title": "Share 'global' with the team",
+      "description": "Off: your 'global' collection syncs only between your own devices. On: teammates receive it too.",
+      "default": false
+    },
+    "response_capture": {
+      "type": "boolean",
+      "title": "Auto-capture findings",
+      "description": "After each turn, a small model (claude -p haiku, or your configured curation provider) stores durable findings as 'auto-capture' memories.",
+      "default": false
+    }
+  }
+}

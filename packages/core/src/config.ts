@@ -1,4 +1,4 @@
-import { homedir } from 'os';
+import { homedir, userInfo } from 'os';
 import { join as pathJoin } from 'path';
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ export const CHUNK_OVERLAP = 200;
 // ---------------------------------------------------------------------------
 
 export type EmbeddingProvider = 'chromadb' | 'fireworks' | 'openai' | 'voyage' | 'ollama';
-export type CurationLLMProvider = 'fireworks' | 'openai' | 'anthropic' | 'ollama';
+export type CurationLLMProvider = 'fireworks' | 'openai' | 'anthropic' | 'ollama' | 'claude-cli';
 export type TrainingBackendName = 'fireworks';
 
 /**
@@ -40,6 +40,8 @@ export interface YapaConfig {
   // Embedding settings
   EMBEDDING_PROVIDER: EmbeddingProvider;
   EMBEDDING_MODEL: string;
+  /** Where the local embedder caches model weights (empty = library default). */
+  MODEL_CACHE_DIR: string;
   FIREWORKS_API_KEY: string;
   OPENAI_API_KEY: string;
   ANTHROPIC_API_KEY: string;
@@ -47,11 +49,26 @@ export interface YapaConfig {
   OLLAMA_URL: string;
 
   // Lifecycle
+  /** Per-day salience multiplier for episodic memories (semantic decay at its square root). */
   SALIENCE_DECAY_RATE: number;
   SALIENCE_RANKING_WEIGHT: number;
+  /** Only recall hits closer than this cosine distance count as "use" and boost salience. */
+  SALIENCE_BOOST_MAX_DISTANCE: number;
+  /** Cap on boosts per memory per UTC day, so one busy session can't pin a memory at the max. */
+  SALIENCE_MAX_BOOSTS_PER_DAY: number;
+  /** Extra recall hits drawn from OTHER collections (cross-customer answers); 0 disables. */
+  CROSS_COLLECTION_RESULTS: number;
+  /** Cross-collection hits must be at least this close (stricter than in-scope hits). */
+  CROSS_COLLECTION_MAX_DISTANCE: number;
 
   // Task management
   USERNAME: string;
+
+  // Scope inference: folders under these roots map to project-/customer-
+  // collections by their first path segment (empty = everything is global).
+  PROJECT_ROOTS: string[];
+  /** Folder names under a project root that are customers (→ customer-{name}). */
+  CUSTOMERS: string[];
 
   // Contradiction detection
   CONTRADICTION_DISTANCE_THRESHOLD: number;
@@ -99,11 +116,60 @@ export interface YapaConfig {
   SYNC_DATABASE_URL: string;
   SYNC_INTERVAL_MS: number;
   SYNC_SIMILARITY_THRESHOLD: number;
+  /**
+   * Stable id for this machine's install. Lets one user sync between their own
+   * machines: pull skips only rows written by this user ON THIS DEVICE.
+   * Empty = derived and persisted under DEVICE_ID_PATH on first use.
+   */
+  DEVICE_ID: string;
+  DEVICE_ID_PATH: string;
+  /**
+   * Share `global` with teammates. Off by default: `global` holds personal,
+   * cross-cutting notes, so it only syncs between the same user's devices.
+   */
+  SYNC_SHARE_GLOBAL: boolean;
+  /** Seconds of overlap re-read on each pull so mid-pull pushes are never skipped. */
+  SYNC_PULL_OVERLAP_SECONDS: number;
+  /** Debounce before a write-triggered push (0 disables push-on-write). */
+  SYNC_PUSH_DEBOUNCE_MS: number;
+
+  // Harness hooks (Claude Code)
+  /** Cap on the hook's pre-recall pull of the active collection. */
+  HOOK_PULL_TIMEOUT_MS: number;
+  /** Prepend YAPA's standing rules to the SessionStart context (plugin installs). */
+  HOOK_INJECT_RULES: boolean;
+
+  // Response capture (per-turn aux-LLM extraction of durable findings)
+  RESPONSE_CAPTURE: boolean;
+  CAPTURE_MIN_CHARS: number;
+  CAPTURE_MAX_MEMORIES: number;
+  CAPTURE_MAX_SALIENCE: number;
+  CAPTURE_DEDUPE_DISTANCE: number;
+  /** Store the harness's context-compaction summary as an episodic memory. */
+  CAPTURE_COMPACTION: boolean;
 }
 
-/** Read `YAPA_<key>` first, then bare `<key>`, then the fallback. */
+/** Split a comma/colon separated list, dropping blanks. */
+function list(value: string): string[] {
+  return value.split(/[,:]/).map(v => v.trim()).filter(Boolean);
+}
+
+/**
+ * Read `YAPA_<key>` first, then bare `<key>`, then the fallback. Empty strings
+ * count as unset: Claude Code substitutes "" for plugin options the user never
+ * configured, which must not override the defaults.
+ */
 function get(env: Record<string, string | undefined>, key: string, fallback: string = ''): string {
-  return env[`YAPA_${key}`] ?? env[key] ?? fallback;
+  const pick = (v: string | undefined) => (v === undefined || v === '' ? undefined : v);
+  return pick(env[`YAPA_${key}`]) ?? pick(env[key]) ?? fallback;
+}
+
+function osUsername(): string {
+  try {
+    return userInfo().username || 'user';
+  } catch {
+    return 'user';
+  }
 }
 
 /**
@@ -119,6 +185,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     EMBEDDING_PROVIDER: get(env, 'EMBEDDING_PROVIDER', 'chromadb') as EmbeddingProvider,
     EMBEDDING_MODEL: get(env, 'EMBEDDING_MODEL', ''),
+    MODEL_CACHE_DIR: get(env, 'MODEL_CACHE_DIR', ''),
     FIREWORKS_API_KEY: get(env, 'FIREWORKS_API_KEY'),
     OPENAI_API_KEY: get(env, 'OPENAI_API_KEY'),
     ANTHROPIC_API_KEY: get(env, 'ANTHROPIC_API_KEY'),
@@ -126,9 +193,20 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     OLLAMA_URL: get(env, 'OLLAMA_URL', 'http://localhost:11434'),
 
     SALIENCE_DECAY_RATE: parseFloat(get(env, 'SALIENCE_DECAY_RATE', '0.98')),
-    SALIENCE_RANKING_WEIGHT: parseFloat(get(env, 'SALIENCE_RANKING_WEIGHT', '0.3')),
+    // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
+    // squared-L2 distances legacy Chroma collections reported.
+    SALIENCE_RANKING_WEIGHT: parseFloat(get(env, 'SALIENCE_RANKING_WEIGHT', '0.15')),
+    SALIENCE_BOOST_MAX_DISTANCE: parseFloat(get(env, 'SALIENCE_BOOST_MAX_DISTANCE', '0.5')),
+    SALIENCE_MAX_BOOSTS_PER_DAY: parseInt(get(env, 'SALIENCE_MAX_BOOSTS_PER_DAY', '3'), 10),
+    CROSS_COLLECTION_RESULTS: parseInt(get(env, 'CROSS_COLLECTION_RESULTS', '2'), 10),
+    CROSS_COLLECTION_MAX_DISTANCE: parseFloat(get(env, 'CROSS_COLLECTION_MAX_DISTANCE', '0.45')),
 
-    USERNAME: get(env, 'USERNAME', 'user'),
+    // Bare USERNAME is deliberately not consulted: on Windows it's the OS login
+    // already, and elsewhere it's often unset. Default = the OS login name.
+    USERNAME: env.YAPA_USERNAME || osUsername(),
+
+    PROJECT_ROOTS: list(get(env, 'PROJECT_ROOTS', '')).map(r => r.replace(/^~(?=\/|$)/, homedir()).replace(/\/+$/, '')),
+    CUSTOMERS: list(get(env, 'CUSTOMERS', '')),
 
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, 'CONTRADICTION_DISTANCE_THRESHOLD', '0.25')),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, 'CONTRADICTION_MAX_RESULTS', '3'), 10),
@@ -168,6 +246,21 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_DATABASE_URL: get(env, 'SYNC_DATABASE_URL', ''),
     SYNC_INTERVAL_MS: parseInt(get(env, 'SYNC_INTERVAL_MS', '300000'), 10), // 5 minutes
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, 'SYNC_SIMILARITY_THRESHOLD', '0.95')),
+    DEVICE_ID: get(env, 'DEVICE_ID', ''),
+    DEVICE_ID_PATH: get(env, 'DEVICE_ID_PATH', pathJoin(homedir(), '.local', 'share', 'yapa', 'device-id')),
+    SYNC_SHARE_GLOBAL: get(env, 'SYNC_SHARE_GLOBAL', 'false') === 'true',
+    SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
+    SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
+
+    HOOK_PULL_TIMEOUT_MS: parseInt(get(env, 'HOOK_PULL_TIMEOUT_MS', '4000'), 10),
+    HOOK_INJECT_RULES: get(env, 'HOOK_INJECT_RULES', 'false') === 'true',
+
+    RESPONSE_CAPTURE: get(env, 'RESPONSE_CAPTURE', 'false') === 'true',
+    CAPTURE_MIN_CHARS: parseInt(get(env, 'CAPTURE_MIN_CHARS', '280'), 10),
+    CAPTURE_MAX_MEMORIES: parseInt(get(env, 'CAPTURE_MAX_MEMORIES', '3'), 10),
+    CAPTURE_MAX_SALIENCE: parseFloat(get(env, 'CAPTURE_MAX_SALIENCE', '2.0')),
+    CAPTURE_DEDUPE_DISTANCE: parseFloat(get(env, 'CAPTURE_DEDUPE_DISTANCE', '0.25')),
+    CAPTURE_COMPACTION: get(env, 'CAPTURE_COMPACTION', 'true') === 'true',
   };
 }
 
@@ -207,6 +300,7 @@ export function getCurationModel(config: YapaConfig = getConfig()): string {
     case 'openai': return 'gpt-4.1-mini';
     case 'anthropic': return 'claude-haiku-4-5-20251001';
     case 'ollama': return 'llama3.1';
+    case 'claude-cli': return 'haiku';
     default: return '';
   }
 }

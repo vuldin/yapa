@@ -2,7 +2,14 @@
 
 **DeepSeek Harness:** see [`packages/dsh/install.md`](packages/dsh/install.md) — the native plugin needs no wizard (and no database server under the default embedded store).
 
-**Claude Code / Cursor / OpenCode:** give your AI agent this prompt: `install https://github.com/vuldin/yapa`
+**Claude Code (recommended):** install the plugin — MCP server, hooks, and skills in one step:
+
+```
+claude plugin marketplace add vuldin/yapa
+claude plugin install yapa@yapa
+```
+
+**Claude Code via `claude mcp add` / Cursor / OpenCode:** see [Install](#install), or give your AI agent this prompt: `install https://github.com/vuldin/yapa`
 
 > **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. For MCP hosts, read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning. For the DeepSeek Harness, follow `packages/dsh/install.md` instead (no agent-driven wizard).
 
@@ -18,6 +25,7 @@ YAPA runs two frontends over one core:
 - `packages/core` (`@yapa/core`) — all logic: memory, tasks, collections, journal, compaction, sync, curation, buckets, training. Config is a `YapaConfig` snapshot (`createConfig(env)` / `setConfig`) instead of module-level env reads, so hosts control configuration. Storage goes through the `VectorStore` port (`src/store/`): the ChromaDB HTTP adapter, or the embedded local adapter (one JSON file per collection, in-process embeddings, brute-force cosine — no server).
 - `packages/mcp` (`yapa-mcp`) — the MCP server + Claude-Code hook CLI.
 - `packages/dsh` (`yapa`) — the DeepSeek Harness cordis plugin.
+- `plugin/` — the Claude Code plugin: a prebuilt bundle of `packages/mcp` + `@yapa/core` (`plugin/dist`), its manifest and `userConfig`, `.mcp.json`, `hooks/hooks.json`, and skills. Built by `npm run build:all`; `.claude-plugin/marketplace.json` at the repo root lists it.
 
 ## What it does
 
@@ -27,7 +35,12 @@ YAPA runs two frontends over one core:
 
 **Collection-based organization** — Memories and tasks are grouped into collections: `global` for cross-cutting knowledge, `customer-acme` for client work, `project-api` for a specific codebase. The agent infers the right collection from what you're discussing.
 
-**Data lifecycle** — Not all memories are equally important. YAPA scores each memory by salience (1.0 to 5.0), boosts it when accessed, and decays it over time. Semantic facts (preferences, configs) decay slower than episodic events (what happened Tuesday). Salience also weights retrieval ranking, so higher-salience memories surface ahead of lower-salience ones at similar vector distance. Nothing is deleted — low-salience memories just surface less often.
+**Data lifecycle** — Not all memories are equally important. YAPA scores each memory by salience (0.05 floor to 5.0 max), boosts it when it's actually used, and decays it with wall-clock time. Salience also weights retrieval ranking, so higher-salience memories surface ahead of lower-salience ones at similar vector distance. Nothing is deleted — low-salience memories just surface less often.
+
+- **Decay** is time-based: `salience × rate^days` since the memory was last decayed (`decayed_at`), with `rate` = 0.98/day for episodic memories (half-life ~34 days) and √0.98 for semantic facts (~69 days). Sweeps run at most once per 24h (checked hourly), and re-running one decays nothing extra, so the curve doesn't depend on how often you open a session.
+- **Boosts** (+0.1) happen only when a recall hit is relevant (cosine distance < `YAPA_SALIENCE_BOOST_MAX_DISTANCE`, default 0.5) — merely being surfaced by the per-prompt hook doesn't count — and at most `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` (3) times per memory per day.
+- **Ranking**: `cosine distance − 0.15 × normalized salience`, so salience breaks ties between similarly relevant memories rather than overriding relevance.
+- Salience is per machine: boosts and decay reflect each user's own usage and don't sync.
 
 **Smart chunking** — Long content is split into 2000-character chunks with 200-character overlap, each independently searchable. Meeting notes, documentation, lengthy explanations — all stored and retrievable.
 
@@ -51,9 +64,55 @@ Data lives in ChromaDB (default for MCP) or the embedded local store (default fo
 
 ## Install
 
-To install, give your AI agent this prompt: `install https://github.com/vuldin/yapa`
+### Claude Code plugin (recommended)
 
-To uninstall later, say `uninstall yapa` in any session.
+```
+claude plugin marketplace add vuldin/yapa
+claude plugin install yapa@yapa
+```
+
+The plugin bundles the MCP server, the always-on hooks, and the `/yapa:standup`
+skill, and injects YAPA's standing rules at session start, so nothing is added
+to CLAUDE.md or settings.json by hand. Claude Code installs the runtime
+dependencies (`@huggingface/transformers`, `pg`) from `plugin/package-lock.json`
+on install. Options (prompted on enable; change later with `/plugin` →
+Configure options, or `claude plugin configure yapa`):
+
+| Option | Default | Meaning |
+|---|---|---|
+| `username` | OS login name | Name on task IDs and on everything you sync |
+| `storage` | `local` | `local` embedded store (no server) or `chroma` |
+| `chroma_url` | `http://localhost:8000` | ChromaDB server when `storage` is `chroma` |
+| `project_roots` | _(empty)_ | Comma-separated folders whose subfolders map to `project-{name}` / `customer-{name}` collections |
+| `customers` | _(empty)_ | Folder names under a root that are customers |
+| `sync_enabled`, `sync_database_url` | off | Team sync through PostgreSQL+pgvector (the URL is stored in the system credential store) |
+| `sync_share_global` | off | Let teammates receive your `global` collection |
+| `response_capture` | off | Auto-capture durable findings after each turn (see hooks below) |
+
+For a whole team, add the marketplace and enable the plugin in managed or
+repo settings (`extraKnownMarketplaces` + `enabledPlugins: {"yapa@yapa": true}`).
+
+### `claude mcp add` (MCP server only, plus optional hooks)
+
+```
+git clone https://github.com/vuldin/yapa && cd yapa/plugin && npm install --omit=dev
+claude mcp add -s user -t stdio -e YAPA_USERNAME=you -e YAPA_STORAGE=local yapa -- node "$PWD/dist/yapa-mcp.mjs"
+node dist/yapa.mjs hooks install      # adds the always-on hooks to ~/.claude/settings.json
+```
+
+The hook CLI reads the same `-e` settings from the `yapa` entry in
+`~/.claude.json`, so hooks and server always agree. `yapa hooks uninstall`
+removes only YAPA's entries; `yapa hooks print` shows them without writing.
+Re-running `hooks install` replaces YAPA hooks from older installs instead of
+duplicating them.
+
+### Agent-driven wizard (Cursor / OpenCode / custom setups)
+
+Give your AI agent this prompt: `install https://github.com/vuldin/yapa` — it
+follows `CLAUDE.md` / `AGENTS.md`.
+
+To uninstall later, say `uninstall yapa` in any session (or
+`claude plugin uninstall yapa@yapa` for the plugin).
 
 ## Tools
 
@@ -102,19 +161,19 @@ walkthrough and its tools.
 > are built into the turn seam (`agent/pre-step`) with nothing to register —
 > see `packages/dsh/architecture.md`.
 
-YAPA ships a small `yapa` CLI in addition to the MCP server. It exposes four
-hook entry points designed to be invoked from `~/.claude/settings.json`:
+The `yapa` CLI (`plugin/dist/yapa.mjs`, or `packages/mcp/dist/cli/index.js`)
+implements YAPA's Claude Code hooks. The plugin registers them automatically;
+`yapa hooks install` registers the same set for `claude mcp add` installs.
 
 | Hook | What it does |
 |------|--------------|
-| `session-start` | Detects scope from `cwd`, surfaces open tasks + top memories + compaction candidates as `additionalContext` |
-| `user-prompt-submit` | Runs `memory_recall` against the detected scope using the prompt as the query and injects the top 3 matches |
-| `stop` | Reminds the agent to call `memory_store` / `task_create` / `journal_append` for findings from the just-finished turn |
-| `session-end` | Logs the session ending; surfaces pending journal drafts at the next session start |
+| `SessionStart` | Detects scope from `cwd` and `YAPA_PROJECT_ROOTS`, pulls teammates' latest writes for that collection, injects open tasks + top memories + compaction candidates (plus the standing rules under the plugin). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
+| `UserPromptSubmit` | Pulls the active collection from the shared DB (bounded by `YAPA_HOOK_PULL_TIMEOUT_MS`, fail-open), then injects the top 3 recall matches for the prompt. Teammates' items are marked `by <user>`; hits from other collections `from <collection>`. |
+| `Stop` (async) | With `YAPA_RESPONSE_CAPTURE=true`: judges the finished turn (the buffered prompt + Claude Code's `last_assistant_message`) with an aux model and stores durable findings as `auto-capture` memories (salience ≤ 2.0, deduplicated; a changed fact supersedes the stale memory). Uses `claude -p --model haiku` when no curation API key is configured, so subscription users need no key. The result shows as a one-line notice on the next prompt. |
+| `PostCompact` (async) | Stores Claude Code's compaction summary as an episodic `compaction` memory, so it outlives the context window. |
+| `SessionEnd` | Cleans up the session's hook state. Journal consolidation and the final sync push happen in the MCP server's own shutdown (it owns the journal session). |
 
-Register the hooks once in `~/.claude/settings.json` (point the `command` field at the absolute path of `packages/mcp/dist/cli/index.js`). After that, recall and task surfacing happen on every prompt without the agent having to remember to call the tools. This is what makes YAPA "always on" rather than best-effort.
-
-Configuration: each hook fails open — if the call errors, the hook emits `{}` and the session continues normally.
+Every hook fails open: on error it emits `{}` and the session continues.
 
 ## Contradiction detection
 
@@ -153,7 +212,7 @@ Two tools record what happened during a session so the next session has continui
 - `journal_append({ entry, collection? })` — append a one-line note. Drafts are scoped to the current MCP server process via a per-process `SESSION_ID`.
 - `journal_consolidate({ collection?, summary? })` — roll the session's drafts into a single memory tagged `journal` at salience 1.5, then delete the drafts. If no `summary` is provided, the drafts are concatenated chronologically.
 
-The `Stop` hook prompts the agent to journal each turn; the `SessionEnd` hook prompts consolidation.
+Consolidation also happens automatically: the MCP server rolls up its session's drafts when it shuts down (one server process per Claude Code session), and the `SessionStart` hook rolls up drafts older than a day left behind by sessions that crashed.
 
 ## Periodic compaction
 
@@ -179,9 +238,15 @@ Tunables:
 
 Embeddings always run **in-process** — no storage backend embeds server-side,
 and the default needs no server and no API key. (The default provider is named
-`chromadb` for historical reasons: it's the `chromadb-default-embed` package —
-MiniLM-L6-v2 on `onnxruntime-web` (WASM) — and has nothing to do with running
-a ChromaDB *server*.)
+`chromadb` for historical reasons: it is the quantized all-MiniLM-L6-v2 ONNX
+model run by `@huggingface/transformers` — the same model the earlier
+`chromadb-default-embed` package used, so existing vectors stay valid — and has
+nothing to do with running a ChromaDB *server*.) Set `YAPA_MODEL_CACHE_DIR` to
+keep the downloaded weights somewhere persistent (the plugin uses its data dir).
+
+ChromaDB collections created before YAPA pinned cosine space use the server
+default (squared L2). YAPA reads each collection's space and converts those
+distances to cosine, so thresholds behave the same on old and new collections.
 
 | Provider | Model | Dimensions | Config |
 |----------|-------|------------|--------|
@@ -206,15 +271,29 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_STORAGE` | `chroma` \| `local` (embedded store, no server) | `chroma` for MCP; the DSH plugin defaults to `local` |
 | `YAPA_LOCAL_STORE_PATH` | Root dir for the embedded store | `~/.local/share/yapa/store` |
 | `YAPA_CHROMA_URL` | ChromaDB server URL (when `YAPA_STORAGE=chroma`) | `http://localhost:8000` |
-| `YAPA_USERNAME` | Username for task ID prefixes | `user` |
+| `YAPA_USERNAME` | Username for task ID prefixes and sync attribution | OS login name |
+| `YAPA_PROJECT_ROOTS` | Comma/colon-separated folders whose first-level subfolders become `project-{name}` (or `customer-{name}`) scopes | _(none: everything is `global`)_ |
+| `YAPA_CUSTOMERS` | Folder names under a project root that map to `customer-{name}` | _(none)_ |
 | `YAPA_EMBEDDING_PROVIDER` | Embedding provider — `chromadb` is in-process MiniLM (zero-config, no server call); `fireworks`/`openai`/`voyage`/`ollama` use HTTP APIs | `chromadb` |
-| `YAPA_SALIENCE_DECAY_RATE` | Daily decay multiplier | `0.98` |
-| `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.3` |
+| `YAPA_SALIENCE_DECAY_RATE` | Per-day decay multiplier for episodic memories (semantic: its square root) | `0.98` |
+| `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.15` |
+| `YAPA_SALIENCE_BOOST_MAX_DISTANCE` | Recall hits closer than this cosine distance count as a use and boost salience | `0.5` |
+| `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` | Max boosts per memory per UTC day | `3` |
 | `YAPA_TRAINING_PIPELINE` | Expose the 18 ML-ops tools (curation/buckets/training/eval/adapter) | `false` |
 | `YAPA_SYNC_ENABLED` | Enable remote sync | `false` |
 | `YAPA_SYNC_DATABASE_URL` | PostgreSQL connection string | _(none)_ |
 | `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms | `300000` (5 min) |
 | `YAPA_SYNC_SIMILARITY_THRESHOLD` | Cosine similarity threshold for dedup | `0.95` |
+| `YAPA_SYNC_SHARE_GLOBAL` | Share `global` with teammates (otherwise it syncs only between your own devices) | `false` |
+| `YAPA_SYNC_PUSH_DEBOUNCE_MS` | Delay before a write-triggered push (`0` = interval only) | `2000` |
+| `YAPA_SYNC_PULL_OVERLAP_SECONDS` | Re-read window on each pull so mid-pull pushes are never skipped | `120` |
+| `YAPA_DEVICE_ID` | Stable id for this machine (else generated once at `YAPA_DEVICE_ID_PATH`) | _(generated)_ |
+| `YAPA_HOOK_PULL_TIMEOUT_MS` | Cap on the hooks' pre-recall pull | `4000` |
+| `YAPA_RESPONSE_CAPTURE` | Auto-capture durable findings after each turn (Stop hook) | `false` |
+| `YAPA_CURATION_LLM_PROVIDER` | Aux model for capture/curation: `anthropic` \| `openai` \| `fireworks` \| `ollama` \| `claude-cli` | `anthropic` (hooks fall back to `claude-cli` without a key) |
+| `YAPA_MODEL_CACHE_DIR` | Where the in-process embedder caches model weights | library default |
+
+Empty values count as unset (Claude Code substitutes `""` for plugin options you never configured).
 
 ML-ops configuration (curation models, bucket thresholds, training backend,
 eval holdout, …) lives in
@@ -226,10 +305,23 @@ Remote sync lets multiple machines or teammates share memories and tasks through
 
 ### How it works
 
-When sync is enabled, YAPA runs a background push/pull cycle every 5 minutes (configurable via `YAPA_SYNC_INTERVAL_MS`):
+When sync is enabled, YAPA runs a background push/pull cycle every 5 minutes (configurable via `YAPA_SYNC_INTERVAL_MS`), and two faster paths keep teammates current within seconds:
 
-1. **Push** — Local documents flagged as unsynced are uploaded to the remote database. Collections you push to are automatically subscribed for pull.
-2. **Pull** — Documents from subscribed remote collections are downloaded, skipping any that originated from the current user. Only documents synced after the last pull timestamp are fetched.
+- **Push on write** — every write tool (`memory_store`, `task_update`, …) schedules a debounced push (`YAPA_SYNC_PUSH_DEBOUNCE_MS`), and the MCP server flushes pending pushes on shutdown.
+- **Pull before recall** — the Claude Code hooks pull the active collection right before injecting context, so a teammate's memory from seconds ago shows up on your next prompt.
+
+The cycle itself:
+
+1. **Push** — Local documents flagged as unsynced are uploaded, stamped with this machine's `origin_device`. Collections you push to are automatically subscribed for pull. Journal drafts stay local; only consolidated journals sync.
+2. **Pull** — Documents from subscribed collections are downloaded, skipping only rows **last written by this device** (so your other machines still receive your work). A newly subscribed collection backfills its full history. The stored pull point is the cycle *start* minus an overlap window, so a document pushed while a pull is running is never skipped.
+3. **Updates** — When a remote document is newer than the local copy and the local copy has no unpushed edits, the remote version replaces it (a teammate completing a task, a corrected memory). A local copy with unpushed edits wins and is pushed on the next cycle.
+
+### Multi-user semantics
+
+- **Attribution** — documents keep their original author (`origin_user`); injected context marks teammates' items `by <user>`.
+- **`global` is personal by default** — it syncs only between your own devices. Set `YAPA_SYNC_SHARE_GLOBAL=true` (plugin: `sync_share_global`) to share it with the team.
+- **Same user, several machines** — use the same `YAPA_USERNAME` everywhere; each install has its own device id.
+- **No access control yet** — everyone with the database URL can read every shared collection. Use `private-`/`local-` collections for anything that must not leave your machine.
 
 You can also trigger a sync manually with `sync` (`action: 'now'`), check status with `action: 'status'`, and manage subscriptions with `action: 'subscribe'` / `'unsubscribe'`.
 
@@ -244,7 +336,7 @@ This means near-duplicates coexist but are cross-referenced, so you can trace wh
 
 ### Delete propagation
 
-When a memory or task is deleted locally, the deletion is queued and propagated to the remote database on the next sync cycle. Pending deletes are processed before any new documents are pushed.
+Deleting **your own** memory or task queues the deletion for the remote database; it's processed on the next push, before new documents. Deleting a **teammate's** document only removes it from your machine: it's tombstoned locally so pull won't re-insert it, and the shared row stays for everyone else (the remote delete is also guarded by owner).
 
 ### Private collections
 

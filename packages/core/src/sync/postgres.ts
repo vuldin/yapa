@@ -94,22 +94,61 @@ export async function addRemoteRelatedIds(id: string, newRelatedIds: string[]): 
   );
 }
 
-/** Get new documents from remote that were synced after a given timestamp and not by the local user. */
+/** Who is pulling: rows last written by this user+device are this device's own echoes. */
+export interface PullIdentity {
+  user: string;
+  device: string;
+}
+
+export interface RemoteDocsQuery {
+  /** Only rows originally written by this user (personal collections, e.g. `global`). */
+  onlyOwnRows?: boolean;
+  /**
+   * Also return rows this device wrote (normally skipped as echoes). Used once,
+   * by a store's first-ever pull, to rebuild a wiped or brand-new store.
+   */
+  includeOwnDevice?: boolean;
+}
+
+/**
+ * Build the pull query. Skips this device's own writes (`origin_device` is the
+ * LAST writer's device) and legacy rows from this user that predate device
+ * stamping (they came from this install before the upgrade). Everything else,
+ * including this user's rows from other devices, is returned.
+ */
+export function buildRemoteDocsSinceQuery(
+  collection: string,
+  sinceTimestamp: number,
+  self: PullIdentity,
+  opts: RemoteDocsQuery = {},
+): { text: string; values: unknown[] } {
+  const values: unknown[] = [collection, sinceTimestamp, self.user, self.device];
+  let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
+     FROM documents
+     WHERE collection = $1
+       AND synced_at > to_timestamp($2)`;
+  if (!opts.includeOwnDevice) {
+    text += `
+       AND COALESCE(metadata->>'origin_device', '') <> $4
+       AND NOT (origin_user = $3 AND metadata->>'origin_device' IS NULL)`;
+  }
+  if (opts.onlyOwnRows) text += `
+       AND origin_user = $3`;
+  text += `
+     ORDER BY synced_at ASC`;
+  return { text, values };
+}
+
+/** Get remote documents synced after a timestamp, minus this device's own writes. */
 export async function getRemoteDocsSince(
   collection: string,
   sinceTimestamp: number,
-  excludeUser: string,
+  self: PullIdentity,
+  opts: RemoteDocsQuery = {},
 ): Promise<RemoteDocument[]> {
   const p = getPool();
-  const result = await p.query(
-    `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
-     FROM documents
-     WHERE collection = $1
-       AND synced_at > to_timestamp($2)
-       AND origin_user != $3
-     ORDER BY synced_at ASC`,
-    [collection, sinceTimestamp, excludeUser],
-  );
+  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts);
+  const result = await p.query(query.text, query.values);
 
   return result.rows.map(r => ({
     id: r.id,
@@ -125,15 +164,26 @@ export async function getRemoteDocsSince(
   }));
 }
 
-/** Delete documents from remote by IDs. */
-export async function deleteRemoteDocuments(ids: string[]): Promise<number> {
+/**
+ * Delete documents from remote by IDs — only rows `owner` originally wrote.
+ * Forgetting a teammate's memory is a local decision (see deletes.ts
+ * tombstones); it must never remove the shared row for everyone.
+ */
+export async function deleteRemoteDocuments(ids: string[], owner: string): Promise<number> {
   if (ids.length === 0) return 0;
   const p = getPool();
   const result = await p.query(
-    'DELETE FROM documents WHERE id = ANY($1::text[])',
-    [ids],
+    'DELETE FROM documents WHERE id = ANY($1::text[]) AND origin_user = $2',
+    [ids, owner],
   );
   return result.rowCount ?? 0;
+}
+
+/** Remote collections holding rows this user wrote (recovery: what to re-subscribe). */
+export async function getRemoteCollectionsForUser(user: string): Promise<string[]> {
+  const p = getPool();
+  const result = await p.query('SELECT DISTINCT collection FROM documents WHERE origin_user = $1 ORDER BY collection', [user]);
+  return result.rows.map(r => r.collection);
 }
 
 /** Get distinct collection names (with doc counts) from the remote database. */
