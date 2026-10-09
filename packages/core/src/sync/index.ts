@@ -55,13 +55,13 @@ export async function syncCycle(): Promise<SyncStats | null> {
     }
 
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.linked > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
     if (hasPushActivity || hasPullActivity) {
       process.stderr.write(
         `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted` +
-        ` | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.linked} linked, ${pullStats.skipped} skipped\n`
+        ` | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped\n`
       );
     }
 

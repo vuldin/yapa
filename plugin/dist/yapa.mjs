@@ -2071,6 +2071,12 @@ function getPool() {
   }
   return pool;
 }
+async function getRemoteCollectionsByIds(ids) {
+  if (ids.length === 0) return /* @__PURE__ */ new Map();
+  const p = getPool();
+  const result = await p.query("SELECT id, collection FROM documents WHERE id = ANY($1::text[])", [ids]);
+  return new Map(result.rows.map((r) => [r.id, r.collection]));
+}
 async function addRemoteRelatedIds(id, newRelatedIds) {
   const p = getPool();
   await p.query(
@@ -2082,18 +2088,25 @@ async function addRemoteRelatedIds(id, newRelatedIds) {
   );
 }
 function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) {
-  const values = [collection, sinceTimestamp, self.user, self.device];
+  const values = [collection, sinceTimestamp];
+  const param = (v) => {
+    values.push(v);
+    return `$${values.length}`;
+  };
   let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
      FROM documents
      WHERE collection = $1
        AND synced_at > to_timestamp($2)`;
+  let userParam;
   if (!opts.includeOwnDevice) {
+    userParam = param(self.user);
+    const deviceParam = param(self.device);
     text += `
-       AND COALESCE(metadata->>'origin_device', '') <> $4
-       AND NOT (origin_user = $3 AND metadata->>'origin_device' IS NULL)`;
+       AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
+       AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
   if (opts.onlyOwnRows) text += `
-       AND origin_user = $3`;
+       AND origin_user = ${userParam ?? param(self.user)}`;
   text += `
      ORDER BY synced_at ASC`;
   return { text, values };
@@ -2197,10 +2210,17 @@ function isPersonalCollection(collectionName) {
   return collectionName === "global" && !getConfig().SYNC_SHARE_GLOBAL;
 }
 function emptyPullStats() {
-  return { pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
   if (!isSyncable(collectionName)) return stats;
+  if (opts.followedCollections) {
+    await dropMovedOut(collectionName, opts.followedCollections, stats).catch((e) => {
+      process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}
+`);
+      stats.errors++;
+    });
+  }
   try {
     const remoteDocs = await getRemoteDocsSince(
       collectionName,
@@ -2247,8 +2267,41 @@ function localMetadataFor(remoteDoc) {
     // Already synced from remote
   };
 }
+async function copiesElsewhere(id, except) {
+  const out = [];
+  for (const col of await listCollections2()) {
+    if (col.name === except) continue;
+    const [doc] = await getDocumentsByIds2(col.name, [id]).catch(() => []);
+    if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
+  }
+  return out;
+}
+async function dropMovedOut(collectionName, followed, stats) {
+  const local = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
+  if (local.length === 0) return;
+  const remote = await getRemoteCollectionsByIds(local.map((d) => d.id));
+  for (const doc of local) {
+    const now = remote.get(doc.id);
+    if (!now || now === collectionName || followed.has(now)) continue;
+    await deleteDocument2(collectionName, doc.id);
+    stats.moved++;
+  }
+}
 async function applyRemoteDoc(collectionName, remoteDoc, stats) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
+  if (!existing) {
+    const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
+    if (elsewhere.some((c) => c.dirty)) {
+      stats.skipped++;
+      return;
+    }
+    if (elsewhere.length > 0) {
+      for (const c of elsewhere) await deleteDocument2(c.collection, remoteDoc.id);
+      await addDocument2(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
+      stats.moved++;
+      return;
+    }
+  }
   if (existing) {
     const localDirty = existing.metadata.is_synced === false;
     const localUpdated = toUnixSeconds(existing.metadata.updated_at ?? existing.metadata.created_at);

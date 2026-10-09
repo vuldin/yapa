@@ -53,7 +53,7 @@ afterAll(() => {
 beforeEach(() => {
   configure();
   pullCollection.mockReset();
-  pullCollection.mockResolvedValue({ pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 0 });
+  pullCollection.mockResolvedValue({ pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 });
   captureTurn.mockReset();
 });
 

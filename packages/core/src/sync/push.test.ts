@@ -9,9 +9,13 @@ vi.mock('./postgres.js', () => ({
   findSimilarRemote: vi.fn(async () => []),
   addRemoteRelatedIds: vi.fn(async () => {}),
   deleteRemoteDocuments: vi.fn(async () => 0),
+  getRemoteCreatedAt: vi.fn(async () => undefined),
+  getRemoteMaxTaskNumber: vi.fn(async () => 0),
 }));
 
-import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments } from './postgres.js';
+import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments, getRemoteCreatedAt, getRemoteMaxTaskNumber } from './postgres.js';
+import { getNextTaskId } from '../tasks/create.js';
+import { getDocumentsByIds } from '../store/index.js';
 import { queueSyncDelete } from './deletes.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getDocumentsByFilter } from '../store/index.js';
@@ -101,5 +105,43 @@ describe('pushToRemote over the local store', () => {
 
     await pushToRemote();
     expect(deleteRemoteDocuments).toHaveBeenCalledWith(['mem-1'], 'tester');
+  });
+
+  it('never overwrites a different remote task that has the same id: renames the local one', async () => {
+    vi.mocked(upsertRemoteDocument).mockClear();
+    const store = (await import('../store/index.js')).getStore();
+    await store.createCollection('customer-acme');
+    await store.addDocument('customer-acme', 'tester-5', 'new task after a wipe', { type: 'task', id: 'tester-5', created_at: 2_000_000_000, is_synced: false });
+    vi.mocked(getRemoteCreatedAt).mockImplementation(async (id: string) => (id === 'tester-5' ? 1_700_000_000 : undefined));
+    vi.mocked(getRemoteMaxTaskNumber).mockResolvedValue(40);
+
+    await pushToRemote();
+
+    const pushedIds = vi.mocked(upsertRemoteDocument).mock.calls.map(c => (c[0] as any).id);
+    expect(pushedIds).not.toContain('tester-5');
+    expect(pushedIds).toContain('tester-41');
+    expect(await getDocumentsByIds('customer-acme', ['tester-5'])).toEqual([]);
+    const [renamed] = await getDocumentsByIds('customer-acme', ['tester-41']);
+    expect(renamed.metadata).toMatchObject({ id: 'tester-41', rekeyed_from: 'tester-5' });
+    vi.mocked(getRemoteCreatedAt).mockResolvedValue(undefined);
+  });
+
+  it('pushes a task update normally when the remote row is the same task', async () => {
+    vi.mocked(upsertRemoteDocument).mockClear();
+    const store = (await import('../store/index.js')).getStore();
+    await store.addDocument('customer-acme', 'tester-7', 'same task, edited', { type: 'task', id: 'tester-7', created_at: 1_900_000_000, is_synced: false });
+    vi.mocked(getRemoteCreatedAt).mockImplementation(async (id: string) => (id === 'tester-7' ? 1_900_000_000 : undefined));
+    await pushToRemote();
+    expect(vi.mocked(upsertRemoteDocument).mock.calls.map(c => (c[0] as any).id)).toContain('tester-7');
+    vi.mocked(getRemoteCreatedAt).mockResolvedValue(undefined);
+  });
+});
+
+describe('getNextTaskId with sync', () => {
+  it('skips numbers already used on the shared database', async () => {
+    setConfig(createConfig({ ...process.env, YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_DATABASE_URL: 'postgres://x' }));
+    vi.mocked(getRemoteMaxTaskNumber).mockResolvedValueOnce(300);
+    expect(await getNextTaskId()).toBe('tester-301');
+    setConfig(createConfig({ ...process.env, YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A' }));
   });
 });

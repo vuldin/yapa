@@ -51,6 +51,7 @@ export async function upsertRemoteDocument(doc: {
     `INSERT INTO documents (id, collection, content, embedding, metadata, origin_user, created_at, updated_at)
      VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6, to_timestamp($7), to_timestamp($8))
      ON CONFLICT (id) DO UPDATE SET
+       collection = EXCLUDED.collection,
        content = EXCLUDED.content,
        embedding = EXCLUDED.embedding,
        metadata = EXCLUDED.metadata,
@@ -58,6 +59,31 @@ export async function upsertRemoteDocument(doc: {
        synced_at = now()`,
     [doc.id, doc.collection, doc.content, embeddingStr, JSON.stringify(doc.metadata), doc.origin_user, doc.created_at, doc.updated_at],
   );
+}
+
+/** created_at (unix seconds) of the remote row with this id, or undefined if none. */
+export async function getRemoteCreatedAt(id: string): Promise<number | undefined> {
+  const p = getPool();
+  const result = await p.query('SELECT extract(epoch from created_at)::bigint AS c FROM documents WHERE id = $1', [id]);
+  return result.rows[0] ? Number(result.rows[0].c) : undefined;
+}
+
+/** Remote collection currently holding each of these ids (ids absent remotely are omitted). */
+export async function getRemoteCollectionsByIds(ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const p = getPool();
+  const result = await p.query('SELECT id, collection FROM documents WHERE id = ANY($1::text[])', [ids]);
+  return new Map(result.rows.map(r => [r.id as string, r.collection as string]));
+}
+
+/** Highest `<user>-<n>` task number on the remote for this user (0 if none). */
+export async function getRemoteMaxTaskNumber(user: string): Promise<number> {
+  const p = getPool();
+  const result = await p.query(
+    `SELECT COALESCE(MAX(substring(id from $2)::bigint), 0) AS n FROM documents WHERE id ~ $1`,
+    [`^${user.replace(/[^A-Za-z0-9_-]/g, '')}-[0-9]+$`, `^${user.replace(/[^A-Za-z0-9_-]/g, '')}-([0-9]+)$`],
+  );
+  return Number(result.rows[0]?.n ?? 0);
 }
 
 /** Find documents similar to the given embedding in a collection. */
@@ -122,20 +148,24 @@ export function buildRemoteDocsSinceQuery(
   self: PullIdentity,
   opts: RemoteDocsQuery = {},
 ): { text: string; values: unknown[] } {
-  const values: unknown[] = [collection, sinceTimestamp, self.user, self.device];
+  // Bind only the parameters the final SQL references: Postgres rejects a
+  // query whose bind count differs from its placeholders.
+  const values: unknown[] = [collection, sinceTimestamp];
+  const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
   let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
      FROM documents
      WHERE collection = $1
        AND synced_at > to_timestamp($2)`;
+  let userParam: string | undefined;
   if (!opts.includeOwnDevice) {
+    userParam = param(self.user);
+    const deviceParam = param(self.device);
     text += `
-       AND COALESCE(metadata->>'origin_device', '') <> $4
-       AND NOT (origin_user = $3 AND metadata->>'origin_device' IS NULL)`;
+       AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
+       AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) text += `
-       AND origin_user = $3`;
-  text += `
-     ORDER BY synced_at ASC`;
+  if (opts.onlyOwnRows) text += `\n       AND origin_user = ${userParam ?? param(self.user)}`;
+  text += `\n     ORDER BY synced_at ASC`;
   return { text, values };
 }
 

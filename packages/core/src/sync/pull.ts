@@ -1,7 +1,7 @@
 import { getConfig } from '../config.js';
-import { listCollections, addDocument, getOrCreateCollection, getDocumentsByIds, queryDocuments, updateDocument } from '../store/index.js';
+import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument } from '../store/index.js';
 
-import { getRemoteDocsSince, addRemoteRelatedIds, getRemoteCollectionsForUser, type RemoteDocument } from './postgres.js';
+import { getRemoteDocsSince, addRemoteRelatedIds, getRemoteCollectionsForUser, getRemoteCollectionsByIds, type RemoteDocument } from './postgres.js';
 import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
@@ -25,13 +25,15 @@ export interface PullStats {
   pulled: number;
   /** Existing local docs replaced by a newer remote version. */
   updated: number;
+  /** Local copies relocated (or dropped) because the doc moved collections remotely. */
+  moved: number;
   linked: number;
   skipped: number;
   errors: number;
 }
 
 export function emptyPullStats(): PullStats {
-  return { pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
 }
 
 /**
@@ -82,8 +84,12 @@ export async function pullFromRemote(): Promise<PullStats> {
     }
   }
 
+  const followed = new Set(pullCollectionNames);
   for (const collectionName of pullCollectionNames) {
-    await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, { includeOwnDevice: recovering });
+    await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
+      includeOwnDevice: recovering,
+      followedCollections: followed,
+    });
   }
 
   await updateSyncPullTimestamp(cycleStartedAt);
@@ -101,9 +107,23 @@ export async function pullCollection(
   collectionName: string,
   since: number,
   stats: PullStats = emptyPullStats(),
-  opts: { includeOwnDevice?: boolean } = {},
+  opts: {
+    includeOwnDevice?: boolean;
+    /**
+     * Full sync cycles pass the set of collections this store follows; it
+     * enables the moved-out check (one id lookup per collection), which the
+     * per-prompt hook skips to stay fast.
+     */
+    followedCollections?: Set<string>;
+  } = {},
 ): Promise<PullStats> {
   if (!isSyncable(collectionName)) return stats;
+  if (opts.followedCollections) {
+    await dropMovedOut(collectionName, opts.followedCollections, stats).catch(e => {
+      process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}\n`);
+      stats.errors++;
+    });
+  }
   try {
     const remoteDocs = await getRemoteDocsSince(
       collectionName,
@@ -153,8 +173,56 @@ function localMetadataFor(remoteDoc: RemoteDocument): Record<string, any> {
   };
 }
 
+/** This id's copies in OTHER local collections (normally none). */
+async function copiesElsewhere(id: string, except: string): Promise<Array<{ collection: string; dirty: boolean }>> {
+  const out: Array<{ collection: string; dirty: boolean }> = [];
+  for (const col of await listCollections()) {
+    if (col.name === except) continue;
+    const [doc] = await getDocumentsByIds(col.name, [id]).catch(() => []);
+    if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
+  }
+  return out;
+}
+
+/**
+ * Moved out: a clean local copy whose remote row now lives in a collection
+ * this store doesn't follow is dropped (it left the shared collection we
+ * follow). If we DO follow the destination, that collection's pull relocates
+ * it instead. Copies with unpushed local edits are kept; their push moves the
+ * remote row back.
+ */
+async function dropMovedOut(collectionName: string, followed: Set<string>, stats: PullStats): Promise<void> {
+  const local = (await getDocumentsByFilter(collectionName, {}, 100_000))
+    .filter(d => !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && d.metadata.is_synced !== false);
+  if (local.length === 0) return;
+  const remote = await getRemoteCollectionsByIds(local.map(d => d.id));
+  for (const doc of local) {
+    const now = remote.get(doc.id);
+    if (!now || now === collectionName || followed.has(now)) continue;
+    await deleteDocument(collectionName, doc.id);
+    stats.moved++;
+  }
+}
+
 async function applyRemoteDoc(collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
   const [existing] = await getDocumentsByIds(collectionName, [remoteDoc.id]).catch(() => []);
+
+  if (!existing) {
+    // Moved in: the doc may still sit in its previous collection here. Local
+    // unpushed edits win (the next push moves the remote row back); otherwise
+    // relocate it so the store never holds two copies.
+    const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
+    if (elsewhere.some(c => c.dirty)) {
+      stats.skipped++;
+      return;
+    }
+    if (elsewhere.length > 0) {
+      for (const c of elsewhere) await deleteDocument(c.collection, remoteDoc.id);
+      await addDocument(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
+      stats.moved++;
+      return;
+    }
+  }
 
   if (existing) {
     // Remote edits (a teammate completing a task, a re-stored correction) win

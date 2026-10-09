@@ -16,7 +16,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "vitest run src/sync/integration.test.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",

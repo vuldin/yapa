@@ -8184,6 +8184,262 @@ var init_store = __esm({
   }
 });
 
+// packages/core/src/sync/postgres.ts
+var postgres_exports = {};
+__export(postgres_exports, {
+  addRemoteRelatedIds: () => addRemoteRelatedIds,
+  buildRemoteDocsSinceQuery: () => buildRemoteDocsSinceQuery,
+  checkRemoteHealth: () => checkRemoteHealth,
+  closePool: () => closePool,
+  deleteRemoteDocuments: () => deleteRemoteDocuments,
+  findSimilarRemote: () => findSimilarRemote,
+  getPool: () => getPool,
+  getRemoteCollections: () => getRemoteCollections,
+  getRemoteCollectionsByIds: () => getRemoteCollectionsByIds,
+  getRemoteCollectionsForUser: () => getRemoteCollectionsForUser,
+  getRemoteCreatedAt: () => getRemoteCreatedAt,
+  getRemoteDocsSince: () => getRemoteDocsSince,
+  getRemoteMaxTaskNumber: () => getRemoteMaxTaskNumber,
+  upsertRemoteDocument: () => upsertRemoteDocument
+});
+import pg from "pg";
+function getPool() {
+  if (!pool) {
+    pool = new Pool({ connectionString: getConfig().SYNC_DATABASE_URL, max: 5 });
+  }
+  return pool;
+}
+async function closePool() {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+}
+async function upsertRemoteDocument(doc) {
+  const p = getPool();
+  const embeddingStr = `[${doc.embedding.join(",")}]`;
+  await p.query(
+    `INSERT INTO documents (id, collection, content, embedding, metadata, origin_user, created_at, updated_at)
+     VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6, to_timestamp($7), to_timestamp($8))
+     ON CONFLICT (id) DO UPDATE SET
+       collection = EXCLUDED.collection,
+       content = EXCLUDED.content,
+       embedding = EXCLUDED.embedding,
+       metadata = EXCLUDED.metadata,
+       updated_at = EXCLUDED.updated_at,
+       synced_at = now()`,
+    [doc.id, doc.collection, doc.content, embeddingStr, JSON.stringify(doc.metadata), doc.origin_user, doc.created_at, doc.updated_at]
+  );
+}
+async function getRemoteCreatedAt(id) {
+  const p = getPool();
+  const result = await p.query("SELECT extract(epoch from created_at)::bigint AS c FROM documents WHERE id = $1", [id]);
+  return result.rows[0] ? Number(result.rows[0].c) : void 0;
+}
+async function getRemoteCollectionsByIds(ids) {
+  if (ids.length === 0) return /* @__PURE__ */ new Map();
+  const p = getPool();
+  const result = await p.query("SELECT id, collection FROM documents WHERE id = ANY($1::text[])", [ids]);
+  return new Map(result.rows.map((r) => [r.id, r.collection]));
+}
+async function getRemoteMaxTaskNumber(user) {
+  const p = getPool();
+  const result = await p.query(
+    `SELECT COALESCE(MAX(substring(id from $2)::bigint), 0) AS n FROM documents WHERE id ~ $1`,
+    [`^${user.replace(/[^A-Za-z0-9_-]/g, "")}-[0-9]+$`, `^${user.replace(/[^A-Za-z0-9_-]/g, "")}-([0-9]+)$`]
+  );
+  return Number(result.rows[0]?.n ?? 0);
+}
+async function findSimilarRemote(collection, embedding, threshold = getConfig().SYNC_SIMILARITY_THRESHOLD) {
+  const p = getPool();
+  const embeddingStr = `[${embedding.join(",")}]`;
+  const result = await p.query(
+    `SELECT id, 1 - (embedding <=> $1::vector) AS similarity
+     FROM documents
+     WHERE collection = $2
+       AND 1 - (embedding <=> $1::vector) > $3
+     ORDER BY similarity DESC
+     LIMIT 5`,
+    [embeddingStr, collection, threshold]
+  );
+  return result.rows.map((r) => ({ id: r.id, similarity: parseFloat(r.similarity) }));
+}
+async function addRemoteRelatedIds(id, newRelatedIds) {
+  const p = getPool();
+  await p.query(
+    `UPDATE documents
+     SET related_ids = array_cat(related_ids, $1::text[]),
+         synced_at = now()
+     WHERE id = $2`,
+    [newRelatedIds, id]
+  );
+}
+function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) {
+  const values = [collection, sinceTimestamp];
+  const param = (v) => {
+    values.push(v);
+    return `$${values.length}`;
+  };
+  let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
+     FROM documents
+     WHERE collection = $1
+       AND synced_at > to_timestamp($2)`;
+  let userParam;
+  if (!opts.includeOwnDevice) {
+    userParam = param(self.user);
+    const deviceParam = param(self.device);
+    text += `
+       AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
+       AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
+  }
+  if (opts.onlyOwnRows) text += `
+       AND origin_user = ${userParam ?? param(self.user)}`;
+  text += `
+     ORDER BY synced_at ASC`;
+  return { text, values };
+}
+async function getRemoteDocsSince(collection, sinceTimestamp, self, opts = {}) {
+  const p = getPool();
+  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts);
+  const result = await p.query(query.text, query.values);
+  return result.rows.map((r) => ({
+    id: r.id,
+    collection: r.collection,
+    content: r.content,
+    embedding: parseEmbedding(r.embedding),
+    metadata: r.metadata,
+    origin_user: r.origin_user,
+    related_ids: r.related_ids ?? [],
+    synced_at: r.synced_at,
+    created_at: r.created_at,
+    updated_at: r.updated_at
+  }));
+}
+async function deleteRemoteDocuments(ids, owner) {
+  if (ids.length === 0) return 0;
+  const p = getPool();
+  const result = await p.query(
+    "DELETE FROM documents WHERE id = ANY($1::text[]) AND origin_user = $2",
+    [ids, owner]
+  );
+  return result.rowCount ?? 0;
+}
+async function getRemoteCollectionsForUser(user) {
+  const p = getPool();
+  const result = await p.query("SELECT DISTINCT collection FROM documents WHERE origin_user = $1 ORDER BY collection", [user]);
+  return result.rows.map((r) => r.collection);
+}
+async function getRemoteCollections() {
+  const p = getPool();
+  const result = await p.query(
+    "SELECT collection, COUNT(*) AS count FROM documents GROUP BY collection ORDER BY collection"
+  );
+  return result.rows.map((r) => ({ name: r.collection, count: parseInt(r.count, 10) }));
+}
+async function checkRemoteHealth() {
+  try {
+    const p = getPool();
+    const result = await p.query("SELECT 1 FROM schema_version LIMIT 1");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+function parseEmbedding(embeddingStr) {
+  return JSON.parse(embeddingStr);
+}
+var Pool, pool;
+var init_postgres = __esm({
+  "packages/core/src/sync/postgres.ts"() {
+    "use strict";
+    init_config();
+    ({ Pool } = pg);
+    pool = null;
+  }
+});
+
+// packages/core/src/tasks/create.ts
+var create_exports = {};
+__export(create_exports, {
+  createTask: () => createTask,
+  getNextTaskId: () => getNextTaskId
+});
+async function getNextTaskId() {
+  const collections = await listCollections2();
+  let maxId = 0;
+  for (const collection of collections) {
+    try {
+      const tasks = await getDocumentsByFilter2(collection.name, { type: "task" }, 1e3);
+      for (const task of tasks) {
+        const match = task.id.match(new RegExp(`^${getConfig().USERNAME}-(\\d+)$`));
+        if (match) {
+          maxId = Math.max(maxId, parseInt(match[1]));
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  if (getConfig().SYNC_ENABLED && getConfig().SYNC_DATABASE_URL) {
+    try {
+      const { getRemoteMaxTaskNumber: getRemoteMaxTaskNumber2 } = await Promise.resolve().then(() => (init_postgres(), postgres_exports));
+      const remote = await Promise.race([
+        getRemoteMaxTaskNumber2(getConfig().USERNAME),
+        new Promise((resolve) => setTimeout(() => resolve(0), 3e3).unref())
+      ]);
+      maxId = Math.max(maxId, remote);
+    } catch {
+    }
+  }
+  return `${getConfig().USERNAME}-${maxId + 1}`;
+}
+async function createTask(title, options = {}, collection = "global") {
+  await getOrCreateCollection2(collection);
+  const id = await getNextTaskId();
+  const now = Math.floor(Date.now() / 1e3);
+  const metadata = {
+    type: "task",
+    id,
+    username: getConfig().USERNAME,
+    title,
+    notes: options.notes ?? "",
+    tags: options.tags ?? [],
+    status: options.status ?? "pending",
+    priority: options.priority ?? "medium",
+    due_date: options.due_date,
+    customer: options.customer,
+    project: options.project,
+    depends_on: options.depends_on ?? [],
+    blocks: options.blocks ?? [],
+    is_recurring: options.is_recurring ?? false,
+    recurrence_pattern: options.recurrence_pattern,
+    created_at: now,
+    updated_at: now,
+    accessed_at: now,
+    completed_at: options.completed_at ?? null,
+    duration_minutes: options.duration_minutes ?? null,
+    salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? "medium"],
+    sector: "semantic"
+  };
+  metadata.is_synced = false;
+  await addDocument2(collection, id, title, metadata);
+  return id;
+}
+var PRIORITY_SALIENCE;
+var init_create = __esm({
+  "packages/core/src/tasks/create.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    PRIORITY_SALIENCE = {
+      critical: 3,
+      high: 2.5,
+      medium: 2,
+      low: 1.5
+    };
+  }
+});
+
 // node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
@@ -38303,65 +38559,8 @@ async function consolidateSessionEverywhere(sessionId = SESSION_ID) {
   return out;
 }
 
-// packages/core/src/tasks/create.ts
-init_config();
-init_store();
-var PRIORITY_SALIENCE = {
-  critical: 3,
-  high: 2.5,
-  medium: 2,
-  low: 1.5
-};
-async function getNextTaskId() {
-  const collections = await listCollections2();
-  let maxId = 0;
-  for (const collection of collections) {
-    try {
-      const tasks = await getDocumentsByFilter2(collection.name, { type: "task" }, 1e3);
-      for (const task of tasks) {
-        const match = task.id.match(new RegExp(`^${getConfig().USERNAME}-(\\d+)$`));
-        if (match) {
-          maxId = Math.max(maxId, parseInt(match[1]));
-        }
-      }
-    } catch {
-      continue;
-    }
-  }
-  return `${getConfig().USERNAME}-${maxId + 1}`;
-}
-async function createTask(title, options = {}, collection = "global") {
-  await getOrCreateCollection2(collection);
-  const id = await getNextTaskId();
-  const now = Math.floor(Date.now() / 1e3);
-  const metadata = {
-    type: "task",
-    id,
-    username: getConfig().USERNAME,
-    title,
-    notes: options.notes ?? "",
-    tags: options.tags ?? [],
-    status: options.status ?? "pending",
-    priority: options.priority ?? "medium",
-    due_date: options.due_date,
-    customer: options.customer,
-    project: options.project,
-    depends_on: options.depends_on ?? [],
-    blocks: options.blocks ?? [],
-    is_recurring: options.is_recurring ?? false,
-    recurrence_pattern: options.recurrence_pattern,
-    created_at: now,
-    updated_at: now,
-    accessed_at: now,
-    completed_at: options.completed_at ?? null,
-    duration_minutes: options.duration_minutes ?? null,
-    salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? "medium"],
-    sector: "semantic"
-  };
-  metadata.is_synced = false;
-  await addDocument2(collection, id, title, metadata);
-  return id;
-}
+// packages/core/src/index.ts
+init_create();
 
 // packages/core/src/tasks/list.ts
 init_store();
@@ -38409,6 +38608,7 @@ async function getDueTasks(includeOverdue = true) {
 // packages/core/src/tasks/update.ts
 init_config();
 init_store();
+init_create();
 async function getTask(id) {
   const collections = await listCollections2();
   for (const collection of collections) {
@@ -39725,131 +39925,8 @@ async function bucketStatus() {
 // packages/core/src/sync/index.ts
 init_config();
 
-// packages/core/src/sync/postgres.ts
-init_config();
-import pg from "pg";
-var { Pool } = pg;
-var pool = null;
-function getPool() {
-  if (!pool) {
-    pool = new Pool({ connectionString: getConfig().SYNC_DATABASE_URL, max: 5 });
-  }
-  return pool;
-}
-async function closePool() {
-  if (pool) {
-    await pool.end();
-    pool = null;
-  }
-}
-async function upsertRemoteDocument(doc) {
-  const p = getPool();
-  const embeddingStr = `[${doc.embedding.join(",")}]`;
-  await p.query(
-    `INSERT INTO documents (id, collection, content, embedding, metadata, origin_user, created_at, updated_at)
-     VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6, to_timestamp($7), to_timestamp($8))
-     ON CONFLICT (id) DO UPDATE SET
-       content = EXCLUDED.content,
-       embedding = EXCLUDED.embedding,
-       metadata = EXCLUDED.metadata,
-       updated_at = EXCLUDED.updated_at,
-       synced_at = now()`,
-    [doc.id, doc.collection, doc.content, embeddingStr, JSON.stringify(doc.metadata), doc.origin_user, doc.created_at, doc.updated_at]
-  );
-}
-async function findSimilarRemote(collection, embedding, threshold = getConfig().SYNC_SIMILARITY_THRESHOLD) {
-  const p = getPool();
-  const embeddingStr = `[${embedding.join(",")}]`;
-  const result = await p.query(
-    `SELECT id, 1 - (embedding <=> $1::vector) AS similarity
-     FROM documents
-     WHERE collection = $2
-       AND 1 - (embedding <=> $1::vector) > $3
-     ORDER BY similarity DESC
-     LIMIT 5`,
-    [embeddingStr, collection, threshold]
-  );
-  return result.rows.map((r) => ({ id: r.id, similarity: parseFloat(r.similarity) }));
-}
-async function addRemoteRelatedIds(id, newRelatedIds) {
-  const p = getPool();
-  await p.query(
-    `UPDATE documents
-     SET related_ids = array_cat(related_ids, $1::text[]),
-         synced_at = now()
-     WHERE id = $2`,
-    [newRelatedIds, id]
-  );
-}
-function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) {
-  const values = [collection, sinceTimestamp, self.user, self.device];
-  let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
-     FROM documents
-     WHERE collection = $1
-       AND synced_at > to_timestamp($2)`;
-  if (!opts.includeOwnDevice) {
-    text += `
-       AND COALESCE(metadata->>'origin_device', '') <> $4
-       AND NOT (origin_user = $3 AND metadata->>'origin_device' IS NULL)`;
-  }
-  if (opts.onlyOwnRows) text += `
-       AND origin_user = $3`;
-  text += `
-     ORDER BY synced_at ASC`;
-  return { text, values };
-}
-async function getRemoteDocsSince(collection, sinceTimestamp, self, opts = {}) {
-  const p = getPool();
-  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts);
-  const result = await p.query(query.text, query.values);
-  return result.rows.map((r) => ({
-    id: r.id,
-    collection: r.collection,
-    content: r.content,
-    embedding: parseEmbedding(r.embedding),
-    metadata: r.metadata,
-    origin_user: r.origin_user,
-    related_ids: r.related_ids ?? [],
-    synced_at: r.synced_at,
-    created_at: r.created_at,
-    updated_at: r.updated_at
-  }));
-}
-async function deleteRemoteDocuments(ids, owner) {
-  if (ids.length === 0) return 0;
-  const p = getPool();
-  const result = await p.query(
-    "DELETE FROM documents WHERE id = ANY($1::text[]) AND origin_user = $2",
-    [ids, owner]
-  );
-  return result.rowCount ?? 0;
-}
-async function getRemoteCollectionsForUser(user) {
-  const p = getPool();
-  const result = await p.query("SELECT DISTINCT collection FROM documents WHERE origin_user = $1 ORDER BY collection", [user]);
-  return result.rows.map((r) => r.collection);
-}
-async function getRemoteCollections() {
-  const p = getPool();
-  const result = await p.query(
-    "SELECT collection, COUNT(*) AS count FROM documents GROUP BY collection ORDER BY collection"
-  );
-  return result.rows.map((r) => ({ name: r.collection, count: parseInt(r.count, 10) }));
-}
-async function checkRemoteHealth() {
-  try {
-    const p = getPool();
-    const result = await p.query("SELECT 1 FROM schema_version LIMIT 1");
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-}
-function parseEmbedding(embeddingStr) {
-  return JSON.parse(embeddingStr);
-}
-
 // packages/core/src/sync/schema.ts
+init_postgres();
 var CURRENT_VERSION = 1;
 var SCHEMA_V1 = `
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -39918,6 +39995,7 @@ async function ensureVectorIndex() {
 init_config();
 init_store();
 init_embeddings();
+init_postgres();
 
 // packages/core/src/sync/device.ts
 init_config();
@@ -39982,7 +40060,17 @@ async function pushToRemote() {
       for (const unsynced of unsyncedDocs) {
         if (unsynced.id.startsWith("__")) continue;
         if (unsynced.metadata.type === "journal_draft") continue;
-        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        let doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        if (doc.metadata.type === "task") {
+          try {
+            doc = await rekeyIfTaskIdTaken(collection.name, doc) ?? doc;
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Task id check failed for ${doc.id}, not pushing it this cycle: ${e}
+`);
+            stats.errors++;
+            continue;
+          }
+        }
         try {
           const embedding = await generateEmbedding(doc.content);
           if (!embedding) {
@@ -40068,6 +40156,22 @@ async function pushToRemote() {
   }
   return stats;
 }
+async function rekeyIfTaskIdTaken(collection, doc) {
+  const localCreated = Number(doc.metadata.created_at);
+  if (!Number.isFinite(localCreated) || localCreated <= 0) return void 0;
+  const remoteCreated = await getRemoteCreatedAt(doc.id);
+  if (remoteCreated === void 0 || Math.abs(remoteCreated - localCreated) <= 1) return void 0;
+  const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
+  const localNext = Number((await getNextTaskId2()).split("-").pop());
+  const remoteMax = await getRemoteMaxTaskNumber(getConfig().USERNAME);
+  const newId = `${getConfig().USERNAME}-${Math.max(localNext, remoteMax + 1)}`;
+  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
+  await addDocument2(collection, newId, doc.content, metadata);
+  await deleteDocument2(collection, doc.id);
+  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared database; renamed this task to ${newId}
+`);
+  return { ...doc, id: newId, metadata };
+}
 async function markSynced(collection, id, metadata) {
   await updateDocument2(collection, id, {
     ...metadata,
@@ -40078,6 +40182,7 @@ async function markSynced(collection, id, metadata) {
 // packages/core/src/sync/pull.ts
 init_config();
 init_store();
+init_postgres();
 function isSyncable4(collectionName) {
   return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
 }
@@ -40085,7 +40190,7 @@ function isPersonalCollection(collectionName) {
   return collectionName === "global" && !getConfig().SYNC_SHARE_GLOBAL;
 }
 function emptyPullStats() {
-  return { pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
 }
 async function pullFromRemote() {
   const stats = emptyPullStats();
@@ -40118,14 +40223,25 @@ async function pullFromRemote() {
       backfill.add(sub);
     }
   }
+  const followed = new Set(pullCollectionNames);
   for (const collectionName of pullCollectionNames) {
-    await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, { includeOwnDevice: recovering });
+    await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
+      includeOwnDevice: recovering,
+      followedCollections: followed
+    });
   }
   await updateSyncPullTimestamp(cycleStartedAt);
   return stats;
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
   if (!isSyncable4(collectionName)) return stats;
+  if (opts.followedCollections) {
+    await dropMovedOut(collectionName, opts.followedCollections, stats).catch((e) => {
+      process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}
+`);
+      stats.errors++;
+    });
+  }
   try {
     const remoteDocs = await getRemoteDocsSince(
       collectionName,
@@ -40172,8 +40288,41 @@ function localMetadataFor(remoteDoc) {
     // Already synced from remote
   };
 }
+async function copiesElsewhere(id, except) {
+  const out = [];
+  for (const col of await listCollections2()) {
+    if (col.name === except) continue;
+    const [doc] = await getDocumentsByIds2(col.name, [id]).catch(() => []);
+    if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
+  }
+  return out;
+}
+async function dropMovedOut(collectionName, followed, stats) {
+  const local = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
+  if (local.length === 0) return;
+  const remote = await getRemoteCollectionsByIds(local.map((d) => d.id));
+  for (const doc of local) {
+    const now = remote.get(doc.id);
+    if (!now || now === collectionName || followed.has(now)) continue;
+    await deleteDocument2(collectionName, doc.id);
+    stats.moved++;
+  }
+}
 async function applyRemoteDoc(collectionName, remoteDoc, stats) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
+  if (!existing) {
+    const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
+    if (elsewhere.some((c) => c.dirty)) {
+      stats.skipped++;
+      return;
+    }
+    if (elsewhere.length > 0) {
+      for (const c of elsewhere) await deleteDocument2(c.collection, remoteDoc.id);
+      await addDocument2(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
+      stats.moved++;
+      return;
+    }
+  }
   if (existing) {
     const localDirty = existing.metadata.is_synced === false;
     const localUpdated = toUnixSeconds(existing.metadata.updated_at ?? existing.metadata.created_at);
@@ -40207,6 +40356,7 @@ async function applyRemoteDoc(collectionName, remoteDoc, stats) {
 }
 
 // packages/core/src/sync/index.ts
+init_postgres();
 var syncTimer = null;
 var syncRunning = false;
 var lastCycleAt = null;
@@ -40240,11 +40390,11 @@ async function syncCycle() {
       pullStats.errors++;
     }
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.linked > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
     if (hasPushActivity || hasPullActivity) {
       process.stderr.write(
-        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.linked} linked, ${pullStats.skipped} skipped
+        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped
 `
       );
     }
@@ -40350,6 +40500,9 @@ async function stopSync() {
   await closePool();
   process.stderr.write("[yapa-sync] Sync stopped\n");
 }
+
+// packages/core/src/index.ts
+init_postgres();
 
 // packages/core/src/training/index.ts
 init_config();
@@ -42327,7 +42480,7 @@ ${r.content}`
             const stats = await syncCycle();
             if (!stats) return text("Sync skipped \u2014 previous cycle still running.");
             const { push, pull } = stats;
-            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
+            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
           } catch (e) {
             return text(`Sync error: ${e}`);
           }

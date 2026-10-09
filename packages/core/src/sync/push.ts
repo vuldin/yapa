@@ -1,8 +1,8 @@
 import { getConfig } from '../config.js';
-import { listCollections, getDocumentsByFilter, updateDocument, type DocumentResult } from '../store/index.js';
+import { listCollections, getDocumentsByFilter, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
-import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments } from './postgres.js';
+import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments, getRemoteCreatedAt, getRemoteMaxTaskNumber } from './postgres.js';
 import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 import { getDeviceId } from './device.js';
@@ -60,7 +60,17 @@ export async function pushToRemote(): Promise<PushStats> {
         if (unsynced.metadata.type === 'journal_draft') continue;
         // Stamp the last writer's device: pull on this device skips its own
         // echoes, while the same user's other devices still receive the row.
-        const doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        let doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+
+        if (doc.metadata.type === 'task') {
+          try {
+            doc = (await rekeyIfTaskIdTaken(collection.name, doc)) ?? doc;
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Task id check failed for ${doc.id}, not pushing it this cycle: ${e}\n`);
+            stats.errors++;
+            continue;
+          }
+        }
 
         try {
           // Generate embedding for similarity search
@@ -163,6 +173,32 @@ export async function pushToRemote(): Promise<PushStats> {
   }
 
   return stats;
+}
+
+/**
+ * Task ids are sequential per user (`user-302`), so a wiped store or a second
+ * machine can mint an id that already belongs to a DIFFERENT task remotely.
+ * Upserting would silently overwrite that task. Detect it (same id, different
+ * creation time) and give this task a fresh id instead. Returns the renamed
+ * doc, or undefined when the id is free or is this same task.
+ */
+export async function rekeyIfTaskIdTaken(collection: string, doc: DocumentResult): Promise<DocumentResult | undefined> {
+  const localCreated = Number(doc.metadata.created_at);
+  if (!Number.isFinite(localCreated) || localCreated <= 0) return undefined; // can't tell; legacy doc
+  const remoteCreated = await getRemoteCreatedAt(doc.id);
+  if (remoteCreated === undefined || Math.abs(remoteCreated - localCreated) <= 1) return undefined;
+
+  // We're mid-push, so the remote is reachable: take the higher of the local
+  // next id and the remote's highest number for this user.
+  const { getNextTaskId } = await import('../tasks/create.js');
+  const localNext = Number((await getNextTaskId()).split('-').pop());
+  const remoteMax = await getRemoteMaxTaskNumber(getConfig().USERNAME);
+  const newId = `${getConfig().USERNAME}-${Math.max(localNext, remoteMax + 1)}`;
+  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
+  await addDocument(collection, newId, doc.content, metadata);
+  await deleteDocument(collection, doc.id);
+  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared database; renamed this task to ${newId}\n`);
+  return { ...doc, id: newId, metadata };
 }
 
 async function markSynced(collection: string, id: string, metadata: Record<string, any>): Promise<void> {

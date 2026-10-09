@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const { pushToRemote, pullFromRemote } = vi.hoisted(() => ({
   pushToRemote: vi.fn(async () => ({ pushed: 1, linked: 0, deleted: 0, errors: 0 })),
-  pullFromRemote: vi.fn(async () => ({ pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 0 })),
+  pullFromRemote: vi.fn(async () => ({ pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 })),
 }));
 vi.mock('./push.js', () => ({ pushToRemote }));
-vi.mock('./pull.js', () => ({ pullFromRemote, emptyPullStats: () => ({ pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 0 }) }));
+vi.mock('./pull.js', () => ({ pullFromRemote, emptyPullStats: () => ({ pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 }) }));
 vi.mock('./schema.js', () => ({ migrateSchema: vi.fn(), ensureVectorIndex: vi.fn(async () => {}) }));
 vi.mock('./postgres.js', () => ({ checkRemoteHealth: vi.fn(), closePool: vi.fn() }));
 

@@ -8,9 +8,10 @@ vi.mock('./postgres.js', () => ({
   getRemoteDocsSince: vi.fn(async () => []),
   addRemoteRelatedIds: vi.fn(async () => {}),
   getRemoteCollectionsForUser: vi.fn(async () => []),
+  getRemoteCollectionsByIds: vi.fn(async () => new Map()),
 }));
 
-import { getRemoteDocsSince, getRemoteCollectionsForUser } from './postgres.js';
+import { getRemoteDocsSince, getRemoteCollectionsForUser, getRemoteCollectionsByIds } from './postgres.js';
 import type { RemoteDocument } from './postgres.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
@@ -216,5 +217,72 @@ describe('removeCollection under sync', () => {
     await pullFromRemote();
     expect(mockedRemote.mock.calls.some(c => c[0] === 'customer-gone')).toBe(false);
     expect((await store.listCollections()).some(c => c.name === 'customer-gone')).toBe(false);
+  });
+});
+
+describe('collection moves', () => {
+  const moved = vi.mocked(getRemoteCollectionsByIds);
+  const local = (col: string, id: string, dirty = false) =>
+    getStore().addDocument(col, id, `task ${id}`, { type: 'task', id, origin_user: 'teammate', created_at: 1_800_000_000, updated_at: 1_800_000_000, is_synced: !dirty });
+  const has = async (col: string, id: string) => (await getDocumentsByIds(col, [id]).catch(() => [])).length === 1;
+
+  beforeEach(() => moved.mockReset().mockResolvedValue(new Map()));
+
+  it('moved in: relocates the stale copy instead of keeping two', async () => {
+    await getStore().createCollection('customer-old');
+    await local('customer-old', 'mv-1');
+    mockedRemote.mockResolvedValueOnce([remote('mv-1', 'customer-new', 'task mv-1', { metadata: { type: 'task', id: 'mv-1' } })]);
+
+    const stats = await pullCollection('customer-new', 0);
+    expect(stats.moved).toBe(1);
+    expect(await has('customer-new', 'mv-1')).toBe(true);
+    expect(await has('customer-old', 'mv-1')).toBe(false);
+  });
+
+  it('moved in, but the old copy has unpushed edits: keeps it (its push wins)', async () => {
+    await local('customer-old', 'mv-2', true);
+    mockedRemote.mockResolvedValueOnce([remote('mv-2', 'customer-new', 'task mv-2', { metadata: { type: 'task', id: 'mv-2' } })]);
+
+    const stats = await pullCollection('customer-new', 0);
+    expect(stats.moved).toBe(0);
+    expect(await has('customer-old', 'mv-2')).toBe(true);
+    expect(await has('customer-new', 'mv-2')).toBe(false);
+  });
+
+  it('moved out to a collection we do not follow: drops the stale copy', async () => {
+    await local('customer-old', 'mv-3');
+    moved.mockResolvedValue(new Map([['mv-3', 'customer-elsewhere']]));
+
+    const stats = await pullCollection('customer-old', 0, undefined, { followedCollections: new Set(['customer-old']) });
+    expect(stats.moved).toBe(1);
+    expect(await has('customer-old', 'mv-3')).toBe(false);
+  });
+
+  it('moved out to a collection we follow: leaves it for that collection\'s pull to relocate', async () => {
+    await local('customer-old', 'mv-4');
+    moved.mockResolvedValue(new Map([['mv-4', 'customer-new']]));
+
+    const stats = await pullCollection('customer-old', 0, undefined, { followedCollections: new Set(['customer-old', 'customer-new']) });
+    expect(stats.moved).toBe(0);
+    expect(await has('customer-old', 'mv-4')).toBe(true);
+  });
+
+  it('moved out, but with unpushed local edits: keeps it', async () => {
+    await local('customer-old', 'mv-5', true);
+    moved.mockResolvedValue(new Map([['mv-5', 'customer-elsewhere']]));
+
+    await pullCollection('customer-old', 0, undefined, { followedCollections: new Set(['customer-old']) });
+    expect(await has('customer-old', 'mv-5')).toBe(true);
+  });
+
+  it('the per-prompt hook path skips the moved-out lookup', async () => {
+    await pullCollection('customer-old', 0);
+    expect(moved).not.toHaveBeenCalled();
+  });
+
+  it('full cycles run the moved-out check for every followed collection', async () => {
+    await pullFromRemote();
+    const checked = moved.mock.calls.flatMap(c => c[0]);
+    expect(checked).toEqual(expect.arrayContaining(['mv-4']));
   });
 });

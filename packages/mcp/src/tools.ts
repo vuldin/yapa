@@ -1169,7 +1169,7 @@ export function registerTools(server: McpServer): void {
             const stats = await syncCycle();
             if (!stats) return text('Sync skipped — previous cycle still running.');
             const { push, pull } = stats;
-            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
+            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
           } catch (e) {
             return text(`Sync error: ${e}`);
           }

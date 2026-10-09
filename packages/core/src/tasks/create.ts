@@ -48,6 +48,23 @@ export async function getNextTaskId(): Promise<string> {
     }
   }
 
+  // A wiped store, or this user's other machine, may already have used higher
+  // numbers on the shared database; reusing one would overwrite that task
+  // remotely. Best-effort: an unreachable remote falls back to local numbering
+  // (push still refuses to overwrite a different task, see sync/push.ts).
+  if (getConfig().SYNC_ENABLED && getConfig().SYNC_DATABASE_URL) {
+    try {
+      const { getRemoteMaxTaskNumber } = await import('../sync/postgres.js');
+      const remote = await Promise.race([
+        getRemoteMaxTaskNumber(getConfig().USERNAME),
+        new Promise<number>(resolve => setTimeout(() => resolve(0), 3000).unref()),
+      ]);
+      maxId = Math.max(maxId, remote);
+    } catch {
+      // fall back to local numbering
+    }
+  }
+
   return `${getConfig().USERNAME}-${maxId + 1}`;
 }
 

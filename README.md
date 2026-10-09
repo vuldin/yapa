@@ -342,6 +342,19 @@ Deleting **your own** memory or task queues the deletion for the remote database
 
 Collections prefixed with `private-` or `local-` are never synced. Use these for personal notes, credentials, or anything that should stay on one machine.
 
+### Testing sync against a real database
+
+`npm test` mocks Postgres. To run the end-to-end sync suite (multi-user model,
+collection moves, task-id collisions) against a real PostgreSQL+pgvector
+database:
+
+```
+YAPA_IT_DATABASE_URL=postgres://user:pass@host:5432/yapa npm run test:integration -w packages/core
+```
+
+Each run uses unique throwaway usernames and collections and deletes every row
+it wrote afterwards; other users' rows are never touched.
+
 ### Database providers
 
 The install wizard handles PostgreSQL setup. Supported providers:
