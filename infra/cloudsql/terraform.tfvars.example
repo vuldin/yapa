@@ -1,0 +1,6 @@
+project_id = "<TEAM_PROJECT_ID>"
+region     = "us-central1"
+# instance_name            = "yapa-pg"
+# tier                     = "db-g1-small"   # cheaper pilot, no SLA
+# enable_query_insights    = true
+# enable_migration_bastion = true            # only while migrating / drilling restores
