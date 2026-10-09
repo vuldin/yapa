@@ -3,7 +3,8 @@ region                = "us-central1"
 cloudsql_state_bucket = "<STATE_BUCKET>"
 allowed_hd            = "<COMPANY_DOMAIN>"
 
-# v1: individual users; switch to a group when it exists.
+# Whole company: ["domain:<COMPANY_DOMAIN>"] + auto_provision_users = true.
+# auto_provision_users = true
 invoker_members = [
   "user:someone@<COMPANY_DOMAIN>",
   # "group:yapa-users@<COMPANY_DOMAIN>",

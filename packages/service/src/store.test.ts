@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { decodeCursor, posFromSince } from './cursor.js';
-import { echoClause, idempotencyStorageKey, pull, requestHash, rowsWithinBudget, type RequestCtx } from './store.js';
+import { echoClause, idempotencyStorageKey, pull, requestHash, rowsWithinBudget, type RequestCtx, usernameFromEmail } from './store.js';
 
 interface Q { text: string; values: unknown[] }
 
@@ -109,5 +109,14 @@ describe('idempotency scoping', () => {
     expect(k('PUT /v1/documents/a')).not.toBe(k('POST /v1/documents/a'));
     expect(idempotencyStorageKey('bob', 'PUT /v1/documents/a', 'k-1')).not.toBe(k('PUT /v1/documents/a'));
     expect(requestHash('PUT /v1/documents/a', '{}')).not.toBe(requestHash('PUT /v1/documents/b', '{}'));
+  });
+});
+
+describe('usernameFromEmail', () => {
+  it('lowercases the local part and maps other characters to -', () => {
+    expect(usernameFromEmail('josh@redpanda.com')).toBe('josh');
+    expect(usernameFromEmail('Dana.Smith+yapa@redpanda.com')).toBe('dana-smith-yapa');
+    expect(usernameFromEmail('..@redpanda.com')).toBeUndefined();
+    expect(usernameFromEmail(`${'a'.repeat(80)}@x.com`)).toHaveLength(64);
   });
 });

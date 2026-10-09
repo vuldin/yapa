@@ -73,6 +73,39 @@ describe.skipIf(!URL_)('service integration (real Postgres + RLS)', () => {
     restoreLog?.();
   });
 
+  describe('self-service sign-up (YAPA_AUTO_PROVISION)', () => {
+    const signupApp = () => createApp({
+      pool,
+      config: { similarityThreshold: 0.95, rateLimits: DEFAULT_RATE_LIMITS, dailyWriteAlert: 20000, autoProvision: true, allowedHd: 'example.com' },
+      verifier: new InsecureTestVerifier(),
+    });
+    const me = async (email: string) => {
+      const r = await signupApp().request('/v1/me', { headers: { authorization: `Bearer test:${email}` } });
+      return { status: r.status, body: await r.json() as any };
+    };
+
+    it('creates a users row on first sign-in, named from the email', async () => {
+      const r = await me('Dana.Smith@example.com');
+      expect([r.status, r.body.username]).toEqual([200, 'dana-smith']);
+      expect((await db.adminPool.query("SELECT email, active FROM users WHERE username = 'dana-smith'")).rows[0]).toEqual({ email: 'dana.smith@example.com', active: true });
+      expect((await me('dana.smith@example.com')).body.username).toBe('dana-smith'); // idempotent
+    });
+
+    it('never provisions other domains, never re-enables a disabled user', async () => {
+      expect((await me('eve@elsewhere.test')).body.error.code).toBe('not_member');
+      expect((await me('carol@example.com')).body.error.code).toBe('user_inactive');
+    });
+
+    it('a username held by another email is left to an admin', async () => {
+      await db.adminPool.query("INSERT INTO users (username, email) VALUES ('frank', 'frank@legacy.example.org')");
+      expect((await me('frank@example.com')).body.error.code).toBe('not_member');
+    });
+
+    it('the runtime role can insert users but not change them', async () => {
+      await expect(pool.query("UPDATE users SET active = true WHERE username = 'carol'")).rejects.toThrow(/permission denied/);
+    });
+  });
+
   it('runs as a non-owner role subject to RLS', async () => {
     const r = await pool.query("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
     expect(r.rows[0]).toEqual({ rolsuper: false, rolbypassrls: false });

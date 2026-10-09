@@ -27,6 +27,9 @@ GRANT SELECT, INSERT                 ON deletions        TO :"runtime_user";
 GRANT SELECT, INSERT                 ON audit_log        TO :"runtime_user";
 GRANT USAGE                          ON SEQUENCE audit_log_seq_seq TO :"runtime_user";
 GRANT SELECT                         ON users            TO :"runtime_user";
+-- Self-service sign-up (YAPA_AUTO_PROVISION): new rows only; active/disabled
+-- stay admin-controlled (no UPDATE).
+GRANT INSERT (username, email)       ON users            TO :"runtime_user";
 GRANT SELECT, INSERT, DELETE         ON idempotency_keys TO :"runtime_user";
 GRANT SELECT                         ON schema_version   TO :"runtime_user";
 

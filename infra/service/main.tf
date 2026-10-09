@@ -28,6 +28,7 @@ locals {
     YAPA_DB_NAME                  = var.db_name
     YAPA_AUDIENCES                = join(",", local.app_audiences)
     YAPA_ALLOWED_HD               = var.allowed_hd
+    YAPA_AUTO_PROVISION           = tostring(var.auto_provision_users)
   })
 }
 
