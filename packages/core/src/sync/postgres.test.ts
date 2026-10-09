@@ -3,7 +3,40 @@ import { describe, it, expect, vi } from 'vitest';
 const { query } = vi.hoisted(() => ({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }));
 vi.mock('pg', () => ({ default: { Pool: class { query = query; end = vi.fn(); } } }));
 
-import { buildRemoteDocsSinceQuery, upsertRemoteDocument } from './postgres.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildRemoteDocsSinceQuery, upsertRemoteDocument, buildPoolConfig } from './postgres.js';
+
+describe('buildPoolConfig (TLS)', () => {
+  const ca = join(mkdtempSync(join(tmpdir(), 'yapa-ca-')), 'server-ca.pem');
+  writeFileSync(ca, '-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n');
+  const remote = 'postgres://u:p@db.example.com:5432/yapa';
+
+  it('verifies the server against the CA when one is configured', () => {
+    const c = buildPoolConfig(remote, ca);
+    expect(c.tls).toBe('verify-ca');
+    expect(c.ssl).toMatchObject({ ca: expect.stringContaining('TEST'), rejectUnauthorized: true });
+    expect((c.ssl as any).checkServerIdentity()).toBeUndefined();
+  });
+
+  it('encrypts without verification for a remote host with no CA (never plaintext)', () => {
+    expect(buildPoolConfig(remote, '')).toMatchObject({ tls: 'unverified', ssl: { rejectUnauthorized: false } });
+  });
+
+  it('keeps localhost plaintext by default', () => {
+    expect(buildPoolConfig('postgres://u:p@localhost:5433/yapa', '')).toMatchObject({ tls: 'off', ssl: false });
+  });
+
+  it('honors sslmode from the URL and strips it so it cannot override the ssl options', () => {
+    const off = buildPoolConfig(`${remote}?sslmode=disable`, ca);
+    expect(off).toMatchObject({ tls: 'off', ssl: false });
+    expect(off.connectionString).not.toContain('sslmode');
+    expect(buildPoolConfig('postgres://u:p@localhost/yapa?sslmode=require', '').tls).toBe('unverified');
+    expect(buildPoolConfig(`${remote}?sslmode=verify-ca`, ca).tls).toBe('verify-ca');
+    expect(() => buildPoolConfig(`${remote}?sslmode=verify-full`, '')).toThrow(/YAPA_SYNC_CA_CERT/);
+  });
+});
 
 describe('buildRemoteDocsSinceQuery', () => {
   const self = { user: 'josh', device: 'dev-A' };

@@ -37,7 +37,7 @@ export async function syncCycle(): Promise<SyncStats | null> {
 
   syncRunning = true;
   try {
-    let pushStats: PushStats = { pushed: 0, linked: 0, deleted: 0, errors: 0 };
+    let pushStats: PushStats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
     let pullStats: PullStats = emptyPullStats();
 
     try {
@@ -54,13 +54,13 @@ export async function syncCycle(): Promise<SyncStats | null> {
       pullStats.errors++;
     }
 
-    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
     const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
     if (hasPushActivity || hasPullActivity) {
       process.stderr.write(
-        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted` +
+        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted, ${pushStats.retracted} retracted` +
         ` | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped\n`
       );
     }

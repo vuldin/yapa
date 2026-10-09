@@ -132,6 +132,12 @@ export interface YapaConfig {
   SYNC_PULL_OVERLAP_SECONDS: number;
   /** Debounce before a write-triggered push (0 disables push-on-write). */
   SYNC_PUSH_DEBOUNCE_MS: number;
+  /**
+   * PEM file with the database server's CA. Set: TLS with the server cert
+   * verified against it. Unset: TLS without verification (warned), except
+   * for localhost, which stays plaintext. A `sslmode` in the URL overrides.
+   */
+  SYNC_CA_CERT: string;
 
   // Harness hooks (Claude Code)
   /** Cap on the hook's pre-recall pull of the active collection. */
@@ -251,6 +257,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_SHARE_GLOBAL: get(env, 'SYNC_SHARE_GLOBAL', 'false') === 'true',
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
+    SYNC_CA_CERT: get(env, 'SYNC_CA_CERT', ''),
 
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, 'HOOK_PULL_TIMEOUT_MS', '4000'), 10),
     HOOK_INJECT_RULES: get(env, 'HOOK_INJECT_RULES', 'false') === 'true',

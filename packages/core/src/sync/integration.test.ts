@@ -145,6 +145,31 @@ describe.skipIf(!URL)('sync against a real database', { timeout: 120_000 }, () =
     });
   });
 
+  describe('private collections', () => {
+    it('an owner moving a doc into private- removes its shared row; a teammate\'s row survives a private copy', async () => {
+      const PRIV = `private-yapa-it-${RUN}`;
+      as('alice', 'pv-alice');
+      const own = (await storeMemory('IT: will move private', { collection: COL })).ids[0];
+      await pushToRemote();
+      expect(await remoteRow(own)).toBeDefined();
+      as('bob', 'pv-bob');
+      const theirs = (await storeMemory('IT: bob shared note', { collection: COL })).ids[0];
+      await pushToRemote();
+
+      as('alice', 'pv-alice');
+      const [doc] = await getDocumentsByIds(COL, [own]);
+      await getStore().createCollection(PRIV);
+      await getStore().addDocument(PRIV, own, doc.content, doc.metadata);
+      await getStore().deleteDocument(COL, own);
+      await getStore().addDocument(PRIV, theirs, 'IT: bob shared note', { type: 'memory', origin_user: user('bob'), created_at: 1 });
+      const stats = await pushToRemote();
+
+      expect(stats.retracted).toBe(1);
+      expect(await remoteRow(own)).toBeUndefined();
+      expect((await remoteRow(theirs))?.origin_user).toBe(user('bob'));
+    });
+  });
+
   describe('collection moves and task-id collisions', () => {
     let id: string;
     let original: { content: string; metadata: Record<string, any> };

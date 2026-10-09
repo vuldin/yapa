@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { getConfig } from '../config.js';
 import pg from 'pg';
 
@@ -6,9 +7,61 @@ const { Pool } = pg;
 
 let pool: pg.Pool | null = null;
 
+export type SyncTls = 'off' | 'unverified' | 'verify-ca';
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '']);
+
+/**
+ * Connection settings for the sync database. Remote connections always use
+ * TLS: verified against `caCertPath` when given (verify-ca: Cloud SQL server
+ * certs name the instance, not the IP, so hostname checks would fail),
+ * otherwise encrypted but unverified. Only localhost defaults to plaintext
+ * (a local Docker Postgres usually has no TLS). An explicit `sslmode` in the
+ * URL wins; it is stripped from the URL because node-postgres would let it
+ * override the ssl options built here.
+ */
+export function buildPoolConfig(databaseUrl: string, caCertPath: string): { connectionString: string; ssl: pg.PoolConfig['ssl']; tls: SyncTls } {
+  let url: URL | undefined;
+  try { url = new URL(databaseUrl); } catch { /* not a URL: let pg report it */ }
+  if (!url) return { connectionString: databaseUrl, ssl: undefined, tls: 'off' };
+
+  const sslmode = url.searchParams.get('sslmode');
+  for (const k of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'uselibpqcompat']) url.searchParams.delete(k);
+  const connectionString = url.toString();
+
+  const verified = () => ({
+    connectionString,
+    ssl: { ca: readFileSync(caCertPath, 'utf-8'), rejectUnauthorized: true, checkServerIdentity: () => undefined },
+    tls: 'verify-ca' as const,
+  });
+  const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: 'unverified' as const };
+
+  if (sslmode === 'disable') return { connectionString, ssl: false, tls: 'off' };
+  if (caCertPath) return verified();
+  if (sslmode === 'verify-ca' || sslmode === 'verify-full') {
+    throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
+  }
+  if (sslmode) return unverified; // require / prefer / allow
+  if (LOCAL_HOSTS.has(url.hostname)) return { connectionString, ssl: false, tls: 'off' };
+  return unverified;
+}
+
+let poolTls: SyncTls = 'off';
+
+/** TLS mode of the current pool (for sync status). */
+export function getSyncTlsMode(): SyncTls {
+  return poolTls;
+}
+
 export function getPool(): pg.Pool {
   if (!pool) {
-    pool = new Pool({ connectionString: getConfig().SYNC_DATABASE_URL, max: 5 });
+    const cfg = getConfig();
+    const { connectionString, ssl, tls } = buildPoolConfig(cfg.SYNC_DATABASE_URL, cfg.SYNC_CA_CERT);
+    if (tls === 'unverified') {
+      process.stderr.write('[yapa-sync] TLS without server verification: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert) to the server CA\n');
+    }
+    poolTls = tls;
+    pool = new Pool({ connectionString, ssl, max: 5 });
   }
   return pool;
 }
@@ -66,6 +119,14 @@ export async function getRemoteCreatedAt(id: string): Promise<number | undefined
   const p = getPool();
   const result = await p.query('SELECT extract(epoch from created_at)::bigint AS c FROM documents WHERE id = $1', [id]);
   return result.rows[0] ? Number(result.rows[0].c) : undefined;
+}
+
+/** Owner (origin_user) of each id that exists remotely; missing ids are absent. */
+export async function getRemoteOwnersByIds(ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const p = getPool();
+  const result = await p.query('SELECT id, origin_user FROM documents WHERE id = ANY($1::text[])', [ids]);
+  return new Map(result.rows.map(r => [r.id as string, r.origin_user as string]));
 }
 
 /** Remote collection currently holding each of these ids (ids absent remotely are omitted). */

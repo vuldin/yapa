@@ -2,7 +2,7 @@ import { getConfig } from '../config.js';
 import { listCollections, getDocumentsByFilter, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
-import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments, getRemoteCreatedAt, getRemoteMaxTaskNumber } from './postgres.js';
+import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments, getRemoteCreatedAt, getRemoteMaxTaskNumber, getRemoteOwnersByIds } from './postgres.js';
 import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 import { getDeviceId } from './device.js';
@@ -16,6 +16,8 @@ export interface PushStats {
   pushed: number;
   linked: number;
   deleted: number;
+  /** Shared rows removed because this user's doc now lives in a private-/local- collection. */
+  retracted: number;
   errors: number;
 }
 
@@ -25,7 +27,7 @@ export interface PushStats {
  * - Then pushes new/updated docs with dedup
  */
 export async function pushToRemote(): Promise<PushStats> {
-  const stats: PushStats = { pushed: 0, linked: 0, deleted: 0, errors: 0 };
+  const stats: PushStats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
 
   // Step 1: Process pending deletes
   try {
@@ -41,8 +43,23 @@ export async function pushToRemote(): Promise<PushStats> {
     stats.errors++;
   }
 
-  // Step 2: Push unsynced documents and auto-subscribe pushed collections
   const collections = await listCollections();
+
+  // Step 2: A doc of ours that now lives in a private-/local- collection
+  // (moved there, restored, or recreated with the same id) must not keep a
+  // shared copy. Teammates' rows are theirs, so a private copy of one is just
+  // a personal copy and their row stays.
+  for (const collection of collections) {
+    if (isSyncable(collection.name)) continue;
+    try {
+      stats.retracted += await retractSharedCopies(collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}\n`);
+      stats.errors++;
+    }
+  }
+
+  // Step 3: Push unsynced documents and auto-subscribe pushed collections
   const pushedCollections: string[] = [];
 
   for (const collection of collections) {
@@ -199,6 +216,27 @@ export async function rekeyIfTaskIdTaken(collection: string, doc: DocumentResult
   await deleteDocument(collection, doc.id);
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared database; renamed this task to ${newId}\n`);
   return { ...doc, id: newId, metadata };
+}
+
+/**
+ * Delete this user's shared rows for docs in private collection `collection`.
+ * Each doc is checked once per version: `remote_checked_at` records the
+ * updated_at that was checked (private docs never sync, so the marker stays
+ * local), keeping steady-state cycles free of remote lookups.
+ */
+async function retractSharedCopies(collection: string): Promise<number> {
+  const versionOf = (d: DocumentResult) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+  const unchecked = (await getDocumentsByFilter(collection, {}, 100_000)).filter(d =>
+    !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && d.metadata.remote_checked_at !== versionOf(d));
+  if (unchecked.length === 0) return 0;
+
+  const me = getConfig().USERNAME;
+  const owners = await getRemoteOwnersByIds(unchecked.map(d => d.id));
+  const mine = unchecked.filter(d => owners.get(d.id) === me && (!d.metadata.origin_user || d.metadata.origin_user === me));
+  const removed = mine.length > 0 ? await deleteRemoteDocuments(mine.map(d => d.id), me) : 0;
+  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? 'y' : 'ies'} of docs now in ${collection}\n`);
+  for (const d of unchecked) await updateDocument(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  return removed;
 }
 
 async function markSynced(collection: string, id: string, metadata: Record<string, any>): Promise<void> {

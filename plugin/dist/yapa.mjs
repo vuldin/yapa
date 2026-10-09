@@ -97,6 +97,7 @@ function createConfig(env = process.env) {
     SYNC_SHARE_GLOBAL: get(env, "SYNC_SHARE_GLOBAL", "false") === "true",
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
+    SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
     HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
     RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "false") === "true",
@@ -2064,10 +2065,42 @@ var init_buckets = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
+import { readFileSync as readFileSync2 } from "node:fs";
 import pg from "pg";
+function buildPoolConfig(databaseUrl, caCertPath) {
+  let url;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+  }
+  if (!url) return { connectionString: databaseUrl, ssl: void 0, tls: "off" };
+  const sslmode = url.searchParams.get("sslmode");
+  for (const k of ["sslmode", "sslrootcert", "sslcert", "sslkey", "uselibpqcompat"]) url.searchParams.delete(k);
+  const connectionString = url.toString();
+  const verified = () => ({
+    connectionString,
+    ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    tls: "verify-ca"
+  });
+  const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
+  if (sslmode === "disable") return { connectionString, ssl: false, tls: "off" };
+  if (caCertPath) return verified();
+  if (sslmode === "verify-ca" || sslmode === "verify-full") {
+    throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
+  }
+  if (sslmode) return unverified;
+  if (LOCAL_HOSTS.has(url.hostname)) return { connectionString, ssl: false, tls: "off" };
+  return unverified;
+}
 function getPool() {
   if (!pool) {
-    pool = new Pool({ connectionString: getConfig().SYNC_DATABASE_URL, max: 5 });
+    const cfg = getConfig();
+    const { connectionString, ssl, tls } = buildPoolConfig(cfg.SYNC_DATABASE_URL, cfg.SYNC_CA_CERT);
+    if (tls === "unverified") {
+      process.stderr.write("[yapa-sync] TLS without server verification: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert) to the server CA\n");
+    }
+    poolTls = tls;
+    pool = new Pool({ connectionString, ssl, max: 5 });
   }
   return pool;
 }
@@ -2131,13 +2164,15 @@ async function getRemoteDocsSince(collection, sinceTimestamp, self, opts = {}) {
 function parseEmbedding(embeddingStr) {
   return JSON.parse(embeddingStr);
 }
-var Pool, pool;
+var Pool, pool, LOCAL_HOSTS, poolTls;
 var init_postgres = __esm({
   "packages/core/src/sync/postgres.ts"() {
     "use strict";
     init_config();
     ({ Pool } = pg);
     pool = null;
+    LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
+    poolTls = "off";
   }
 });
 
@@ -2151,7 +2186,7 @@ var init_schema = __esm({
 
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync as readFileSync3, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 function getDeviceId() {
   const config = getConfig();
@@ -2160,7 +2195,7 @@ function getDeviceId() {
   const path = config.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync2(path, "utf-8").trim();
+    id = readFileSync3(path, "utf-8").trim();
   } catch {
     id = "";
   }
@@ -2172,7 +2207,7 @@ function getDeviceId() {
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync2(path, "utf-8").trim() || id;
+        id = readFileSync3(path, "utf-8").trim() || id;
       } catch {
       }
     }
@@ -2568,7 +2603,7 @@ __export(hooks_exports, {
   stop: () => stop,
   userPromptSubmit: () => userPromptSubmit
 });
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync4, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join3 } from "node:path";
 function emit(payload) {
@@ -2617,7 +2652,7 @@ function stateFile(sessionId, kind) {
 }
 function readTurn(sessionId) {
   try {
-    return JSON.parse(readFileSync3(stateFile(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync4(stateFile(sessionId, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -2636,7 +2671,7 @@ function takeNotice(sessionId) {
   if (!sessionId) return void 0;
   const file = stateFile(sessionId, "notice");
   try {
-    const notice = readFileSync3(file, "utf-8").trim();
+    const notice = readFileSync4(file, "utf-8").trim();
     rmSync(file, { force: true });
     return notice || void 0;
   } catch {
@@ -2824,7 +2859,7 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname2, join as join4 } from "node:path";
 function isYapaHook(h) {
@@ -2860,7 +2895,7 @@ function selfCommand() {
 }
 function readSettings(path) {
   try {
-    return JSON.parse(readFileSync4(path, "utf-8"));
+    return JSON.parse(readFileSync5(path, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);

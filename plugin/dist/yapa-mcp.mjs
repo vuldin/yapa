@@ -7290,6 +7290,7 @@ function createConfig(env = process.env) {
     SYNC_SHARE_GLOBAL: get(env, "SYNC_SHARE_GLOBAL", "false") === "true",
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
+    SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
     HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
     RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "false") === "true",
@@ -8188,6 +8189,7 @@ var init_store = __esm({
 var postgres_exports = {};
 __export(postgres_exports, {
   addRemoteRelatedIds: () => addRemoteRelatedIds,
+  buildPoolConfig: () => buildPoolConfig,
   buildRemoteDocsSinceQuery: () => buildRemoteDocsSinceQuery,
   checkRemoteHealth: () => checkRemoteHealth,
   closePool: () => closePool,
@@ -8200,12 +8202,49 @@ __export(postgres_exports, {
   getRemoteCreatedAt: () => getRemoteCreatedAt,
   getRemoteDocsSince: () => getRemoteDocsSince,
   getRemoteMaxTaskNumber: () => getRemoteMaxTaskNumber,
+  getRemoteOwnersByIds: () => getRemoteOwnersByIds,
+  getSyncTlsMode: () => getSyncTlsMode,
   upsertRemoteDocument: () => upsertRemoteDocument
 });
+import { readFileSync as readFileSync2 } from "node:fs";
 import pg from "pg";
+function buildPoolConfig(databaseUrl, caCertPath) {
+  let url2;
+  try {
+    url2 = new URL(databaseUrl);
+  } catch {
+  }
+  if (!url2) return { connectionString: databaseUrl, ssl: void 0, tls: "off" };
+  const sslmode = url2.searchParams.get("sslmode");
+  for (const k of ["sslmode", "sslrootcert", "sslcert", "sslkey", "uselibpqcompat"]) url2.searchParams.delete(k);
+  const connectionString = url2.toString();
+  const verified = () => ({
+    connectionString,
+    ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    tls: "verify-ca"
+  });
+  const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
+  if (sslmode === "disable") return { connectionString, ssl: false, tls: "off" };
+  if (caCertPath) return verified();
+  if (sslmode === "verify-ca" || sslmode === "verify-full") {
+    throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
+  }
+  if (sslmode) return unverified;
+  if (LOCAL_HOSTS.has(url2.hostname)) return { connectionString, ssl: false, tls: "off" };
+  return unverified;
+}
+function getSyncTlsMode() {
+  return poolTls;
+}
 function getPool() {
   if (!pool) {
-    pool = new Pool({ connectionString: getConfig().SYNC_DATABASE_URL, max: 5 });
+    const cfg = getConfig();
+    const { connectionString, ssl, tls } = buildPoolConfig(cfg.SYNC_DATABASE_URL, cfg.SYNC_CA_CERT);
+    if (tls === "unverified") {
+      process.stderr.write("[yapa-sync] TLS without server verification: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert) to the server CA\n");
+    }
+    poolTls = tls;
+    pool = new Pool({ connectionString, ssl, max: 5 });
   }
   return pool;
 }
@@ -8235,6 +8274,12 @@ async function getRemoteCreatedAt(id) {
   const p = getPool();
   const result = await p.query("SELECT extract(epoch from created_at)::bigint AS c FROM documents WHERE id = $1", [id]);
   return result.rows[0] ? Number(result.rows[0].c) : void 0;
+}
+async function getRemoteOwnersByIds(ids) {
+  if (ids.length === 0) return /* @__PURE__ */ new Map();
+  const p = getPool();
+  const result = await p.query("SELECT id, origin_user FROM documents WHERE id = ANY($1::text[])", [ids]);
+  return new Map(result.rows.map((r) => [r.id, r.origin_user]));
 }
 async function getRemoteCollectionsByIds(ids) {
   if (ids.length === 0) return /* @__PURE__ */ new Map();
@@ -8348,13 +8393,15 @@ async function checkRemoteHealth() {
 function parseEmbedding(embeddingStr) {
   return JSON.parse(embeddingStr);
 }
-var Pool, pool;
+var Pool, pool, LOCAL_HOSTS, poolTls;
 var init_postgres = __esm({
   "packages/core/src/sync/postgres.ts"() {
     "use strict";
     init_config();
     ({ Pool } = pg);
     pool = null;
+    LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
+    poolTls = "off";
   }
 });
 
@@ -39510,7 +39557,7 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
 import { join as join3 } from "path";
 function artifactDir(kind) {
   return join3(getConfig().ARTIFACTS_DIR, kind);
@@ -40000,7 +40047,7 @@ init_postgres();
 // packages/core/src/sync/device.ts
 init_config();
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname } from "node:path";
 var cached2;
 function getDeviceId() {
@@ -40010,7 +40057,7 @@ function getDeviceId() {
   const path = config2.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync3(path, "utf-8").trim();
+    id = readFileSync4(path, "utf-8").trim();
   } catch {
     id = "";
   }
@@ -40022,7 +40069,7 @@ function getDeviceId() {
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync3(path, "utf-8").trim() || id;
+        id = readFileSync4(path, "utf-8").trim() || id;
       } catch {
       }
     }
@@ -40036,7 +40083,7 @@ function isSyncable3(collectionName) {
   return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
 }
 async function pushToRemote() {
-  const stats = { pushed: 0, linked: 0, deleted: 0, errors: 0 };
+  const stats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
   try {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
@@ -40051,6 +40098,16 @@ async function pushToRemote() {
     stats.errors++;
   }
   const collections = await listCollections2();
+  for (const collection of collections) {
+    if (isSyncable3(collection.name)) continue;
+    try {
+      stats.retracted += await retractSharedCopies(collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
+`);
+      stats.errors++;
+    }
+  }
   const pushedCollections = [];
   for (const collection of collections) {
     if (!isSyncable3(collection.name)) continue;
@@ -40171,6 +40228,19 @@ async function rekeyIfTaskIdTaken(collection, doc) {
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared database; renamed this task to ${newId}
 `);
   return { ...doc, id: newId, metadata };
+}
+async function retractSharedCopies(collection) {
+  const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.remote_checked_at !== versionOf(d));
+  if (unchecked.length === 0) return 0;
+  const me = getConfig().USERNAME;
+  const owners = await getRemoteOwnersByIds(unchecked.map((d) => d.id));
+  const mine = unchecked.filter((d) => owners.get(d.id) === me && (!d.metadata.origin_user || d.metadata.origin_user === me));
+  const removed = mine.length > 0 ? await deleteRemoteDocuments(mine.map((d) => d.id), me) : 0;
+  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
+`);
+  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  return removed;
 }
 async function markSynced(collection, id, metadata) {
   await updateDocument2(collection, id, {
@@ -40373,7 +40443,7 @@ async function syncCycle() {
   }
   syncRunning = true;
   try {
-    let pushStats = { pushed: 0, linked: 0, deleted: 0, errors: 0 };
+    let pushStats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
     let pullStats = emptyPullStats();
     try {
       pushStats = await pushToRemote();
@@ -40389,12 +40459,12 @@ async function syncCycle() {
 `);
       pullStats.errors++;
     }
-    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
     const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
     if (hasPushActivity || hasPullActivity) {
       process.stderr.write(
-        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped
+        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted, ${pushStats.retracted} retracted | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped
 `
       );
     }
@@ -40508,7 +40578,7 @@ init_postgres();
 init_config();
 init_store();
 import { createHash } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "fs";
 import { join as join5 } from "path";
 
 // packages/core/src/training/fireworks.ts
@@ -40671,7 +40741,7 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
 import { join as join4 } from "path";
 function registryPath() {
   return join4(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
@@ -40685,7 +40755,7 @@ function load() {
   const path = registryPath();
   if (!existsSync3(path)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync4(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync5(path, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -40727,7 +40797,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync5 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -40830,7 +40900,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path) {
-  const content = readFileSync5(path, "utf-8");
+  const content = readFileSync6(path, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -40909,7 +40979,7 @@ async function trainingTrigger(args) {
   if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync6(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync7(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(

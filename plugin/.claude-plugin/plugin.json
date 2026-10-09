@@ -63,6 +63,12 @@
       "sensitive": true,
       "default": ""
     },
+    "sync_ca_cert": {
+      "type": "file",
+      "title": "Sync database CA certificate",
+      "description": "PEM file with the database server's CA; the server certificate is verified against it. Empty: connections are encrypted but the server is not verified.",
+      "default": ""
+    },
     "sync_share_global": {
       "type": "boolean",
       "title": "Share 'global' with the team",

@@ -11,9 +11,10 @@ vi.mock('./postgres.js', () => ({
   deleteRemoteDocuments: vi.fn(async () => 0),
   getRemoteCreatedAt: vi.fn(async () => undefined),
   getRemoteMaxTaskNumber: vi.fn(async () => 0),
+  getRemoteOwnersByIds: vi.fn(async () => new Map()),
 }));
 
-import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments, getRemoteCreatedAt, getRemoteMaxTaskNumber } from './postgres.js';
+import { upsertRemoteDocument, findSimilarRemote, addRemoteRelatedIds, deleteRemoteDocuments, getRemoteCreatedAt, getRemoteMaxTaskNumber, getRemoteOwnersByIds } from './postgres.js';
 import { getNextTaskId } from '../tasks/create.js';
 import { getDocumentsByIds } from '../store/index.js';
 import { queueSyncDelete } from './deletes.js';
@@ -134,6 +135,43 @@ describe('pushToRemote over the local store', () => {
     await pushToRemote();
     expect(vi.mocked(upsertRemoteDocument).mock.calls.map(c => (c[0] as any).id)).toContain('tester-7');
     vi.mocked(getRemoteCreatedAt).mockResolvedValue(undefined);
+  });
+});
+
+describe('docs that now live in a private collection', () => {
+  it('deletes this user\'s shared copy, keeps a teammate\'s row, never pushes the private doc', async () => {
+    const store = (await import('../store/index.js')).getStore();
+    await store.createCollection('private-moved');
+    await store.addDocument('private-moved', 'tester-90', 'my task, moved private', { type: 'task', created_at: 1_800_000_000, is_synced: true });
+    await store.addDocument('private-moved', 'mem-mate-1', 'copy of a teammate memory', { type: 'memory', origin_user: 'mate', created_at: 1_800_000_000 });
+    vi.mocked(getRemoteOwnersByIds).mockClear();
+    vi.mocked(getRemoteOwnersByIds).mockResolvedValue(new Map([['tester-90', 'tester'], ['mem-mate-1', 'mate']]));
+    vi.mocked(deleteRemoteDocuments).mockClear();
+    vi.mocked(deleteRemoteDocuments).mockResolvedValue(1);
+    vi.mocked(upsertRemoteDocument).mockClear();
+
+    const stats = await pushToRemote();
+
+    expect(deleteRemoteDocuments).toHaveBeenCalledWith(['tester-90'], 'tester');
+    expect(stats.retracted).toBe(1);
+    const pushedIds = vi.mocked(upsertRemoteDocument).mock.calls.map(c => (c[0] as any).id);
+    expect(pushedIds).not.toContain('tester-90');
+    expect(pushedIds).not.toContain('mem-mate-1');
+  });
+
+  it('checks each version once: no remote lookups on the next cycle, again after an edit', async () => {
+    vi.mocked(getRemoteOwnersByIds).mockClear();
+    vi.mocked(deleteRemoteDocuments).mockClear();
+    vi.mocked(deleteRemoteDocuments).mockResolvedValue(0);
+    await pushToRemote();
+    expect(getRemoteOwnersByIds).not.toHaveBeenCalled();
+
+    const store = (await import('../store/index.js')).getStore();
+    const [doc] = await getDocumentsByIds('private-moved', ['tester-90']);
+    await store.addDocument('private-moved', 'tester-90', 'edited', { ...doc.metadata, updated_at: 1_900_000_000 });
+    await pushToRemote();
+    expect(vi.mocked(getRemoteOwnersByIds).mock.calls.at(-1)?.[0]).toEqual(['tester-90']);
+    vi.mocked(getRemoteOwnersByIds).mockResolvedValue(new Map());
   });
 });
 

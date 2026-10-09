@@ -342,6 +342,8 @@ Deleting **your own** memory or task queues the deletion for the remote database
 
 Collections prefixed with `private-` or `local-` are never synced. Use these for personal notes, credentials, or anything that should stay on one machine.
 
+A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved, restored, or recreated with the same id), the next sync deletes its shared row. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
+
 ### Testing sync against a real database
 
 `npm test` mocks Postgres. To run the end-to-end sync suite (multi-user model,
