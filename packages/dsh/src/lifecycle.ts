@@ -16,6 +16,7 @@ import {
   runDecaySweep,
   shouldRunDecay,
   startSync,
+  isSyncConfigured,
   stopSync,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
@@ -89,10 +90,10 @@ export function registerLifecycle(ctx: Context, getResolved: () => ResolvedConfi
   // change sync fields restart the loop (see index.ts watch handler).
   const syncCtl = { active: false };
   const applySyncState = (cfg: ResolvedConfig['core']) => {
-    if (cfg.SYNC_ENABLED && cfg.SYNC_DATABASE_URL && !syncCtl.active) {
+    if (isSyncConfigured(cfg) && !syncCtl.active) {
       startSync().catch(e => log(`Sync startup error: ${e}`));
       syncCtl.active = true;
-    } else if ((!cfg.SYNC_ENABLED || !cfg.SYNC_DATABASE_URL) && syncCtl.active) {
+    } else if (!isSyncConfigured(cfg) && syncCtl.active) {
       stopSync();
       syncCtl.active = false;
     }

@@ -19,6 +19,8 @@ import { getNextTaskId } from '../tasks/create.js';
 import { getDocumentsByIds } from '../store/index.js';
 import { queueSyncDelete } from './deletes.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
+import { setSyncBackend } from './backend.js';
+import { PostgresBackend } from './postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getDocumentsByFilter } from '../store/index.js';
 import { pushToRemote } from './push.js';
 
@@ -28,12 +30,15 @@ beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'yapa-sync-test-'));
   setConfig(createConfig({ ...process.env, YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A' }));
   setStore(createLocalStore(dir));
+  // The Postgres backend over the mocked postgres.js seam.
+  setSyncBackend(new PostgresBackend());
 });
 
 afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
   resetStore();
   resetConfig();
+  setSyncBackend(undefined);
 });
 
 describe('pushToRemote over the local store', () => {

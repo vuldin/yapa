@@ -113,6 +113,21 @@ export interface YapaConfig {
 
   // Remote sync
   SYNC_ENABLED: boolean;
+  /**
+   * Base URL of the YAPA sync service (packages/service). When set, sync goes
+   * through the service with a Google ID token and SYNC_DATABASE_URL is ignored.
+   */
+  SYNC_SERVICE_URL: string;
+  /**
+   * Command that prints a Google ID token for the service. Empty =
+   * `gcloud auth print-identity-token` (user accounts, after `gcloud auth login`).
+   */
+  SYNC_ID_TOKEN_CMD: string;
+  /** File caching the current ID token (0600) across short-lived hook processes; '' = memory only. */
+  SYNC_ID_TOKEN_CACHE: string;
+  /** Per-request timeout for the sync service. */
+  SYNC_HTTP_TIMEOUT_MS: number;
+  /** Advanced/self-host: direct PostgreSQL URL (ignored when SYNC_SERVICE_URL is set). */
   SYNC_DATABASE_URL: string;
   SYNC_INTERVAL_MS: number;
   SYNC_SIMILARITY_THRESHOLD: number;
@@ -244,6 +259,10 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     INFERENCE_BASE_URL: get(env, 'INFERENCE_BASE_URL', 'https://api.fireworks.ai/inference/v1'),
 
     SYNC_ENABLED: get(env, 'SYNC_ENABLED', 'false') === 'true',
+    SYNC_SERVICE_URL: get(env, 'SYNC_SERVICE_URL', '').replace(/\/+$/, ''),
+    SYNC_ID_TOKEN_CMD: get(env, 'SYNC_ID_TOKEN_CMD', ''),
+    SYNC_ID_TOKEN_CACHE: ((v: string) => (v === 'off' ? '' : v))(get(env, 'SYNC_ID_TOKEN_CACHE', pathJoin(homedir(), '.local', 'share', 'yapa', 'id-token'))),
+    SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, 'SYNC_HTTP_TIMEOUT_MS', '15000'), 10),
     SYNC_DATABASE_URL: get(env, 'SYNC_DATABASE_URL', ''),
     SYNC_INTERVAL_MS: parseInt(get(env, 'SYNC_INTERVAL_MS', '300000'), 10), // 5 minutes
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, 'SYNC_SIMILARITY_THRESHOLD', '0.95')),

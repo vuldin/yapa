@@ -44,7 +44,7 @@ YAPA runs two frontends over one core:
 
 **Smart chunking** — Long content is split into 2000-character chunks with 200-character overlap, each independently searchable. Meeting notes, documentation, lengthy explanations — all stored and retrievable.
 
-**Remote sync** — Optionally sync memories and tasks to a shared PostgreSQL+pgvector database. Push local data to the remote, pull teammates' data down. A background sync runs every 5 minutes automatically. The install wizard supports Docker, Neon, Supabase, AWS RDS, GCP Cloud SQL, and Azure Flexible Server.
+**Remote sync**: Optionally sync memories and tasks with your team through the YAPA sync service (Google sign-in; no database credentials on your machine), or, for self-hosting, a PostgreSQL+pgvector database you run. Push local data to the remote, pull teammates' data down. A background sync runs every 5 minutes automatically. The install wizard supports Docker, Neon, Supabase, AWS RDS, GCP Cloud SQL, and Azure Flexible Server.
 
 **Deduplication** — During sync, YAPA compares document embeddings using cosine similarity (default threshold 0.95). Near-duplicates are linked via `related_ids` rather than merged or discarded, so no data is lost and you can trace where related knowledge came from.
 
@@ -80,12 +80,13 @@ Configure options, or `claude plugin configure yapa`):
 
 | Option | Default | Meaning |
 |---|---|---|
-| `username` | OS login name | Name on task IDs and on everything you sync |
+| `username` | OS login name | Name on task IDs and on everything you sync (with the sync service it comes from your Google account; this is then informational) |
 | `storage` | `local` | `local` embedded store (no server) or `chroma` |
 | `chroma_url` | `http://localhost:8000` | ChromaDB server when `storage` is `chroma` |
 | `project_roots` | _(empty)_ | Comma-separated folders whose subfolders map to `project-{name}` / `customer-{name}` collections |
 | `customers` | _(empty)_ | Folder names under a root that are customers |
-| `sync_enabled`, `sync_database_url` | off | Team sync through PostgreSQL+pgvector (the URL is stored in the system credential store) |
+| `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
+| `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
 | `response_capture` | off | Auto-capture durable findings after each turn (see hooks below) |
 
 For a whole team, add the marketplace and enable the plugin in managed or
@@ -280,7 +281,10 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` | Max boosts per memory per UTC day | `3` |
 | `YAPA_TRAINING_PIPELINE` | Expose the 18 ML-ops tools (curation/buckets/training/eval/adapter) | `false` |
 | `YAPA_SYNC_ENABLED` | Enable remote sync | `false` |
-| `YAPA_SYNC_DATABASE_URL` | PostgreSQL connection string | _(none)_ |
+| `YAPA_SYNC_SERVICE_URL` | YAPA sync service URL (wins over the database URL) | _(none)_ |
+| `YAPA_SYNC_ID_TOKEN_CMD` | Command printing a Google ID token for the service | `gcloud auth print-identity-token` |
+| `YAPA_SYNC_HTTP_TIMEOUT_MS` | Per-request timeout for the sync service | `15000` |
+| `YAPA_SYNC_DATABASE_URL` | Advanced/self-host: direct PostgreSQL connection string (ignored when a service URL is set) | _(none)_ |
 | `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms | `300000` (5 min) |
 | `YAPA_SYNC_SIMILARITY_THRESHOLD` | Cosine similarity threshold for dedup | `0.95` |
 | `YAPA_SYNC_PUSH_DEBOUNCE_MS` | Delay before a write-triggered push (`0` = interval only) | `2000` |
@@ -299,7 +303,20 @@ eval holdout, …) lives in
 
 ## Remote Sync
 
-Remote sync lets multiple machines or teammates share memories and tasks through a PostgreSQL+pgvector database. It is optional — YAPA works fully offline with just ChromaDB.
+Remote sync lets multiple machines or teammates share memories and tasks. It is optional: YAPA works fully offline, and local features keep working when the remote is unreachable.
+
+### Setup (sync service)
+
+1. Install the plugin (above) and enable `sync_enabled`.
+2. Set `sync_service_url` to your team's YAPA sync service URL (ask your YAPA admin).
+3. Sign in once: `gcloud auth login` with your company Google account. YAPA calls `gcloud auth print-identity-token` for a short-lived ID token, keeps it in memory only, and refreshes it before it expires. Other token sources: set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints an ID token.
+4. Check with the `sync` tool, `action: 'status'`: it shows the backend, the service URL, who you are signed in as, the last error, and any docs the service refused.
+
+With the service, your username comes from your Google account (shown in `sync status`); task ids use it, and the `username` option is informational. The service enforces ownership (only the owner deletes a shared row), refuses content that looks like a secret (the doc stays local and unsynced, listed in `sync status`, and is retried only after you edit it), renames a task whose id already belongs to a different task, and sends deletions to teammates' machines (a clean copy is removed; a copy with unpushed edits is kept and reported).
+
+### Advanced: direct database (self-host)
+
+Instead of the service, `sync_database_url` (`YAPA_SYNC_DATABASE_URL`) connects straight to a PostgreSQL+pgvector database you run; it is ignored when a service URL is set. This mode has no server-side access control: everyone with the URL can read and write every shared collection, deletions do not propagate to other machines, and there is no secret check.
 
 ### How it works
 
@@ -318,8 +335,8 @@ The cycle itself:
 
 - **Attribution** — documents keep their original author (`origin_user`); injected context marks teammates' items `by <user>`.
 - **`global` is local-only** — like `private-`/`local-` collections it never leaves your machine (not even to your other devices). Put team-wide knowledge in a shared collection such as `project-cs-team`.
-- **Same user, several machines** — use the same `YAPA_USERNAME` everywhere; each install has its own device id.
-- **No access control yet** — everyone with the database URL can read every shared collection. Use `private-`/`local-` collections for anything that must not leave your machine.
+- **Same user, several machines**: sign in with the same Google account (direct database: use the same `YAPA_USERNAME`) everywhere; each install has its own device id.
+- **Access control**: with the sync service, the server checks every request against your Google identity; with a direct database, everyone with the URL can read every shared collection. Either way, use `private-`/`local-` collections for anything that must not leave your machine.
 
 You can also trigger a sync manually with `sync` (`action: 'now'`), check status with `action: 'status'`, and manage subscriptions with `action: 'subscribe'` / `'unsubscribe'`.
 
@@ -342,9 +359,25 @@ Collections prefixed with `private-` or `local-`, and `global`, are never synced
 
 A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved, restored, or synced by an older YAPA version), the next sync deletes its shared row. Only the same doc is removed (matched by id and creation time), never a different shared task that happens to reuse the id. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
 
-### Testing sync against a real database
+### Testing sync
 
-`npm test` mocks Postgres. To run the end-to-end sync suite (multi-user model,
+`npm test` mocks the remote (Postgres seam, and a mock HTTP server for the service client).
+
+Backend contract suite: the same scenarios against the direct-database backend and the service backend (in-process service, test auth, RLS schema from `infra/cloudsql/sql`), on a throwaway pgvector container:
+
+```
+docker run -d --rm --name yapa-ct -e POSTGRES_PASSWORD=ct -p 127.0.0.1:55433:5432 pgvector/pgvector:pg17
+YAPA_CONTRACT_DB_URL=postgres://postgres:ct@127.0.0.1:55433/postgres npx vitest run src/sync/contract.test.ts   # in packages/core
+docker rm -f yapa-ct
+```
+
+Live check against a deployed service (after `gcloud auth login`; writes only to a per-run `project-yapa-it-<run>` collection and deletes its rows afterwards):
+
+```
+YAPA_LIVE_SERVICE_URL=https://<your-service> npx vitest run src/sync/live.test.ts   # in packages/core
+```
+
+Direct-database end-to-end suite (multi-user model,
 collection moves, task-id collisions) against a real PostgreSQL+pgvector
 database:
 
