@@ -12,6 +12,7 @@
         "YAPA_PROJECT_ROOTS": "${user_config.project_roots}",
         "YAPA_CUSTOMERS": "${user_config.customers}",
         "YAPA_SYNC_ENABLED": "${user_config.sync_enabled}",
+        "YAPA_SYNC_SERVICE_URL": "${user_config.sync_service_url}",
         "YAPA_SYNC_DATABASE_URL": "${user_config.sync_database_url}",
         "YAPA_SYNC_CA_CERT": "${user_config.sync_ca_cert}",
         "YAPA_RESPONSE_CAPTURE": "${user_config.response_capture}",

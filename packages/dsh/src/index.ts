@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-session';
 import type {} from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-skill';
-import { setConfig, setStore, chromaStore, createLocalStore, type YapaConfig } from '@yapa/core';
+import { setConfig, setStore, chromaStore, createLocalStore, isSyncConfigured, type YapaConfig } from '@yapa/core';
 import { Config, resolveConfig, type ResolvedConfig } from './config.js';
 import { registerTools } from './tools.js';
 import { registerAdvancedTools } from './tools-advanced.js';
@@ -95,7 +95,8 @@ export function apply(ctx: Context, config: Config): void {
   // hot-reloaded; the cordis row config becomes the composition `base` layer.
   const scope = ctx.settings.register(settingsNamespace('yapa'), Config, { base: config, applies: 'live' });
   scope.watch(next => {
-    const prevSync = resolved.core.SYNC_ENABLED && resolved.core.SYNC_DATABASE_URL;
+    const syncTarget = (c: typeof resolved.core) => isSyncConfigured(c) && (c.SYNC_SERVICE_URL || c.SYNC_DATABASE_URL);
+    const prevSync = syncTarget(resolved.core);
     const prevInterval = resolved.core.SYNC_INTERVAL_MS;
     const prevStore = `${resolved.core.STORAGE}:${resolved.core.LOCAL_STORE_PATH}`;
     const prevPipeline = resolved.trainingPipeline;
@@ -109,7 +110,7 @@ export function apply(ctx: Context, config: Config): void {
       disposeAdvanced();
       disposeAdvanced = registerAdvancedTools(ctx, getResolved);
     }
-    const nextSync = resolved.core.SYNC_ENABLED && resolved.core.SYNC_DATABASE_URL;
+    const nextSync = syncTarget(resolved.core);
     if (prevSync !== nextSync || prevInterval !== resolved.core.SYNC_INTERVAL_MS) {
       lifecycle.syncChanged();
     }

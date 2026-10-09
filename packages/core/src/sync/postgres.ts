@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { getConfig } from '../config.js';
 import pg from 'pg';
+import type { RemoteDocument } from './backend.js';
 
 
 const { Pool } = pg;
@@ -10,6 +11,11 @@ let pool: pg.Pool | null = null;
 export type SyncTls = 'off' | 'unverified' | 'verify-ca';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '']);
+
+/*
+ * Direct PostgreSQL access: used only by PostgresBackend (postgres-backend.ts),
+ * the advanced/self-host sync target. Everything else goes through backend.ts.
+ */
 
 /**
  * Connection settings for the sync database. Remote connections always use
@@ -85,18 +91,7 @@ export async function closePool(): Promise<void> {
   }
 }
 
-export interface RemoteDocument {
-  id: string;
-  collection: string;
-  content: string;
-  embedding: number[];
-  metadata: Record<string, any>;
-  origin_user: string;
-  related_ids: string[];
-  synced_at: Date;
-  created_at: Date;
-  updated_at: Date;
-}
+export type { RemoteDocument };
 
 /** Insert or update a document in the remote database. */
 export async function upsertRemoteDocument(doc: {

@@ -1,7 +1,7 @@
 import { getConfig } from '../config.js';
 import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument } from '../store/index.js';
 
-import { getRemoteDocsSince, addRemoteRelatedIds, getRemoteCollectionsForUser, getRemoteCollectionsByIds, type RemoteDocument } from './postgres.js';
+import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type RemoteDeletion, type RemoteDocument, type SyncBackend } from './backend.js';
 import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
@@ -16,12 +16,19 @@ export interface PullStats {
   moved: number;
   linked: number;
   skipped: number;
+  /** Clean local copies removed because the doc was deleted remotely. */
+  deleted: number;
+  /** Docs deleted remotely whose local copy has unpushed edits: kept (the next push re-creates them). */
+  keptDirty: number;
   errors: number;
 }
 
 export function emptyPullStats(): PullStats {
-  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
 }
+
+/** Safety cap on pages per collection per call (500 docs each). */
+const MAX_PULL_PAGES = 200;
 
 /**
  * Pull new and updated documents from the remote database into the local store.
@@ -33,6 +40,9 @@ export function emptyPullStats(): PullStats {
  */
 export async function pullFromRemote(): Promise<PullStats> {
   const stats = emptyPullStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
 
   const cycleStartedAt = Math.floor(Date.now() / 1000) - getConfig().SYNC_PULL_OVERLAP_SECONDS;
   const lastPull = await getSyncPullTimestamp();
@@ -44,12 +54,19 @@ export async function pullFromRemote(): Promise<PullStats> {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const mine = (await getRemoteCollectionsForUser(getConfig().USERNAME)).filter(isSyncable);
+      const mine = (await backend.collectionsForUser()).filter(isSyncable);
       const subs = await getSyncSubscriptions();
       const add = mine.filter(c => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}\n`);
+      noteSyncError(e);
+      // Not signed in / unreachable: keep the store marked as never-pulled so
+      // recovery runs again next cycle.
+      if (isCycleFatal(e)) {
+        stats.errors++;
+        return stats;
+      }
     }
   }
   const collections = await listCollections();
@@ -72,14 +89,19 @@ export async function pullFromRemote(): Promise<PullStats> {
   }
 
   const followed = new Set(pullCollectionNames);
+  let fatal = false;
   for (const collectionName of pullCollectionNames) {
     await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
       includeOwnDevice: recovering,
       followedCollections: followed,
+      onFatal: () => { fatal = true; },
     });
+    if (fatal) break;
   }
 
-  await updateSyncPullTimestamp(cycleStartedAt);
+  // A cycle cut short (not signed in, unreachable) must not advance the pull
+  // point past docs it never read.
+  if (!fatal) await updateSyncPullTimestamp(cycleStartedAt);
 
   return stats;
 }
@@ -102,45 +124,88 @@ export async function pullCollection(
      * per-prompt hook skips to stay fast.
      */
     followedCollections?: Set<string>;
+    /** Called when the remote is unusable for the rest of the cycle (auth, network). */
+    onFatal?: () => void;
   } = {},
 ): Promise<PullStats> {
   if (!isSyncable(collectionName)) return stats;
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  const failed = (what: string, e: unknown) => {
+    process.stderr.write(`[yapa-sync] ${what}: ${e}\n`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) opts.onFatal?.();
+    return isCycleFatal(e);
+  };
   if (opts.followedCollections) {
-    await dropMovedOut(collectionName, opts.followedCollections, stats).catch(e => {
-      process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}\n`);
-      stats.errors++;
+    let fatal = false;
+    await dropMovedOut(backend, collectionName, opts.followedCollections, stats).catch(e => {
+      fatal = failed(`Move check failed for ${collectionName}`, e);
     });
+    if (fatal) return stats;
   }
   try {
-    const remoteDocs = await getRemoteDocsSince(
-      collectionName,
-      since,
-      { user: getConfig().USERNAME, device: getDeviceId() },
-      { includeOwnDevice: opts.includeOwnDevice },
-    );
-    if (remoteDocs.length === 0) return stats;
-
-    const tombstones = await getLocalTombstones();
-    await getOrCreateCollection(collectionName);
-    for (const remoteDoc of remoteDocs) {
-      try {
-        // Tombstoned here, or another session's journal scratch (drafts are
-        // never shared; only consolidated journals are).
-        if (tombstones.has(remoteDoc.id) || remoteDoc.metadata?.type === 'journal_draft') {
-          stats.skipped++;
-          continue;
+    let tombstones: Set<string> | undefined;
+    let cursor: string | undefined;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PULL_PAGES; page++) {
+      const res = await backend.pull(collectionName, { since, cursor, includeOwnDevice: opts.includeOwnDevice });
+      if (res.documents.length > 0 || res.deletions.length > 0) {
+        await getOrCreateCollection(collectionName);
+        tombstones ??= await getLocalTombstones();
+        // Deletions first: a doc deleted and then re-created comes back in
+        // the documents feed and must survive. A deletion of an id that this
+        // pull returned as a live row is older than that row.
+        for (const d of res.documents) seen.add(d.id);
+        for (const del of res.deletions) {
+          if (seen.has(del.id)) continue;
+          try {
+            await applyRemoteDeletion(collectionName, del, stats);
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Pull delete error for ${del.id}: ${e}\n`);
+            stats.errors++;
+          }
         }
-        await applyRemoteDoc(collectionName, remoteDoc, stats);
-      } catch (e) {
-        process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}\n`);
-        stats.errors++;
+        for (const remoteDoc of res.documents) {
+          try {
+            // Tombstoned here, or another session's journal scratch (drafts are
+            // never shared; only consolidated journals are).
+            if (tombstones.has(remoteDoc.id) || remoteDoc.metadata?.type === 'journal_draft') {
+              stats.skipped++;
+              continue;
+            }
+            await applyRemoteDoc(backend, collectionName, remoteDoc, stats);
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}\n`);
+            stats.errors++;
+          }
+        }
       }
+      if (!res.hasMore || !res.nextCursor || res.nextCursor === cursor) break;
+      cursor = res.nextCursor;
     }
   } catch (e) {
-    process.stderr.write(`[yapa-sync] Pull error for collection ${collectionName}: ${e}\n`);
-    stats.errors++;
+    failed(`Pull error for collection ${collectionName}`, e);
   }
   return stats;
+}
+
+/**
+ * A doc deleted remotely by its owner: drop the clean local copy. A copy with
+ * unpushed local edits is kept and reported (its next push re-creates the
+ * shared row), so nothing is lost silently.
+ */
+async function applyRemoteDeletion(collectionName: string, del: RemoteDeletion, stats: PullStats): Promise<void> {
+  const [existing] = await getDocumentsByIds(collectionName, [del.id]).catch(() => []);
+  if (!existing) return;
+  if (existing.metadata.is_synced === false) {
+    stats.keptDirty++;
+    process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)\n`);
+    return;
+  }
+  await deleteDocument(collectionName, del.id);
+  stats.deleted++;
 }
 
 function toUnixSeconds(value: Date | number | string | undefined | null): number {
@@ -179,11 +244,11 @@ async function copiesElsewhere(id: string, except: string): Promise<Array<{ coll
  * it instead. Copies with unpushed local edits are kept; their push moves the
  * remote row back.
  */
-async function dropMovedOut(collectionName: string, followed: Set<string>, stats: PullStats): Promise<void> {
+async function dropMovedOut(backend: SyncBackend, collectionName: string, followed: Set<string>, stats: PullStats): Promise<void> {
   const local = (await getDocumentsByFilter(collectionName, {}, 100_000))
     .filter(d => !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && d.metadata.is_synced !== false);
   if (local.length === 0) return;
-  const remote = await getRemoteCollectionsByIds(local.map(d => d.id));
+  const remote = await backend.collectionsByIds(local.map(d => d.id));
   for (const doc of local) {
     const now = remote.get(doc.id);
     if (!now || now === collectionName || followed.has(now)) continue;
@@ -192,7 +257,7 @@ async function dropMovedOut(collectionName: string, followed: Set<string>, stats
   }
 }
 
-async function applyRemoteDoc(collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
+async function applyRemoteDoc(backend: SyncBackend, collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
   const [existing] = await getDocumentsByIds(collectionName, [remoteDoc.id]).catch(() => []);
 
   if (!existing) {
@@ -241,7 +306,9 @@ async function applyRemoteDoc(collectionName: string, remoteDoc: RemoteDocument,
           localRelated.push(remoteDoc.id);
           await updateDocument(collectionName, localDoc.id, { ...localDoc.metadata, related_ids: localRelated });
         }
-        await addRemoteRelatedIds(remoteDoc.id, [localDoc.id]);
+        await backend.addRelatedIds(remoteDoc.id, [localDoc.id]).catch(e => {
+          process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}\n`);
+        });
         stats.linked++;
       }
     }

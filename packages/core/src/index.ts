@@ -60,14 +60,15 @@ export * from './buckets/router.js';
 export * from './buckets/system-prompt.js';
 export * from './buckets/training-manifest.js';
 
-// Remote sync (Postgres + pgvector).
+// Remote sync (the YAPA sync service, or a direct Postgres+pgvector database).
 export * from './sync/index.js';
-export * from './sync/postgres.js';
+export * from './sync/backend.js';
+export { HttpBackend, IdTokenProvider, ServiceError } from './sync/http-backend.js';
+export { PostgresBackend } from './sync/postgres-backend.js';
 export * from './sync/pull.js';
 export * from './sync/push.js';
 export * from './sync/deletes.js';
 export * from './sync/sentinel.js';
-export * from './sync/schema.js';
 export * from './sync/device.js';
 
 // Training / eval / promotion.

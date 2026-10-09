@@ -14,6 +14,8 @@ vi.mock('./postgres.js', () => ({
 import { getRemoteDocsSince, getRemoteCollectionsForUser, getRemoteCollectionsByIds } from './postgres.js';
 import type { RemoteDocument } from './postgres.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
+import { setSyncBackend } from './backend.js';
+import { PostgresBackend } from './postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
 import { pullFromRemote, pullCollection } from './pull.js';
 import { isSyncableCollection } from './syncable.js';
@@ -49,12 +51,15 @@ beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'yapa-pull-test-'));
   configure();
   setStore(createLocalStore(dir));
+  // The Postgres backend over the mocked postgres.js seam.
+  setSyncBackend(new PostgresBackend());
 });
 
 afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
   resetStore();
   resetConfig();
+  setSyncBackend(undefined);
 });
 
 beforeEach(() => {

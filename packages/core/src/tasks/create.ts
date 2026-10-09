@@ -1,5 +1,6 @@
 import { getConfig } from '../config.js';
 import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../store/index.js';
+import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -31,6 +32,14 @@ const PRIORITY_SALIENCE: Record<string, number> = {
 
 /** Get next sequential task ID for user. Format: {username}-{n} */
 export async function getNextTaskId(): Promise<string> {
+  // With the sync service, ids must carry the server-assigned username
+  // (from the Google account); learn it first, bounded like the remote max.
+  if (isSyncConfigured()) {
+    await Promise.race([
+      resolveSyncUsername(),
+      new Promise<void>(resolve => setTimeout(resolve, 3000).unref()),
+    ]).catch(() => undefined);
+  }
   const collections = await listCollections();
   let maxId = 0;
 
@@ -52,11 +61,11 @@ export async function getNextTaskId(): Promise<string> {
   // numbers on the shared database; reusing one would overwrite that task
   // remotely. Best-effort: an unreachable remote falls back to local numbering
   // (push still refuses to overwrite a different task, see sync/push.ts).
-  if (getConfig().SYNC_ENABLED && getConfig().SYNC_DATABASE_URL) {
+  if (isSyncConfigured()) {
     try {
-      const { getRemoteMaxTaskNumber } = await import('../sync/postgres.js');
-      const remote = await Promise.race([
-        getRemoteMaxTaskNumber(getConfig().USERNAME),
+      const backend = await getSyncBackend();
+      const remote = !backend ? 0 : await Promise.race([
+        backend.maxTaskNumber(),
         new Promise<number>(resolve => setTimeout(() => resolve(0), 3000).unref()),
       ]);
       maxId = Math.max(maxId, remote);

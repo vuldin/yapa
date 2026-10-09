@@ -11,7 +11,7 @@ const PLUGIN_OPTION_PREFIX = 'CLAUDE_PLUGIN_OPTION_';
  *
  *   1. explicit YAPA_* env (the user's shell, or a hook's own env)
  *   2. plugin options — Claude Code exports userConfig to plugin hooks as
- *      CLAUDE_PLUGIN_OPTION_<KEY>; key `sync_database_url` → YAPA_SYNC_DATABASE_URL
+ *      CLAUDE_PLUGIN_OPTION_<KEY>; key `sync_service_url` -> YAPA_SYNC_SERVICE_URL
  *   3. the `yapa` server's env block in ~/.claude.json (a `claude mcp add`
  *      install), project-scoped entry for `cwd` first, then user scope —
  *      only when NOT running as a plugin hook

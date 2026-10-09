@@ -12,8 +12,9 @@ import {
   bucketRouteNow,
   bucketRoutePreview,
   bucketStatus,
-  checkRemoteHealth,
-  getSyncTlsMode,
+  formatSyncStats,
+  getSyncBackend,
+  listRejectedDocs,
   classifyMemories,
   completeTask,
   createNewCollection,
@@ -32,7 +33,6 @@ import {
   getDueTasks,
   getOrCreateCollection,
   getPendingDeletes,
-  getRemoteCollections,
   getSyncPullTimestamp,
   getSyncState,
   getSyncSubscriptions,
@@ -1117,32 +1117,37 @@ export function registerTools(server: McpServer): void {
   // --- Sync (consolidated: one tool, action-dispatched) ---
   server.tool(
     'sync',
-    'Remote sync (PostgreSQL+pgvector) control. Actions: `status` (health, last sync, pending), `now` (run a push+pull cycle immediately), `collections` (list remote collections with subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions — pass `collections`; unsubscribe keeps local data).',
+    'Team sync control (through the YAPA sync service, or a self-hosted database). Actions: `status` (health, last sync, pending), `now` (run a push+pull cycle immediately), `collections` (list remote collections with subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions; pass `collections`; unsubscribe keeps local data).',
     {
       action: z.enum(['status', 'now', 'collections', 'subscribe', 'unsubscribe']).describe('Sync operation to perform'),
       collections: z.array(z.string()).optional().describe('Collection names (required for subscribe/unsubscribe)'),
     },
     async ({ action, collections }) => {
-      const { SYNC_ENABLED, SYNC_DATABASE_URL, SYNC_INTERVAL_MS } = getConfig();
+      const { SYNC_ENABLED, SYNC_INTERVAL_MS } = getConfig();
       if (!SYNC_ENABLED) {
         return { content: [{ type: 'text' as const, text: 'Remote sync is disabled. Set YAPA_SYNC_ENABLED=true to enable.' }] };
       }
       const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
+      let backend: Awaited<ReturnType<typeof getSyncBackend>>;
+      try {
+        backend = await getSyncBackend();
+      } catch (e) {
+        return text(`Sync is misconfigured: ${e instanceof Error ? e.message : e}`);
+      }
+      if (!backend) return text('Remote sync is enabled but has no target. Set the `sync_service_url` option (YAPA_SYNC_SERVICE_URL) and run `gcloud auth login`.');
+      const remoteCollections = () => backend.collections();
 
       switch (action) {
         case 'status': {
           const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1000}s)`];
-          lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
-          lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
-          if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
-          lines.push('global: local only (never synced; like private-/local- collections)');
           try {
-            const health = await checkRemoteHealth();
-            lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
-            lines.push(`TLS: ${{ 'verify-ca': 'encrypted, server verified', unverified: 'encrypted, server NOT verified (set sync_ca_cert)', off: 'off (local database)' }[getSyncTlsMode()]}`);
+            lines.push(...await backend.describe());
           } catch (e) {
-            lines.push(`Connection: error — ${e}`);
+            lines.push(`Connection: error - ${e}`);
           }
+          lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
+          if (backend.kind !== 'service' && !process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
+          lines.push('global: local only (never synced; like private-/local- collections)');
           try {
             const lastPull = await getSyncPullTimestamp();
             lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
@@ -1156,11 +1161,23 @@ export function registerTools(server: McpServer): void {
             // ignore
           }
           try {
+            const rejected = await listRejectedDocs();
+            if (rejected.length > 0) {
+              const byCode = new Map<string, number>();
+              for (const r of rejected) byCode.set(r.code, (byCode.get(r.code) ?? 0) + 1);
+              lines.push(`Refused by the remote (kept local, retried after an edit): ${rejected.length} (${[...byCode].map(([c, n]) => `${c}: ${n}`).join(', ')}): ${rejected.slice(0, 10).map(r => `${r.collection}/${r.id}`).join(', ')}${rejected.length > 10 ? ', ...' : ''}`);
+            }
+          } catch {
+            // ignore
+          }
+          try {
             const state = getSyncState();
             lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
             lines.push(`Cycles completed: ${state.cycleCount}`);
             if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
-            if (state.lastCycleError) lines.push(`Last error: ${state.lastCycleError}`);
+            if (state.lastStats) lines.push(`Last cycle result: ${formatSyncStats(state.lastStats)}`);
+            if (state.lastCycleError) lines.push(`Last cycle error: ${state.lastCycleError}`);
+            if (state.lastError) lines.push(`Last error: ${state.lastError.message} (${new Date(state.lastError.at).toISOString()})`);
           } catch {
             lines.push('Background state: unavailable');
           }
@@ -1171,8 +1188,9 @@ export function registerTools(server: McpServer): void {
           try {
             const stats = await syncCycle();
             if (!stats) return text('Sync skipped — previous cycle still running.');
-            const { push, pull } = stats;
-            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
+            const errors = stats.push.errors + stats.pull.errors;
+            const last = getSyncState().lastError;
+            return text(`Sync cycle completed. ${formatSyncStats(stats)}${errors && last ? `\nLast error: ${last.message}` : ''}`);
           } catch (e) {
             return text(`Sync error: ${e}`);
           }
@@ -1180,7 +1198,7 @@ export function registerTools(server: McpServer): void {
 
         case 'collections': {
           try {
-            const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
+            const [remote, subscriptions] = await Promise.all([remoteCollections(), getSyncSubscriptions()]);
             const subSet = new Set(subscriptions);
             if (remote.length === 0) return text('No collections found on remote.');
             return text(remote.map(r => `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? '(subscribed)' : ''}`).join('\n'));
@@ -1192,7 +1210,7 @@ export function registerTools(server: McpServer): void {
         case 'subscribe': {
           if (!collections?.length) return text('Refused — `collections` is required for subscribe.');
           try {
-            const remote = await getRemoteCollections();
+            const remote = await remoteCollections();
             const remoteNames = new Set(remote.map(r => r.name));
             const valid: string[] = [];
             const invalid: string[] = [];

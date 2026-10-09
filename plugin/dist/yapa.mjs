@@ -88,6 +88,9 @@ function createConfig(env = process.env) {
     VERIFICATION_ATTEMPTS_MAX: parseInt(get(env, "VERIFICATION_ATTEMPTS_MAX", "3"), 10),
     INFERENCE_BASE_URL: get(env, "INFERENCE_BASE_URL", "https://api.fireworks.ai/inference/v1"),
     SYNC_ENABLED: get(env, "SYNC_ENABLED", "false") === "true",
+    SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
+    SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
+    SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
     // 5 minutes
@@ -933,8 +936,8 @@ function chunkText(text) {
     chunks.push({ content: text.slice(start, end), index: chunks.length, total: 0 });
     start += CHUNK_SIZE - CHUNK_OVERLAP;
   }
-  for (const chunk of chunks) {
-    chunk.total = chunks.length;
+  for (const chunk2 of chunks) {
+    chunk2.total = chunks.length;
   }
   return chunks;
 }
@@ -1077,7 +1080,7 @@ async function storeMemory(content, options = {}) {
     return { ids: [id], potential_conflicts };
   }
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-  const docs = chunks.map((chunk) => {
+  const docs = chunks.map((chunk2) => {
     const chunkMeta = {
       ...options.metadata ?? {},
       type: "memory",
@@ -1087,15 +1090,15 @@ async function storeMemory(content, options = {}) {
       sector,
       created_at: now,
       accessed_at: now,
-      chunk_index: chunk.index,
-      chunk_total: chunk.total,
+      chunk_index: chunk2.index,
+      chunk_total: chunk2.total,
       parent_id: baseId
     };
     if (options.supersedes) chunkMeta.supersedes = options.supersedes;
     chunkMeta.is_synced = false;
     return {
-      id: `${baseId}-${chunk.index}`,
-      content: chunk.content,
+      id: `${baseId}-${chunk2.index}`,
+      content: chunk2.content,
       metadata: chunkMeta
     };
   });
@@ -1385,12 +1388,914 @@ var init_journal = __esm({
   }
 });
 
+// packages/core/src/sync/device.ts
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+function getDeviceId() {
+  const config = getConfig();
+  if (config.DEVICE_ID) return config.DEVICE_ID;
+  if (cached?.path === config.DEVICE_ID_PATH) return cached.id;
+  const path = config.DEVICE_ID_PATH;
+  let id;
+  try {
+    id = readFileSync2(path, "utf-8").trim();
+  } catch {
+    id = "";
+  }
+  if (!id) {
+    id = randomUUID();
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${id}
+`, { flag: "wx" });
+    } catch {
+      try {
+        id = readFileSync2(path, "utf-8").trim() || id;
+      } catch {
+      }
+    }
+  }
+  cached = { path, id };
+  return id;
+}
+var cached;
+var init_device = __esm({
+  "packages/core/src/sync/device.ts"() {
+    "use strict";
+    init_config();
+  }
+});
+
+// packages/core/src/sync/http-backend.ts
+var http_backend_exports = {};
+__export(http_backend_exports, {
+  HttpBackend: () => HttpBackend,
+  IdTokenProvider: () => IdTokenProvider,
+  ServiceError: () => ServiceError,
+  decodeJwtPayload: () => decodeJwtPayload,
+  redactTokens: () => redactTokens
+});
+import { exec, execFile } from "node:child_process";
+import { randomUUID as randomUUID2 } from "node:crypto";
+function redactTokens(text) {
+  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, "<token>");
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2) return void 0;
+  try {
+    const json = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return json && typeof json === "object" ? json : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function runTokenCommand(cmd) {
+  return new Promise((resolve, reject) => {
+    const done = (err, stdout, stderr) => {
+      if (err) {
+        const detail = redactTokens(String(stderr || err.message).trim().split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
+        reject(new Error(`could not get a Google ID token from \`${cmd || "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`));
+        return;
+      }
+      resolve(String(stdout));
+    };
+    const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
+    if (cmd) exec(cmd, opts, done);
+    else execFile("gcloud", ["auth", "print-identity-token"], { ...opts, shell: process.platform === "win32" }, done);
+  });
+}
+function explain(status, code, message) {
+  switch (code) {
+    case "unauthenticated":
+      return "the sync service rejected the sign-in (401). Run `gcloud auth login` (or check YAPA_SYNC_ID_TOKEN_CMD).";
+    case "not_member":
+      return "your Google account is not mapped to a YAPA user; ask a YAPA admin to add you.";
+    case "user_inactive":
+      return "your YAPA user is disabled; ask a YAPA admin.";
+    case "rate_limited":
+      return `rate limited by the sync service (${message}); sync retries next cycle.`;
+    case "unavailable":
+      return "the sync service is temporarily unavailable; local changes stay unsynced and retry next cycle.";
+    case "cloud_run_forbidden":
+      return "Cloud Run refused the request (403): your Google account has no access to the sync service (roles/run.invoker). Ask a YAPA admin, then `gcloud auth login` with that account.";
+    case "cloud_run_unauthenticated":
+      return "Cloud Run rejected the ID token (401). Run `gcloud auth login`.";
+    default:
+      return `sync service error ${status} ${code}: ${message}`;
+  }
+}
+function toOutcome(id, r) {
+  if (!r) return { id, ok: false, code: "internal", message: "no result for this document", permanent: false };
+  if (r.status === "error") {
+    const err = r.error ?? {};
+    const code = String(err.code ?? "internal");
+    return {
+      id,
+      ok: false,
+      code,
+      message: String(err.message ?? code),
+      permanent: PERMANENT_ITEM_ERRORS.has(code),
+      ...typeof err.suggested_id === "string" ? { suggestedId: err.suggested_id } : {}
+    };
+  }
+  return { id, ok: true, status: String(r.status), ...r.stale ? { stale: true } : {}, similar: Array.isArray(r.similar) ? r.similar : [] };
+}
+function embeddingModelLabel() {
+  const c = getConfig();
+  if (c.EMBEDDING_PROVIDER === "chromadb") return "Xenova/all-MiniLM-L6-v2:q8";
+  const m = getEmbeddingModel(c);
+  return m ? `${c.EMBEDDING_PROVIDER}:${m}`.slice(0, 200) : void 0;
+}
+function byteBatches(items, maxItems, maxBytes) {
+  const out = [];
+  let cur = [];
+  let bytes = 0;
+  for (const item of items) {
+    const size = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (cur.length > 0 && (cur.length >= maxItems || bytes + size > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(item);
+    bytes += size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+var REFRESH_MARGIN_MS, OPAQUE_TOKEN_TTL_MS, TOKEN_CMD_TIMEOUT_MS, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES, MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, PULL_PAGE_LIMIT, PERMANENT_ITEM_ERRORS, IdTokenProvider, ServiceError, HttpBackend;
+var init_http_backend = __esm({
+  "packages/core/src/sync/http-backend.ts"() {
+    "use strict";
+    init_config();
+    init_device();
+    init_backend();
+    REFRESH_MARGIN_MS = 5 * 6e4;
+    OPAQUE_TOKEN_TTL_MS = 6e4;
+    TOKEN_CMD_TIMEOUT_MS = 2e4;
+    MAX_UPSERT_DOCS = 50;
+    MAX_UPSERT_BODY_BYTES = 15e5;
+    MAX_DELETE_IDS = 500;
+    MAX_LOOKUP_IDS = 1e3;
+    MAX_RELATED_IDS = 100;
+    PULL_PAGE_LIMIT = 500;
+    PERMANENT_ITEM_ERRORS = /* @__PURE__ */ new Set([
+      "secret_detected",
+      "embedding_dimension",
+      "embedding_invalid",
+      "invalid_request",
+      "invalid_collection",
+      "local_only_collection",
+      "task_namespace",
+      "payload_too_large",
+      "not_owner"
+    ]);
+    IdTokenProvider = class {
+      constructor(cmd = "", now = Date.now) {
+        this.now = now;
+        this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
+      }
+      now;
+      token;
+      validUntil = 0;
+      inFlight;
+      run;
+      /** Bumped on every newly minted token (identity caches key on it). */
+      generation = 0;
+      async get() {
+        if (this.token && this.now() < this.validUntil) return this.token;
+        this.inFlight ??= this.fetch().finally(() => {
+          this.inFlight = void 0;
+        });
+        return this.inFlight;
+      }
+      invalidate() {
+        this.token = void 0;
+        this.validUntil = 0;
+      }
+      /** `email` claim of the cached token, if any (display only; the service verifies). */
+      email() {
+        const e = this.token ? decodeJwtPayload(this.token)?.email : void 0;
+        return typeof e === "string" ? e : void 0;
+      }
+      async fetch() {
+        const out = (await this.run()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const token = out[out.length - 1];
+        if (!token || /\s/.test(token)) throw new Error("the ID token command printed no token. Run `gcloud auth login`.");
+        const now = this.now();
+        const exp = Number(decodeJwtPayload(token)?.exp);
+        let until;
+        if (Number.isFinite(exp) && exp > 0) {
+          const life = exp * 1e3 - now;
+          until = now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
+        } else {
+          until = now + OPAQUE_TOKEN_TTL_MS;
+        }
+        this.token = token;
+        this.validUntil = until;
+        this.generation++;
+        return token;
+      }
+    };
+    ServiceError = class extends Error {
+      constructor(message, status, code, requestId, details = {}) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.requestId = requestId;
+        this.details = details;
+        this.name = "ServiceError";
+      }
+      status;
+      code;
+      requestId;
+      details;
+    };
+    HttpBackend = class {
+      kind = "service";
+      capabilities = { deletionsFeed: true };
+      target;
+      tokens;
+      timeoutMs;
+      device;
+      meCache;
+      constructor(opts = {}) {
+        const config = getConfig();
+        this.target = (opts.baseUrl ?? config.SYNC_SERVICE_URL).replace(/\/+$/, "");
+        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
+        this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD);
+        this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
+        this.device = opts.device ?? getDeviceId;
+      }
+      fail(err) {
+        noteSyncError(err);
+        throw err;
+      }
+      async request(method, path, opts = {}) {
+        const url = `${this.target}${path}`;
+        const idemKey = opts.idempotent ? randomUUID2() : void 0;
+        const body = opts.body === void 0 ? void 0 : JSON.stringify(opts.body);
+        for (let attempt = 0; ; attempt++) {
+          let token;
+          try {
+            token = await this.tokens.get();
+          } catch (e) {
+            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"));
+          }
+          const headers = {
+            authorization: `Bearer ${token}`,
+            "x-yapa-id-token": token,
+            "x-yapa-device": this.device(),
+            accept: "application/json"
+          };
+          if (body !== void 0) headers["content-type"] = "application/json";
+          if (idemKey) headers["idempotency-key"] = idemKey;
+          let res;
+          try {
+            res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
+          } catch (e) {
+            const why = e?.name === "TimeoutError" || e?.name === "AbortError" ? `timed out after ${this.timeoutMs} ms` : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
+            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"));
+          }
+          const text = await res.text().catch(() => "");
+          let json;
+          try {
+            json = text ? JSON.parse(text) : void 0;
+          } catch {
+            json = void 0;
+          }
+          if (res.ok) return json;
+          if (res.status === 404 && opts.allow404) return void 0;
+          const apiErr = json?.error;
+          const code = apiErr?.code ?? (res.status === 401 ? "cloud_run_unauthenticated" : res.status === 403 ? "cloud_run_forbidden" : `http_${res.status}`);
+          if (res.status === 401 && attempt === 0) {
+            this.tokens.invalidate();
+            continue;
+          }
+          const message = redactTokens(String(apiErr?.message ?? res.statusText ?? "")).slice(0, 300);
+          const details = { ...apiErr?.details ?? {} };
+          const retryAfter = res.headers.get("retry-after");
+          if (retryAfter) details.retry_after = Number(retryAfter);
+          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details));
+        }
+      }
+      /** GET /v1/me, cached per process until the token is re-minted. */
+      async me(refresh = false) {
+        if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
+          const r = await this.request("GET", "/v1/me");
+          this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
+        }
+        return { username: this.meCache.username, email: this.meCache.email };
+      }
+      identity() {
+        return this.me();
+      }
+      async pull(collection, req) {
+        const q = new URLSearchParams();
+        if (req.cursor) q.set("cursor", req.cursor);
+        else q.set("since", String(Math.max(0, Math.floor(req.since))));
+        q.set("limit", String(req.limit ?? PULL_PAGE_LIMIT));
+        if (req.includeOwnDevice) q.set("include_own_device", "true");
+        q.set("embeddings", "false");
+        const r = await this.request("GET", `/v1/collections/${encodeURIComponent(collection)}/documents?${q}`);
+        return {
+          documents: (r.documents ?? []).map((d) => ({ ...d, related_ids: d.related_ids ?? [], metadata: d.metadata ?? {} })),
+          deletions: r.deletions ?? [],
+          nextCursor: r.next_cursor,
+          hasMore: Boolean(r.has_more)
+        };
+      }
+      async upsertMany(docs) {
+        const model = embeddingModelLabel();
+        const items = docs.map((d) => ({
+          id: d.id,
+          collection: d.collection,
+          content: d.content,
+          embedding: d.embedding,
+          ...model ? { embedding_model: model } : {},
+          metadata: d.metadata,
+          created_at: d.created_at,
+          updated_at: d.updated_at
+        }));
+        const out = [];
+        for (const batch of byteBatches(items, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES)) {
+          const r = await this.request("POST", "/v1/documents:batchUpsert", { body: { documents: batch }, idempotent: true });
+          batch.forEach((item, i) => out.push(toOutcome(item.id, r.results?.[i])));
+        }
+        return out;
+      }
+      async delete(ids, reason = "delete") {
+        let deleted = 0;
+        for (const part of chunk(ids, MAX_DELETE_IDS)) {
+          const r = await this.request("POST", "/v1/documents:batchDelete", { body: { ids: part, reason }, idempotent: true });
+          deleted += Number(r.deleted ?? 0);
+        }
+        return deleted;
+      }
+      async collections() {
+        return (await this.request("GET", "/v1/collections")).collections ?? [];
+      }
+      async collectionsForUser() {
+        return (await this.request("GET", "/v1/me/collections")).collections ?? [];
+      }
+      async collectionsByIds(ids) {
+        const out = /* @__PURE__ */ new Map();
+        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
+          const r = await this.request("POST", "/v1/documents:collections", { body: { ids: part } });
+          for (const [id, c] of Object.entries(r.collections ?? {})) out.set(id, c);
+        }
+        return out;
+      }
+      async ownersByIds(ids) {
+        const out = /* @__PURE__ */ new Map();
+        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
+          const r = await this.request("POST", "/v1/documents:owners", { body: { ids: part } });
+          for (const [id, owner] of Object.entries(r.owners ?? {})) out.set(id, { owner, createdAt: Number(r.created_at?.[id] ?? 0) });
+        }
+        return out;
+      }
+      async createdAt(id) {
+        const r = await this.request("GET", `/v1/documents/${encodeURIComponent(id)}/created-at`, { allow404: true });
+        return r ? Number(r.created_at) : void 0;
+      }
+      async maxTaskNumber() {
+        return Number((await this.request("GET", "/v1/me/max-task-number")).max ?? 0);
+      }
+      async similar(collection, embedding, threshold) {
+        const r = await this.request("POST", `/v1/collections/${encodeURIComponent(collection)}:similar`, {
+          body: { embedding, ...threshold !== void 0 ? { threshold } : {}, limit: 5 }
+        });
+        return r.matches ?? [];
+      }
+      async addRelatedIds(id, add) {
+        for (const part of chunk(add, MAX_RELATED_IDS)) {
+          await this.request("POST", `/v1/documents/${encodeURIComponent(id)}/related-ids`, { body: { add: part } });
+        }
+      }
+      async health() {
+        try {
+          await this.request("GET", "/v1/health");
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
+      /** Sign in once at startup; the service's username becomes the effective USERNAME. */
+      async prepare() {
+        applyServerUsername((await this.me(true)).username);
+        const note = syncUsernameNote();
+        if (note) process.stderr.write(`[yapa-sync] ${note}
+`);
+      }
+      async maintain() {
+      }
+      async describe() {
+        const lines = ["Backend: YAPA sync service", `Service: ${this.target}`];
+        try {
+          const me = await this.me(true);
+          applyServerUsername(me.username);
+          lines.push(`Signed in as: ${me.username} (${me.email})`);
+          const note = syncUsernameNote();
+          if (note) lines.push(note);
+          lines.push("Connection: healthy");
+        } catch (e) {
+          lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
+        }
+        return lines;
+      }
+      async close() {
+        this.tokens.invalidate();
+        this.meCache = void 0;
+      }
+    };
+  }
+});
+
+// packages/core/src/sync/postgres.ts
+import { readFileSync as readFileSync3 } from "node:fs";
+import pg from "pg";
+function buildPoolConfig(databaseUrl, caCertPath) {
+  let url;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+  }
+  if (!url) {
+    const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
+    if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
+    if (caCertPath) {
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+    }
+    return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
+  }
+  const sslmode = url.searchParams.get("sslmode");
+  for (const k of ["sslmode", "sslrootcert", "sslcert", "sslkey", "uselibpqcompat"]) url.searchParams.delete(k);
+  const connectionString = url.toString();
+  const verified = () => ({
+    connectionString,
+    ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    tls: "verify-ca"
+  });
+  const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
+  if (sslmode === "disable") return { connectionString, ssl: false, tls: "off" };
+  if (caCertPath) return verified();
+  if (sslmode === "verify-ca" || sslmode === "verify-full") {
+    throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
+  }
+  if (sslmode) return unverified;
+  const hostParam = url.searchParams.get("host");
+  const local = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url.hostname);
+  if (local) return { connectionString, ssl: false, tls: "off" };
+  return unverified;
+}
+function getSyncTlsMode() {
+  return poolTls;
+}
+function getPool() {
+  if (!pool) {
+    const cfg = getConfig();
+    const { connectionString, ssl, tls } = buildPoolConfig(cfg.SYNC_DATABASE_URL, cfg.SYNC_CA_CERT);
+    if (tls === "unverified") {
+      process.stderr.write("[yapa-sync] TLS without server verification: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert) to the server CA\n");
+    }
+    poolTls = tls;
+    pool = new Pool({ connectionString, ssl, max: 5 });
+  }
+  return pool;
+}
+async function closePool() {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+}
+async function upsertRemoteDocument(doc) {
+  const p = getPool();
+  const embeddingStr = `[${doc.embedding.join(",")}]`;
+  await p.query(
+    `INSERT INTO documents (id, collection, content, embedding, metadata, origin_user, created_at, updated_at)
+     VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6, to_timestamp($7), to_timestamp($8))
+     ON CONFLICT (id) DO UPDATE SET
+       collection = EXCLUDED.collection,
+       content = EXCLUDED.content,
+       embedding = EXCLUDED.embedding,
+       metadata = EXCLUDED.metadata,
+       updated_at = EXCLUDED.updated_at,
+       synced_at = now()`,
+    [doc.id, doc.collection, doc.content, embeddingStr, JSON.stringify(doc.metadata), doc.origin_user, doc.created_at, doc.updated_at]
+  );
+}
+async function getRemoteCreatedAt(id) {
+  const p = getPool();
+  const result = await p.query("SELECT extract(epoch from created_at)::bigint AS c FROM documents WHERE id = $1", [id]);
+  return result.rows[0] ? Number(result.rows[0].c) : void 0;
+}
+async function getRemoteOwnersByIds(ids) {
+  if (ids.length === 0) return /* @__PURE__ */ new Map();
+  const p = getPool();
+  const result = await p.query("SELECT id, origin_user, extract(epoch from created_at)::bigint AS c FROM documents WHERE id = ANY($1::text[])", [ids]);
+  return new Map(result.rows.map((r) => [r.id, { owner: r.origin_user, createdAt: Number(r.c) }]));
+}
+async function getRemoteCollectionsByIds(ids) {
+  if (ids.length === 0) return /* @__PURE__ */ new Map();
+  const p = getPool();
+  const result = await p.query("SELECT id, collection FROM documents WHERE id = ANY($1::text[])", [ids]);
+  return new Map(result.rows.map((r) => [r.id, r.collection]));
+}
+async function getRemoteMaxTaskNumber(user) {
+  const p = getPool();
+  const result = await p.query(
+    `SELECT COALESCE(MAX(substring(id from $2)::bigint), 0) AS n FROM documents WHERE id ~ $1`,
+    [`^${user.replace(/[^A-Za-z0-9_-]/g, "")}-[0-9]+$`, `^${user.replace(/[^A-Za-z0-9_-]/g, "")}-([0-9]+)$`]
+  );
+  return Number(result.rows[0]?.n ?? 0);
+}
+async function findSimilarRemote(collection, embedding, threshold = getConfig().SYNC_SIMILARITY_THRESHOLD, owner) {
+  const p = getPool();
+  const embeddingStr = `[${embedding.join(",")}]`;
+  const result = await p.query(
+    `SELECT id, 1 - (embedding <=> $1::vector) AS similarity
+     FROM documents
+     WHERE collection = $2
+       AND 1 - (embedding <=> $1::vector) > $3${owner ? "\n       AND origin_user = $4" : ""}
+     ORDER BY similarity DESC
+     LIMIT 5`,
+    owner ? [embeddingStr, collection, threshold, owner] : [embeddingStr, collection, threshold]
+  );
+  return result.rows.map((r) => ({ id: r.id, similarity: parseFloat(r.similarity) }));
+}
+async function addRemoteRelatedIds(id, newRelatedIds) {
+  const p = getPool();
+  await p.query(
+    `UPDATE documents
+     SET related_ids = ARRAY(SELECT DISTINCT unnest(array_cat(related_ids, $1::text[]))),
+         synced_at = now()
+     WHERE id = $2`,
+    [newRelatedIds, id]
+  );
+}
+function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) {
+  const values = [collection, sinceTimestamp];
+  const param = (v) => {
+    values.push(v);
+    return `$${values.length}`;
+  };
+  let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
+     FROM documents
+     WHERE collection = $1
+       AND synced_at > to_timestamp($2)`;
+  let userParam;
+  if (!opts.includeOwnDevice) {
+    userParam = param(self.user);
+    const deviceParam = param(self.device);
+    text += `
+       AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
+       AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
+  }
+  if (opts.onlyOwnRows) text += `
+       AND origin_user = ${userParam ?? param(self.user)}`;
+  text += `
+     ORDER BY synced_at ASC`;
+  return { text, values };
+}
+async function getRemoteDocsSince(collection, sinceTimestamp, self, opts = {}) {
+  const p = getPool();
+  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts);
+  const result = await p.query(query.text, query.values);
+  return result.rows.map((r) => ({
+    id: r.id,
+    collection: r.collection,
+    content: r.content,
+    embedding: parseEmbedding(r.embedding),
+    metadata: r.metadata,
+    origin_user: r.origin_user,
+    related_ids: r.related_ids ?? [],
+    synced_at: r.synced_at,
+    created_at: r.created_at,
+    updated_at: r.updated_at
+  }));
+}
+async function deleteRemoteDocuments(ids, owner) {
+  if (ids.length === 0) return 0;
+  const p = getPool();
+  const result = await p.query(
+    "DELETE FROM documents WHERE id = ANY($1::text[]) AND origin_user = $2",
+    [ids, owner]
+  );
+  return result.rowCount ?? 0;
+}
+async function getRemoteCollectionsForUser(user) {
+  const p = getPool();
+  const result = await p.query("SELECT DISTINCT collection FROM documents WHERE origin_user = $1 ORDER BY collection", [user]);
+  return result.rows.map((r) => r.collection);
+}
+async function getRemoteCollections() {
+  const p = getPool();
+  const result = await p.query(
+    "SELECT collection, COUNT(*) AS count FROM documents GROUP BY collection ORDER BY collection"
+  );
+  return result.rows.map((r) => ({ name: r.collection, count: parseInt(r.count, 10) }));
+}
+async function checkRemoteHealth() {
+  try {
+    const p = getPool();
+    const result = await p.query("SELECT 1 FROM schema_version LIMIT 1");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+function parseEmbedding(embeddingStr) {
+  return JSON.parse(embeddingStr);
+}
+var Pool, pool, LOCAL_HOSTS, poolTls;
+var init_postgres = __esm({
+  "packages/core/src/sync/postgres.ts"() {
+    "use strict";
+    init_config();
+    ({ Pool } = pg);
+    pool = null;
+    LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
+    poolTls = "off";
+  }
+});
+
+// packages/core/src/sync/schema.ts
+async function migrateSchema() {
+  const pool2 = getPool();
+  const tableCheck = await pool2.query(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables
+      WHERE table_name = 'schema_version'
+    ) AS exists
+  `);
+  if (!tableCheck.rows[0].exists) {
+    process.stderr.write("[yapa-sync] Creating remote schema (v1)...\n");
+    await pool2.query(SCHEMA_V1);
+    await pool2.query("INSERT INTO schema_version (version) VALUES ($1)", [CURRENT_VERSION]);
+    process.stderr.write("[yapa-sync] Remote schema created.\n");
+    return;
+  }
+  const versionResult = await pool2.query("SELECT MAX(version) AS version FROM schema_version");
+  const currentVersion = versionResult.rows[0]?.version ?? 0;
+  if (currentVersion >= CURRENT_VERSION) {
+    return;
+  }
+  process.stderr.write(`[yapa-sync] Schema is at v${currentVersion}, current is v${CURRENT_VERSION}.
+`);
+}
+async function ensureVectorIndex() {
+  try {
+    const pool2 = getPool();
+    const countResult = await pool2.query("SELECT COUNT(*) AS cnt FROM documents");
+    const count = parseInt(countResult.rows[0].cnt, 10);
+    if (count >= 100) {
+      await pool2.query(IVFFLAT_INDEX);
+    }
+  } catch {
+  }
+}
+var CURRENT_VERSION, SCHEMA_V1, IVFFLAT_INDEX;
+var init_schema = __esm({
+  "packages/core/src/sync/schema.ts"() {
+    "use strict";
+    init_postgres();
+    CURRENT_VERSION = 1;
+    SCHEMA_V1 = `
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS schema_version (
+  version INTEGER PRIMARY KEY,
+  applied_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  collection TEXT NOT NULL,
+  content TEXT NOT NULL,
+  embedding vector NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  origin_user TEXT NOT NULL,
+  related_ids TEXT[] DEFAULT '{}',
+  synced_at TIMESTAMPTZ DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_docs_collection ON documents(collection);
+CREATE INDEX IF NOT EXISTS idx_docs_synced_at ON documents(synced_at);
+CREATE INDEX IF NOT EXISTS idx_docs_origin_user ON documents(origin_user);
+`;
+    IVFFLAT_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_docs_embedding ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+`;
+  }
+});
+
+// packages/core/src/sync/postgres-backend.ts
+var postgres_backend_exports = {};
+__export(postgres_backend_exports, {
+  PostgresBackend: () => PostgresBackend
+});
+var TLS_LABEL, PostgresBackend;
+var init_postgres_backend = __esm({
+  "packages/core/src/sync/postgres-backend.ts"() {
+    "use strict";
+    init_config();
+    init_device();
+    init_postgres();
+    init_schema();
+    TLS_LABEL = {
+      "verify-ca": "encrypted, server verified",
+      unverified: "encrypted, server NOT verified (set sync_ca_cert)",
+      off: "off (local database)"
+    };
+    PostgresBackend = class {
+      kind = "postgres";
+      capabilities = { deletionsFeed: false };
+      get target() {
+        return getConfig().SYNC_DATABASE_URL.replace(/:[^:@/]*@/, ":***@");
+      }
+      async pull(collection, req) {
+        const documents = await getRemoteDocsSince(
+          collection,
+          req.since,
+          { user: getConfig().USERNAME, device: getDeviceId() },
+          { includeOwnDevice: req.includeOwnDevice }
+        );
+        return { documents, deletions: [], hasMore: false };
+      }
+      async upsertMany(docs) {
+        const out = [];
+        for (const doc of docs) out.push(await this.upsertOne(doc));
+        return out;
+      }
+      /**
+       * Same checks the service makes, done client-side: a task id that already
+       * belongs to a different task (creation time more than 1 s away) is not
+       * overwritten but reported as `id_taken`; similar rows come back for linking.
+       */
+      async upsertOne(doc) {
+        const me = getConfig().USERNAME;
+        if (doc.metadata.type === "task") {
+          const localCreated = Number(doc.metadata.created_at);
+          if (Number.isFinite(localCreated) && localCreated > 0) {
+            const remoteCreated = await getRemoteCreatedAt(doc.id);
+            if (remoteCreated !== void 0 && Math.abs(remoteCreated - localCreated) > 1) {
+              const max = await getRemoteMaxTaskNumber(me);
+              return { id: doc.id, ok: false, code: "id_taken", message: "this task id belongs to a different task", permanent: false, suggestedId: `${me}-${max + 1}` };
+            }
+          }
+        }
+        const similar = doc.embedding.length > 0 ? (await findSimilarRemote(doc.collection, doc.embedding)).filter((s) => s.id !== doc.id) : [];
+        await upsertRemoteDocument(doc);
+        return { id: doc.id, ok: true, status: "updated", similar };
+      }
+      delete(ids) {
+        return deleteRemoteDocuments(ids, getConfig().USERNAME);
+      }
+      collections() {
+        return getRemoteCollections();
+      }
+      collectionsForUser() {
+        return getRemoteCollectionsForUser(getConfig().USERNAME);
+      }
+      collectionsByIds(ids) {
+        return getRemoteCollectionsByIds(ids);
+      }
+      ownersByIds(ids) {
+        return getRemoteOwnersByIds(ids);
+      }
+      createdAt(id) {
+        return getRemoteCreatedAt(id);
+      }
+      maxTaskNumber() {
+        return getRemoteMaxTaskNumber(getConfig().USERNAME);
+      }
+      similar(collection, embedding, threshold) {
+        return findSimilarRemote(collection, embedding, threshold);
+      }
+      addRelatedIds(id, add) {
+        return addRemoteRelatedIds(id, add);
+      }
+      health() {
+        return checkRemoteHealth();
+      }
+      async prepare() {
+        const h = await checkRemoteHealth();
+        if (!h.ok) await migrateSchema();
+      }
+      maintain() {
+        return ensureVectorIndex();
+      }
+      async describe() {
+        const lines = ["Backend: direct database (advanced/self-host)", `Remote: ${this.target}`];
+        try {
+          const health = await checkRemoteHealth();
+          lines.push(`Connection: ${health.ok ? "healthy" : `error - ${health.error}`}`);
+          lines.push(`TLS: ${TLS_LABEL[getSyncTlsMode()]}`);
+        } catch (e) {
+          lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
+        }
+        return lines;
+      }
+      close() {
+        return closePool();
+      }
+    };
+  }
+});
+
+// packages/core/src/sync/backend.ts
+function syncBackendKind(config = getConfig()) {
+  if (config.SYNC_SERVICE_URL) return "service";
+  if (config.SYNC_DATABASE_URL) return "postgres";
+  return void 0;
+}
+function isSyncConfigured(config = getConfig()) {
+  return config.SYNC_ENABLED && syncBackendKind(config) !== void 0;
+}
+function keyOf(config) {
+  return JSON.stringify([config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
+}
+async function getSyncBackend() {
+  const b = await selectBackend();
+  if (b?.kind === "service" && serverUsername && getConfig().USERNAME !== serverUsername) applyServerUsername(serverUsername);
+  return b;
+}
+async function selectBackend() {
+  if (override) return override;
+  const config = getConfig();
+  const kind = syncBackendKind(config);
+  if (!kind) return void 0;
+  const key = keyOf(config);
+  if (active3?.key === key) return active3.backend;
+  if (active3) await active3.backend.close().catch(() => void 0);
+  serverUsername = void 0;
+  const backend = kind === "service" ? new (await Promise.resolve().then(() => (init_http_backend(), http_backend_exports))).HttpBackend() : new (await Promise.resolve().then(() => (init_postgres_backend(), postgres_backend_exports))).PostgresBackend();
+  active3 = { key, backend };
+  return backend;
+}
+function chunk(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+function noteSyncError(e) {
+  lastError = { message: e instanceof Error ? e.message : String(e), at: Date.now() };
+}
+function isCycleFatal(e) {
+  const code = e?.code;
+  return typeof code === "string" && [
+    "unreachable",
+    "unauthenticated",
+    "cloud_run_unauthenticated",
+    "cloud_run_forbidden",
+    "not_member",
+    "user_inactive",
+    "rate_limited",
+    "unavailable",
+    "token_command"
+  ].includes(code);
+}
+function applyServerUsername(username) {
+  serverUsername = username;
+  const c = getConfig();
+  if (c.USERNAME === username) return;
+  configuredUsername = c.USERNAME;
+  setConfig({ ...c, USERNAME: username });
+}
+async function resolveSyncUsername() {
+  const b = await getSyncBackend();
+  if (b?.identity) {
+    try {
+      applyServerUsername((await b.identity()).username);
+    } catch {
+    }
+  }
+  return getConfig().USERNAME;
+}
+function syncUsernameNote() {
+  if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return void 0;
+  return `Username: using '${serverUsername}' from your Google account (the username option '${configuredUsername}' is informational with the sync service)`;
+}
+var override, active3, lastError, serverUsername, configuredUsername;
+var init_backend = __esm({
+  "packages/core/src/sync/backend.ts"() {
+    "use strict";
+    init_config();
+  }
+});
+
 // packages/core/src/tasks/create.ts
 var init_create = __esm({
   "packages/core/src/tasks/create.ts"() {
     "use strict";
     init_config();
     init_store();
+    init_backend();
   }
 });
 
@@ -2074,174 +2979,6 @@ var init_buckets = __esm({
   }
 });
 
-// packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import pg from "pg";
-function buildPoolConfig(databaseUrl, caCertPath) {
-  let url;
-  try {
-    url = new URL(databaseUrl);
-  } catch {
-  }
-  if (!url) {
-    const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
-    if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
-    if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
-    }
-    return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
-  }
-  const sslmode = url.searchParams.get("sslmode");
-  for (const k of ["sslmode", "sslrootcert", "sslcert", "sslkey", "uselibpqcompat"]) url.searchParams.delete(k);
-  const connectionString = url.toString();
-  const verified = () => ({
-    connectionString,
-    ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
-    tls: "verify-ca"
-  });
-  const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
-  if (sslmode === "disable") return { connectionString, ssl: false, tls: "off" };
-  if (caCertPath) return verified();
-  if (sslmode === "verify-ca" || sslmode === "verify-full") {
-    throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
-  }
-  if (sslmode) return unverified;
-  const hostParam = url.searchParams.get("host");
-  const local = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url.hostname);
-  if (local) return { connectionString, ssl: false, tls: "off" };
-  return unverified;
-}
-function getPool() {
-  if (!pool) {
-    const cfg = getConfig();
-    const { connectionString, ssl, tls } = buildPoolConfig(cfg.SYNC_DATABASE_URL, cfg.SYNC_CA_CERT);
-    if (tls === "unverified") {
-      process.stderr.write("[yapa-sync] TLS without server verification: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert) to the server CA\n");
-    }
-    poolTls = tls;
-    pool = new Pool({ connectionString, ssl, max: 5 });
-  }
-  return pool;
-}
-async function getRemoteCollectionsByIds(ids) {
-  if (ids.length === 0) return /* @__PURE__ */ new Map();
-  const p = getPool();
-  const result = await p.query("SELECT id, collection FROM documents WHERE id = ANY($1::text[])", [ids]);
-  return new Map(result.rows.map((r) => [r.id, r.collection]));
-}
-async function addRemoteRelatedIds(id, newRelatedIds) {
-  const p = getPool();
-  await p.query(
-    `UPDATE documents
-     SET related_ids = ARRAY(SELECT DISTINCT unnest(array_cat(related_ids, $1::text[]))),
-         synced_at = now()
-     WHERE id = $2`,
-    [newRelatedIds, id]
-  );
-}
-function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) {
-  const values = [collection, sinceTimestamp];
-  const param = (v) => {
-    values.push(v);
-    return `$${values.length}`;
-  };
-  let text = `SELECT id, collection, content, embedding::text, metadata, origin_user, related_ids, synced_at, created_at, updated_at
-     FROM documents
-     WHERE collection = $1
-       AND synced_at > to_timestamp($2)`;
-  let userParam;
-  if (!opts.includeOwnDevice) {
-    userParam = param(self.user);
-    const deviceParam = param(self.device);
-    text += `
-       AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
-       AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
-  }
-  if (opts.onlyOwnRows) text += `
-       AND origin_user = ${userParam ?? param(self.user)}`;
-  text += `
-     ORDER BY synced_at ASC`;
-  return { text, values };
-}
-async function getRemoteDocsSince(collection, sinceTimestamp, self, opts = {}) {
-  const p = getPool();
-  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts);
-  const result = await p.query(query.text, query.values);
-  return result.rows.map((r) => ({
-    id: r.id,
-    collection: r.collection,
-    content: r.content,
-    embedding: parseEmbedding(r.embedding),
-    metadata: r.metadata,
-    origin_user: r.origin_user,
-    related_ids: r.related_ids ?? [],
-    synced_at: r.synced_at,
-    created_at: r.created_at,
-    updated_at: r.updated_at
-  }));
-}
-function parseEmbedding(embeddingStr) {
-  return JSON.parse(embeddingStr);
-}
-var Pool, pool, LOCAL_HOSTS, poolTls;
-var init_postgres = __esm({
-  "packages/core/src/sync/postgres.ts"() {
-    "use strict";
-    init_config();
-    ({ Pool } = pg);
-    pool = null;
-    LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1", "[::1]", ""]);
-    poolTls = "off";
-  }
-});
-
-// packages/core/src/sync/schema.ts
-var init_schema = __esm({
-  "packages/core/src/sync/schema.ts"() {
-    "use strict";
-    init_postgres();
-  }
-});
-
-// packages/core/src/sync/device.ts
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync as readFileSync3, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-function getDeviceId() {
-  const config = getConfig();
-  if (config.DEVICE_ID) return config.DEVICE_ID;
-  if (cached?.path === config.DEVICE_ID_PATH) return cached.id;
-  const path = config.DEVICE_ID_PATH;
-  let id;
-  try {
-    id = readFileSync3(path, "utf-8").trim();
-  } catch {
-    id = "";
-  }
-  if (!id) {
-    id = randomUUID();
-    try {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, `${id}
-`, { flag: "wx" });
-    } catch {
-      try {
-        id = readFileSync3(path, "utf-8").trim() || id;
-      } catch {
-      }
-    }
-  }
-  cached = { path, id };
-  return id;
-}
-var cached;
-var init_device = __esm({
-  "packages/core/src/sync/device.ts"() {
-    "use strict";
-    init_config();
-  }
-});
-
 // packages/core/src/sync/push.ts
 var init_push = __esm({
   "packages/core/src/sync/push.ts"() {
@@ -2249,7 +2986,7 @@ var init_push = __esm({
     init_config();
     init_store();
     init_embeddings();
-    init_postgres();
+    init_backend();
     init_deletes();
     init_sentinel();
     init_device();
@@ -2259,46 +2996,80 @@ var init_push = __esm({
 
 // packages/core/src/sync/pull.ts
 function emptyPullStats() {
-  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
   if (!isSyncableCollection(collectionName)) return stats;
-  if (opts.followedCollections) {
-    await dropMovedOut(collectionName, opts.followedCollections, stats).catch((e) => {
-      process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  const failed = (what, e) => {
+    process.stderr.write(`[yapa-sync] ${what}: ${e}
 `);
-      stats.errors++;
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) opts.onFatal?.();
+    return isCycleFatal(e);
+  };
+  if (opts.followedCollections) {
+    let fatal = false;
+    await dropMovedOut(backend, collectionName, opts.followedCollections, stats).catch((e) => {
+      fatal = failed(`Move check failed for ${collectionName}`, e);
     });
+    if (fatal) return stats;
   }
   try {
-    const remoteDocs = await getRemoteDocsSince(
-      collectionName,
-      since,
-      { user: getConfig().USERNAME, device: getDeviceId() },
-      { includeOwnDevice: opts.includeOwnDevice }
-    );
-    if (remoteDocs.length === 0) return stats;
-    const tombstones = await getLocalTombstones();
-    await getOrCreateCollection2(collectionName);
-    for (const remoteDoc of remoteDocs) {
-      try {
-        if (tombstones.has(remoteDoc.id) || remoteDoc.metadata?.type === "journal_draft") {
-          stats.skipped++;
-          continue;
-        }
-        await applyRemoteDoc(collectionName, remoteDoc, stats);
-      } catch (e) {
-        process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}
+    let tombstones;
+    let cursor;
+    const seen = /* @__PURE__ */ new Set();
+    for (let page = 0; page < MAX_PULL_PAGES; page++) {
+      const res = await backend.pull(collectionName, { since, cursor, includeOwnDevice: opts.includeOwnDevice });
+      if (res.documents.length > 0 || res.deletions.length > 0) {
+        await getOrCreateCollection2(collectionName);
+        tombstones ??= await getLocalTombstones();
+        for (const d of res.documents) seen.add(d.id);
+        for (const del of res.deletions) {
+          if (seen.has(del.id)) continue;
+          try {
+            await applyRemoteDeletion(collectionName, del, stats);
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Pull delete error for ${del.id}: ${e}
 `);
-        stats.errors++;
+            stats.errors++;
+          }
+        }
+        for (const remoteDoc of res.documents) {
+          try {
+            if (tombstones.has(remoteDoc.id) || remoteDoc.metadata?.type === "journal_draft") {
+              stats.skipped++;
+              continue;
+            }
+            await applyRemoteDoc(backend, collectionName, remoteDoc, stats);
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}
+`);
+            stats.errors++;
+          }
+        }
       }
+      if (!res.hasMore || !res.nextCursor || res.nextCursor === cursor) break;
+      cursor = res.nextCursor;
     }
   } catch (e) {
-    process.stderr.write(`[yapa-sync] Pull error for collection ${collectionName}: ${e}
-`);
-    stats.errors++;
+    failed(`Pull error for collection ${collectionName}`, e);
   }
   return stats;
+}
+async function applyRemoteDeletion(collectionName, del, stats) {
+  const [existing] = await getDocumentsByIds2(collectionName, [del.id]).catch(() => []);
+  if (!existing) return;
+  if (existing.metadata.is_synced === false) {
+    stats.keptDirty++;
+    process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)
+`);
+    return;
+  }
+  await deleteDocument2(collectionName, del.id);
+  stats.deleted++;
 }
 function toUnixSeconds(value) {
   if (value == null) return 0;
@@ -2325,10 +3096,10 @@ async function copiesElsewhere(id, except) {
   }
   return out;
 }
-async function dropMovedOut(collectionName, followed, stats) {
+async function dropMovedOut(backend, collectionName, followed, stats) {
   const local = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
   if (local.length === 0) return;
-  const remote = await getRemoteCollectionsByIds(local.map((d) => d.id));
+  const remote = await backend.collectionsByIds(local.map((d) => d.id));
   for (const doc of local) {
     const now = remote.get(doc.id);
     if (!now || now === collectionName || followed.has(now)) continue;
@@ -2336,7 +3107,7 @@ async function dropMovedOut(collectionName, followed, stats) {
     stats.moved++;
   }
 }
-async function applyRemoteDoc(collectionName, remoteDoc, stats) {
+async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
   if (!existing) {
     const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
@@ -2373,7 +3144,10 @@ async function applyRemoteDoc(collectionName, remoteDoc, stats) {
           localRelated.push(remoteDoc.id);
           await updateDocument2(collectionName, localDoc.id, { ...localDoc.metadata, related_ids: localRelated });
         }
-        await addRemoteRelatedIds(remoteDoc.id, [localDoc.id]);
+        await backend.addRelatedIds(remoteDoc.id, [localDoc.id]).catch((e) => {
+          process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}
+`);
+        });
         stats.linked++;
       }
     }
@@ -2382,16 +3156,17 @@ async function applyRemoteDoc(collectionName, remoteDoc, stats) {
   await addDocument2(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
   stats.pulled++;
 }
+var MAX_PULL_PAGES;
 var init_pull = __esm({
   "packages/core/src/sync/pull.ts"() {
     "use strict";
     init_config();
     init_store();
-    init_postgres();
+    init_backend();
     init_sentinel();
     init_deletes();
-    init_device();
     init_syncable();
+    MAX_PULL_PAGES = 200;
   }
 });
 
@@ -2400,10 +3175,9 @@ var init_sync = __esm({
   "packages/core/src/sync/index.ts"() {
     "use strict";
     init_config();
-    init_schema();
     init_push();
     init_pull();
-    init_postgres();
+    init_backend();
   }
 });
 
@@ -2446,7 +3220,7 @@ var init_training = __esm({
 });
 
 // packages/core/src/training/backend.ts
-var init_backend = __esm({
+var init_backend2 = __esm({
   "packages/core/src/training/backend.ts"() {
     "use strict";
   }
@@ -2553,15 +3327,16 @@ var init_src = __esm({
     init_system_prompt();
     init_training_manifest();
     init_sync();
-    init_postgres();
+    init_backend();
+    init_http_backend();
+    init_postgres_backend();
     init_pull();
     init_push();
     init_deletes();
     init_sentinel();
-    init_schema();
     init_device();
     init_training();
-    init_backend();
+    init_backend2();
     init_eval();
     init_fireworks();
     init_holdout();
@@ -2640,10 +3415,10 @@ function withTimeout(work, ms) {
 }
 async function freshenFromRemote(collection) {
   const config = getConfig();
-  if (!config.SYNC_ENABLED || !config.SYNC_DATABASE_URL) return 0;
+  if (!isSyncConfigured(config)) return 0;
   try {
     const since = Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS);
-    const stats = await withTimeout(pullCollection(collection, since), config.HOOK_PULL_TIMEOUT_MS);
+    const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
     if (!stats) {
       process.stderr.write(`[yapa-hook] remote pull for ${collection} timed out
 `);
@@ -2709,7 +3484,7 @@ async function sessionStart(input) {
   const lines = [];
   if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, "");
   lines.push("# YAPA Context", "", scopeLine(detection));
-  if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the shared database._`);
+  if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
   try {
@@ -2991,8 +3766,8 @@ function usage() {
 async function readStdin() {
   if (process.stdin.isTTY) return "";
   const chunks = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk);
+  for await (const chunk2 of process.stdin) {
+    chunks.push(chunk2);
   }
   return Buffer.concat(chunks).toString("utf-8");
 }

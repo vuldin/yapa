@@ -7281,6 +7281,9 @@ function createConfig(env = process.env) {
     VERIFICATION_ATTEMPTS_MAX: parseInt(get(env, "VERIFICATION_ATTEMPTS_MAX", "3"), 10),
     INFERENCE_BASE_URL: get(env, "INFERENCE_BASE_URL", "https://api.fireworks.ai/inference/v1"),
     SYNC_ENABLED: get(env, "SYNC_ENABLED", "false") === "true",
+    SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
+    SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
+    SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
     // 5 minutes
@@ -7303,6 +7306,9 @@ function createConfig(env = process.env) {
 function getConfig() {
   active ??= createConfig();
   return active;
+}
+function setConfig(config2) {
+  active = config2;
 }
 function getCurationModel(config2 = getConfig()) {
   if (config2.CURATION_MODEL) return config2.CURATION_MODEL;
@@ -8184,28 +8190,433 @@ var init_store = __esm({
   }
 });
 
-// packages/core/src/sync/postgres.ts
-var postgres_exports = {};
-__export(postgres_exports, {
-  addRemoteRelatedIds: () => addRemoteRelatedIds,
-  buildPoolConfig: () => buildPoolConfig,
-  buildRemoteDocsSinceQuery: () => buildRemoteDocsSinceQuery,
-  checkRemoteHealth: () => checkRemoteHealth,
-  closePool: () => closePool,
-  deleteRemoteDocuments: () => deleteRemoteDocuments,
-  findSimilarRemote: () => findSimilarRemote,
-  getPool: () => getPool,
-  getRemoteCollections: () => getRemoteCollections,
-  getRemoteCollectionsByIds: () => getRemoteCollectionsByIds,
-  getRemoteCollectionsForUser: () => getRemoteCollectionsForUser,
-  getRemoteCreatedAt: () => getRemoteCreatedAt,
-  getRemoteDocsSince: () => getRemoteDocsSince,
-  getRemoteMaxTaskNumber: () => getRemoteMaxTaskNumber,
-  getRemoteOwnersByIds: () => getRemoteOwnersByIds,
-  getSyncTlsMode: () => getSyncTlsMode,
-  upsertRemoteDocument: () => upsertRemoteDocument
+// packages/core/src/sync/device.ts
+import { randomUUID } from "node:crypto";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname } from "node:path";
+function getDeviceId() {
+  const config2 = getConfig();
+  if (config2.DEVICE_ID) return config2.DEVICE_ID;
+  if (cached2?.path === config2.DEVICE_ID_PATH) return cached2.id;
+  const path = config2.DEVICE_ID_PATH;
+  let id;
+  try {
+    id = readFileSync2(path, "utf-8").trim();
+  } catch {
+    id = "";
+  }
+  if (!id) {
+    id = randomUUID();
+    try {
+      mkdirSync2(dirname(path), { recursive: true });
+      writeFileSync2(path, `${id}
+`, { flag: "wx" });
+    } catch {
+      try {
+        id = readFileSync2(path, "utf-8").trim() || id;
+      } catch {
+      }
+    }
+  }
+  cached2 = { path, id };
+  return id;
+}
+var cached2;
+var init_device = __esm({
+  "packages/core/src/sync/device.ts"() {
+    "use strict";
+    init_config();
+  }
 });
-import { readFileSync as readFileSync2 } from "node:fs";
+
+// packages/core/src/sync/http-backend.ts
+var http_backend_exports = {};
+__export(http_backend_exports, {
+  HttpBackend: () => HttpBackend,
+  IdTokenProvider: () => IdTokenProvider,
+  ServiceError: () => ServiceError,
+  decodeJwtPayload: () => decodeJwtPayload,
+  redactTokens: () => redactTokens
+});
+import { exec, execFile } from "node:child_process";
+import { randomUUID as randomUUID2 } from "node:crypto";
+function redactTokens(text) {
+  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, "<token>");
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2) return void 0;
+  try {
+    const json2 = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return json2 && typeof json2 === "object" ? json2 : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function runTokenCommand(cmd) {
+  return new Promise((resolve, reject) => {
+    const done = (err, stdout, stderr) => {
+      if (err) {
+        const detail = redactTokens(String(stderr || err.message).trim().split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
+        reject(new Error(`could not get a Google ID token from \`${cmd || "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`));
+        return;
+      }
+      resolve(String(stdout));
+    };
+    const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
+    if (cmd) exec(cmd, opts, done);
+    else execFile("gcloud", ["auth", "print-identity-token"], { ...opts, shell: process.platform === "win32" }, done);
+  });
+}
+function explain(status, code, message) {
+  switch (code) {
+    case "unauthenticated":
+      return "the sync service rejected the sign-in (401). Run `gcloud auth login` (or check YAPA_SYNC_ID_TOKEN_CMD).";
+    case "not_member":
+      return "your Google account is not mapped to a YAPA user; ask a YAPA admin to add you.";
+    case "user_inactive":
+      return "your YAPA user is disabled; ask a YAPA admin.";
+    case "rate_limited":
+      return `rate limited by the sync service (${message}); sync retries next cycle.`;
+    case "unavailable":
+      return "the sync service is temporarily unavailable; local changes stay unsynced and retry next cycle.";
+    case "cloud_run_forbidden":
+      return "Cloud Run refused the request (403): your Google account has no access to the sync service (roles/run.invoker). Ask a YAPA admin, then `gcloud auth login` with that account.";
+    case "cloud_run_unauthenticated":
+      return "Cloud Run rejected the ID token (401). Run `gcloud auth login`.";
+    default:
+      return `sync service error ${status} ${code}: ${message}`;
+  }
+}
+function toOutcome(id, r) {
+  if (!r) return { id, ok: false, code: "internal", message: "no result for this document", permanent: false };
+  if (r.status === "error") {
+    const err = r.error ?? {};
+    const code = String(err.code ?? "internal");
+    return {
+      id,
+      ok: false,
+      code,
+      message: String(err.message ?? code),
+      permanent: PERMANENT_ITEM_ERRORS.has(code),
+      ...typeof err.suggested_id === "string" ? { suggestedId: err.suggested_id } : {}
+    };
+  }
+  return { id, ok: true, status: String(r.status), ...r.stale ? { stale: true } : {}, similar: Array.isArray(r.similar) ? r.similar : [] };
+}
+function embeddingModelLabel() {
+  const c = getConfig();
+  if (c.EMBEDDING_PROVIDER === "chromadb") return "Xenova/all-MiniLM-L6-v2:q8";
+  const m = getEmbeddingModel(c);
+  return m ? `${c.EMBEDDING_PROVIDER}:${m}`.slice(0, 200) : void 0;
+}
+function byteBatches(items, maxItems, maxBytes) {
+  const out = [];
+  let cur = [];
+  let bytes = 0;
+  for (const item of items) {
+    const size = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (cur.length > 0 && (cur.length >= maxItems || bytes + size > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(item);
+    bytes += size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+var REFRESH_MARGIN_MS, OPAQUE_TOKEN_TTL_MS, TOKEN_CMD_TIMEOUT_MS, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES, MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, PULL_PAGE_LIMIT, PERMANENT_ITEM_ERRORS, IdTokenProvider, ServiceError, HttpBackend;
+var init_http_backend = __esm({
+  "packages/core/src/sync/http-backend.ts"() {
+    "use strict";
+    init_config();
+    init_device();
+    init_backend();
+    REFRESH_MARGIN_MS = 5 * 6e4;
+    OPAQUE_TOKEN_TTL_MS = 6e4;
+    TOKEN_CMD_TIMEOUT_MS = 2e4;
+    MAX_UPSERT_DOCS = 50;
+    MAX_UPSERT_BODY_BYTES = 15e5;
+    MAX_DELETE_IDS = 500;
+    MAX_LOOKUP_IDS = 1e3;
+    MAX_RELATED_IDS = 100;
+    PULL_PAGE_LIMIT = 500;
+    PERMANENT_ITEM_ERRORS = /* @__PURE__ */ new Set([
+      "secret_detected",
+      "embedding_dimension",
+      "embedding_invalid",
+      "invalid_request",
+      "invalid_collection",
+      "local_only_collection",
+      "task_namespace",
+      "payload_too_large",
+      "not_owner"
+    ]);
+    IdTokenProvider = class {
+      constructor(cmd = "", now = Date.now) {
+        this.now = now;
+        this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
+      }
+      now;
+      token;
+      validUntil = 0;
+      inFlight;
+      run;
+      /** Bumped on every newly minted token (identity caches key on it). */
+      generation = 0;
+      async get() {
+        if (this.token && this.now() < this.validUntil) return this.token;
+        this.inFlight ??= this.fetch().finally(() => {
+          this.inFlight = void 0;
+        });
+        return this.inFlight;
+      }
+      invalidate() {
+        this.token = void 0;
+        this.validUntil = 0;
+      }
+      /** `email` claim of the cached token, if any (display only; the service verifies). */
+      email() {
+        const e = this.token ? decodeJwtPayload(this.token)?.email : void 0;
+        return typeof e === "string" ? e : void 0;
+      }
+      async fetch() {
+        const out = (await this.run()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const token = out[out.length - 1];
+        if (!token || /\s/.test(token)) throw new Error("the ID token command printed no token. Run `gcloud auth login`.");
+        const now = this.now();
+        const exp = Number(decodeJwtPayload(token)?.exp);
+        let until;
+        if (Number.isFinite(exp) && exp > 0) {
+          const life = exp * 1e3 - now;
+          until = now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
+        } else {
+          until = now + OPAQUE_TOKEN_TTL_MS;
+        }
+        this.token = token;
+        this.validUntil = until;
+        this.generation++;
+        return token;
+      }
+    };
+    ServiceError = class extends Error {
+      constructor(message, status, code, requestId, details = {}) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.requestId = requestId;
+        this.details = details;
+        this.name = "ServiceError";
+      }
+      status;
+      code;
+      requestId;
+      details;
+    };
+    HttpBackend = class {
+      kind = "service";
+      capabilities = { deletionsFeed: true };
+      target;
+      tokens;
+      timeoutMs;
+      device;
+      meCache;
+      constructor(opts = {}) {
+        const config2 = getConfig();
+        this.target = (opts.baseUrl ?? config2.SYNC_SERVICE_URL).replace(/\/+$/, "");
+        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
+        this.tokens = opts.tokens ?? new IdTokenProvider(config2.SYNC_ID_TOKEN_CMD);
+        this.timeoutMs = opts.timeoutMs ?? config2.SYNC_HTTP_TIMEOUT_MS;
+        this.device = opts.device ?? getDeviceId;
+      }
+      fail(err) {
+        noteSyncError(err);
+        throw err;
+      }
+      async request(method, path, opts = {}) {
+        const url2 = `${this.target}${path}`;
+        const idemKey = opts.idempotent ? randomUUID2() : void 0;
+        const body = opts.body === void 0 ? void 0 : JSON.stringify(opts.body);
+        for (let attempt = 0; ; attempt++) {
+          let token;
+          try {
+            token = await this.tokens.get();
+          } catch (e) {
+            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"));
+          }
+          const headers = {
+            authorization: `Bearer ${token}`,
+            "x-yapa-id-token": token,
+            "x-yapa-device": this.device(),
+            accept: "application/json"
+          };
+          if (body !== void 0) headers["content-type"] = "application/json";
+          if (idemKey) headers["idempotency-key"] = idemKey;
+          let res;
+          try {
+            res = await fetch(url2, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
+          } catch (e) {
+            const why = e?.name === "TimeoutError" || e?.name === "AbortError" ? `timed out after ${this.timeoutMs} ms` : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
+            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"));
+          }
+          const text = await res.text().catch(() => "");
+          let json2;
+          try {
+            json2 = text ? JSON.parse(text) : void 0;
+          } catch {
+            json2 = void 0;
+          }
+          if (res.ok) return json2;
+          if (res.status === 404 && opts.allow404) return void 0;
+          const apiErr = json2?.error;
+          const code = apiErr?.code ?? (res.status === 401 ? "cloud_run_unauthenticated" : res.status === 403 ? "cloud_run_forbidden" : `http_${res.status}`);
+          if (res.status === 401 && attempt === 0) {
+            this.tokens.invalidate();
+            continue;
+          }
+          const message = redactTokens(String(apiErr?.message ?? res.statusText ?? "")).slice(0, 300);
+          const details = { ...apiErr?.details ?? {} };
+          const retryAfter = res.headers.get("retry-after");
+          if (retryAfter) details.retry_after = Number(retryAfter);
+          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details));
+        }
+      }
+      /** GET /v1/me, cached per process until the token is re-minted. */
+      async me(refresh = false) {
+        if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
+          const r = await this.request("GET", "/v1/me");
+          this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
+        }
+        return { username: this.meCache.username, email: this.meCache.email };
+      }
+      identity() {
+        return this.me();
+      }
+      async pull(collection, req) {
+        const q = new URLSearchParams();
+        if (req.cursor) q.set("cursor", req.cursor);
+        else q.set("since", String(Math.max(0, Math.floor(req.since))));
+        q.set("limit", String(req.limit ?? PULL_PAGE_LIMIT));
+        if (req.includeOwnDevice) q.set("include_own_device", "true");
+        q.set("embeddings", "false");
+        const r = await this.request("GET", `/v1/collections/${encodeURIComponent(collection)}/documents?${q}`);
+        return {
+          documents: (r.documents ?? []).map((d) => ({ ...d, related_ids: d.related_ids ?? [], metadata: d.metadata ?? {} })),
+          deletions: r.deletions ?? [],
+          nextCursor: r.next_cursor,
+          hasMore: Boolean(r.has_more)
+        };
+      }
+      async upsertMany(docs) {
+        const model = embeddingModelLabel();
+        const items = docs.map((d) => ({
+          id: d.id,
+          collection: d.collection,
+          content: d.content,
+          embedding: d.embedding,
+          ...model ? { embedding_model: model } : {},
+          metadata: d.metadata,
+          created_at: d.created_at,
+          updated_at: d.updated_at
+        }));
+        const out = [];
+        for (const batch of byteBatches(items, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES)) {
+          const r = await this.request("POST", "/v1/documents:batchUpsert", { body: { documents: batch }, idempotent: true });
+          batch.forEach((item, i) => out.push(toOutcome(item.id, r.results?.[i])));
+        }
+        return out;
+      }
+      async delete(ids, reason = "delete") {
+        let deleted = 0;
+        for (const part of chunk(ids, MAX_DELETE_IDS)) {
+          const r = await this.request("POST", "/v1/documents:batchDelete", { body: { ids: part, reason }, idempotent: true });
+          deleted += Number(r.deleted ?? 0);
+        }
+        return deleted;
+      }
+      async collections() {
+        return (await this.request("GET", "/v1/collections")).collections ?? [];
+      }
+      async collectionsForUser() {
+        return (await this.request("GET", "/v1/me/collections")).collections ?? [];
+      }
+      async collectionsByIds(ids) {
+        const out = /* @__PURE__ */ new Map();
+        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
+          const r = await this.request("POST", "/v1/documents:collections", { body: { ids: part } });
+          for (const [id, c] of Object.entries(r.collections ?? {})) out.set(id, c);
+        }
+        return out;
+      }
+      async ownersByIds(ids) {
+        const out = /* @__PURE__ */ new Map();
+        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
+          const r = await this.request("POST", "/v1/documents:owners", { body: { ids: part } });
+          for (const [id, owner] of Object.entries(r.owners ?? {})) out.set(id, { owner, createdAt: Number(r.created_at?.[id] ?? 0) });
+        }
+        return out;
+      }
+      async createdAt(id) {
+        const r = await this.request("GET", `/v1/documents/${encodeURIComponent(id)}/created-at`, { allow404: true });
+        return r ? Number(r.created_at) : void 0;
+      }
+      async maxTaskNumber() {
+        return Number((await this.request("GET", "/v1/me/max-task-number")).max ?? 0);
+      }
+      async similar(collection, embedding, threshold) {
+        const r = await this.request("POST", `/v1/collections/${encodeURIComponent(collection)}:similar`, {
+          body: { embedding, ...threshold !== void 0 ? { threshold } : {}, limit: 5 }
+        });
+        return r.matches ?? [];
+      }
+      async addRelatedIds(id, add) {
+        for (const part of chunk(add, MAX_RELATED_IDS)) {
+          await this.request("POST", `/v1/documents/${encodeURIComponent(id)}/related-ids`, { body: { add: part } });
+        }
+      }
+      async health() {
+        try {
+          await this.request("GET", "/v1/health");
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
+      /** Sign in once at startup; the service's username becomes the effective USERNAME. */
+      async prepare() {
+        applyServerUsername((await this.me(true)).username);
+        const note = syncUsernameNote();
+        if (note) process.stderr.write(`[yapa-sync] ${note}
+`);
+      }
+      async maintain() {
+      }
+      async describe() {
+        const lines = ["Backend: YAPA sync service", `Service: ${this.target}`];
+        try {
+          const me = await this.me(true);
+          applyServerUsername(me.username);
+          lines.push(`Signed in as: ${me.username} (${me.email})`);
+          const note = syncUsernameNote();
+          if (note) lines.push(note);
+          lines.push("Connection: healthy");
+        } catch (e) {
+          lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
+        }
+        return lines;
+      }
+      async close() {
+        this.tokens.invalidate();
+        this.meCache = void 0;
+      }
+    };
+  }
+});
+
+// packages/core/src/sync/postgres.ts
+import { readFileSync as readFileSync3 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url2;
@@ -8217,7 +8628,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -8226,7 +8637,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url2.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync3(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -8413,6 +8824,282 @@ var init_postgres = __esm({
   }
 });
 
+// packages/core/src/sync/schema.ts
+async function migrateSchema() {
+  const pool2 = getPool();
+  const tableCheck = await pool2.query(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables
+      WHERE table_name = 'schema_version'
+    ) AS exists
+  `);
+  if (!tableCheck.rows[0].exists) {
+    process.stderr.write("[yapa-sync] Creating remote schema (v1)...\n");
+    await pool2.query(SCHEMA_V1);
+    await pool2.query("INSERT INTO schema_version (version) VALUES ($1)", [CURRENT_VERSION]);
+    process.stderr.write("[yapa-sync] Remote schema created.\n");
+    return;
+  }
+  const versionResult = await pool2.query("SELECT MAX(version) AS version FROM schema_version");
+  const currentVersion = versionResult.rows[0]?.version ?? 0;
+  if (currentVersion >= CURRENT_VERSION) {
+    return;
+  }
+  process.stderr.write(`[yapa-sync] Schema is at v${currentVersion}, current is v${CURRENT_VERSION}.
+`);
+}
+async function ensureVectorIndex() {
+  try {
+    const pool2 = getPool();
+    const countResult = await pool2.query("SELECT COUNT(*) AS cnt FROM documents");
+    const count = parseInt(countResult.rows[0].cnt, 10);
+    if (count >= 100) {
+      await pool2.query(IVFFLAT_INDEX);
+    }
+  } catch {
+  }
+}
+var CURRENT_VERSION, SCHEMA_V1, IVFFLAT_INDEX;
+var init_schema = __esm({
+  "packages/core/src/sync/schema.ts"() {
+    "use strict";
+    init_postgres();
+    CURRENT_VERSION = 1;
+    SCHEMA_V1 = `
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS schema_version (
+  version INTEGER PRIMARY KEY,
+  applied_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  collection TEXT NOT NULL,
+  content TEXT NOT NULL,
+  embedding vector NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  origin_user TEXT NOT NULL,
+  related_ids TEXT[] DEFAULT '{}',
+  synced_at TIMESTAMPTZ DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_docs_collection ON documents(collection);
+CREATE INDEX IF NOT EXISTS idx_docs_synced_at ON documents(synced_at);
+CREATE INDEX IF NOT EXISTS idx_docs_origin_user ON documents(origin_user);
+`;
+    IVFFLAT_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_docs_embedding ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+`;
+  }
+});
+
+// packages/core/src/sync/postgres-backend.ts
+var postgres_backend_exports = {};
+__export(postgres_backend_exports, {
+  PostgresBackend: () => PostgresBackend
+});
+var TLS_LABEL, PostgresBackend;
+var init_postgres_backend = __esm({
+  "packages/core/src/sync/postgres-backend.ts"() {
+    "use strict";
+    init_config();
+    init_device();
+    init_postgres();
+    init_schema();
+    TLS_LABEL = {
+      "verify-ca": "encrypted, server verified",
+      unverified: "encrypted, server NOT verified (set sync_ca_cert)",
+      off: "off (local database)"
+    };
+    PostgresBackend = class {
+      kind = "postgres";
+      capabilities = { deletionsFeed: false };
+      get target() {
+        return getConfig().SYNC_DATABASE_URL.replace(/:[^:@/]*@/, ":***@");
+      }
+      async pull(collection, req) {
+        const documents = await getRemoteDocsSince(
+          collection,
+          req.since,
+          { user: getConfig().USERNAME, device: getDeviceId() },
+          { includeOwnDevice: req.includeOwnDevice }
+        );
+        return { documents, deletions: [], hasMore: false };
+      }
+      async upsertMany(docs) {
+        const out = [];
+        for (const doc of docs) out.push(await this.upsertOne(doc));
+        return out;
+      }
+      /**
+       * Same checks the service makes, done client-side: a task id that already
+       * belongs to a different task (creation time more than 1 s away) is not
+       * overwritten but reported as `id_taken`; similar rows come back for linking.
+       */
+      async upsertOne(doc) {
+        const me = getConfig().USERNAME;
+        if (doc.metadata.type === "task") {
+          const localCreated = Number(doc.metadata.created_at);
+          if (Number.isFinite(localCreated) && localCreated > 0) {
+            const remoteCreated = await getRemoteCreatedAt(doc.id);
+            if (remoteCreated !== void 0 && Math.abs(remoteCreated - localCreated) > 1) {
+              const max = await getRemoteMaxTaskNumber(me);
+              return { id: doc.id, ok: false, code: "id_taken", message: "this task id belongs to a different task", permanent: false, suggestedId: `${me}-${max + 1}` };
+            }
+          }
+        }
+        const similar = doc.embedding.length > 0 ? (await findSimilarRemote(doc.collection, doc.embedding)).filter((s) => s.id !== doc.id) : [];
+        await upsertRemoteDocument(doc);
+        return { id: doc.id, ok: true, status: "updated", similar };
+      }
+      delete(ids) {
+        return deleteRemoteDocuments(ids, getConfig().USERNAME);
+      }
+      collections() {
+        return getRemoteCollections();
+      }
+      collectionsForUser() {
+        return getRemoteCollectionsForUser(getConfig().USERNAME);
+      }
+      collectionsByIds(ids) {
+        return getRemoteCollectionsByIds(ids);
+      }
+      ownersByIds(ids) {
+        return getRemoteOwnersByIds(ids);
+      }
+      createdAt(id) {
+        return getRemoteCreatedAt(id);
+      }
+      maxTaskNumber() {
+        return getRemoteMaxTaskNumber(getConfig().USERNAME);
+      }
+      similar(collection, embedding, threshold) {
+        return findSimilarRemote(collection, embedding, threshold);
+      }
+      addRelatedIds(id, add) {
+        return addRemoteRelatedIds(id, add);
+      }
+      health() {
+        return checkRemoteHealth();
+      }
+      async prepare() {
+        const h = await checkRemoteHealth();
+        if (!h.ok) await migrateSchema();
+      }
+      maintain() {
+        return ensureVectorIndex();
+      }
+      async describe() {
+        const lines = ["Backend: direct database (advanced/self-host)", `Remote: ${this.target}`];
+        try {
+          const health = await checkRemoteHealth();
+          lines.push(`Connection: ${health.ok ? "healthy" : `error - ${health.error}`}`);
+          lines.push(`TLS: ${TLS_LABEL[getSyncTlsMode()]}`);
+        } catch (e) {
+          lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
+        }
+        return lines;
+      }
+      close() {
+        return closePool();
+      }
+    };
+  }
+});
+
+// packages/core/src/sync/backend.ts
+function syncBackendKind(config2 = getConfig()) {
+  if (config2.SYNC_SERVICE_URL) return "service";
+  if (config2.SYNC_DATABASE_URL) return "postgres";
+  return void 0;
+}
+function isSyncConfigured(config2 = getConfig()) {
+  return config2.SYNC_ENABLED && syncBackendKind(config2) !== void 0;
+}
+function keyOf(config2) {
+  return JSON.stringify([config2.SYNC_SERVICE_URL, config2.SYNC_ID_TOKEN_CMD, config2.SYNC_DATABASE_URL, config2.SYNC_CA_CERT, config2.SYNC_HTTP_TIMEOUT_MS]);
+}
+async function getSyncBackend() {
+  const b = await selectBackend();
+  if (b?.kind === "service" && serverUsername && getConfig().USERNAME !== serverUsername) applyServerUsername(serverUsername);
+  return b;
+}
+async function selectBackend() {
+  if (override) return override;
+  const config2 = getConfig();
+  const kind = syncBackendKind(config2);
+  if (!kind) return void 0;
+  const key = keyOf(config2);
+  if (active3?.key === key) return active3.backend;
+  if (active3) await active3.backend.close().catch(() => void 0);
+  serverUsername = void 0;
+  const backend = kind === "service" ? new (await Promise.resolve().then(() => (init_http_backend(), http_backend_exports))).HttpBackend() : new (await Promise.resolve().then(() => (init_postgres_backend(), postgres_backend_exports))).PostgresBackend();
+  active3 = { key, backend };
+  return backend;
+}
+async function closeSyncBackend() {
+  const b = active3?.backend;
+  active3 = void 0;
+  serverUsername = void 0;
+  if (b) await b.close();
+}
+function chunk(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+function noteSyncError(e) {
+  lastError = { message: e instanceof Error ? e.message : String(e), at: Date.now() };
+}
+function lastSyncError() {
+  return lastError;
+}
+function isCycleFatal(e) {
+  const code = e?.code;
+  return typeof code === "string" && [
+    "unreachable",
+    "unauthenticated",
+    "cloud_run_unauthenticated",
+    "cloud_run_forbidden",
+    "not_member",
+    "user_inactive",
+    "rate_limited",
+    "unavailable",
+    "token_command"
+  ].includes(code);
+}
+function applyServerUsername(username) {
+  serverUsername = username;
+  const c = getConfig();
+  if (c.USERNAME === username) return;
+  configuredUsername = c.USERNAME;
+  setConfig({ ...c, USERNAME: username });
+}
+async function resolveSyncUsername() {
+  const b = await getSyncBackend();
+  if (b?.identity) {
+    try {
+      applyServerUsername((await b.identity()).username);
+    } catch {
+    }
+  }
+  return getConfig().USERNAME;
+}
+function syncUsernameNote() {
+  if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return void 0;
+  return `Username: using '${serverUsername}' from your Google account (the username option '${configuredUsername}' is informational with the sync service)`;
+}
+var override, active3, lastError, serverUsername, configuredUsername;
+var init_backend = __esm({
+  "packages/core/src/sync/backend.ts"() {
+    "use strict";
+    init_config();
+  }
+});
+
 // packages/core/src/tasks/create.ts
 var create_exports = {};
 __export(create_exports, {
@@ -8420,6 +9107,12 @@ __export(create_exports, {
   getNextTaskId: () => getNextTaskId
 });
 async function getNextTaskId() {
+  if (isSyncConfigured()) {
+    await Promise.race([
+      resolveSyncUsername(),
+      new Promise((resolve) => setTimeout(resolve, 3e3).unref())
+    ]).catch(() => void 0);
+  }
   const collections = await listCollections2();
   let maxId = 0;
   for (const collection of collections) {
@@ -8435,11 +9128,11 @@ async function getNextTaskId() {
       continue;
     }
   }
-  if (getConfig().SYNC_ENABLED && getConfig().SYNC_DATABASE_URL) {
+  if (isSyncConfigured()) {
     try {
-      const { getRemoteMaxTaskNumber: getRemoteMaxTaskNumber2 } = await Promise.resolve().then(() => (init_postgres(), postgres_exports));
-      const remote = await Promise.race([
-        getRemoteMaxTaskNumber2(getConfig().USERNAME),
+      const backend = await getSyncBackend();
+      const remote = !backend ? 0 : await Promise.race([
+        backend.maxTaskNumber(),
         new Promise((resolve) => setTimeout(() => resolve(0), 3e3).unref())
       ]);
       maxId = Math.max(maxId, remote);
@@ -8486,6 +9179,7 @@ var init_create = __esm({
     "use strict";
     init_config();
     init_store();
+    init_backend();
     PRIORITY_SALIENCE = {
       critical: 3,
       high: 2.5,
@@ -37738,13 +38432,13 @@ var ReadBuffer = class {
   constructor(options) {
     this._maxBufferSize = options?.maxBufferSize ?? STDIO_DEFAULT_MAX_BUFFER_SIZE;
   }
-  append(chunk) {
-    const newSize = (this._buffer?.length ?? 0) + chunk.length;
+  append(chunk2) {
+    const newSize = (this._buffer?.length ?? 0) + chunk2.length;
     if (newSize > this._maxBufferSize) {
       this.clear();
       throw new Error(`ReadBuffer exceeded maximum size of ${this._maxBufferSize} bytes`);
     }
-    this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk]) : chunk;
+    this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk2]) : chunk2;
   }
   readMessage() {
     if (!this._buffer) {
@@ -37775,9 +38469,9 @@ var StdioServerTransport = class {
     this._stdin = _stdin;
     this._stdout = _stdout;
     this._started = false;
-    this._ondata = (chunk) => {
+    this._ondata = (chunk2) => {
       try {
-        this._readBuffer.append(chunk);
+        this._readBuffer.append(chunk2);
         this.processReadBuffer();
       } catch (error62) {
         this.onerror?.(error62);
@@ -38033,8 +38727,8 @@ function chunkText(text) {
     chunks.push({ content: text.slice(start, end), index: chunks.length, total: 0 });
     start += CHUNK_SIZE - CHUNK_OVERLAP;
   }
-  for (const chunk of chunks) {
-    chunk.total = chunks.length;
+  for (const chunk2 of chunks) {
+    chunk2.total = chunks.length;
   }
   return chunks;
 }
@@ -38149,7 +38843,7 @@ async function storeMemory(content, options = {}) {
     return { ids: [id], potential_conflicts };
   }
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-  const docs = chunks.map((chunk) => {
+  const docs = chunks.map((chunk2) => {
     const chunkMeta = {
       ...options.metadata ?? {},
       type: "memory",
@@ -38159,15 +38853,15 @@ async function storeMemory(content, options = {}) {
       sector,
       created_at: now,
       accessed_at: now,
-      chunk_index: chunk.index,
-      chunk_total: chunk.total,
+      chunk_index: chunk2.index,
+      chunk_total: chunk2.total,
       parent_id: baseId
     };
     if (options.supersedes) chunkMeta.supersedes = options.supersedes;
     chunkMeta.is_synced = false;
     return {
-      id: `${baseId}-${chunk.index}`,
-      content: chunk.content,
+      id: `${baseId}-${chunk2.index}`,
+      content: chunk2.content,
       metadata: chunkMeta
     };
   });
@@ -39262,12 +39956,12 @@ function extractJsonArray(raw) {
 var timer = null;
 var running = false;
 var lastRunAt = null;
-var lastError = null;
+var lastError2 = null;
 var cycleCount = 0;
 var timerActive = false;
 var totalScored = 0;
 function getCurationState() {
-  return { lastRunAt, lastError, cycleCount, timerActive, totalScored };
+  return { lastRunAt, lastError: lastError2, cycleCount, timerActive, totalScored };
 }
 var MAX_PER_COLLECTION = 500;
 async function collectUnclassified(collection) {
@@ -39331,7 +40025,7 @@ async function curationCycle() {
       }
     }
     lastRunAt = Date.now();
-    lastError = null;
+    lastError2 = null;
     cycleCount++;
     totalScored += stats.scored;
     if (stats.scored > 0 || stats.errors > 0) {
@@ -39346,7 +40040,7 @@ async function curationCycle() {
     process.stderr.write(`[yapa-curation] Cycle error: ${msg}
 `);
     lastRunAt = Date.now();
-    lastError = msg;
+    lastError2 = msg;
     cycleCount++;
     return null;
   } finally {
@@ -39572,14 +40266,14 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
 import { join as join3 } from "path";
 function artifactDir(kind) {
   return join3(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync2(dir)) mkdirSync2(dir, { recursive: true });
+  if (!existsSync2(dir)) mkdirSync3(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -39598,7 +40292,7 @@ function nextVersion(kind) {
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
   const path = join3(dir, filename);
-  writeFileSync2(path, content);
+  writeFileSync3(path, content);
   return path;
 }
 function artifactPath(kind, filename) {
@@ -39987,137 +40681,57 @@ async function bucketStatus() {
 // packages/core/src/sync/index.ts
 init_config();
 
-// packages/core/src/sync/schema.ts
-init_postgres();
-var CURRENT_VERSION = 1;
-var SCHEMA_V1 = `
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS schema_version (
-  version INTEGER PRIMARY KEY,
-  applied_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS documents (
-  id TEXT PRIMARY KEY,
-  collection TEXT NOT NULL,
-  content TEXT NOT NULL,
-  embedding vector NOT NULL,
-  metadata JSONB NOT NULL DEFAULT '{}',
-  origin_user TEXT NOT NULL,
-  related_ids TEXT[] DEFAULT '{}',
-  synced_at TIMESTAMPTZ DEFAULT now(),
-  created_at TIMESTAMPTZ NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_docs_collection ON documents(collection);
-CREATE INDEX IF NOT EXISTS idx_docs_synced_at ON documents(synced_at);
-CREATE INDEX IF NOT EXISTS idx_docs_origin_user ON documents(origin_user);
-`;
-var IVFFLAT_INDEX = `
-CREATE INDEX IF NOT EXISTS idx_docs_embedding ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-`;
-async function migrateSchema() {
-  const pool2 = getPool();
-  const tableCheck = await pool2.query(`
-    SELECT EXISTS (
-      SELECT FROM information_schema.tables
-      WHERE table_name = 'schema_version'
-    ) AS exists
-  `);
-  if (!tableCheck.rows[0].exists) {
-    process.stderr.write("[yapa-sync] Creating remote schema (v1)...\n");
-    await pool2.query(SCHEMA_V1);
-    await pool2.query("INSERT INTO schema_version (version) VALUES ($1)", [CURRENT_VERSION]);
-    process.stderr.write("[yapa-sync] Remote schema created.\n");
-    return;
-  }
-  const versionResult = await pool2.query("SELECT MAX(version) AS version FROM schema_version");
-  const currentVersion = versionResult.rows[0]?.version ?? 0;
-  if (currentVersion >= CURRENT_VERSION) {
-    return;
-  }
-  process.stderr.write(`[yapa-sync] Schema is at v${currentVersion}, current is v${CURRENT_VERSION}.
-`);
-}
-async function ensureVectorIndex() {
-  try {
-    const pool2 = getPool();
-    const countResult = await pool2.query("SELECT COUNT(*) AS cnt FROM documents");
-    const count = parseInt(countResult.rows[0].cnt, 10);
-    if (count >= 100) {
-      await pool2.query(IVFFLAT_INDEX);
-    }
-  } catch {
-  }
-}
-
 // packages/core/src/sync/push.ts
 init_config();
 init_store();
 init_embeddings();
-init_postgres();
-
-// packages/core/src/sync/device.ts
-init_config();
-import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname } from "node:path";
-var cached2;
-function getDeviceId() {
-  const config2 = getConfig();
-  if (config2.DEVICE_ID) return config2.DEVICE_ID;
-  if (cached2?.path === config2.DEVICE_ID_PATH) return cached2.id;
-  const path = config2.DEVICE_ID_PATH;
-  let id;
-  try {
-    id = readFileSync4(path, "utf-8").trim();
-  } catch {
-    id = "";
-  }
-  if (!id) {
-    id = randomUUID();
-    try {
-      mkdirSync3(dirname(path), { recursive: true });
-      writeFileSync3(path, `${id}
-`, { flag: "wx" });
-    } catch {
-      try {
-        id = readFileSync4(path, "utf-8").trim() || id;
-      } catch {
-      }
-    }
-  }
-  cached2 = { path, id };
-  return id;
+init_backend();
+import { createHash } from "node:crypto";
+init_device();
+function emptyPushStats() {
+  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
-
-// packages/core/src/sync/push.ts
+var LOCAL_ONLY_KEYS = ["sync_rejected", "sync_rejected_fp", "sync_rejected_message"];
+function syncFingerprint(doc) {
+  const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
+  const meta3 = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
+  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta3)).digest("hex").slice(0, 32);
+}
+function stripLocalOnly(metadata) {
+  const out = { ...metadata };
+  for (const k of LOCAL_ONLY_KEYS) delete out[k];
+  return out;
+}
 async function pushToRemote() {
-  const stats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
+  const stats = emptyPushStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
   try {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
       const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
-      const deletedCount = await deleteRemoteDocuments(docIds, getConfig().USERNAME);
-      stats.deleted = deletedCount;
+      stats.deleted = await backend.delete(docIds, "delete");
       await clearPendingDeletes(pendingDeletes);
     }
   } catch (e) {
     process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
 `);
+    noteSyncError(e);
     stats.errors++;
+    if (isCycleFatal(e)) return stats;
   }
   const collections = await listCollections2();
   for (const collection of collections) {
     if (isSyncableCollection(collection.name)) continue;
     try {
-      stats.retracted += await retractSharedCopies(collection.name);
+      stats.retracted += await retractSharedCopies(backend, collection.name);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
 `);
+      noteSyncError(e);
       stats.errors++;
+      if (isCycleFatal(e)) return stats;
     }
   }
   const pushedCollections = [];
@@ -40125,89 +40739,29 @@ async function pushToRemote() {
     if (!isSyncableCollection(collection.name)) continue;
     try {
       const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
-      let collectionHadPush = false;
+      const before = stats.pushed + stats.linked;
+      const batch = [];
       for (const unsynced of unsyncedDocs) {
         if (unsynced.id.startsWith("__")) continue;
         if (unsynced.metadata.type === "journal_draft") continue;
-        let doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
-        if (doc.metadata.type === "task") {
-          try {
-            doc = await rekeyIfTaskIdTaken(collection.name, doc) ?? doc;
-          } catch (e) {
-            process.stderr.write(`[yapa-sync] Task id check failed for ${doc.id}, not pushing it this cycle: ${e}
-`);
-            stats.errors++;
-            continue;
-          }
-        }
+        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
         try {
-          const embedding = await generateEmbedding(doc.content);
-          if (!embedding) {
-            await upsertRemoteDocument({
-              id: doc.id,
-              collection: collection.name,
-              content: doc.content,
-              embedding: [],
-              // Will fail — need client-side embeddings for sync
-              metadata: doc.metadata,
-              origin_user: getConfig().USERNAME,
-              created_at: doc.metadata.created_at ?? Math.floor(Date.now() / 1e3),
-              updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? Math.floor(Date.now() / 1e3)
-            });
-            await markSynced(collection.name, doc.id, doc.metadata);
-            stats.pushed++;
-            collectionHadPush = true;
-            continue;
-          }
-          const similar = (await findSimilarRemote(collection.name, embedding)).filter((s) => s.id !== doc.id);
-          if (similar.length > 0) {
-            const remoteId = similar[0].id;
-            await addRemoteRelatedIds(remoteId, [doc.id]);
-            const existingRelated = Array.isArray(doc.metadata.related_ids) ? doc.metadata.related_ids : [];
-            if (!existingRelated.includes(remoteId)) {
-              existingRelated.push(remoteId);
-            }
-            await upsertRemoteDocument({
-              id: doc.id,
-              collection: collection.name,
-              content: doc.content,
-              embedding,
-              metadata: { ...doc.metadata, related_ids: existingRelated },
-              origin_user: getConfig().USERNAME,
-              created_at: doc.metadata.created_at ?? Math.floor(Date.now() / 1e3),
-              updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? Math.floor(Date.now() / 1e3)
-            });
-            await markSynced(collection.name, doc.id, { ...doc.metadata, related_ids: existingRelated });
-            stats.linked++;
-            collectionHadPush = true;
-          } else {
-            await upsertRemoteDocument({
-              id: doc.id,
-              collection: collection.name,
-              content: doc.content,
-              embedding,
-              metadata: doc.metadata,
-              origin_user: getConfig().USERNAME,
-              created_at: doc.metadata.created_at ?? Math.floor(Date.now() / 1e3),
-              updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? Math.floor(Date.now() / 1e3)
-            });
-            await markSynced(collection.name, doc.id, doc.metadata);
-            stats.pushed++;
-            collectionHadPush = true;
-          }
+          batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
         } catch (e) {
           process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
 `);
           stats.errors++;
         }
       }
-      if (collectionHadPush) {
-        pushedCollections.push(collection.name);
-      }
+      await pushBatch(backend, collection.name, batch, stats, true);
+      if (stats.pushed + stats.linked > before) pushedCollections.push(collection.name);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}
 `);
+      noteSyncError(e);
       stats.errors++;
+      if (isCycleFatal(e)) break;
     }
   }
   if (pushedCollections.length > 0) {
@@ -40225,67 +40779,163 @@ async function pushToRemote() {
   }
   return stats;
 }
-async function rekeyIfTaskIdTaken(collection, doc) {
-  const localCreated = Number(doc.metadata.created_at);
-  if (!Number.isFinite(localCreated) || localCreated <= 0) return void 0;
-  const remoteCreated = await getRemoteCreatedAt(doc.id);
-  if (remoteCreated === void 0 || Math.abs(remoteCreated - localCreated) <= 1) return void 0;
+async function toUpsert(collection, doc) {
+  const now = Math.floor(Date.now() / 1e3);
+  const embedding = await generateEmbedding(doc.content) ?? [];
+  return {
+    id: doc.id,
+    collection,
+    content: doc.content,
+    embedding,
+    metadata: stripLocalOnly(doc.metadata),
+    origin_user: getConfig().USERNAME,
+    created_at: doc.metadata.created_at ?? now,
+    updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? now
+  };
+}
+async function pushBatch(backend, collection, batch, stats, allowRekey) {
+  if (batch.length === 0) return;
+  let outcomes;
+  try {
+    outcomes = await backend.upsertMany(batch.map((b) => b.upsert));
+  } catch (e) {
+    stats.errors += batch.length - 1;
+    throw e;
+  }
+  const retry = [];
+  for (let i = 0; i < batch.length; i++) {
+    const { doc, upsert } = batch[i];
+    const outcome = outcomes[i];
+    try {
+      if (outcome.ok) {
+        await applyPushed(backend, collection, doc, outcome.similar, stats);
+      } else if (outcome.code === "id_taken" && allowRekey && doc.metadata.type === "task") {
+        const renamed = await rekeyTask(collection, doc, outcome.suggestedId);
+        stats.renamed++;
+        retry.push({ doc: renamed, upsert: { ...upsert, id: renamed.id, metadata: stripLocalOnly(renamed.metadata) } });
+      } else if (outcome.permanent) {
+        await markRejected(collection, doc, outcome.code, outcome.message);
+        stats.rejected++;
+      } else {
+        process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${outcome.code}: ${outcome.message}
+`);
+        noteSyncError(`${doc.id}: ${outcome.code}: ${outcome.message}`);
+        stats.errors++;
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+      stats.errors++;
+    }
+  }
+  await pushBatch(backend, collection, retry, stats, false);
+}
+async function applyPushed(backend, collection, doc, similar, stats) {
+  const match = similar.find((s) => s.id !== doc.id);
+  const metadata = stripLocalOnly(doc.metadata);
+  if (!match) {
+    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
+    stats.pushed++;
+    return;
+  }
+  try {
+    await backend.addRelatedIds(match.id, [doc.id]);
+    await backend.addRelatedIds(doc.id, [match.id]);
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
+`);
+  }
+  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
+  if (!related.includes(match.id)) related.push(match.id);
+  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  stats.linked++;
+}
+async function markRejected(collection, doc, code, message) {
+  await updateDocument2(collection, doc.id, {
+    ...doc.metadata,
+    is_synced: false,
+    sync_rejected: code,
+    sync_rejected_message: message.slice(0, 300),
+    sync_rejected_fp: syncFingerprint(doc)
+  });
+  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
+`);
+}
+async function listRejectedDocs() {
+  const out = [];
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+        out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
+      }
+    }
+  }
+  return out;
+}
+async function rekeyTask(collection, doc, suggestedId) {
   const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
+  const me = getConfig().USERNAME;
   const localNext = Number((await getNextTaskId2()).split("-").pop());
-  const remoteMax = await getRemoteMaxTaskNumber(getConfig().USERNAME);
-  const newId = `${getConfig().USERNAME}-${Math.max(localNext, remoteMax + 1)}`;
+  const suggested = Number(suggestedId?.split("-").pop());
+  const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
+  const newId = `${me}-${n}`;
   const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
   await addDocument2(collection, newId, doc.content, metadata);
   await deleteDocument2(collection, doc.id);
-  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared database; renamed this task to ${newId}
+  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
 `);
   return { ...doc, id: newId, metadata };
 }
-async function retractSharedCopies(collection) {
+async function retractSharedCopies(backend, collection) {
   const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
   const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.remote_checked_at !== versionOf(d));
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
-  const remote = await getRemoteOwnersByIds(unchecked.map((d) => d.id));
+  const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
   const mine = unchecked.filter((d) => {
     const row = remote.get(d.id);
     const localCreated = Number(d.metadata.created_at);
     return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
   });
-  const removed = mine.length > 0 ? await deleteRemoteDocuments(mine.map((d) => d.id), me) : 0;
+  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
   for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
   return removed;
 }
-async function markSynced(collection, id, metadata) {
-  await updateDocument2(collection, id, {
-    ...metadata,
-    is_synced: true
-  });
-}
 
 // packages/core/src/sync/pull.ts
 init_config();
 init_store();
-init_postgres();
+init_backend();
 function emptyPullStats() {
-  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
 }
+var MAX_PULL_PAGES = 200;
 async function pullFromRemote() {
   const stats = emptyPullStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
   const cycleStartedAt = Math.floor(Date.now() / 1e3) - getConfig().SYNC_PULL_OVERLAP_SECONDS;
   const lastPull = await getSyncPullTimestamp();
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const mine = (await getRemoteCollectionsForUser(getConfig().USERNAME)).filter(isSyncableCollection);
+      const mine = (await backend.collectionsForUser()).filter(isSyncableCollection);
       const subs = await getSyncSubscriptions();
       const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
 `);
+      noteSyncError(e);
+      if (isCycleFatal(e)) {
+        stats.errors++;
+        return stats;
+      }
     }
   }
   const collections = await listCollections2();
@@ -40304,53 +40954,92 @@ async function pullFromRemote() {
     }
   }
   const followed = new Set(pullCollectionNames);
+  let fatal = false;
   for (const collectionName of pullCollectionNames) {
     await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
       includeOwnDevice: recovering,
-      followedCollections: followed
+      followedCollections: followed,
+      onFatal: () => {
+        fatal = true;
+      }
     });
+    if (fatal) break;
   }
-  await updateSyncPullTimestamp(cycleStartedAt);
+  if (!fatal) await updateSyncPullTimestamp(cycleStartedAt);
   return stats;
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
   if (!isSyncableCollection(collectionName)) return stats;
-  if (opts.followedCollections) {
-    await dropMovedOut(collectionName, opts.followedCollections, stats).catch((e) => {
-      process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  const failed = (what, e) => {
+    process.stderr.write(`[yapa-sync] ${what}: ${e}
 `);
-      stats.errors++;
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) opts.onFatal?.();
+    return isCycleFatal(e);
+  };
+  if (opts.followedCollections) {
+    let fatal = false;
+    await dropMovedOut(backend, collectionName, opts.followedCollections, stats).catch((e) => {
+      fatal = failed(`Move check failed for ${collectionName}`, e);
     });
+    if (fatal) return stats;
   }
   try {
-    const remoteDocs = await getRemoteDocsSince(
-      collectionName,
-      since,
-      { user: getConfig().USERNAME, device: getDeviceId() },
-      { includeOwnDevice: opts.includeOwnDevice }
-    );
-    if (remoteDocs.length === 0) return stats;
-    const tombstones = await getLocalTombstones();
-    await getOrCreateCollection2(collectionName);
-    for (const remoteDoc of remoteDocs) {
-      try {
-        if (tombstones.has(remoteDoc.id) || remoteDoc.metadata?.type === "journal_draft") {
-          stats.skipped++;
-          continue;
-        }
-        await applyRemoteDoc(collectionName, remoteDoc, stats);
-      } catch (e) {
-        process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}
+    let tombstones;
+    let cursor;
+    const seen = /* @__PURE__ */ new Set();
+    for (let page = 0; page < MAX_PULL_PAGES; page++) {
+      const res = await backend.pull(collectionName, { since, cursor, includeOwnDevice: opts.includeOwnDevice });
+      if (res.documents.length > 0 || res.deletions.length > 0) {
+        await getOrCreateCollection2(collectionName);
+        tombstones ??= await getLocalTombstones();
+        for (const d of res.documents) seen.add(d.id);
+        for (const del of res.deletions) {
+          if (seen.has(del.id)) continue;
+          try {
+            await applyRemoteDeletion(collectionName, del, stats);
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Pull delete error for ${del.id}: ${e}
 `);
-        stats.errors++;
+            stats.errors++;
+          }
+        }
+        for (const remoteDoc of res.documents) {
+          try {
+            if (tombstones.has(remoteDoc.id) || remoteDoc.metadata?.type === "journal_draft") {
+              stats.skipped++;
+              continue;
+            }
+            await applyRemoteDoc(backend, collectionName, remoteDoc, stats);
+          } catch (e) {
+            process.stderr.write(`[yapa-sync] Pull error for ${remoteDoc.id}: ${e}
+`);
+            stats.errors++;
+          }
+        }
       }
+      if (!res.hasMore || !res.nextCursor || res.nextCursor === cursor) break;
+      cursor = res.nextCursor;
     }
   } catch (e) {
-    process.stderr.write(`[yapa-sync] Pull error for collection ${collectionName}: ${e}
-`);
-    stats.errors++;
+    failed(`Pull error for collection ${collectionName}`, e);
   }
   return stats;
+}
+async function applyRemoteDeletion(collectionName, del, stats) {
+  const [existing] = await getDocumentsByIds2(collectionName, [del.id]).catch(() => []);
+  if (!existing) return;
+  if (existing.metadata.is_synced === false) {
+    stats.keptDirty++;
+    process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)
+`);
+    return;
+  }
+  await deleteDocument2(collectionName, del.id);
+  stats.deleted++;
 }
 function toUnixSeconds(value) {
   if (value == null) return 0;
@@ -40377,10 +41066,10 @@ async function copiesElsewhere(id, except) {
   }
   return out;
 }
-async function dropMovedOut(collectionName, followed, stats) {
+async function dropMovedOut(backend, collectionName, followed, stats) {
   const local = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
   if (local.length === 0) return;
-  const remote = await getRemoteCollectionsByIds(local.map((d) => d.id));
+  const remote = await backend.collectionsByIds(local.map((d) => d.id));
   for (const doc of local) {
     const now = remote.get(doc.id);
     if (!now || now === collectionName || followed.has(now)) continue;
@@ -40388,7 +41077,7 @@ async function dropMovedOut(collectionName, followed, stats) {
     stats.moved++;
   }
 }
-async function applyRemoteDoc(collectionName, remoteDoc, stats) {
+async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
   if (!existing) {
     const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
@@ -40425,7 +41114,10 @@ async function applyRemoteDoc(collectionName, remoteDoc, stats) {
           localRelated.push(remoteDoc.id);
           await updateDocument2(collectionName, localDoc.id, { ...localDoc.metadata, related_ids: localRelated });
         }
-        await addRemoteRelatedIds(remoteDoc.id, [localDoc.id]);
+        await backend.addRelatedIds(remoteDoc.id, [localDoc.id]).catch((e) => {
+          process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}
+`);
+        });
         stats.linked++;
       }
     }
@@ -40436,15 +41128,16 @@ async function applyRemoteDoc(collectionName, remoteDoc, stats) {
 }
 
 // packages/core/src/sync/index.ts
-init_postgres();
+init_backend();
 var syncTimer = null;
 var syncRunning = false;
 var lastCycleAt = null;
 var lastCycleError = null;
 var cycleCount2 = 0;
 var timerActive2 = false;
+var lastStats = null;
 function getSyncState() {
-  return { lastCycleAt, lastCycleError, cycleCount: cycleCount2, timerActive: timerActive2 };
+  return { lastCycleAt, lastCycleError, cycleCount: cycleCount2, timerActive: timerActive2, lastStats, lastError: lastSyncError() ?? null };
 }
 async function syncCycle() {
   if (syncRunning) {
@@ -40453,7 +41146,7 @@ async function syncCycle() {
   }
   syncRunning = true;
   try {
-    let pushStats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
+    let pushStats = emptyPushStats();
     let pullStats = emptyPullStats();
     try {
       pushStats = await pushToRemote();
@@ -40470,13 +41163,11 @@ async function syncCycle() {
       pullStats.errors++;
     }
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.keptDirty > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
-    if (hasPushActivity || hasPullActivity) {
-      process.stderr.write(
-        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted, ${pushStats.retracted} retracted | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped
-`
-      );
+    if (hasPushActivity || hasPullActivity || pushStats.rejected > 0) {
+      process.stderr.write(`[yapa-sync] ${formatSyncStats({ push: pushStats, pull: pullStats })}
+`);
     }
     if (hasErrors) {
       process.stderr.write(
@@ -40485,13 +41176,14 @@ async function syncCycle() {
       );
     }
     try {
-      await ensureVectorIndex();
+      await (await getSyncBackend())?.maintain();
     } catch {
     }
     lastCycleAt = Date.now();
     lastCycleError = null;
     cycleCount2++;
-    return { push: pushStats, pull: pullStats };
+    lastStats = { push: pushStats, pull: pullStats };
+    return lastStats;
   } catch (e) {
     const msg = `${e}`;
     process.stderr.write(`[yapa-sync] Cycle error: ${msg}
@@ -40514,7 +41206,7 @@ function runTracked(work) {
   return tracked;
 }
 function scheduleSyncSoon(delayMs = getConfig().SYNC_PUSH_DEBOUNCE_MS) {
-  if (!getConfig().SYNC_ENABLED || !getConfig().SYNC_DATABASE_URL || delayMs <= 0) return;
+  if (!isSyncConfigured() || delayMs <= 0) return;
   if (soonTimer) clearTimeout(soonTimer);
   soonTimer = setTimeout(() => {
     soonTimer = null;
@@ -40542,26 +41234,25 @@ async function flushPendingSync(timeoutMs = 5e3) {
 }
 async function startSync() {
   if (!getConfig().SYNC_ENABLED) return;
-  if (!getConfig().SYNC_DATABASE_URL) {
-    process.stderr.write("[yapa-sync] YAPA_SYNC_DATABASE_URL not set \u2014 sync disabled\n");
+  const kind = syncBackendKind();
+  if (!kind) {
+    process.stderr.write("[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n");
     return;
   }
-  if (!process.env.YAPA_USERNAME) {
+  if (kind === "service" && getConfig().SYNC_DATABASE_URL) {
+    process.stderr.write("[yapa-sync] Using the sync service; YAPA_SYNC_DATABASE_URL is ignored\n");
+  }
+  if (kind !== "service" && !process.env.YAPA_USERNAME) {
     process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.
 `);
   }
   try {
-    const health = await checkRemoteHealth();
-    if (!health.ok) {
-      await migrateSchema();
-      process.stderr.write(`[yapa-sync] Connected to remote database
+    const backend = await getSyncBackend();
+    await backend?.prepare();
+    process.stderr.write(`[yapa-sync] Connected to ${kind === "service" ? "the sync service" : "the remote database"} (${backend?.target})
 `);
-    } else {
-      process.stderr.write(`[yapa-sync] Remote database healthy
-`);
-    }
   } catch (e) {
-    process.stderr.write(`[yapa-sync] Failed to connect to remote database: ${e}
+    process.stderr.write(`[yapa-sync] Sync not connected: ${e}
 `);
     process.stderr.write("[yapa-sync] Sync will retry on next interval\n");
   }
@@ -40575,23 +41266,34 @@ async function startSync() {
   process.stderr.write(`[yapa-sync] Background sync started (interval: ${getConfig().SYNC_INTERVAL_MS / 1e3}s)
 `);
 }
+function formatSyncStats({ push, pull }) {
+  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
+  if (push.renamed) line += `, ${push.renamed} renamed`;
+  if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
+  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.skipped} skipped`;
+  if (pull.keptDirty) line += `, ${pull.keptDirty} remote deletions not applied (local edits kept)`;
+  return `${line}, ${pull.errors} errors`;
+}
 async function stopSync() {
   if (syncTimer) {
     clearInterval(syncTimer);
     syncTimer = null;
     timerActive2 = false;
   }
-  await closePool();
+  await closeSyncBackend();
   process.stderr.write("[yapa-sync] Sync stopped\n");
 }
 
 // packages/core/src/index.ts
-init_postgres();
+init_backend();
+init_http_backend();
+init_postgres_backend();
+init_device();
 
 // packages/core/src/training/index.ts
 init_config();
 init_store();
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "fs";
 import { join as join5 } from "path";
 
@@ -40947,7 +41649,7 @@ function previewDir() {
   return dir;
 }
 function sha256(content) {
-  return createHash("sha256").update(content, "utf-8").digest("hex");
+  return createHash2("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -42514,31 +43216,36 @@ ${r.content}`
   );
   server2.tool(
     "sync",
-    "Remote sync (PostgreSQL+pgvector) control. Actions: `status` (health, last sync, pending), `now` (run a push+pull cycle immediately), `collections` (list remote collections with subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions \u2014 pass `collections`; unsubscribe keeps local data).",
+    "Team sync control (through the YAPA sync service, or a self-hosted database). Actions: `status` (health, last sync, pending), `now` (run a push+pull cycle immediately), `collections` (list remote collections with subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions; pass `collections`; unsubscribe keeps local data).",
     {
       action: external_exports.enum(["status", "now", "collections", "subscribe", "unsubscribe"]).describe("Sync operation to perform"),
       collections: external_exports.array(external_exports.string()).optional().describe("Collection names (required for subscribe/unsubscribe)")
     },
     async ({ action, collections }) => {
-      const { SYNC_ENABLED, SYNC_DATABASE_URL, SYNC_INTERVAL_MS } = getConfig();
+      const { SYNC_ENABLED, SYNC_INTERVAL_MS } = getConfig();
       if (!SYNC_ENABLED) {
         return { content: [{ type: "text", text: "Remote sync is disabled. Set YAPA_SYNC_ENABLED=true to enable." }] };
       }
       const text = (t) => ({ content: [{ type: "text", text: t }] });
+      let backend;
+      try {
+        backend = await getSyncBackend();
+      } catch (e) {
+        return text(`Sync is misconfigured: ${e instanceof Error ? e.message : e}`);
+      }
+      if (!backend) return text("Remote sync is enabled but has no target. Set the `sync_service_url` option (YAPA_SYNC_SERVICE_URL) and run `gcloud auth login`.");
+      const remoteCollections = () => backend.collections();
       switch (action) {
         case "status": {
           const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1e3}s)`];
-          lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ":***@") : "not configured"}`);
-          lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
-          if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
-          lines.push("global: local only (never synced; like private-/local- collections)");
           try {
-            const health = await checkRemoteHealth();
-            lines.push(`Connection: ${health.ok ? "healthy" : `error \u2014 ${health.error}`}`);
-            lines.push(`TLS: ${{ "verify-ca": "encrypted, server verified", unverified: "encrypted, server NOT verified (set sync_ca_cert)", off: "off (local database)" }[getSyncTlsMode()]}`);
+            lines.push(...await backend.describe());
           } catch (e) {
-            lines.push(`Connection: error \u2014 ${e}`);
+            lines.push(`Connection: error - ${e}`);
           }
+          lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
+          if (backend.kind !== "service" && !process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
+          lines.push("global: local only (never synced; like private-/local- collections)");
           try {
             const lastPull = await getSyncPullTimestamp();
             lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1e3).toISOString() : "never"}`);
@@ -42551,11 +43258,22 @@ ${r.content}`
           } catch {
           }
           try {
+            const rejected = await listRejectedDocs();
+            if (rejected.length > 0) {
+              const byCode = /* @__PURE__ */ new Map();
+              for (const r of rejected) byCode.set(r.code, (byCode.get(r.code) ?? 0) + 1);
+              lines.push(`Refused by the remote (kept local, retried after an edit): ${rejected.length} (${[...byCode].map(([c, n]) => `${c}: ${n}`).join(", ")}): ${rejected.slice(0, 10).map((r) => `${r.collection}/${r.id}`).join(", ")}${rejected.length > 10 ? ", ..." : ""}`);
+            }
+          } catch {
+          }
+          try {
             const state = getSyncState();
             lines.push(`Background timer: ${state.timerActive ? "active" : "inactive"}`);
             lines.push(`Cycles completed: ${state.cycleCount}`);
             if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
-            if (state.lastCycleError) lines.push(`Last error: ${state.lastCycleError}`);
+            if (state.lastStats) lines.push(`Last cycle result: ${formatSyncStats(state.lastStats)}`);
+            if (state.lastCycleError) lines.push(`Last cycle error: ${state.lastCycleError}`);
+            if (state.lastError) lines.push(`Last error: ${state.lastError.message} (${new Date(state.lastError.at).toISOString()})`);
           } catch {
             lines.push("Background state: unavailable");
           }
@@ -42565,15 +43283,17 @@ ${r.content}`
           try {
             const stats = await syncCycle();
             if (!stats) return text("Sync skipped \u2014 previous cycle still running.");
-            const { push, pull } = stats;
-            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
+            const errors = stats.push.errors + stats.pull.errors;
+            const last = getSyncState().lastError;
+            return text(`Sync cycle completed. ${formatSyncStats(stats)}${errors && last ? `
+Last error: ${last.message}` : ""}`);
           } catch (e) {
             return text(`Sync error: ${e}`);
           }
         }
         case "collections": {
           try {
-            const [remote, subscriptions] = await Promise.all([getRemoteCollections(), getSyncSubscriptions()]);
+            const [remote, subscriptions] = await Promise.all([remoteCollections(), getSyncSubscriptions()]);
             const subSet = new Set(subscriptions);
             if (remote.length === 0) return text("No collections found on remote.");
             return text(remote.map((r) => `- **${r.name}**: ${r.count} docs ${subSet.has(r.name) ? "(subscribed)" : ""}`).join("\n"));
@@ -42584,7 +43304,7 @@ ${r.content}`
         case "subscribe": {
           if (!collections?.length) return text("Refused \u2014 `collections` is required for subscribe.");
           try {
-            const remote = await getRemoteCollections();
+            const remote = await remoteCollections();
             const remoteNames = new Set(remote.map((r) => r.name));
             const valid = [];
             const invalid = [];

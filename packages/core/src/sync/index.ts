@@ -1,9 +1,8 @@
 
 import { getConfig } from '../config.js';
-import { migrateSchema, ensureVectorIndex } from './schema.js';
-import { pushToRemote, PushStats } from './push.js';
-import { pullFromRemote, PullStats, emptyPullStats } from './pull.js';
-import { checkRemoteHealth, closePool } from './postgres.js';
+import { pushToRemote, emptyPushStats, type PushStats } from './push.js';
+import { pullFromRemote, emptyPullStats, type PullStats } from './pull.js';
+import { closeSyncBackend, getSyncBackend, isSyncConfigured, lastSyncError, syncBackendKind } from './backend.js';
 
 export interface SyncStats {
   push: PushStats;
@@ -18,10 +17,11 @@ let lastCycleAt: number | null = null;
 let lastCycleError: string | null = null;
 let cycleCount = 0;
 let timerActive = false;
+let lastStats: SyncStats | null = null;
 
 /** Get the current background sync state (in-memory, not persisted). */
 export function getSyncState() {
-  return { lastCycleAt, lastCycleError, cycleCount, timerActive };
+  return { lastCycleAt, lastCycleError, cycleCount, timerActive, lastStats, lastError: lastSyncError() ?? null };
 }
 
 /**
@@ -37,7 +37,7 @@ export async function syncCycle(): Promise<SyncStats | null> {
 
   syncRunning = true;
   try {
-    let pushStats: PushStats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
+    let pushStats: PushStats = emptyPushStats();
     let pullStats: PullStats = emptyPullStats();
 
     try {
@@ -55,14 +55,11 @@ export async function syncCycle(): Promise<SyncStats | null> {
     }
 
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.keptDirty > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
-    if (hasPushActivity || hasPullActivity) {
-      process.stderr.write(
-        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted, ${pushStats.retracted} retracted` +
-        ` | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped\n`
-      );
+    if (hasPushActivity || hasPullActivity || pushStats.rejected > 0) {
+      process.stderr.write(`[yapa-sync] ${formatSyncStats({ push: pushStats, pull: pullStats })}\n`);
     }
 
     if (hasErrors) {
@@ -71,14 +68,15 @@ export async function syncCycle(): Promise<SyncStats | null> {
       );
     }
 
-    // Try to create ivfflat index if we have enough data
-    try { await ensureVectorIndex(); } catch { /* non-critical */ }
+    // Backend maintenance (Postgres: ivfflat index once there is enough data)
+    try { await (await getSyncBackend())?.maintain(); } catch { /* non-critical */ }
 
     lastCycleAt = Date.now();
     lastCycleError = null;
     cycleCount++;
+    lastStats = { push: pushStats, pull: pullStats };
 
-    return { push: pushStats, pull: pullStats };
+    return lastStats;
   } catch (e) {
     const msg = `${e}`;
     process.stderr.write(`[yapa-sync] Cycle error: ${msg}\n`);
@@ -105,7 +103,7 @@ function runTracked<T>(work: Promise<T>): Promise<T> {
  * see a new memory/task within seconds instead of on the next interval tick.
  */
 export function scheduleSyncSoon(delayMs: number = getConfig().SYNC_PUSH_DEBOUNCE_MS): void {
-  if (!getConfig().SYNC_ENABLED || !getConfig().SYNC_DATABASE_URL || delayMs <= 0) return;
+  if (!isSyncConfigured() || delayMs <= 0) return;
   if (soonTimer) clearTimeout(soonTimer);
   soonTimer = setTimeout(() => {
     soonTimer = null;
@@ -147,27 +145,27 @@ export async function flushPendingSync(timeoutMs = 5000): Promise<void> {
 export async function startSync(): Promise<void> {
   if (!getConfig().SYNC_ENABLED) return;
 
-  if (!getConfig().SYNC_DATABASE_URL) {
-    process.stderr.write('[yapa-sync] YAPA_SYNC_DATABASE_URL not set — sync disabled\n');
+  const kind = syncBackendKind();
+  if (!kind) {
+    process.stderr.write('[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n');
     return;
   }
+  if (kind === 'service' && getConfig().SYNC_DATABASE_URL) {
+    process.stderr.write('[yapa-sync] Using the sync service; YAPA_SYNC_DATABASE_URL is ignored\n');
+  }
 
-  if (!process.env.YAPA_USERNAME) {
+  if (kind !== 'service' && !process.env.YAPA_USERNAME) {
     process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.\n`);
   }
 
-  // Validate connection and migrate schema
+  // Validate the connection (Postgres: create the schema on first run).
+  // Fail open: local memory and tasks work regardless; sync retries.
   try {
-    const health = await checkRemoteHealth();
-    if (!health.ok) {
-      // First run — try schema migration
-      await migrateSchema();
-      process.stderr.write(`[yapa-sync] Connected to remote database\n`);
-    } else {
-      process.stderr.write(`[yapa-sync] Remote database healthy\n`);
-    }
+    const backend = await getSyncBackend();
+    await backend?.prepare();
+    process.stderr.write(`[yapa-sync] Connected to ${kind === 'service' ? 'the sync service' : 'the remote database'} (${backend?.target})\n`);
   } catch (e) {
-    process.stderr.write(`[yapa-sync] Failed to connect to remote database: ${e}\n`);
+    process.stderr.write(`[yapa-sync] Sync not connected: ${e}\n`);
     process.stderr.write('[yapa-sync] Sync will retry on next interval\n');
   }
 
@@ -183,6 +181,16 @@ export async function startSync(): Promise<void> {
   process.stderr.write(`[yapa-sync] Background sync started (interval: ${getConfig().SYNC_INTERVAL_MS / 1000}s)\n`);
 }
 
+/** One line summarizing a cycle's push and pull. */
+export function formatSyncStats({ push, pull }: SyncStats): string {
+  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
+  if (push.renamed) line += `, ${push.renamed} renamed`;
+  if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
+  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.skipped} skipped`;
+  if (pull.keptDirty) line += `, ${pull.keptDirty} remote deletions not applied (local edits kept)`;
+  return `${line}, ${pull.errors} errors`;
+}
+
 /**
  * Stop the background sync process and close connections.
  */
@@ -192,6 +200,6 @@ export async function stopSync(): Promise<void> {
     syncTimer = null;
     timerActive = false;
   }
-  await closePool();
+  await closeSyncBackend();
   process.stderr.write('[yapa-sync] Sync stopped\n');
 }

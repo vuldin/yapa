@@ -14,6 +14,8 @@ import {
   detectCollection,
   pullCollection,
   getSyncPullTimestamp,
+  isSyncConfigured,
+  resolveSyncUsername,
   captureTurn,
   storeMemory,
   consolidateStaleDrafts,
@@ -89,10 +91,11 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
  */
 export async function freshenFromRemote(collection: string): Promise<number> {
   const config = getConfig();
-  if (!config.SYNC_ENABLED || !config.SYNC_DATABASE_URL) return 0;
+  if (!isSyncConfigured(config)) return 0;
   try {
     const since = Math.max(0, (await getSyncPullTimestamp()) - HOOK_PULL_OVERLAP_SECONDS);
-    const stats = await withTimeout(pullCollection(collection, since), config.HOOK_PULL_TIMEOUT_MS);
+    // The service's username (Google account) drives "by <user>" attribution.
+    const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
     if (!stats) {
       process.stderr.write(`[yapa-hook] remote pull for ${collection} timed out\n`);
       return 0;
@@ -174,7 +177,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   const lines: string[] = [];
   if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, '');
   lines.push('# YAPA Context', '', scopeLine(detection));
-  if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the shared database._`);
+  if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
 

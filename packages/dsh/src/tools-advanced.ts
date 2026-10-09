@@ -20,7 +20,8 @@ import {
   bucketRouteNow,
   bucketRoutePreview,
   bucketStatus,
-  checkRemoteHealth,
+  getSyncBackend,
+  formatSyncStats,
   classifyMemories,
   curationCycle,
   evalCompare,
@@ -32,7 +33,6 @@ import {
   getDocumentsByFilter,
   getOrCreateCollection,
   getPendingDeletes,
-  getRemoteCollections,
   getSyncPullTimestamp,
   getSyncState,
   getSyncSubscriptions,
@@ -760,7 +760,7 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
   reg(defineTool({
     name: 'yapa_sync',
     description:
-      'Remote sync (PostgreSQL+pgvector) control. Actions: `status` (health, last sync, pending), '
+      'Team sync control (YAPA sync service, or a self-hosted database). Actions: `status` (health, last sync, pending), '
       + '`now` (run a push+pull cycle immediately), `collections` (list remote collections with '
       + 'subscription status), `subscribe` / `unsubscribe` (manage pull subscriptions — pass '
       + '`collections`; unsubscribe keeps local data).',
@@ -780,16 +780,22 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
     async execute(args) {
       const cfg = getConfig();
       if (!cfg.SYNC_ENABLED) return { text: 'Remote sync is disabled. Set syncEnabled in the plugin config or YAPA_SYNC_ENABLED=true to enable.' };
+      let backend: Awaited<ReturnType<typeof getSyncBackend>>;
+      try {
+        backend = await getSyncBackend();
+      } catch (e) {
+        return { text: `Sync is misconfigured: ${e instanceof Error ? e.message : e}` };
+      }
+      if (!backend) return { text: 'Remote sync is enabled but has no target (set YAPA_SYNC_SERVICE_URL).' };
+      const getRemoteCollections = () => backend.collections();
 
       switch (args.action) {
         case 'status': {
           const lines = [`Sync: **enabled** (interval: ${cfg.SYNC_INTERVAL_MS / 1000}s)`];
-          lines.push(`Remote: ${cfg.SYNC_DATABASE_URL ? cfg.SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
           try {
-            const health = await checkRemoteHealth();
-            lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
+            lines.push(...await backend.describe());
           } catch (e) {
-            lines.push(`Connection: error — ${e}`);
+            lines.push(`Connection: error - ${e}`);
           }
           try {
             const lastPull = await getSyncPullTimestamp();
@@ -804,7 +810,8 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
             lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
             lines.push(`Cycles completed: ${state.cycleCount}`);
             if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
-            if (state.lastCycleError) lines.push(`Last error: ${state.lastCycleError}`);
+            if (state.lastCycleError) lines.push(`Last cycle error: ${state.lastCycleError}`);
+            if (state.lastError) lines.push(`Last error: ${state.lastError.message} (${new Date(state.lastError.at).toISOString()})`);
           } catch { lines.push('Background state: unavailable'); }
           return { text: lines.join('\n') };
         }
@@ -813,8 +820,7 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
           try {
             const stats = await syncCycle();
             if (!stats) return { text: 'Sync skipped — previous cycle still running.' };
-            const { push, pull } = stats;
-            return { text: `Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors` };
+            return { text: `Sync cycle completed. ${formatSyncStats(stats)}` };
           } catch (e) {
             return { text: `Sync error: ${e}` };
           }

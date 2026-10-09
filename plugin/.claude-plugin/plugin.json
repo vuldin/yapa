@@ -1,7 +1,7 @@
 {
   "name": "yapa",
   "version": "0.1.0",
-  "description": "Persistent, team-shareable memory and tasks for Claude Code: per-prompt recall, teammate sync over PostgreSQL+pgvector, journal and compaction capture.",
+  "description": "Persistent, team-shareable memory and tasks for Claude Code: per-prompt recall, teammate sync through the YAPA sync service (Google sign-in), journal and compaction capture.",
   "author": {
     "name": "Josh Purcell"
   },
@@ -19,7 +19,7 @@
     "username": {
       "type": "string",
       "title": "Username",
-      "description": "Your name in task IDs and on everything you sync (teammates see items as 'from <username>'). Empty = your OS login name. Use the same value on all of your machines.",
+      "description": "Your name in task IDs and on everything you sync. With the sync service it comes from your Google account and this is informational. Empty = your OS login name.",
       "default": ""
     },
     "storage": {
@@ -53,20 +53,26 @@
     "sync_enabled": {
       "type": "boolean",
       "title": "Team sync",
-      "description": "Share memories and tasks through a PostgreSQL+pgvector database.",
+      "description": "Share memories and tasks with your team through the YAPA sync service.",
       "default": false
+    },
+    "sync_service_url": {
+      "type": "string",
+      "title": "Sync service URL",
+      "description": "URL of the YAPA sync service, e.g. https://<your-service>.run.app. Sign in once with `gcloud auth login`; no database credentials are needed.",
+      "default": ""
     },
     "sync_database_url": {
       "type": "string",
-      "title": "Sync database URL",
-      "description": "postgres://user:pass@host:5432/yapa (stored in the system credential store).",
+      "title": "Sync database URL (advanced)",
+      "description": "Advanced/self-host: direct database URL (ignored when a service URL is set)",
       "sensitive": true,
       "default": ""
     },
     "sync_ca_cert": {
       "type": "file",
       "title": "Sync database CA certificate",
-      "description": "PEM file with the database server's CA; the server certificate is verified against it. Empty: connections are encrypted but the server is not verified.",
+      "description": "Advanced/self-host (direct database only): PEM file with the database server CA; the server certificate is verified against it.",
       "default": ""
     },
     "response_capture": {
