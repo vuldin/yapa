@@ -3362,6 +3362,7 @@ var init_src = __esm({
     init_http_backend();
     init_postgres_backend();
     init_pull();
+    init_syncable();
     init_push();
     init_deletes();
     init_sentinel();
@@ -3447,6 +3448,7 @@ function withTimeout(work, ms) {
 async function freshenFromRemote(collection) {
   const config = getConfig();
   if (!isSyncConfigured(config)) return 0;
+  if (!isSyncableCollection(collection)) return 0;
   try {
     const since = Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS);
     const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
