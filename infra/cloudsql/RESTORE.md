@@ -11,8 +11,10 @@ Placeholders: `<PROJECT_ID>`, `<INSTANCE>` (e.g. `yapa-pg`), `<CLONE>` (e.g.
 
 - Bastion on: `enable_migration_bastion = true`, `terraform apply`.
 - Server CA, admin password and a tunnel to production, as in README.md
-  ("Bootstrap the schema"). The clone uses the same admin login, password
-  and server CA as its source.
+  ("Bootstrap the schema"). The clone uses the same admin login and password
+  as its source, but gets its OWN server CA: fetch it with
+  `gcloud sql instances describe <CLONE> --format='value(serverCaCert.cert)'`
+  and use it for sslrootcert when connecting to the clone.
 - Start a log: date, operator, and a stopwatch.
 
 ## 1. Baseline on production
@@ -29,8 +31,10 @@ Note `taken_at` from the first result. That is the restore point `T`
 
 ```sh
 time gcloud sql instances clone <INSTANCE> <CLONE> \
-  --project <PROJECT_ID> --point-in-time '<T>' \
-  --allocated-ip-range-name yapa-vpc-psa
+  --project <PROJECT_ID> --point-in-time '<T>'
+# (GA gcloud has no --allocated-ip-range-name; the clone reuses the source's
+# private services range. PITR needs a backup older than T: if the instance
+# is new, run `gcloud sql backups create --instance <INSTANCE>` first.)
 ```
 
 The clone keeps the source's settings: private IP only in the same VPC,
@@ -89,3 +93,7 @@ then re-run `sql/03_grants.sql` on it), or copy the affected rows back with
 `scripts/migrate-db.mjs` pointed from the clone to production. Bring the
 clone under Terraform or rename it in the tfvars only after the incident is
 closed.
+
+## Drill log
+
+- 2026-10-09: on-demand backup, baseline at 21:08:35Z, PITR clone `yapa-pg-drill` took ~10 min (db-g1-small), verify_counts diff identical (1671 documents, checksum match), clone deleted.
