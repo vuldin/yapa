@@ -35,7 +35,7 @@ type Env = {
 
 export interface AppDeps {
   pool: pg.Pool;
-  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes'>>;
+  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes' | 'autoProvision' | 'allowedHd'>>;
   verifier: TokenVerifier;
   /** Defaults to the users table. */
   lookupUser?: UserLookup;
@@ -52,7 +52,9 @@ function errorBody(code: ErrorCode, message: string, requestId: string, details?
 
 export function createApp(deps: AppDeps): Hono<Env> {
   const { pool, config } = deps;
-  const lookupUser: UserLookup = deps.lookupUser ?? (email => store.findUserByEmail(pool, email));
+  const lookupUser: UserLookup = deps.lookupUser ?? (email => (deps.config.autoProvision
+    ? store.findOrCreateUser(pool, email, deps.config.allowedHd ?? '')
+    : store.findUserByEmail(pool, email)));
   const buckets = new TokenBuckets(deps.now);
   const daily = new DailyCounter(deps.now);
   const limits: RateLimits | false = config.rateLimits;

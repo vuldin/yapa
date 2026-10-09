@@ -8,7 +8,7 @@ import type pg from 'pg';
 import type { Caller } from './auth.js';
 import { withUserTx } from './db.js';
 import { itemError, type ItemError } from './errors.js';
-import { logAudit, type AuditLine } from './log.js';
+import { log, logAudit, type AuditLine } from './log.js';
 import { encodeCursor, type FeedPos, type PullCursor } from './cursor.js';
 import {
   changedKeys, classifyUpdate, isLocalOnlyCollection, MAX_RELATED_IDS, taskIdPrefix, toPgVector,
@@ -501,6 +501,42 @@ export function requestHash(target: string, body: string): string {
 export async function findUserByEmail(pool: pg.Pool, email: string) {
   const r = await pool.query('SELECT username, email, active FROM users WHERE lower(email) = lower($1)', [email]);
   return r.rows[0] as { username: string; email: string; active: boolean } | undefined;
+}
+
+/**
+ * Username for a company account: the email's local part, lowercased, with
+ * anything outside [a-z0-9_-] collapsed to '-'. Deterministic, so nobody can
+ * claim a name other than their own.
+ */
+export function usernameFromEmail(email: string): string | undefined {
+  const local = email.toLowerCase().split('@')[0] ?? '';
+  const name = local.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+  return name || undefined;
+}
+
+/**
+ * Self-service sign-up (YAPA_AUTO_PROVISION): a verified account in the allowed
+ * domain gets a users row on first sign-in. Existing rows are never changed, so
+ * a disabled user stays disabled; a username already held by another email is
+ * left to an admin (returns undefined -> not_member).
+ */
+export async function findOrCreateUser(pool: pg.Pool, email: string, domain: string) {
+  const found = await findUserByEmail(pool, email);
+  if (found) return found;
+  if (!domain || email.toLowerCase().split('@')[1] !== domain) return undefined;
+  const username = usernameFromEmail(email);
+  if (!username) return undefined;
+  const r = await pool.query(
+    'INSERT INTO users (username, email) VALUES ($1, lower($2)) ON CONFLICT DO NOTHING RETURNING username, email, active',
+    [username, email],
+  );
+  if (r.rows[0]) {
+    log('INFO', 'user provisioned', { event: 'user_provisioned', username });
+    return r.rows[0] as { username: string; email: string; active: boolean };
+  }
+  const raced = await findUserByEmail(pool, email);
+  if (!raced) log('WARNING', 'username taken by another account', { event: 'user_provision_conflict', username });
+  return raced;
 }
 
 export async function dbHealthy(pool: pg.Pool): Promise<boolean> {

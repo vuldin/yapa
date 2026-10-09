@@ -42,8 +42,14 @@ variable "image" {
   }
 }
 
+variable "auto_provision_users" {
+  description = "Create a users row on first sign-in for any verified account in allowed_hd (username = email local part). Pair with invoker_members = [\"domain:<allowed_hd>\"] to open YAPA to the whole company."
+  type        = bool
+  default     = false
+}
+
 variable "invoker_members" {
-  description = "Principals granted roles/run.invoker, e.g. [\"user:someone@example.com\"]. Replace with [\"group:yapa-users@example.com\"] once the group exists. Add CI / admin service accounts here too. Never allUsers / allAuthenticatedUsers."
+  description = "Principals granted roles/run.invoker, e.g. [\"user:someone@example.com\"]. Use [\"domain:example.com\"] for the whole company, or a group. Add CI / admin service accounts here too. Never allUsers / allAuthenticatedUsers."
   type        = list(string)
   default     = []
 

@@ -27,6 +27,8 @@ export interface ServiceConfig {
   audiences: string[];
   /** Required `hd` (Google Workspace domain) claim. */
   allowedHd: string;
+  /** Create a users row on first sign-in for verified accounts in allowedHd (YAPA_AUTO_PROVISION=true). */
+  autoProvision: boolean;
   /** Direct connection string (local dev and tests). */
   databaseUrl?: string;
   /** Cloud SQL `project:region:instance` (production, with IAM auth over private IP). */
@@ -114,6 +116,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     authMode: mode,
     audiences,
     allowedHd,
+    autoProvision: (env.YAPA_AUTO_PROVISION ?? '').trim().toLowerCase() === 'true',
     databaseUrl,
     instanceConnectionName,
     dbUser: env.YAPA_DB_USER || undefined,
