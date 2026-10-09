@@ -1,8 +1,9 @@
 # YAPA Sync Service: Design and Threat Model
 
-Status: draft (task josh-309). Related: josh-310 (migration/cutover), josh-312
-(client rollout), josh-313 (remote MCP endpoint for scheduled routines),
-josh-323 (governance review of changes to shared artifacts).
+Status: accepted 2026-10-09 (task josh-309; decisions in section 10).
+Related: josh-310 (migration/cutover), josh-311, josh-312 (client rollout),
+josh-313 (remote MCP endpoint for scheduled routines), josh-316 (pilot),
+josh-317, josh-323 (governance review of changes to shared artifacts).
 
 ## 0. Background: how sync works today
 
@@ -18,8 +19,8 @@ client code (`packages/core/src/sync/*.ts`):
 | Attribution: `origin_user` = the pusher's `YAPA_USERNAME` (self-asserted) | `push.ts` |
 | `origin_user` and `created_at` are not overwritten on conflict | `upsertRemoteDocument` (`ON CONFLICT ... DO UPDATE` omits them) |
 | Echo suppression: skip rows whose `metadata.origin_device` is this device, and legacy rows from this user with no device stamp | `buildRemoteDocsSinceQuery` |
-| `global` is personal: pull adds `origin_user = me`, plus rows whose owner stamped `share_global` when the reader opted in | `pull.ts` `isPersonalCollection`, `push.ts` |
-| `private-*` / `local-*` never pushed; own shared copies of docs now in such a collection are retracted (deleted remotely) | `push.ts` `isSyncable`, `retractSharedCopies` |
+| `global` was personal (pull added `origin_user = me`, plus an opt-in to share it). PR #17 (8a8f8f3) makes `global` local-only like `private-*`: never pushed, old shared copies retracted, opt-in removed | `isSyncableCollection`, `pull.ts`, `push.ts` |
+| `private-*` / `local-*` (and, with PR #17, `global`) never pushed; own shared copies of docs now in such a collection are retracted (deleted remotely) | `push.ts` `isSyncable`, `retractSharedCopies` |
 | Remote delete only of own rows (`AND origin_user = $owner`); deleting a teammate's doc writes a local tombstone | `deleteRemoteDocuments`, `deletes.ts` |
 | Archive / supersede = metadata update (`archived: true`, `superseded_by`, `duplicate_of`) pushed like any edit | `memory/archive.ts`, curation |
 | Task id collision: same id, different `created_at` (>1 s) means a different task; rekey to `max(local next, remote max + 1)` | `rekeyIfTaskIdTaken` |
@@ -30,20 +31,23 @@ client code (`packages/core/src/sync/*.ts`):
 | Schema DDL is run by clients on connect | `schema.ts` `migrateSchema` |
 
 Because the rules are client-side, anyone holding the database URL can read
-everything (including other people's personal `global`), write as any
+everything (including, until PR #17, other people's `global`), write as any
 username, delete any row, and run DDL. The README says as much ("No access
 control yet").
 
 Gaps found while reading the code that the service should fix (not just port):
 
-1. (Fixed client-side in 0dc113b) `SYNC_SHARE_GLOBAL` was evaluated on the
-   **reader**. Push now stamps the owner's choice as `metadata.share_global`
-   and pull only accepts a teammate's `global` row when it is set. The client
-   can still bypass this with a direct DB connection; the service enforces it.
+1. (Fixed client-side in PR #17) The opt-in to share `global` rows with
+   teammates was first evaluated on the reader, then moved to an owner stamp
+   in 0dc113b; either way a direct DB connection bypassed it, and the
+   "personal" rule itself was only a client filter. PR #17 makes `global`
+   local-only and drops the opt-in; every remote `global` row was deleted on
+   2026-10-09 (0 remain). The service rejects `global` like `private-*`
+   (decision 6).
 2. `getRemoteCollections`, `getRemoteOwnersByIds`, `getRemoteCollectionsByIds`
-   and `getRemoteCreatedAt` ignore the personal rule, so ids and counts from
-   other people's `global` are visible (push dedup via `findSimilarRemote` is
-   owner-scoped for `global` since 0dc113b).
+   and `getRemoteCreatedAt` ignored the personal rule, so ids and counts from
+   other people's `global` were visible. Moot now that no `global` rows exist
+   remotely; the service never stores them.
 3. (Fixed in 0dc113b) `addRemoteRelatedIds` used `array_cat`, so retries
    appended duplicate ids; appends are now a set union.
 4. The `embedding` column is untyped `vector`; an ivfflat index needs fixed
@@ -51,6 +55,7 @@ Gaps found while reading the code that the service should fix (not just port):
    similarity query is a sequential scan.
 5. Remote deletes do not reach teammates: the row disappears, but teammates'
    clean local copies are never removed (pull only sees rows that exist).
+   The service ships a deletions feed in v1 (decision 5).
 6. Task ids can be minted in another user's namespace (`bob-12` pushed by
    alice) because the username is self-asserted.
 
@@ -72,8 +77,9 @@ Goals
   optional and eventually consistent, exactly as today.
 - **Same sync semantics.** Push/pull, echo rules, moves, rekeys, tombstones,
   and recovery keep working with only the transport swapped.
-- **Remote MCP endpoint** on the same service for scheduled routines that have
-  no local store (josh-313).
+- **Remote MCP endpoint** for scheduled routines that have no local store
+  (josh-313), deployed later as a second Cloud Run service from the same image
+  (decision 1).
 
 Non-goals
 
@@ -83,9 +89,14 @@ Non-goals
 - No server-side curation, compaction, decay, or training. Those stay client
   jobs.
 - No fine-grained per-collection ACLs in v1 (everyone in the group can read
-  every shared collection, as today). See open questions.
-- The direct-DB mode is not deleted; it becomes an advanced/self-host option
-  (josh-312).
+  every shared collection, as today). Restricted material goes in `private-*`
+  collections meanwhile; see decision 7.
+- No syncing of `global`, not even between one user's own devices. `global`
+  is local-only like `private-*`/`local-*`; team-wide knowledge goes in a
+  shared collection such as `project-cs-team` (decision 6).
+- The direct-DB mode is not deleted; it stays as the advanced/self-host path
+  in v1 (josh-312, decision 13). Our team uses only the service, and direct DB
+  credentials are never distributed.
 
 ## 2. Architecture
 
@@ -101,12 +112,24 @@ Non-goals
   |  +-------------------------+  |               v  v
   +-------------------------------+     +----------------------------+
                                         |  Cloud Run: yapa-service   |
-  Scheduled routines (josh-313)         |   /v1/*   sync REST API    |
-  +-------------------------------+     |   /mcp    remote MCP       |
-  | cloud agent, no local store   |---->|   authn: ID token verify   |
-  | (OAuth bearer for /mcp)       |     |   authz: rules in sec. 4   |
-  +-------------------------------+     |   embedder (MiniLM q8)     |
+                                        |   /v1/*  sync REST API     |
+                                        |   platform: run.invoker    |
+                                        |     = YAPA group, custom   |
+                                        |     audiences              |
+                                        |   app: ID token verify,    |
+                                        |     authz rules in sec. 4  |
                                         +-------------+--------------+
+                                                      |
+  Scheduled routines (josh-313, later)                |
+  +-------------------------------+     +-------------+--------------+
+  | cloud agent, no local store   |---->|  Cloud Run: yapa-mcp       |
+  | (OAuth bearer for /mcp)       |     |   same image, MCP mode     |
+  +-------------------------------+     |   /mcp, OAuth endpoints    |
+                                        |   platform: open           |
+                                        |   app: bearer verify, authz|
+                                        |   embedder (MiniLM q8)     |
+                                        +-------------+--------------+
+                                                      | (both services)
                                                       | Direct VPC egress
                                                       | Cloud SQL connector
                                                       | IAM DB auth, private IP
@@ -121,10 +144,24 @@ Non-goals
                                         Cloud Identity Groups API (membership)
 ```
 
+Two services, one image (decision 1):
+
+- **`yapa-service` (v1)** serves `/v1/*` only. Cloud Run IAM protects it:
+  `roles/run.invoker` is bound to the YAPA Google group, and the service's
+  custom audiences include the YAPA desktop OAuth client id so the ID tokens
+  the CLI mints pass the platform check. It is NOT deployed with
+  `--allow-unauthenticated`. The app still verifies every token itself
+  (defense in depth, section 3).
+- **`yapa-mcp` (josh-313)** is a second Cloud Run service built from the same
+  image in MCP mode. It is open at the platform level, because MCP OAuth
+  clients cannot present a Google ID token to Cloud Run, so app-level auth is
+  its only gate. It does not exist in v1.
+
 Request flow for a push: the plugin's sync loop calls the service instead of
-`pg`. The service verifies the token, resolves `email -> username`, checks
-group membership (cached), applies the authorization rules, writes the row and
-an audit record in one transaction, and returns per-item results.
+`pg`. Cloud Run checks the invoker binding, then the service verifies the
+token, resolves `email -> username`, checks group membership (cached), applies
+the authorization rules, writes the row and an audit record in one
+transaction, and returns per-item results.
 
 Client seam: `push.ts` and `pull.ts` only call the functions exported from
 `postgres.ts`. Those become a `RemoteSyncPort` interface with two adapters:
@@ -151,7 +188,7 @@ JWKS), `iss`, `exp`, `aud`, `email_verified`, and `hd` (company domain).
 (b) **IAP in front of Cloud Run.** IAP authenticates and passes a signed
 `x-goog-iap-jwt-assertion`; the service trusts that header.
 
-### Decision: (a)
+### Decision: (a) (decided 2026-10-09, decision 0)
 
 - **CLI-friendly.** Hooks run on every prompt with a tight latency budget and
   no browser. IAP programmatic access needs an ID token whose audience is the
@@ -160,8 +197,8 @@ JWKS), `iss`, `exp`, `aud`, `email_verified`, and `hd` (company domain).
   headless client.
 - **Remote MCP.** Claude's remote MCP connectors use the MCP authorization
   spec (OAuth 2.1 bearer tokens, protected-resource metadata). IAP in front of
-  `/mcp` would block that handshake. With (a) the service already owns token
-  validation and can serve both bearer types on one origin.
+  `/mcp` would block that handshake. With (a) the same code validates both
+  bearer types; the MCP service (josh-313) runs it without a platform gate.
 - **Authorization needs the identity in the app anyway.** IAP only answers
   "is this person allowed in". The username mapping, owner checks and audit
   attribution all live in the service regardless, so IAP adds a component
@@ -171,34 +208,51 @@ JWKS), `iss`, `exp`, `aud`, `email_verified`, and `hd` (company domain).
   setup.
 
 Costs of (a), accepted: we own JWT verification (use `google-auth-library`
-`verifyIdToken`, never hand-rolled), and Cloud Run is deployed with
-`--allow-unauthenticated` at the platform level for `/mcp` reachability, so the
-app is the only gate. Mitigation: verification runs as middleware on every
-route except `/healthz`; a deny-by-default test asserts every route rejects a
-missing/invalid token. If routing allows, the `/v1` API can additionally keep
-Cloud Run IAM (`roles/run.invoker` bound to the group) with custom audiences;
-see open questions.
+`verifyIdToken`, never hand-rolled). Mitigations:
+
+- **v1 keeps a platform gate.** `yapa-service` is deployed without
+  `--allow-unauthenticated`: Cloud Run IAM (`roles/run.invoker` bound to the
+  YAPA group, custom audiences for the desktop OAuth client id) rejects
+  outsiders before the app runs. App-level verification stays on every route
+  as defense in depth (decision 1).
+- **The MCP service has no platform gate.** When josh-313 adds `yapa-mcp`, it
+  is open at the platform level and the app is its only gate.
+- **Deny by default.** Verification runs as middleware on every route except
+  `/healthz`; a test enumerates routes and asserts each rejects a
+  missing/invalid token. The same test runs in both modes.
+- **Spike first.** Whether Cloud Run custom audiences accept ID tokens minted
+  by the desktop OAuth client is verified with a spike at the start of
+  josh-311, before the rest of the service is built on it.
 
 Accepted audiences: the YAPA desktop OAuth client id, the service URL (service
 accounts), and optionally the gcloud client id (only if the gcloud fallback is
-enabled; it is broader because any gcloud-minted token qualifies).
+enabled; it is broader because any gcloud-minted token qualifies). The same
+list is configured as the Cloud Run custom audiences of `yapa-service`. Service
+accounts that call `/v1` (CI, admin job) need `roles/run.invoker` too.
 
 ### Membership and username mapping
 
 - **Membership:** a Google group (e.g. `yapa-users@<domain>`). The service
   checks it with the Cloud Identity Groups API
   (`checkTransitiveMembership`), cached per email for 10 minutes.
-- **Mapping:** `users` table: `email -> username`, plus `active` and
-  `share_global`. A request is allowed only if the token is valid AND the email
+- **Mapping:** `users` table: `email -> username`, plus `active`. A request is allowed only if the token is valid AND the email
   is a group member AND a `users` row exists with `active = true`.
 - **First login / existing usernames:** existing `origin_user` values are
   seeded into `users` during migration (josh-310) by an admin, one row per
   person. A new person gets a row from an admin command; no self-service
   username claims (otherwise someone could claim an existing name).
 - **Offboarding:** remove from the group (blocks within the cache TTL, at most
-  10 minutes) and set `active = false` (immediate). The person's rows remain,
-  attributed to their username; the username is never reassigned to someone
-  else.
+  10 minutes; the Cloud Run invoker binding follows the group too) and set
+  `active = false` (immediate). The person's rows remain, attributed to their
+  username; the username is never reassigned to someone else. If someone ever
+  needs to delete or archive a departed user's rows, an admin-only, audited
+  ownership-transfer command is added at that point; it is not v1-blocking
+  (decision 10).
+- **Routine principals (josh-313/317):** a scheduled routine authenticates as
+  its own `routine-<name>` principal with a named human owner, never as the
+  human. It may read and write shared collections only (there is no `global`
+  on the server to read), and its writes are attributed "by routine-<name>" (decision 2). The routine
+  can be disabled without touching its owner's access.
 
 ## 4. Authorization
 
@@ -206,9 +260,8 @@ enabled; it is broader because any gcloud-minted token qualifies).
 
 | Class | Names | Server behavior |
 |-------|-------|-----------------|
-| Shared | anything syncable except `global` (`customer-*`, `project-*`, others) | readable and writable by all active members |
-| Personal | `global` | rows readable by the row owner only, unless the owner's `users.share_global = true`; then readable by members. Writable by owner only. |
-| Private | `private-*`, `local-*` | rejected on every endpoint with `403 private_collection`. The server never stores or logs them. |
+| Shared | anything syncable (`customer-*`, `project-*`, others) | readable and writable by all active members |
+| Local-only | `global`, `private-*`, `local-*` | rejected on every endpoint with `403 local_only_collection`. The server never stores or logs them. `global` never reaches the shared database, not even to sync one user's own devices (decision 6); team-wide knowledge goes in a shared collection such as `project-cs-team`. |
 
 Collection names must match `^[a-z0-9][a-z0-9._-]{0,127}$` (validated server
 side; clients already produce such names).
@@ -229,23 +282,24 @@ side; clients already produce such names).
 
 "Self" = row's `origin_user` is the caller. "Teammate" = someone else.
 "ADP" marks change classes that go through governance review once josh-323
-lands; in v1 they are allowed, attributed (`last_editor`) and audited.
+lands. Review is asynchronous (decision 9): the write is applied immediately,
+reviewed after, and revertible from `audit_log`. In v1 they are allowed,
+attributed (`last_editor`) and audited.
 
-| Action | Shared, self | Shared, teammate | `global`, self | `global`, teammate | private-*/local-* |
-|--------|--------------|------------------|----------------|--------------------|-------------------|
-| Insert (new id) | allow; `origin_user` = caller | n/a | allow | n/a | reject |
-| Insert, id in another user's task namespace (`bob-12` by alice) | reject `403 task_namespace` | | reject | | reject |
-| Update content/metadata | allow | allow, **ADP** | allow | reject | reject |
-| Archive / supersede (`archived` false->true, `superseded_by`) | allow | allow, **ADP** | allow | reject | reject |
-| Un-archive | allow | allow, **ADP** | allow | reject | reject |
-| Move between shared collections | allow | allow, **ADP** | n/a | n/a | n/a |
-| Move shared -> `global` | allow (row becomes personal) | reject | | | |
-| Move `global` -> shared | allow (publishes it) | | | reject | |
-| Move into private-*/local- | not a server call: client retracts (delete own) | client keeps a personal copy; shared row stays | same | same | reject |
-| Delete | allow | reject `403 not_owner` (client tombstones locally) | allow | reject | reject |
-| Append `related_ids` | allow | allow (link only, capped, not ADP) | allow | reject | reject |
-| Read (pull, lookup, similar) | allow | allow | allow | only if owner `share_global` | reject |
-| Lookups that reveal existence (owners/collections/created-at by id) | allow | allow | allow | omitted from result | reject |
+| Action | Shared, self | Shared, teammate | Local-only (`global`, private-*/local-*) |
+|--------|--------------|------------------|------------------------------------------|
+| Insert (new id) | allow; `origin_user` = caller | n/a | reject |
+| Insert, id in another user's task namespace (`bob-12` by alice) | reject `403 task_namespace` | | reject |
+| Update content/metadata | allow | allow, **ADP** | reject |
+| Archive / supersede (`archived` false->true, `superseded_by`) | allow | allow, **ADP** | reject |
+| Un-archive | allow | allow, **ADP** | reject |
+| Move between shared collections | allow | allow, **ADP** | n/a |
+| Move into a local-only collection | not a server call: client retracts (delete own) | client keeps a local copy; shared row stays | reject |
+| Move local-only -> shared | not a move on the server: an insert of a new shared row (publishes it) | n/a | reject |
+| Delete | allow | reject `403 not_owner` (client tombstones locally) | reject |
+| Append `related_ids` | allow | allow (link only, capped, not ADP) | reject |
+| Read (pull, lookup, similar) | allow | allow | reject |
+| Lookups that reveal existence (owners/collections/created-at by id) | allow | allow | reject |
 
 Notes:
 
@@ -256,11 +310,23 @@ Notes:
 - Teammate edits of a shared task (complete, reassign, re-date) are content
   updates and are ADP-classed with the rest; the governance layer can choose to
   auto-approve low-risk fields such as `status`.
-- Writes from the remote MCP endpoint (routines) are attributed to the
-  routine's identity (see open questions) and follow the same matrix.
-- Admin actions (user mapping, reassigning ownership of a departed user's rows)
-  are not API endpoints in v1; they run as a separate admin job with its own
-  service account.
+- Concurrent edits are last-writer-wins in v1 (decision 4). When a write
+  replaces a version last written by a different user, the server also writes
+  an `overwrote_teammate_edit` event to `audit_log`. Stricter governance
+  belongs to ADP (josh-323).
+- Any insert or update whose content matches a secret pattern is rejected
+  with `422 secret_detected` in every column of the matrix (decision 8).
+- Routine principals (`routine-<name>`, from the remote MCP endpoint) follow
+  the same shared-collection columns (decision 2). They cannot read `global`
+  because it is never on the server. Their writes are attributed
+  "by routine-<name>".
+- Admin actions (user mapping, transferring ownership of a departed user's
+  rows) are not API endpoints in v1; they run as a separate admin job with its
+  own service account and are written to `audit_log`. Ownership transfer is
+  added when first needed (decision 10).
+- No per-collection ACLs in v1 (decision 7): every active member can read
+  every shared collection. Restricted material uses `private-*` collections
+  until v2 adds collection -> group bindings.
 
 ## 5. API v1
 
@@ -274,7 +340,7 @@ are Unix seconds (integers) to match the client code. Every response carries
 | Endpoint | Replaces (`postgres.ts`) |
 |----------|--------------------------|
 | `GET /healthz` (no auth), `GET /v1/health` | `checkRemoteHealth` |
-| `GET /v1/me` | (new) username, email, `share_global`, server limits |
+| `GET /v1/me` | (new) username, email, server limits |
 | `GET /v1/collections/{c}/documents` | `getRemoteDocsSince` / `buildRemoteDocsSinceQuery` |
 | `POST /v1/documents:batchUpsert` (and `PUT /v1/documents/{id}`) | `upsertRemoteDocument` |
 | `POST /v1/documents:batchDelete` | `deleteRemoteDocuments` |
@@ -286,8 +352,8 @@ are Unix seconds (integers) to match the client code. Every response carries
 | `GET /v1/me/max-task-number` | `getRemoteMaxTaskNumber` |
 | `POST /v1/collections/{c}:similar` | `findSimilarRemote` |
 | `POST /v1/documents/{id}/related-ids` | `addRemoteRelatedIds` |
-| `GET /v1/deletions` | (new, optional) delete propagation, gap 5 |
-| `POST /mcp` | (new) remote MCP, josh-313 |
+| (part of pull) `deletions` in the pull response | (new, v1) delete propagation, gap 5, decision 5 |
+| `POST /mcp` on `yapa-mcp` (not `yapa-service`) | (new, later) remote MCP, josh-313 |
 
 `migrateSchema` and `ensureVectorIndex` have no endpoint: schema is owned by
 the deploy pipeline, never by clients.
@@ -315,22 +381,36 @@ the deploy pipeline, never by clients.
 
 `GET /v1/collections/{c}/documents?since=<unix>&cursor=<opaque>&limit=<n>&include_own_device=<bool>&embeddings=<bool>`
 
-- Server applies: collection class check, personal rule for `global`, echo
+- Server applies: collection class check (local-only rejected), echo
   rule using the caller's username and `X-Yapa-Device`, `synced_at > since`.
 - Order: `(synced_at, id)` ascending. `limit` default 500, max 1000.
-- Cursor: opaque base64 of the last `(synced_at, id)` returned. A request with
-  a cursor ignores `since`.
+- Cursor: opaque base64 of the last `(synced_at, id)` returned plus the last
+  `(deleted_at, id)` of the deletions feed. A request with a cursor ignores
+  `since`.
+- Deletions (decision 5): the response also returns rows from `deletions` for
+  this collection with `deleted_at` after the cursor (or `since`), with the
+  same overlap window, paginated with the documents. Deletions are only
+  recorded for shared collections, since nothing else is stored.
+  The client deletes its local copy when it is clean; a dirty copy (local
+  edits not yet pushed) is kept and reported in `sync status` and the sync
+  log, so nothing is lost silently. Retractions (own doc moved into a
+  `private-*`/`local-*` collection) are deletions on the server and appear in
+  the feed the same way.
 - The cursor is on `synced_at`, not `updated_at`: `updated_at` is client clock
   (skewed, can move backwards on a rekey or a stale push) and does not change
   on `related_ids` appends, so it cannot be a reliable change feed.
   `synced_at` is server-assigned on every write. The client keeps its overlap
   window (`SYNC_PULL_OVERLAP_SECONDS`) because a transaction that started
   before a pull can commit after it with an earlier `synced_at`; the service
-  uses `clock_timestamp()` to keep that window small.
+  uses `clock_timestamp()` to keep that window small. This stays the v1
+  change feed (decision 11).
 
 ```jsonc
 // 200
-{ "documents": [Document, ...], "next_cursor": "b64...", "has_more": true }
+{ "documents": [Document, ...],
+  "deletions": [{ "id": "acme-auth-fix-1", "deleted_by": "alice",
+                  "deleted_at": 1760000600 }],
+  "next_cursor": "b64...", "has_more": true }
 ```
 
 ### Upsert
@@ -345,8 +425,8 @@ the deploy pipeline, never by clients.
     "id": "alice-312",
     "collection": "project-yapa",
     "content": "string",
-    "embedding": [/* 384 floats */],      // optional: server embeds if absent
-    "embedding_model": "Xenova/all-MiniLM-L6-v2:q8",
+    "embedding": [/* 384 floats */],      // required in v1 (decision 12)
+    "embedding_model": "Xenova/all-MiniLM-L6-v2:q8", // recorded, not trusted
     "metadata": { "type": "task", "status": "pending" },
     "created_at": 1760000000,
     "updated_at": 1760000500
@@ -355,17 +435,30 @@ the deploy pipeline, never by clients.
 // 200 (per-item results; the batch never fails as a whole for item errors)
 {
   "results": [
-    { "id": "alice-312", "status": "inserted" | "updated" | "unchanged",
+    { "id": "alice-312", "status": "inserted" | "updated" | "unchanged" | "pending",
       "synced_at": 1760000510,
       "similar": [{ "id": "alice-77", "similarity": 0.97 }] },
     { "id": "bob-12", "status": "error",
       "error": { "code": "task_namespace", "message": "..." } },
     { "id": "alice-300", "status": "error",
       "error": { "code": "id_taken", "remote_created_at": 1750000000,
-                 "suggested_id": "alice-341" } }
+                 "suggested_id": "alice-341" } },
+    { "id": "acme-creds-2", "status": "error",
+      "error": { "code": "secret_detected", "message": "..." } }
   ]
 }
 ```
+
+- `pending` is reserved for forward compatibility (decision 9). v1 never
+  returns it, and with asynchronous ADP review it may never be needed; clients
+  must still accept it as a non-error result (written, not yet visible to
+  others) so a later server can use it without a client release.
+- Secrets (decision 8): an item whose `content` matches a secret pattern is
+  rejected with `secret_detected` (HTTP 422 for the single-doc form). The
+  client runs the same pattern check before pushing, so this is normally a
+  backstop. Either way the doc stays in the local store, marked
+  local/unsynced, and the user is told which doc and why. Nothing is lost.
+  The pattern list is shared code so client and server agree.
 
 - `similar` returns readable rows above the server's similarity threshold so a
   push needs one round trip instead of similar + upsert. The client still does
@@ -379,9 +472,12 @@ the deploy pipeline, never by clients.
   `unchanged` when content, metadata, embedding and collection match). The
   `Idempotency-Key` is stored for 24 h to return the original response on a
   retry and to keep audit records from duplicating.
-- Concurrency: last-writer-wins, matching today. The response reports
-  `stale: true` when the stored `updated_at` was newer than the incoming one,
-  so the client can log it. Real conflict handling is an open question.
+- Concurrency: last-writer-wins, matching today (decision 4). The response
+  reports `stale: true` when the stored `updated_at` was newer than the
+  incoming one, so the client can log it. When the replaced version was last
+  written by a different user, the server writes an `overwrote_teammate_edit`
+  event to `audit_log` in the same transaction. Stricter conflict governance
+  belongs to ADP (josh-323), not to the sync API.
 - `PUT /v1/documents/{id}` is the single-doc form with the same body/result.
 
 ### Delete
@@ -389,13 +485,14 @@ the deploy pipeline, never by clients.
 `POST /v1/documents:batchDelete` `{ "ids": ["..."] }` (max 500) ->
 `{ "results": [{ "id": "...", "status": "deleted" | "not_found" | "error", "error": {"code": "not_owner"} }], "deleted": 3 }`.
 Each delete writes a row to `deletions` (id, collection, deleted_by,
-deleted_at) so teammates can eventually drop their copies (gap 5).
+deleted_at) in the same transaction, and pull returns it to teammates so they
+drop clean copies (gap 5, decision 5).
 
 ### Lookups
 
 - `GET /v1/collections` -> `{ "collections": [{ "name": "customer-acme", "count": 42 }] }`.
   Counts only rows the caller can read; private names never appear.
-- `GET /v1/me/collections` -> `{ "collections": ["customer-acme", "global"] }`
+- `GET /v1/me/collections` -> `{ "collections": ["customer-acme", "project-yapa"] }`
   (rows the caller owns; used by recovery).
 - `POST /v1/documents:collections` and `POST /v1/documents:owners`:
   `{ "ids": [...] }` (max 1000) -> `{ "collections": { "id": "name" } }` /
@@ -419,7 +516,7 @@ searched (fixes gap 2).
 `POST /v1/documents/{id}/related-ids` `{ "add": ["..."] }` ->
 `{ "related_ids": [...] }`. Set union (fixes gap 3), max 100 ids per row,
 bumps `synced_at`. Allowed on any row the caller can read in a shared
-collection, or on the caller's own `global` rows.
+collection.
 
 ### Errors
 
@@ -430,12 +527,13 @@ collection, or on the caller's own `global` rows.
 
 | HTTP | code | Meaning |
 |------|------|---------|
-| 400 | `invalid_request`, `invalid_collection`, `embedding_dimension`, `embedding_model` | malformed input |
+| 400 | `invalid_request`, `invalid_collection`, `embedding_dimension`, `embedding_invalid` | malformed input |
 | 401 | `unauthenticated` | missing/expired/invalid token (client refreshes once, then surfaces "run yapa login") |
-| 403 | `not_member`, `user_inactive`, `not_owner`, `personal_collection`, `private_collection`, `task_namespace` | authz |
+| 403 | `not_member`, `user_inactive`, `not_owner`, `local_only_collection`, `task_namespace` | authz |
 | 404 | `not_found` | missing or not readable (indistinguishable on purpose) |
 | 409 | `id_taken` | task id collision, includes `suggested_id` |
 | 413 | `payload_too_large` | over batch/doc limits |
+| 422 | `secret_detected` | content matches a secret pattern; doc stays local (decision 8) |
 | 429 | `rate_limited` | with `Retry-After` seconds |
 | 503 | `unavailable` | DB down / overloaded; client keeps local changes unsynced and retries next cycle |
 
@@ -459,13 +557,22 @@ prompt); the limits exist to stop a runaway loop. A per-user daily write cap
 
 ### Remote MCP (josh-313)
 
+Not part of v1. Served by the separate `yapa-mcp` Cloud Run service (same
+image, open at the platform level, app auth only; decision 1).
+
 `POST /mcp` (streamable HTTP transport). Exposes a subset of the local tools,
 backed directly by the shared store: `memory_recall`, `memory_store`,
 `task_list`, `task_search`, `task_create`, `task_update`, `task_complete`,
 `collection_list`. Same authz matrix; private collections do not exist here
-(no local store), and `global` is the caller's own. Write tools compute
-embeddings server-side. Destructive tools (`memory_forget`, `task_delete`) are
-not exposed in v1.
+(no local store). Callers are `routine-<name>` principals: shared collections
+only (`global` is not on the server), writes attributed "by routine-<name>" (decision 2).
+Write tools compute embeddings server-side. Destructive tools
+(`memory_forget`, `task_delete`) are not exposed.
+
+OAuth (decision 3): settled by a spike in josh-313. The expected shape is a
+thin OAuth authorization server inside the service that fronts Google sign-in
+and issues short-lived bearer tokens for `/mcp`, with protected-resource
+metadata as the MCP authorization spec requires.
 
 ## 6. Data model
 
@@ -477,10 +584,11 @@ CREATE TABLE users (
   username     TEXT PRIMARY KEY CHECK (username ~ '^[A-Za-z0-9_-]{1,64}$'),
   email        TEXT NOT NULL UNIQUE,
   active       BOOLEAN NOT NULL DEFAULT true,
-  share_global BOOLEAN NOT NULL DEFAULT false,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   disabled_at  TIMESTAMPTZ
 );
+-- josh-313 adds routine principals here (username `routine-<name>`, plus an
+-- owner column naming the responsible human); not needed in v1.
 
 -- documents: keep v1 columns, add
 ALTER TABLE documents
@@ -492,12 +600,13 @@ CREATE INDEX idx_docs_coll_synced ON documents (collection, synced_at, id);
 CREATE INDEX idx_docs_embedding ON documents USING hnsw (embedding vector_cosine_ops);
 DROP INDEX IF EXISTS idx_docs_synced_at;  -- superseded by the composite
 
--- deletions: lets teammates' clients drop deleted rows (optional in v1)
+-- deletions: feed that lets teammates' clients drop deleted rows (v1)
 CREATE TABLE deletions (
   id TEXT NOT NULL, collection TEXT NOT NULL,
   deleted_by TEXT NOT NULL, deleted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (id, deleted_at)
 );
+CREATE INDEX idx_deletions_coll_at ON deletions (collection, deleted_at, id);
 
 -- audit_log: append-only record of every write
 CREATE TABLE audit_log (
@@ -508,9 +617,11 @@ CREATE TABLE audit_log (
   device       TEXT,
   request_id   TEXT NOT NULL,
   action       TEXT NOT NULL,          -- insert|update|archive|move|delete|link|retract
+                                       -- |overwrote_teammate_edit|transfer_owner
   doc_id       TEXT NOT NULL,
   collection   TEXT NOT NULL,
   prev_collection TEXT,
+  prev_editor  TEXT,                   -- last writer before this write
   row_owner    TEXT NOT NULL,
   change_class TEXT NOT NULL,          -- own|teammate (teammate = ADP candidate)
   content_sha256 TEXT,                 -- hash, not content
@@ -527,7 +638,18 @@ CREATE TABLE idempotency_keys (
   to query "changes by non-owners to shared rows" and because it should be
   restorable with the data. Request logs (method, route, status, latency,
   actor, request id, never content) go to Cloud Logging. The runtime role has
-  `INSERT` but not `UPDATE`/`DELETE` on `audit_log`.
+  `INSERT` but not `UPDATE`/`DELETE` on `audit_log`. ADP review (josh-323) is
+  asynchronous and reverts from these records (decision 9), so `audit_log`
+  must carry enough to identify the prior version; `overwrote_teammate_edit`
+  rows (decision 4) are its main input.
+- `deletions` rows are kept indefinitely in v1 (they are tiny), so a client
+  that has been offline for a long time still sees every deletion.
+- Room for v2 per-collection ACLs (decision 7): a `collection_acls
+  (collection, group_email)` table can be added without touching `documents`;
+  a collection with no binding stays readable by every active member, which
+  is the v1 behavior.
+- There is no personal collection class and no sharing flag: `global` rows
+  are never stored (decision 6), and a v2 pre-check asserts none exist.
 - Row-level security as defense in depth: enable RLS on `documents` with
   policies keyed on `current_setting('yapa.user')`, set per transaction by the
   service (`SET LOCAL`). The service is still the primary enforcement point;
@@ -538,7 +660,8 @@ CREATE TABLE idempotency_keys (
   pipeline, before the new service revision takes traffic. It is additive
   except the `vector(384)` change, which needs a pre-check that every existing
   row has 384 dimensions (rows with other dimensions are reported and
-  re-embedded by the service from `content`). Old direct-DB clients at v1 keep
+  re-embedded from `content` by the migration job, using the same pinned
+  model as the clients). Old direct-DB clients at v1 keep
   working against v2 (they ignore new columns), which makes the cutover
   reversible until the shared login is revoked. Clients in service mode never
   run DDL; `migrateSchema` stays only in the self-host adapter.
@@ -546,7 +669,7 @@ CREATE TABLE idempotency_keys (
 ## 7. Threat model (STRIDE)
 
 Assets: shared memories/tasks (customer context, internal decisions),
-personal `global` rows, embeddings (invertible enough to treat as content),
+embeddings (invertible enough to treat as content),
 user mapping, audit trail. Actors: active member, former member, outsider on
 the internet, compromised laptop, buggy/runaway client, malicious content
 author (prompt injection via shared memories), compromised routine.
@@ -554,30 +677,32 @@ author (prompt injection via shared memories), compromised routine.
 | Threat | Example | Mitigation |
 |--------|---------|------------|
 | **S** Impersonate a teammate | Set `YAPA_USERNAME=bob` (works today) | Username comes from `users` via verified email; body `origin_user` ignored |
+| **S** Outsider reaches the API | Anyone on the internet calls `/v1` | v1: Cloud Run IAM (`roles/run.invoker` = YAPA group, custom audiences) rejects them before the app runs, and the app verifies the token again. MCP service (josh-313): app auth only |
 | **S** Stolen token | ID token copied from a laptop | 1 h lifetime, `aud` and `hd` checks, refresh token only in OS keychain, offboarding disables mapping immediately |
 | **S** Token for another app replayed | Google ID token minted for some other OAuth client | Strict `aud` allowlist; gcloud audience off unless explicitly enabled |
 | **S** Spoofed device id | Forge `X-Yapa-Device` | Device only drives echo suppression; spoofing just makes the attacker miss or re-pull their own rows. Not trusted for authz |
-| **T** Overwrite a teammate's row | Push same id with new content | Allowed by design but attributed (`last_editor`), audited, ADP-reviewable; `origin_user`/`created_at` immutable |
-| **T** Hijack via collection move | Move a teammate's doc into own `global` to hide it | Matrix forbids moving teammate rows into personal collections |
+| **T** Overwrite a teammate's row | Push same id with new content (or a stale local copy) | Last-writer-wins by design but attributed (`last_editor`), audited with an `overwrote_teammate_edit` event, reviewed asynchronously and revertible via ADP; `origin_user`/`created_at` immutable |
+| **T** Hijack via collection move | Move a teammate's doc into a local-only collection to hide it | Not a server operation: the client keeps a local copy and the shared row stays; only the owner can retract (delete) |
 | **T** Task id squatting | Push `bob-999` to block bob's next ids | Namespace check on insert |
 | **T** Mass deletion | Delete everything | Owner-only delete; per-user write rate and daily caps; PITR |
-| **T** Direct DB writes | Old URL still works | Revoke shared login at cutover; Cloud SQL private IP only, no authorized networks; runtime SA has DML only, no DDL |
+| **T** Direct DB writes | Old URL still works | Revoke shared login at cutover; direct DB credentials are never distributed to the team (self-host only); Cloud SQL private IP only, no authorized networks; runtime SA has DML only, no DDL |
 | **T** Data in transit | MITM on a network | HTTPS only (Cloud Run managed TLS); private IP + connector TLS to Cloud SQL |
 | **R** "I didn't change that" | Disputed teammate edit | `audit_log` with actor email, device, request id; Cloud Logging request logs; append-only for runtime role |
-| **I** Read someone's personal `global` | Query the table directly with the shared DB login (works today) | Owner-side `share_global` flag, enforced on every read path including similarity, counts and id lookups |
+| **I** Read someone's `global` | Query the table directly with the shared DB login (worked before PR #17) | `global` is local-only: never pushed by clients, rejected by the service on every endpoint, and all remote `global` rows were deleted on 2026-10-09 |
 | **I** Existence oracle | Probe ids/owners/counts | Unreadable rows omitted; 404 for both missing and unreadable |
-| **I** Private data sent to server | Bug pushes `private-*` | Rejected before parse of content; request bodies never logged; client also filters |
-| **I** Secrets stored in shared memories | API key pasted into a `customer-*` memory | Server-side secret pattern scan on insert/update (warn + flag in v1; see open questions); docs keep pointing users to `private-*` |
+| **I** Local-only data sent to server | Bug pushes `global` or `private-*` | Rejected (`local_only_collection`) before parse of content; request bodies never logged; client also filters |
+| **I** Secrets stored in shared memories | API key pasted into a `customer-*` memory | Client checks secret patterns before pushing; server rejects matching inserts/updates with `422 secret_detected`; the doc stays local and unsynced and the user is told; docs keep pointing users to `private-*` |
 | **I** Logs leak content | Content in error logs | Structured logging with an allowlist of fields; content and embeddings never logged |
 | **I** Former member keeps data | Laptop still has local copies | Out of scope technically (local-first); covered by device policy. Access to new data ends at offboarding |
 | **D** Runaway client | Push loop, huge pulls | Rate limits, batch limits, pagination, `statement_timeout` (5 s), Cloud Run max instances, alert on per-user write spikes |
 | **D** Expensive similarity | Many large queries | HNSW index, limit clamp, similarity rate class |
 | **D** Connection exhaustion | Many instances x pool | Pool size x max instances < Cloud SQL `max_connections` minus headroom |
-| **E** Unauthenticated route | New route forgets auth | Deny-by-default middleware, test that enumerates routes |
+| **E** Unauthenticated route | New route forgets auth | v1: Cloud Run IAM in front of every route; deny-by-default middleware and a test that enumerates routes in both service modes (the only gate on the MCP service) |
 | **E** SQL injection | Username in regex (today `getRemoteMaxTaskNumber` builds a pattern from it) | Username from DB only, validated by `CHECK`; parameterized queries everywhere |
 | **E** Over-privileged service account | SA can alter schema or read secrets | Separate runtime SA (DML), migrator SA (DDL, used only by the job), admin SA (users table) |
 | **E** Prompt injection through shared content | Malicious memory instructs other users' Claude sessions | Content is untrusted data: recall output already attributes `by <user>`; ADP review of teammate edits; size limits. Hooks should keep framing injected memories as data |
-| **E** Compromised routine via `/mcp` | Routine token abused | Separate routine identity with narrow scope (no delete tools, rate class), revocable independently of the human |
+| **E** Compromised routine via `/mcp` | Routine token abused | Separate `routine-<name>` principal with a named human owner; shared collections only (`global` is never on the server); writes attributed "by routine-<name>"; no delete tools, own rate class; revocable independently of the human |
+| **T** Poisoned embedding | Client sends a vector chosen to surface a memory for unrelated queries | v1: dimension, finiteness and unit-norm checks only (accepted gap); full server-side re-embedding of every write once the model ships server-side with josh-313 |
 
 ## 8. Embeddings
 
@@ -586,32 +711,32 @@ author (prompt injection via shared memories), compromised routine.
   dimensions) via `@huggingface/transformers` v4. Other providers
   (fireworks/openai/voyage/ollama) produce different vectors and already break
   cross-user similarity if mixed.
-- The server validates every incoming embedding: exactly 384 finite floats,
-  L2 norm within `1 +/- 0.01`, and `embedding_model` equal to
-  `Xenova/all-MiniLM-L6-v2:q8`. Otherwise `400 embedding_model` /
-  `embedding_dimension`.
-- The service bundles the same model and library version (pinned in the
-  container image, weights baked in, no download at start). Uses:
-  - `/mcp` queries and writes (routines have no embedder).
-  - Upserts that omit `embedding` (lets non-local providers sync by having the
-    server embed `content`, and removes the empty-embedding push path).
-  - Re-embedding rows that fail the v2 dimension pre-check.
-- Optional integrity check: re-embed a small sample of client-supplied vectors
-  and compare (cosine > 0.99). A mismatch flags the row and the user. This
-  catches poisoning (a vector chosen to surface a memory for unrelated
-  queries) at low cost.
+- v1 validation (decision 12): the server checks every incoming embedding for
+  dimension (exactly 384), finiteness (no NaN/Inf) and approximate unit norm
+  (L2 norm within `1 +/- 0.01`); otherwise `400 embedding_dimension` /
+  `embedding_invalid`. `embedding` is required on every upsert.
+  `embedding_model` is recorded but not trusted (it is self-asserted), so v1
+  does not detect a well-formed vector that was not produced from `content`.
+- v1 does not run an embedder. Rows that fail the v2 dimension pre-check are
+  re-embedded by the migration job with the same pinned model the clients use.
+- With josh-313 the model ships server-side (pinned in the container image,
+  weights baked in, no download at start). From then on the server re-embeds
+  every write from `content` and stores its own vector, which closes the
+  poisoning gap (a vector chosen to surface a memory for unrelated queries)
+  and lets non-local providers sync. The same embedder serves `/mcp` queries
+  and writes (routines have no embedder).
 - Model changes are a coordinated migration (new column, dual write, backfill,
   switch), never a silent swap.
-- Sizing: the q8 model is small (tens of MB); a 1 GiB / 1 vCPU instance
-  embeds short texts in milliseconds. Cold start adds model load time, which is
-  one reason for `min-instances=1`.
+- Sizing (josh-313 onward): the q8 model is small (tens of MB); a 1 GiB /
+  1 vCPU instance embeds short texts in milliseconds. Cold start adds model
+  load time, one more reason for `min-instances=1`.
 
 ## 9. Operations
 
 ### Deployment
 
 - Terraform under `infra/` (preferred; gcloud scripts acceptable for a first
-  cut): Cloud Run service, service accounts, Cloud SQL instance (private IP
+  cut): Cloud Run service(s), service accounts, Cloud SQL instance (private IP
   only, PITR on), database and IAM users, Direct VPC egress, Artifact Registry
   repo, Secret Manager entries for OAuth client config, monitoring policies,
   log bucket.
@@ -620,6 +745,18 @@ author (prompt injection via shared memories), compromised routine.
   revision with gradual traffic (10% -> 100%).
 - Cloud Run settings: `min-instances=1`, `max-instances=5`, concurrency 40,
   1 vCPU / 1 GiB, request timeout 60 s.
+- `yapa-service` (v1) access (decision 1): deployed with
+  `--no-allow-unauthenticated`; `roles/run.invoker` granted to the YAPA Google
+  group (plus the CI and admin service accounts); `--custom-audiences` set to
+  the YAPA desktop OAuth client id (and the gcloud client id only if that
+  fallback is enabled). The first task of josh-311 is a spike that deploys a
+  stub with this configuration and confirms a desktop-client ID token from
+  `yapa login` is accepted by Cloud Run and by the app.
+- `yapa-mcp` (josh-313, not in v1): a second Cloud Run service from the same
+  image with an MCP-mode flag, deployed with `--allow-unauthenticated`
+  because MCP OAuth clients cannot satisfy Cloud Run IAM. It serves only
+  `/mcp` and the OAuth endpoints; `/v1` is not routed there. It uses its own
+  runtime service account with the same DML-only database role.
 
 ### Secrets and DB credentials
 
@@ -628,7 +765,8 @@ author (prompt injection via shared memories), compromised routine.
   database password exists for the service. Recommended over Secret Manager
   passwords: nothing to rotate or leak, and access dies with the SA binding.
 - Secret Manager only for the OAuth client secret used by the `/mcp` OAuth
-  flow (the desktop client id is public by nature).
+  flow (josh-313; the desktop client id is public by nature). v1 needs no
+  secrets.
 - The legacy `yapa` password login is removed at cutover.
 
 ### Monitoring and alerting
@@ -637,7 +775,7 @@ author (prompt injection via shared memories), compromised routine.
   authz denials by code, per-user write volume, pull lag (now - max
   `synced_at` returned), DB CPU/connections/storage, embedder latency.
 - Alerts: 5xx rate > 2% for 10 min; p95 pull latency > 1 s; any
-  `private_collection` rejection (indicates a client bug); auth failure spike;
+  `local_only_collection` rejection (indicates a client bug); auth failure spike;
   per-user write spike; Cloud SQL storage > 80%; backup failure.
 - Uptime check on `/healthz`.
 
@@ -668,7 +806,8 @@ SLA; acceptable for a pilot.
 
 1. Provision Cloud SQL and the service; apply schema v2.
 2. Copy data from the current database (dump/restore or Database Migration
-   Service); verify counts.
+   Service); verify counts and that no `global`, `private-*` or `local-*`
+   rows exist (remote `global` rows were already deleted on 2026-10-09).
 3. Seed `users` from distinct `origin_user` values with each person's email.
 4. Pilot: a few users switch to service mode. Either the service fronts the
    old database during the pilot (both paths write the same tables), or the
@@ -682,8 +821,16 @@ SLA; acceptable for a pilot.
 
 - New config: `sync_service_url` (plugin) / `YAPA_SYNC_SERVICE_URL` (MCP), and
   a `yapa login` command for the OAuth loopback flow.
-- `sync_database_url` stays for self-hosting but is documented as advanced;
-  the installer stops offering it for team setups.
+- `sync_database_url` stays as the advanced/self-host path in v1
+  (decision 13); the installer stops offering it for team setups, and direct
+  DB credentials for the team database are never distributed. Revisit after
+  the pilot (josh-316).
+- Client-side secret check before push (decision 8): matching docs stay
+  local/unsynced and the user is told; a server `secret_detected` result is
+  handled the same way.
+- Deletions feed (decision 5): pull applies `deletions` to clean local copies
+  and reports dirty ones in `sync status`.
+- Clients accept a `pending` per-item result (decision 9) without error.
 - `sync status` reports which adapter is active, the signed-in email, and the
   mapped username; it warns if `YAPA_USERNAME` disagrees with the mapping (the
   local username must match, since task ids are prefixed with it).
@@ -691,41 +838,56 @@ SLA; acceptable for a pilot.
   step 5; after that they get connection errors and `sync status` explains
   how to migrate.
 
-## 10. Open questions
+## 10. Decisions (2026-10-09)
 
-1. **Cloud Run IAM in addition to app auth.** Can `/v1` keep
-   `roles/run.invoker` (with custom audiences for the desktop client id) while
-   `/mcp` stays reachable for OAuth, e.g. two services or a path split? Needs a
-   quick spike.
-2. **Routine identity for `/mcp`.** Does a scheduled routine act as the human
-   who created it (delegated OAuth token) or as a separate `routine-<name>`
-   user? Affects attribution, offboarding, and which `global` it can read.
-3. **MCP OAuth implementation.** Does the service act as its own OAuth
-   authorization server (proxying Google sign-in, issuing short-lived tokens)
-   or can a Google-issued token be used directly by the connector?
-4. **Conflict handling.** Keep last-writer-wins, or add optimistic
-   concurrency (`base_updated_at`, 409 on mismatch) so a teammate's edit is
-   not silently overwritten by a stale local copy?
-5. **Delete propagation.** Ship the `deletions` feed in v1 so teammates drop
-   deleted rows, or keep today's behavior (copies linger) and add it later?
-6. **`share_global` semantics.** Owner-side flag per user (proposed) applies
-   retroactively to all of their `global` rows; is per-row opt-in needed? What
-   about rows teammates already pulled before the owner turns it off?
-7. **Per-collection ACLs.** Do some `customer-*` collections need a restricted
-   audience (e.g. only the account team)? If yes, model as collection ->
-   group bindings in v2.
-8. **Secrets in shared content.** Warn-and-flag or reject on insert when a
-   secret pattern matches? Rejecting breaks offline-first pushes for that doc.
-9. **ADP review placement (josh-323).** Synchronous (write held as pending
-   until approved) or asynchronous (applied, reviewed after, revertible from
-   `audit_log`)? The data model supports either; the API would need a
-   `pending` result status for the synchronous variant.
-10. **Departed users' rows.** Keep attributed forever, or allow an admin to
-    reassign ownership (so someone can delete/archive them)?
-11. **Pull change feed.** Is the `synced_at` + overlap window good enough, or
-    should v2 add a commit-ordered sequence (`BIGSERIAL` set on write) to drop
-    the overlap entirely?
-12. **Embedding integrity sampling.** Worth the CPU, and what sample rate?
-13. **Self-host story.** Should the service image also be the recommended
-    self-host path (with a generic OIDC issuer), retiring direct DB sync
-    entirely in a later major version?
+0. **Identity: the service verifies Google ID tokens itself (option (a)).**
+   CLI-friendly, works for remote MCP, and the app needs the identity for
+   authz and attribution anyway (section 3).
+1. **Cloud Run IAM also protects the v1 service.** `roles/run.invoker` is bound
+   to the YAPA group with custom audiences for the desktop OAuth client; no
+   `--allow-unauthenticated`. App verification stays as defense in depth. The
+   remote MCP endpoint (josh-313) is a second Cloud Run service from the same
+   image, open at the platform level with app auth only. A spike at the start
+   of josh-311 verifies the custom-audience setup.
+2. **Routine identity (josh-313/317): separate `routine-<name>` principal** with
+   a named human owner. Shared collections only, never any `global` (it is
+   local-only, decision 6); writes attributed "by routine-<name>". Keeps attribution honest and lets a routine
+   be revoked without touching its owner.
+3. **MCP OAuth (josh-313): decided by a spike in 313.** Expected outcome: the
+   service runs a thin OAuth authorization server fronting Google sign-in,
+   since connectors need an MCP-spec authorization server.
+4. **Conflicts: last-writer-wins in v1.** The server writes an
+   `overwrote_teammate_edit` audit event whenever a write replaces a version
+   last written by a different user. Stricter governance belongs to ADP
+   (josh-323), not the sync API.
+5. **Deletions feed ships in v1.** `deletions(id, collection, deleted_by,
+   deleted_at)`; pull returns deletions since the cursor; clients delete clean
+   local copies and keep and report dirty ones. Fixes gap 5 without risking
+   unpushed work.
+6. **`global` is local-only, like `private-*`/`local-*`.** It never reaches the
+   shared database, not even between one user's own devices, and the service
+   rejects it on every endpoint. The former share-global opt-in
+   (`share_global` / `SYNC_SHARE_GLOBAL`) is removed entirely (client side in
+   PR #17, commit 8a8f8f3); all remote `global` rows were deleted on
+   2026-10-09. Team-wide knowledge goes in a shared collection such as
+   `project-cs-team`. Removes a whole collection class and its read rules.
+7. **No per-collection ACLs in v1.** The data model leaves room for collection
+   -> group bindings in v2; restricted material uses `private-*` collections
+   meanwhile.
+8. **Secrets: reject, do not warn.** The server rejects inserts/updates whose
+   content matches secret patterns (`422 secret_detected`) and the client runs
+   the same check before pushing. The doc stays local and unsynced and the
+   user is told, so nothing is lost.
+9. **ADP review (josh-323) is asynchronous.** Writes apply immediately, are
+   reviewed after, and are revertible from `audit_log`. API v1 reserves a
+   `pending` per-item result status for forward compatibility.
+10. **Departed users' rows stay attributed.** An admin-only, audited
+    ownership-transfer command is added when first needed; not v1-blocking.
+11. **Pull change feed: `synced_at` + overlap window in v1.** Good enough at
+    team scale; a commit-ordered sequence can replace it later if needed.
+12. **Embedding integrity: v1 validates dimension (384), finiteness and
+    approximate unit norm only.** Full server-side re-embedding on every write
+    once the model ships server-side with josh-313.
+13. **Self-host: direct DB sync stays as the advanced/self-host path in v1.**
+    Our team uses only the service and direct DB credentials are never
+    distributed. Revisit after the pilot (josh-316).
