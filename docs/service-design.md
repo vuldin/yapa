@@ -891,3 +891,22 @@ SLA; acceptable for a pilot.
 13. **Self-host: direct DB sync stays as the advanced/self-host path in v1.**
     Our team uses only the service and direct DB credentials are never
     distributed. Revisit after the pilot (josh-316).
+
+## 11. Implementation notes (josh-311, 2026-10-09)
+
+- **App token header.** Cloud Run IAM forwards `Authorization` with the token
+  signature replaced by `SIGNATURE_REMOVED_BY_GOOGLE` (also when
+  `X-Serverless-Authorization` is sent), so clients send the same ID token in
+  `X-Yapa-Id-Token`, which the app verifies fully. A stripped token is never
+  accepted.
+- **Membership (v1).** No YAPA Google group exists yet: Cloud Run
+  `roles/run.invoker` is bound per person, and the app requires an active
+  `users` row (the group check of section 3 is deferred until a group exists).
+- **Pilot tokens.** `gcloud auth print-identity-token` user tokens (gcloud's
+  client id as audience) are accepted for the pilot; switch to the YAPA
+  desktop OAuth client audience before team rollout (josh-318).
+- **Health.** Cloud Run reserves `/healthz` externally; `/health` is the
+  external liveness route.
+- **RLS.** `docs_update` uses `NULLIF(current_setting('yapa.user', true), '')`
+  (pooled connections reset it to ''), and a trigger makes `origin_user` /
+  `created_at` immutable except for an explicit admin ownership transfer.
