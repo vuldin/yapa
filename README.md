@@ -114,6 +114,15 @@ follows `CLAUDE.md` / `AGENTS.md`.
 To uninstall later, say `uninstall yapa` in any session (or
 `claude plugin uninstall yapa@yapa` for the plugin).
 
+## Team pilot
+
+Joining the team sync pilot:
+
+- [docs/pilot-onboarding.md](docs/pilot-onboarding.md): install, configure, verify, privacy rules, troubleshooting, rollback.
+- [docs/second-user-test.md](docs/second-user-test.md): two-person runbook that proves cross-user sync end to end.
+- [docs/pilot-feedback-template.md](docs/pilot-feedback-template.md): how to report issues (Slack + YAPA task).
+- Admins: `scripts/yapa-user.sh` lists, disables, enables, or maps users (header explains the IAP tunnel).
+
 ## Tools
 
 The table below lists the **MCP** tool names. The DSH plugin exposes the same
