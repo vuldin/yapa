@@ -3,3 +3,6 @@ dist/
 .env
 *.tsbuildinfo
 .npm-cache
+
+# The Claude Code plugin ships its prebuilt bundle (plugins have no build step).
+!plugin/dist/

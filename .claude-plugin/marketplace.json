@@ -1,0 +1,12 @@
+{
+  "name": "yapa",
+  "owner": { "name": "Josh Purcell" },
+  "metadata": { "description": "YAPA: persistent, team-shareable memory and tasks for Claude Code" },
+  "plugins": [
+    {
+      "name": "yapa",
+      "source": "./plugin",
+      "description": "Memory, tasks, per-prompt recall and teammate sync (PostgreSQL+pgvector) for Claude Code"
+    }
+  ]
+}

@@ -28,20 +28,16 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-session';
 import {
+  captureTurn as coreCaptureTurn,
   extractMemories,
   queryDocuments,
   resolveConflict,
   storeMemory,
-  EXTRACTOR_PROMPT_VERSION,
-  RESOLVER_PROMPT_VERSION,
 } from '@yapa/core';
 import { detectCollection } from './injector.js';
 import type { ResolvedConfig } from './config.js';
 
 const log = (msg: string) => process.stderr.write(`[yapa] ${msg}\n`);
-
-/** Bound the extractor input so a monster turn can't blow up aux cost. */
-const MAX_EXTRACT_CHARS = 12_000;
 
 interface TurnBuffer {
   /** Turn number currently accumulating (from turn/start). */
@@ -165,97 +161,16 @@ async function captureTurn(
   resolved: ResolvedConfig,
 ): Promise<void> {
   const { collection } = await detectCollection(cwd, resolved.projectRoots, resolved.customers);
-
-  const candidates = await extractMemories(
+  // The pipeline lives in core (shared with the Claude Code Stop hook); pass
+  // this module's bindings so the plugin's collaborators stay swappable.
+  const result = await coreCaptureTurn(
+    { collection, sessionId, turn, userText, assistantText: assistantTextJoined },
     {
-      collection,
-      userText: userText.slice(0, MAX_EXTRACT_CHARS),
-      assistantText: assistantTextJoined.slice(0, MAX_EXTRACT_CHARS),
+      maxMemories: resolved.captureMaxMemories,
+      maxSalience: resolved.captureMaxSalience,
+      dedupeDistance: resolved.captureDedupeDistance,
     },
-    { maxMemories: resolved.captureMaxMemories },
+    { extractMemories, queryDocuments, resolveConflict, storeMemory, log },
   );
-  if (!candidates.length) return;
-
-  let stored = 0;
-  let skipped = 0;
-  let superseded = 0;
-  for (const candidate of candidates) {
-    // Retrieve-then-decide: near neighbors gate the candidate. No neighbors
-    // → store. Neighbors → the conservative resolver judges: skip (same
-    // fact), add (distinct despite similar embedding), or supersede (the
-    // fact CHANGED — store the update, archive the stale memory). This is
-    // what keeps "X is now on port 9000" from being lost to dedup against
-    // "X runs on port 8000".
-    const neighbors = await queryDocuments(collection, candidate.content, 3, { type: 'memory' })
-      .then(results => results.filter(r => r.distance < resolved.captureDedupeDistance && r.metadata?.archived !== true))
-      .catch(() => []); // collection may not exist yet → nothing to conflict with
-
-    let content = candidate.content;
-    let supersedes: string | undefined;
-    let resolverRationale: string | undefined;
-
-    if (neighbors.length > 0) {
-      let decision;
-      try {
-        decision = await resolveConflict(
-          candidate.content,
-          neighbors.map(n => ({ id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience })),
-        );
-      } catch (e) {
-        // Resolver failure (LLM outage, or process teardown mid-capture —
-        // llm-bridge's disposer clears the aux route as the plugin scope
-        // disposes, so calls in flight at shutdown always land here). Never
-        // blind-store: that's a double-store when the agent already captured
-        // the fact mid-turn. Fall back to a STRICT distance gate instead —
-        // skip near-exact duplicates, store the rest.
-        log(`Resolver failed for a candidate in ${collection}: ${e}`);
-        const strictThreshold = resolved.captureDedupeDistance / 2;
-        if (neighbors.some(n => n.distance < strictThreshold)) {
-          skipped++;
-          continue;
-        }
-        decision = { action: 'add' as const, rationale: 'resolver error, passed strict distance gate' };
-      }
-
-      if (decision.action === 'skip') {
-        skipped++;
-        continue;
-      }
-      if (decision.action === 'supersede' && decision.targetId) {
-        supersedes = decision.targetId;
-        content = decision.mergedContent ?? candidate.content;
-        resolverRationale = decision.rationale;
-      }
-    }
-
-    await storeMemory(content, {
-      collection,
-      tags: [...new Set([...candidate.tags, 'auto-capture'])],
-      salience: Math.min(candidate.salience, resolved.captureMaxSalience),
-      sector: candidate.sector,
-      supersedes,
-      metadata: {
-        source: 'auto-capture',
-        session_id: sessionId,
-        turn,
-        extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
-        rationale: candidate.rationale,
-        ...(resolverRationale !== undefined && {
-          resolver_prompt_version: RESOLVER_PROMPT_VERSION,
-          resolver_rationale: resolverRationale,
-        }),
-      },
-    });
-    stored++;
-    if (supersedes) superseded++;
-  }
-
-  if (stored > 0 || skipped > 0) {
-    const note = `Auto-captured ${stored} ${stored === 1 ? 'memory' : 'memories'} from last turn`
-      + (superseded ? `, ${superseded} superseding stale ${superseded === 1 ? 'memory' : 'memories'}` : '')
-      + (skipped ? ` (${skipped} skipped as already known)` : '')
-      + ` → \`${collection}\``;
-    captureNotices.set(sessionId, note);
-    log(`${note} [session ${sessionId}, turn ${turn}]`);
-  }
+  if (result.notice) captureNotices.set(sessionId, result.notice);
 }

@@ -21,13 +21,13 @@ export async function getSyncPullTimestamp(): Promise<number> {
 }
 
 /**
- * Update the pull timestamp to now.
+ * Update the pull timestamp (defaults to now).
  */
-export async function updateSyncPullTimestamp(): Promise<void> {
+export async function updateSyncPullTimestamp(at: number = Math.floor(Date.now() / 1000)): Promise<void> {
   await getOrCreateCollection('global');
   await addDocument('global', SYNC_PULL_SENTINEL_ID, 'sync pull sentinel', {
     type: 'sync_pull_sentinel',
-    last_pull: Math.floor(Date.now() / 1000),
+    last_pull: at,
   });
 }
 

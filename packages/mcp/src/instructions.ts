@@ -89,9 +89,10 @@ already captured in git history or in an existing memory.
 ### End-of-Session Journal
 - During the session, call \`journal_append\` with a one-line note whenever a
   meaningful step completes (decision made, finding confirmed, task closed).
-- Before the session ends — or when prompted by the SessionEnd hook — call
-  \`journal_consolidate\` to merge the drafts into a single memory tagged
-  \`journal\`. The next session's recall will surface it.
+- Drafts are consolidated into a single memory tagged \`journal\` automatically
+  when the session ends (the MCP server does it on shutdown). Call
+  \`journal_consolidate\` earlier if the work reaches a natural close. The next
+  session's recall will surface it.
 
 ### Task Management Lifecycle
 - On completion: \`task_complete\`

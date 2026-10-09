@@ -6,6 +6,12 @@ export interface LifecycleMetadata {
   created_at: number;
   sector: 'semantic' | 'episodic';
 
+  /** Unix seconds this memory's salience was last decayed (wall-clock decay anchor). */
+  decayed_at?: number;
+  /** UTC day number (unix seconds / 86400) of the last boost, and boosts that day. */
+  boost_day?: number;
+  boosts_today?: number;
+
   // Populated by the Phase 1 classifier; scalar 0.0-1.0.
   trainable?: number;
   durability?: number;
@@ -27,27 +33,43 @@ export interface LifecycleMetadata {
   verification_last_result?: 'passed' | 'failed';
 }
 
-/** Boost salience when document is accessed. */
-export function touchDocument(metadata: LifecycleMetadata): LifecycleMetadata {
+/**
+ * Record a use of the document: refresh `accessed_at` and boost salience by
+ * SALIENCE_BOOST_ON_ACCESS — at most SALIENCE_MAX_BOOSTS_PER_DAY times per UTC
+ * day, so a burst of prompts in one session can't pin a memory at the max.
+ */
+export function touchDocument(metadata: LifecycleMetadata, now: number = Math.floor(Date.now() / 1000)): LifecycleMetadata {
+  const day = Math.floor(now / 86400);
+  const boostsToday = metadata.boost_day === day ? (metadata.boosts_today ?? 0) : 0;
+  if (boostsToday >= getConfig().SALIENCE_MAX_BOOSTS_PER_DAY) {
+    return { ...metadata, accessed_at: now };
+  }
   return {
     ...metadata,
-    accessed_at: Math.floor(Date.now() / 1000),
+    accessed_at: now,
     salience: Math.min(metadata.salience + SALIENCE_BOOST_ON_ACCESS, SALIENCE_MAX),
+    boost_day: day,
+    boosts_today: boostsToday + 1,
   };
 }
 
-/**
- * Apply daily decay to salience.
- * Semantic memories decay slower than episodic.
- */
-export function applyDecay(metadata: LifecycleMetadata): LifecycleMetadata {
-  const decayMultiplier = metadata.sector === 'semantic'
+/** Salience multiplier for `days` of elapsed time. Semantic memories decay at half the rate. */
+export function decayFactor(sector: 'semantic' | 'episodic', days: number): number {
+  const perDay = sector === 'semantic'
     ? Math.pow(getConfig().SALIENCE_DECAY_RATE, 0.5) // Slower decay for facts
     : getConfig().SALIENCE_DECAY_RATE;
+  return Math.pow(perDay, Math.max(0, days));
+}
 
+/**
+ * Decay salience for `days` of elapsed wall-clock time (fractional days are
+ * fine). Time-based rather than per-sweep, so the curve doesn't depend on how
+ * often a server happens to start.
+ */
+export function applyDecay(metadata: LifecycleMetadata, days: number = 1): LifecycleMetadata {
   return {
     ...metadata,
-    salience: Math.max(metadata.salience * decayMultiplier, SALIENCE_FLOOR),
+    salience: Math.max(metadata.salience * decayFactor(metadata.sector, days), SALIENCE_FLOOR),
   };
 }
 

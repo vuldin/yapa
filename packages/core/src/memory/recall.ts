@@ -1,4 +1,5 @@
 import { queryDocuments, queryAllCollections, updateDocument } from '../store/index.js';
+import { getConfig } from '../config.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
 import {
   passesPromotedFilter,
@@ -14,6 +15,18 @@ export interface RecallOptions {
   include_promoted?: boolean;
   include_archived?: boolean;
   filters?: RecallFilters;
+  /**
+   * Count relevant hits as a "use" and boost their salience (default true).
+   * Only hits closer than SALIENCE_BOOST_MAX_DISTANCE are boosted either way.
+   */
+  boost?: boolean;
+  /**
+   * With `collection` set, also return up to this many strongly relevant hits
+   * from OTHER collections (closer than CROSS_COLLECTION_MAX_DISTANCE): the
+   * fix for one customer's issue is often already known from another.
+   * Results carry their `collection`. Default 0.
+   */
+  crossCollection?: number;
 }
 
 export interface RecallResult {
@@ -45,6 +58,15 @@ export async function recallMemory(
   if (options.collection) {
     const docs = await queryDocuments(options.collection, query, nResults, filter);
     results = docs.map(d => ({ ...d, collection: options.collection }));
+    const extra = options.crossCollection ?? 0;
+    if (extra > 0) {
+      const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
+      // Over-fetch: the scope's own hits and weak matches are dropped below.
+      const others = (await queryAllCollections(query, nResults + extra * 4, filter).catch(() => []))
+        .filter(r => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true)
+        .slice(0, extra);
+      results = [...results, ...others];
+    }
   } else {
     const docs = await queryAllCollections(query, nResults, filter);
     results = docs;
@@ -73,8 +95,13 @@ export async function recallMemory(
     rankScore(a.distance, a.metadata.salience) - rankScore(b.distance, b.metadata.salience),
   );
 
-  // Boost salience asynchronously for retrieved docs (preserves existing behavior)
+  // Boost salience for hits that were actually relevant. Surfacing a weak
+  // match (e.g. the per-prompt hook's top 3 on an unrelated prompt) is not a
+  // use, and boosting it fed a rich-get-richer loop: higher salience → ranked
+  // higher → surfaced more → boosted more.
+  const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
   for (const r of results) {
+    if (options.boost === false || r.distance >= boostMaxDistance) continue;
     if (r.collection) {
       const lifecycleMeta: LifecycleMetadata = {
         salience: r.metadata.salience ?? 1.0,

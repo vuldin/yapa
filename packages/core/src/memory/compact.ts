@@ -1,4 +1,5 @@
 import { getConfig } from '../config.js';
+import { archivedMetadata } from './archive.js';
 import {
   getDocumentsByFilter,
   getDocumentsByIds,
@@ -121,11 +122,7 @@ export async function applyCompaction(input: ApplyCompactionInput): Promise<Appl
     try {
       const existing = await getDocumentsByIds(input.collection, [id]);
       if (!existing.length) continue;
-      await updateDocument(input.collection, id, {
-        ...existing[0].metadata,
-        archived: true,
-        compacted_into: summaryId,
-      });
+      await updateDocument(input.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
       archivedIds.push(id);
     } catch (e) {
       process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}\n`);

@@ -5,8 +5,11 @@ let localPipeline: any = null;
 
 async function getLocalPipeline() {
   if (!localPipeline) {
-    const { pipeline } = await import('chromadb-default-embed');
-    localPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    const { pipeline, env } = await import('@huggingface/transformers');
+    if (getConfig().MODEL_CACHE_DIR) env.cacheDir = getConfig().MODEL_CACHE_DIR;
+    // q8 is the same quantized ONNX model the previous embedder
+    // (chromadb-default-embed) loaded by default, so stored vectors stay valid.
+    localPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
   }
   return localPipeline;
 }
@@ -17,13 +20,35 @@ async function embedLocal(text: string): Promise<number[]> {
   return Array.from(output.data);
 }
 
+// Small memo of recent single-text embeddings (promises, so concurrent callers
+// share one computation). A cross-collection search queries every collection
+// with the same text; without this each query re-embedded it.
+const MEMO_MAX = 64;
+const memo = new Map<string, Promise<number[]>>();
+
 /**
  * Generate embedding for a single text.
  */
-export async function generateEmbedding(text: string): Promise<number[]> {
-  if (getConfig().EMBEDDING_PROVIDER === 'chromadb') return embedLocal(text);
-  const batch = await generateEmbeddingsBatch([text]);
-  return batch[0];
+export function generateEmbedding(text: string): Promise<number[]> {
+  const key = `${getConfig().EMBEDDING_PROVIDER}\u0000${getEmbeddingModel()}\u0000${text}`;
+  const hit = memo.get(key);
+  if (hit) {
+    memo.delete(key); // refresh LRU position
+    memo.set(key, hit);
+    return hit;
+  }
+  const work = (getConfig().EMBEDDING_PROVIDER === 'chromadb'
+    ? embedLocal(text)
+    : generateEmbeddingsBatch([text]).then(batch => batch[0]));
+  memo.set(key, work);
+  work.catch(() => memo.delete(key)); // never cache failures
+  if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value!);
+  return work;
+}
+
+/** Test hook: drop memoized embeddings. */
+export function clearEmbeddingMemo(): void {
+  memo.clear();
 }
 
 /**

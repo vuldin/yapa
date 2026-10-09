@@ -1,7 +1,6 @@
 import { getConfig } from './config.js';
 import { toChroma, fromChroma, type RawMetadata } from './metadata-adapter.js';
 import { generateEmbedding, generateEmbeddingsBatch } from './embeddings.js';
-import { touchDocument } from './lifecycle.js';
 
 // Canonical document/result types live in the store port (store/types.ts);
 // re-exported here for compatibility with long-standing import paths.
@@ -82,6 +81,25 @@ function buildChromaFilter(filter: Record<string, any>): Record<string, any> {
 
 // Cache collection name -> ID mapping
 const collectionIdCache = new Map<string, string>();
+// Cache collection name -> HNSW distance space ('cosine' | 'l2' | 'ip')
+const collectionSpaceCache = new Map<string, string>();
+
+/**
+ * Normalize a Chroma distance to cosine distance (0..2). Collections created
+ * before yapa pinned `hnsw.space: 'cosine'` use the server default, squared
+ * L2. For the unit-normalized vectors yapa stores, ||a-b||^2 = 2 - 2cos, i.e.
+ * exactly twice the cosine distance; inner product returns 1 - cos directly.
+ * Without this, every tuned threshold is off by 2x on legacy collections.
+ */
+export function toCosineDistance(distance: number, space: string | undefined): number {
+  return space === 'l2' ? distance / 2 : distance;
+}
+
+function spaceOf(collection: any): string {
+  return collection?.configuration_json?.hnsw?.space
+    ?? collection?.metadata?.['hnsw:space']
+    ?? 'l2'; // Chroma's server default when nothing was pinned
+}
 
 async function chromaFetch(path: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(`${apiBase()}${path}`, {
@@ -105,6 +123,7 @@ export async function getCollectionId(name: string): Promise<string> {
   if (!match) throw new Error(`Collection '${name}' not found`);
 
   collectionIdCache.set(name, match.id);
+  collectionSpaceCache.set(name, spaceOf(match));
   return match.id;
 }
 
@@ -213,19 +232,16 @@ export async function queryDocuments(
   const data = await response.json();
   if (!data.ids[0]?.length) return [];
 
+  // Raw metadata: boosting salience is recall's decision (relevance-gated),
+  // not a side effect of every similarity query. Touching here as well made
+  // each recall hit count twice on Chroma.
   return data.ids[0].map((id: string, i: number) => {
     const metadata = fromChroma(data.metadatas[0][i]);
-    const lifecycleMeta = {
-      salience: metadata.salience ?? 1.0,
-      accessed_at: metadata.accessed_at ?? Math.floor(Date.now() / 1000),
-      created_at: metadata.created_at ?? Math.floor(Date.now() / 1000),
-      sector: metadata.sector ?? 'episodic',
-    };
     return {
       id,
       content: data.documents[0][i],
-      metadata: { ...metadata, ...touchDocument(lifecycleMeta) },
-      distance: data.distances[0][i],
+      metadata,
+      distance: toCosineDistance(data.distances[0][i], collectionSpaceCache.get(collectionName)),
     };
   });
 }
@@ -378,6 +394,7 @@ export async function createCollection(
 
   // Clear cache since we have a new collection
   collectionIdCache.delete(name);
+  collectionSpaceCache.delete(name);
 }
 
 /** Delete a collection by name. */
@@ -393,6 +410,7 @@ export async function deleteCollection(name: string): Promise<void> {
   }
 
   collectionIdCache.delete(name);
+  collectionSpaceCache.delete(name);
 }
 
 /** Get collection document count. */

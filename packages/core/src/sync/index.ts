@@ -2,7 +2,7 @@
 import { getConfig } from '../config.js';
 import { migrateSchema, ensureVectorIndex } from './schema.js';
 import { pushToRemote, PushStats } from './push.js';
-import { pullFromRemote, PullStats } from './pull.js';
+import { pullFromRemote, PullStats, emptyPullStats } from './pull.js';
 import { checkRemoteHealth, closePool } from './postgres.js';
 
 export interface SyncStats {
@@ -37,8 +37,8 @@ export async function syncCycle(): Promise<SyncStats | null> {
 
   syncRunning = true;
   try {
-    let pushStats: PushStats = { pushed: 0, linked: 0, deleted: 0, errors: 0 };
-    let pullStats: PullStats = { pulled: 0, linked: 0, skipped: 0, errors: 0 };
+    let pushStats: PushStats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
+    let pullStats: PullStats = emptyPullStats();
 
     try {
       pushStats = await pushToRemote();
@@ -54,14 +54,14 @@ export async function syncCycle(): Promise<SyncStats | null> {
       pullStats.errors++;
     }
 
-    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.linked > 0;
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
     if (hasPushActivity || hasPullActivity) {
       process.stderr.write(
-        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted` +
-        ` | Pull: ${pullStats.pulled} new, ${pullStats.linked} linked, ${pullStats.skipped} skipped\n`
+        `[yapa-sync] Push: ${pushStats.pushed} new, ${pushStats.linked} linked, ${pushStats.deleted} deleted, ${pushStats.retracted} retracted` +
+        ` | Pull: ${pullStats.pulled} new, ${pullStats.updated} updated, ${pullStats.moved} moved, ${pullStats.linked} linked, ${pullStats.skipped} skipped\n`
       );
     }
 
@@ -91,6 +91,55 @@ export async function syncCycle(): Promise<SyncStats | null> {
   }
 }
 
+let soonTimer: ReturnType<typeof setTimeout> | null = null;
+let inFlight: Promise<unknown> | null = null;
+
+function runTracked<T>(work: Promise<T>): Promise<T> {
+  const tracked = work.finally(() => { if (inFlight === tracked) inFlight = null; });
+  inFlight = tracked;
+  return tracked;
+}
+
+/**
+ * Debounced, fire-and-forget sync shortly after a local write, so teammates
+ * see a new memory/task within seconds instead of on the next interval tick.
+ */
+export function scheduleSyncSoon(delayMs: number = getConfig().SYNC_PUSH_DEBOUNCE_MS): void {
+  if (!getConfig().SYNC_ENABLED || !getConfig().SYNC_DATABASE_URL || delayMs <= 0) return;
+  if (soonTimer) clearTimeout(soonTimer);
+  soonTimer = setTimeout(() => {
+    soonTimer = null;
+    runTracked(syncCycle()).catch(e => process.stderr.write(`[yapa-sync] Write-triggered sync error: ${e}\n`));
+  }, delayMs);
+}
+
+/** True while a write-triggered sync is scheduled but hasn't run yet. */
+export function hasPendingSync(): boolean {
+  return soonTimer !== null;
+}
+
+/**
+ * Shutdown path: push any write still waiting on the debounce (and let an
+ * in-flight cycle finish), bounded by `timeoutMs`. Without this, a memory
+ * stored seconds before the session closed would sit unpushed until the next
+ * session on this machine.
+ */
+export async function flushPendingSync(timeoutMs = 5000): Promise<void> {
+  const work: Promise<unknown>[] = [];
+  if (soonTimer) {
+    clearTimeout(soonTimer);
+    soonTimer = null;
+    work.push(runTracked(pushToRemote()).catch(e => process.stderr.write(`[yapa-sync] Shutdown push error: ${e}\n`)));
+  } else if (inFlight) {
+    work.push(inFlight.catch(() => undefined));
+  }
+  if (work.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs); });
+  await Promise.race([Promise.all(work), timeout]);
+  if (timer) clearTimeout(timer);
+}
+
 /**
  * Start the background sync process.
  * Runs schema migration on first connect, then syncs on interval.
@@ -101,6 +150,10 @@ export async function startSync(): Promise<void> {
   if (!getConfig().SYNC_DATABASE_URL) {
     process.stderr.write('[yapa-sync] YAPA_SYNC_DATABASE_URL not set — sync disabled\n');
     return;
+  }
+
+  if (!process.env.YAPA_USERNAME) {
+    process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.\n`);
   }
 
   // Validate connection and migrate schema

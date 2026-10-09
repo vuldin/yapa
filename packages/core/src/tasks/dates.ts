@@ -88,3 +88,31 @@ function endOfDay(d: Date): number {
   d.setHours(23, 59, 59, 999);
   return Math.floor(d.getTime() / 1000);
 }
+
+/**
+ * Parse a hands-on effort string into integer minutes.
+ * Examples: "90m", "2h", "1.5d", "45" (bare number = minutes).
+ * A "day" is treated as an 8-hour working day, since this measures effort, not wall-clock.
+ * Returns null if unparseable (callers should warn, not throw).
+ */
+export function parseDuration(input: string): number | null {
+  const s = input.toLowerCase().trim();
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+  if (!m) return null;
+  const value = parseFloat(m[1]);
+  if (isNaN(value)) return null;
+  const unit = m[2] ?? 'm';
+  let minutes: number;
+  if (unit.startsWith('h')) minutes = value * 60;
+  else if (unit.startsWith('d')) minutes = value * 60 * 8;
+  else minutes = value;
+  return Math.round(minutes);
+}
+
+/** Format effort minutes for human-readable display. Examples: "45m", "1h 30m", "2h". */
+export function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}

@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock @yapa/core before importing the module under test: only listCollections
-// is needed, and it must never touch a real store.
-vi.mock('@yapa/core', () => ({
+// Mock the store port before importing the module under test: only
+// listCollections is needed, and it must never touch a real store.
+vi.mock('./store/index.js', () => ({
   listCollections: vi.fn(),
 }));
 
-import { listCollections } from '@yapa/core';
+import { listCollections } from './store/index.js';
 import { detectCollection } from './scope.js';
+import { setConfig, resetConfig, createConfig } from './config.js';
 
 const mocked = vi.mocked(listCollections);
 const ROOTS = ['/home/u/projects'];
@@ -67,5 +68,31 @@ describe('detectCollection', () => {
     const d = await detectCollection('/home/u/projects/dsh', ROOTS);
     expect(d.collection).toBe('project-dsh');
     expect(d.ambiguous).toBeUndefined();
+  });
+
+  it('matches roots on a path boundary only', async () => {
+    expect((await detectCollection('/home/u/projects-old/dsh', ROOTS)).collection).toBe('global');
+    expect((await detectCollection('/home/u/projects', ROOTS)).collection).toBe('global');
+    expect((await detectCollection('/home/u/projects/dsh', ['/home/u/projects/'])).collection).toBe('project-dsh');
+  });
+
+  it('defaults roots and customers from YAPA_PROJECT_ROOTS / YAPA_CUSTOMERS', async () => {
+    setConfig(createConfig({ YAPA_PROJECT_ROOTS: '/srv/work:/home/u/projects', YAPA_CUSTOMERS: 'acme,globex' }));
+    try {
+      expect((await detectCollection('/srv/work/globex/notes')).collection).toBe('customer-globex');
+      expect((await detectCollection('/home/u/projects/dsh')).collection).toBe('project-dsh');
+      expect((await detectCollection('/tmp/x')).collection).toBe('global');
+    } finally {
+      resetConfig();
+    }
+  });
+
+  it('treats everything as global when no roots are configured', async () => {
+    setConfig(createConfig({}));
+    try {
+      expect((await detectCollection('/home/u/projects/dsh')).collection).toBe('global');
+    } finally {
+      resetConfig();
+    }
   });
 });

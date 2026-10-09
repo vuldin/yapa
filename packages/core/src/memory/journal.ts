@@ -5,6 +5,7 @@ import {
   deleteDocument,
   getDocumentsByFilter,
   getOrCreateCollection,
+  listCollections,
 } from '../store/index.js';
 
 import { storeMemory } from './store.js';
@@ -121,4 +122,54 @@ export async function journalConsolidate(
   }
 
   return { memory_id: stored.ids[0], draft_count: drafts.length };
+}
+
+/**
+ * Consolidate one session's drafts in every collection that holds any — the
+ * MCP server's shutdown path (a session may journal into several scopes).
+ */
+export async function consolidateSessionEverywhere(sessionId: string = SESSION_ID): Promise<ConsolidateResult[]> {
+  const out: ConsolidateResult[] = [];
+  for (const col of await listCollections().catch(() => [])) {
+    try {
+      const result = await journalConsolidate({ collection: col.name, sessionId });
+      if (result) out.push(result);
+    } catch (e) {
+      process.stderr.write(`[yapa] journal: consolidate failed in ${col.name}: ${e}\n`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Fallback for sessions that died without consolidating (crash, kill -9):
+ * roll up drafts older than `maxAgeSeconds`, grouped per collection+session,
+ * never touching a live session's recent drafts.
+ */
+export async function consolidateStaleDrafts(maxAgeSeconds = 24 * 3600): Promise<ConsolidateResult[]> {
+  const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
+  const out: ConsolidateResult[] = [];
+  for (const col of await listCollections().catch(() => [])) {
+    let drafts;
+    try {
+      drafts = await getDocumentsByFilter(col.name, { type: DRAFT_TYPE }, 1000);
+    } catch {
+      continue;
+    }
+    const sessions = new Map<string, number>();
+    for (const d of drafts) {
+      const sid = d.metadata.session_id;
+      if (!sid) continue;
+      // Only this user's drafts: a draft copied in from someone else (e.g. by
+      // an older sync) must never be rolled up under this user's name.
+      if (d.metadata.username && d.metadata.username !== getConfig().USERNAME) continue;
+      sessions.set(sid, Math.max(sessions.get(sid) ?? 0, d.metadata.created_at ?? 0));
+    }
+    for (const [sid, newest] of sessions) {
+      if (newest > cutoff) continue; // still possibly live
+      const result = await journalConsolidate({ collection: col.name, sessionId: sid }).catch(() => null);
+      if (result) out.push(result);
+    }
+  }
+  return out;
 }

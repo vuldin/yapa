@@ -18,6 +18,8 @@ export interface TaskOptions {
   is_recurring?: boolean;
   recurrence_pattern?: 'daily' | 'weekly' | 'monthly';
   salience?: number;
+  duration_minutes?: number;
+  completed_at?: number;
 }
 
 const PRIORITY_SALIENCE: Record<string, number> = {
@@ -43,6 +45,23 @@ export async function getNextTaskId(): Promise<string> {
       }
     } catch {
       continue;
+    }
+  }
+
+  // A wiped store, or this user's other machine, may already have used higher
+  // numbers on the shared database; reusing one would overwrite that task
+  // remotely. Best-effort: an unreachable remote falls back to local numbering
+  // (push still refuses to overwrite a different task, see sync/push.ts).
+  if (getConfig().SYNC_ENABLED && getConfig().SYNC_DATABASE_URL) {
+    try {
+      const { getRemoteMaxTaskNumber } = await import('../sync/postgres.js');
+      const remote = await Promise.race([
+        getRemoteMaxTaskNumber(getConfig().USERNAME),
+        new Promise<number>(resolve => setTimeout(() => resolve(0), 3000).unref()),
+      ]);
+      maxId = Math.max(maxId, remote);
+    } catch {
+      // fall back to local numbering
     }
   }
 
@@ -78,6 +97,8 @@ export async function createTask(
     created_at: now,
     updated_at: now,
     accessed_at: now,
+    completed_at: options.completed_at ?? null,
+    duration_minutes: options.duration_minutes ?? null,
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? 'medium'],
     sector: 'semantic',
   };

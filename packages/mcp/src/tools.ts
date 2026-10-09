@@ -13,6 +13,7 @@ import {
   bucketRoutePreview,
   bucketStatus,
   checkRemoteHealth,
+  getSyncTlsMode,
   classifyMemories,
   completeTask,
   createNewCollection,
@@ -22,6 +23,7 @@ import {
   evalCompare,
   evalRun,
   forgetMemory,
+  formatDuration,
   formatTaskDate,
   getAdapter,
   getCurationModel,
@@ -43,7 +45,11 @@ import {
   listMemories,
   listSessionDrafts,
   listTasks,
+  parseDuration,
   parseRelativeDate,
+  pullCollection,
+  scheduleSyncSoon,
+  getDeviceId,
   recallMemory,
   removeCollection,
   runDecaySweep,
@@ -64,7 +70,36 @@ import {
   verifyAdapterAgainstManifest,
 } from '@yapa/core';
 
+// Tools whose writes should reach the shared remote within seconds instead of
+// on the next sync interval tick.
+export const SYNC_ON_WRITE_TOOLS = new Set([
+  'memory_store', 'memory_forget', 'compaction_apply', 'journal_consolidate', 'janitor_now',
+  'task_create', 'task_update', 'task_complete', 'task_delete', 'task_add_dependency',
+]);
+
+/**
+ * Wrap `server.tool` so every write tool schedules a debounced sync after its
+ * handler resolves. One seam instead of a call in every handler's return paths.
+ */
+export function withSyncOnWrite(server: McpServer): McpServer {
+  const register = server.tool.bind(server) as (...args: any[]) => any;
+  (server as any).tool = (name: string, ...rest: any[]) => {
+    if (SYNC_ON_WRITE_TOOLS.has(name)) {
+      const handler = rest[rest.length - 1];
+      rest[rest.length - 1] = async (...args: any[]) => {
+        const result = await handler(...args);
+        scheduleSyncSoon();
+        return result;
+      };
+    }
+    return register(name, ...rest);
+  };
+  return server;
+}
+
 export function registerTools(server: McpServer): void {
+  withSyncOnWrite(server);
+
   // --- Setup ---
   server.tool(
     'setup_instructions',
@@ -116,10 +151,11 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'memory_recall',
-    'Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. Promoted memories (already moved to the system-prompt companion or a trained adapter) are excluded by default.',
+    'Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. With `collection`, a few strongly relevant hits from OTHER collections are included too (labeled with their collection) — a fix found for one customer often applies to another. Omit `collection` to search everything. Promoted memories (already moved to the system-prompt companion or a trained adapter) are excluded by default.',
     {
       query: z.string().describe('Semantic search query'),
-      collection: z.string().optional().describe('Limit search to this collection'),
+      collection: z.string().optional().describe('Primary collection to search (omit to search all collections equally)'),
+      other_collections: z.number().optional().describe('With `collection`: max extra strongly-relevant hits from other collections (default from YAPA_CROSS_COLLECTION_RESULTS, 2; 0 = scope only)'),
       n_results: z.number().optional().describe('Max results (default 5)'),
       tags: z.array(z.string()).optional().describe('Filter by tags'),
       include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
@@ -130,9 +166,10 @@ export function registerTools(server: McpServer): void {
         classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
       }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ query, collection, n_results, tags, include_promoted, filters }) => {
+    async ({ query, collection, other_collections, n_results, tags, include_promoted, filters }) => {
       const results = await recallMemory(query, {
         collection,
+        crossCollection: other_collections ?? getConfig().CROSS_COLLECTION_RESULTS,
         nResults: n_results,
         tags,
         include_promoted,
@@ -886,6 +923,9 @@ export function registerTools(server: McpServer): void {
           `Collection: ${task.collection}`,
         ];
         if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
+        if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
+        if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
+        if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines.push(`Owner: ${task.metadata.origin_user}`);
         if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
         const tags = norm(task.metadata.tags);
         if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
@@ -905,6 +945,8 @@ export function registerTools(server: McpServer): void {
       const text = tasks.map(t => {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
         if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
+        if (t.metadata.duration_minutes != null) line += ` (effort: ${formatDuration(t.metadata.duration_minutes)})`;
+        if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
         line += ` [${t.collection}]`;
         return line;
       }).join('\n');
@@ -921,20 +963,33 @@ export function registerTools(server: McpServer): void {
       status: z.enum(['pending', 'in_progress', 'blocked', 'complete']).optional(),
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
       notes: z.string().optional(),
-      due: z.string().optional().describe('Due date phrase'),
+      due: z.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date'),
       tags: z.array(z.string()).optional(),
       blocked_reason: z.string().optional(),
+      duration: z.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
     },
-    async ({ id, status, priority, notes, due, tags, blocked_reason }) => {
+    async ({ id, status, priority, notes, due, tags, blocked_reason, duration }) => {
       const updates: Record<string, any> = {};
       if (status) updates.status = status;
       if (priority) updates.priority = priority;
       if (notes !== undefined) updates.notes = notes;
       if (tags) updates.tags = tags;
       if (blocked_reason) updates.blockedReason = blocked_reason;
-      if (due) {
-        const ts = parseRelativeDate(due);
-        if (ts) updates.due_date = ts;
+      if (due !== undefined) {
+        const low = due.trim().toLowerCase();
+        if (low === 'none' || low === 'clear' || low === '') {
+          updates.due_date = 0; // sentinel for "no due date"; readers treat 0 as unset
+        } else {
+          const ts = parseRelativeDate(due);
+          if (ts) updates.due_date = ts;
+        }
+      }
+      if (duration) {
+        const parsed = parseDuration(duration);
+        if (parsed == null) {
+          return { content: [{ type: 'text' as const, text: `Couldn't parse duration "${duration}". Try "90m", "2h", or "1.5d".` }] };
+        }
+        updates.duration_minutes = parsed;
       }
 
       await updateTask(id, updates);
@@ -947,10 +1002,20 @@ export function registerTools(server: McpServer): void {
     'Mark a task as done. Handles recurring task regeneration.',
     {
       id: z.string().describe('Task ID to complete'),
+      duration: z.string().optional().describe('Hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
     },
-    async ({ id }) => {
-      const result = await completeTask(id);
+    async ({ id, duration }) => {
+      let durationMinutes: number | undefined;
+      if (duration) {
+        const parsed = parseDuration(duration);
+        if (parsed == null) {
+          return { content: [{ type: 'text' as const, text: `Couldn't parse duration "${duration}". Try "90m", "2h", or "1.5d".` }] };
+        }
+        durationMinutes = parsed;
+      }
+      const result = await completeTask(id, durationMinutes);
       let text = `Completed task ${id}`;
+      if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
       if (result.regeneratedId) {
         text += ` → regenerated as ${result.regeneratedId} (recurring)`;
       }
@@ -1068,9 +1133,13 @@ export function registerTools(server: McpServer): void {
         case 'status': {
           const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1000}s)`];
           lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
+          lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
+          if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
+          lines.push('global: local only (never synced; like private-/local- collections)');
           try {
             const health = await checkRemoteHealth();
             lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
+            lines.push(`TLS: ${{ 'verify-ca': 'encrypted, server verified', unverified: 'encrypted, server NOT verified (set sync_ca_cert)', off: 'off (local database)' }[getSyncTlsMode()]}`);
           } catch (e) {
             lines.push(`Connection: error — ${e}`);
           }
@@ -1103,7 +1172,7 @@ export function registerTools(server: McpServer): void {
             const stats = await syncCycle();
             if (!stats) return text('Sync skipped — previous cycle still running.');
             const { push, pull } = stats;
-            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
+            return text(`Sync cycle completed. Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.skipped} skipped, ${pull.errors} errors`);
           } catch (e) {
             return text(`Sync error: ${e}`);
           }
@@ -1137,8 +1206,12 @@ export function registerTools(server: McpServer): void {
             const existing = await getSyncSubscriptions();
             await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
             for (const name of valid) await getOrCreateCollection(name);
+            // Backfill full history: a regular cycle only pulls docs newer than
+            // the shared last-pull timestamp, so a new subscription would start empty.
+            let backfilled = 0;
+            for (const name of valid) backfilled += (await pullCollection(name, 0)).pulled;
             await syncCycle();
-            const lines = [`Subscribed to: ${valid.join(', ')}`];
+            const lines = [`Subscribed to: ${valid.join(', ')} (backfilled ${backfilled} docs)`];
             if (invalid.length > 0) lines.push(`Not found on remote: ${invalid.join(', ')}`);
             return text(lines.join('\n'));
           } catch (e) {

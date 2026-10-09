@@ -16,11 +16,12 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "vitest run src/sync/integration.test.ts"
   },
   "dependencies": {
-    "chromadb-default-embed": "^2.14.0",
-    "pg": "^8.20.0"
+    "@huggingface/transformers": "^4.3.1",
+    "pg": "^8.23.1"
   },
   "engines": {
     "node": ">=18"
