@@ -123,11 +123,6 @@ export interface YapaConfig {
    */
   DEVICE_ID: string;
   DEVICE_ID_PATH: string;
-  /**
-   * Share `global` with teammates. Off by default: `global` holds personal,
-   * cross-cutting notes, so it only syncs between the same user's devices.
-   */
-  SYNC_SHARE_GLOBAL: boolean;
   /** Seconds of overlap re-read on each pull so mid-pull pushes are never skipped. */
   SYNC_PULL_OVERLAP_SECONDS: number;
   /** Debounce before a write-triggered push (0 disables push-on-write). */
@@ -254,7 +249,6 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, 'SYNC_SIMILARITY_THRESHOLD', '0.95')),
     DEVICE_ID: get(env, 'DEVICE_ID', ''),
     DEVICE_ID_PATH: get(env, 'DEVICE_ID_PATH', pathJoin(homedir(), '.local', 'share', 'yapa', 'device-id')),
-    SYNC_SHARE_GLOBAL: get(env, 'SYNC_SHARE_GLOBAL', 'false') === 'true',
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
     SYNC_CA_CERT: get(env, 'SYNC_CA_CERT', ''),

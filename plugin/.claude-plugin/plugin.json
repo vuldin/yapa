@@ -69,12 +69,6 @@
       "description": "PEM file with the database server's CA; the server certificate is verified against it. Empty: connections are encrypted but the server is not verified.",
       "default": ""
     },
-    "sync_share_global": {
-      "type": "boolean",
-      "title": "Share 'global' with the team",
-      "description": "Off: your 'global' collection syncs only between your own devices. On: teammates receive it too.",
-      "default": false
-    },
     "response_capture": {
       "type": "boolean",
       "title": "Auto-capture findings",

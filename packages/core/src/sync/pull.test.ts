@@ -15,7 +15,8 @@ import { getRemoteDocsSince, getRemoteCollectionsForUser, getRemoteCollectionsBy
 import type { RemoteDocument } from './postgres.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
-import { pullFromRemote, pullCollection, isPersonalCollection } from './pull.js';
+import { pullFromRemote, pullCollection } from './pull.js';
+import { isSyncableCollection } from './syncable.js';
 import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions } from './sentinel.js';
 import { removeCollection } from '../collections/manage.js';
 import { getPendingDeletes, getLocalTombstones } from './deletes.js';
@@ -76,7 +77,7 @@ describe('pullCollection', () => {
 
   it('identifies itself by user AND device so the same user\'s other machines still sync', async () => {
     await pullCollection('project-acme', 0);
-    expect(mockedRemote).toHaveBeenCalledWith('project-acme', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: false, orOwnerShared: false, includeOwnDevice: undefined });
+    expect(mockedRemote).toHaveBeenCalledWith('project-acme', 0, { user: 'tester', device: 'dev-A' }, { includeOwnDevice: undefined });
   });
 
   it('applies a newer remote version over a clean local copy', async () => {
@@ -135,23 +136,15 @@ describe('pullCollection', () => {
   });
 });
 
-describe('personal collections', () => {
-  it('treats global as personal regardless of the reader\'s setting', () => {
-    expect(isPersonalCollection('global')).toBe(true);
-    expect(isPersonalCollection('project-acme')).toBe(false);
-    configure({ YAPA_SYNC_SHARE_GLOBAL: 'true' });
-    expect(isPersonalCollection('global')).toBe(true);
+describe('local-only collections', () => {
+  it('global, private-* and local-* never sync; shared collections do', () => {
+    for (const c of ['global', 'private-notes', 'local-x']) expect(isSyncableCollection(c)).toBe(false);
+    for (const c of ['customer-acme', 'project-acme', 'global-ish']) expect(isSyncableCollection(c)).toBe(true);
   });
 
-  it('pulls only the user\'s own rows into global', async () => {
+  it('never pulls global', async () => {
     await pullCollection('global', 0);
-    expect(mockedRemote).toHaveBeenCalledWith('global', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: true, orOwnerShared: false, includeOwnDevice: undefined });
-  });
-
-  it('a reader who opts in also gets rows their OWNERS shared, never everyone\'s', async () => {
-    configure({ YAPA_SYNC_SHARE_GLOBAL: 'true' });
-    await pullCollection('global', 0);
-    expect(mockedRemote).toHaveBeenCalledWith('global', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: true, orOwnerShared: true, includeOwnDevice: undefined });
+    expect(mockedRemote).not.toHaveBeenCalled();
   });
 });
 

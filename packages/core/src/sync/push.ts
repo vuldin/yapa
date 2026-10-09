@@ -7,10 +7,7 @@ import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
-/** Collection prefixes that should not be synced. */
-function isSyncable(collectionName: string): boolean {
-  return !collectionName.startsWith('private-') && !collectionName.startsWith('local-');
-}
+import { isSyncableCollection as isSyncable } from './syncable.js';
 
 export interface PushStats {
   pushed: number;
@@ -46,9 +43,9 @@ export async function pushToRemote(): Promise<PushStats> {
 
   const collections = await listCollections();
 
-  // Step 2: A doc of ours that now lives in a private-/local- collection
-  // (moved there, restored, or recreated with the same id) must not keep a
-  // shared copy. Teammates' rows are theirs, so a private copy of one is just
+  // Step 2: A doc of ours that now lives in a local-only collection
+  // (private-/local-/global: moved there, restored, or synced by an older
+  // version) must not keep a shared copy. Teammates' rows are theirs, so a private copy of one is just
   // a personal copy and their row stays.
   for (const collection of collections) {
     if (isSyncable(collection.name)) continue;
@@ -79,8 +76,6 @@ export async function pushToRemote(): Promise<PushStats> {
         // Stamp the last writer's device: pull on this device skips its own
         // echoes, while the same user's other devices still receive the row.
         let doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
-        // The owner decides whether their personal `global` is visible to teammates.
-        if (collection.name === 'global') doc.metadata.share_global = getConfig().SYNC_SHARE_GLOBAL;
 
         if (doc.metadata.type === 'task') {
           try {
@@ -116,8 +111,7 @@ export async function pushToRemote(): Promise<PushStats> {
 
           // Check for similar documents in remote
           // A re-push of an edited doc matches its own remote row; never self-link.
-          const owner = collection.name === 'global' ? getConfig().USERNAME : undefined;
-          const similar = (await findSimilarRemote(collection.name, embedding, undefined, owner)).filter(s => s.id !== doc.id);
+          const similar = (await findSimilarRemote(collection.name, embedding)).filter(s => s.id !== doc.id);
 
           if (similar.length > 0) {
             // Found similar doc(s) — link them via related_ids

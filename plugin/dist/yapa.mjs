@@ -94,7 +94,6 @@ function createConfig(env = process.env) {
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
-    SYNC_SHARE_GLOBAL: get(env, "SYNC_SHARE_GLOBAL", "false") === "true",
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
@@ -1496,6 +1495,16 @@ var init_sentinel = __esm({
   }
 });
 
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+var init_syncable = __esm({
+  "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
 // packages/core/src/collections/manage.ts
 var init_manage = __esm({
   "packages/core/src/collections/manage.ts"() {
@@ -1504,6 +1513,7 @@ var init_manage = __esm({
     init_deletes();
     init_sentinel();
     init_store();
+    init_syncable();
   }
 });
 
@@ -2076,6 +2086,9 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   if (!url) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
+    if (caCertPath) {
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+    }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
   const sslmode = url.searchParams.get("sslmode");
@@ -2144,12 +2157,8 @@ function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) 
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) {
-    const own = `origin_user = ${userParam ?? param(self.user)}`;
-    text += opts.orOwnerShared ? `
-       AND (${own} OR metadata->>'share_global' = 'true')` : `
-       AND ${own}`;
-  }
+  if (opts.onlyOwnRows) text += `
+       AND origin_user = ${userParam ?? param(self.user)}`;
   text += `
      ORDER BY synced_at ASC`;
   return { text, values };
@@ -2244,21 +2253,16 @@ var init_push = __esm({
     init_deletes();
     init_sentinel();
     init_device();
+    init_syncable();
   }
 });
 
 // packages/core/src/sync/pull.ts
-function isSyncable(collectionName) {
-  return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
-}
-function isPersonalCollection(collectionName) {
-  return collectionName === "global";
-}
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
-  if (!isSyncable(collectionName)) return stats;
+  if (!isSyncableCollection(collectionName)) return stats;
   if (opts.followedCollections) {
     await dropMovedOut(collectionName, opts.followedCollections, stats).catch((e) => {
       process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}
@@ -2271,11 +2275,7 @@ async function pullCollection(collectionName, since, stats = emptyPullStats(), o
       collectionName,
       since,
       { user: getConfig().USERNAME, device: getDeviceId() },
-      {
-        onlyOwnRows: isPersonalCollection(collectionName),
-        orOwnerShared: getConfig().SYNC_SHARE_GLOBAL,
-        includeOwnDevice: opts.includeOwnDevice
-      }
+      { includeOwnDevice: opts.includeOwnDevice }
     );
     if (remoteDocs.length === 0) return stats;
     const tombstones = await getLocalTombstones();
@@ -2319,7 +2319,7 @@ function localMetadataFor(remoteDoc) {
 async function copiesElsewhere(id, except) {
   const out = [];
   for (const col of await listCollections2()) {
-    if (col.name === except || !isSyncable(col.name)) continue;
+    if (col.name === except || !isSyncableCollection(col.name)) continue;
     const [doc] = await getDocumentsByIds2(col.name, [id]).catch(() => []);
     if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
   }
@@ -2391,6 +2391,7 @@ var init_pull = __esm({
     init_sentinel();
     init_deletes();
     init_device();
+    init_syncable();
   }
 });
 
@@ -2583,7 +2584,7 @@ var init_rules = __esm({
 You have YAPA's persistent memory and durable task tools (the yapa MCP server: \`memory_*\`, \`task_*\`, \`journal_*\`, \`collection_*\`, \`compaction_*\`, \`sync\`). Hooks already do the routine work: this block plus open tasks and top memories are injected at session start, and a semantic recall for each prompt is injected as \`# YAPA Recall\` (after pulling teammates' latest writes for the active collection). Do not repeat that recall unless you need a different or more specific query.
 
 ### Scope
-The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). \`private-*\` and \`local-*\` collections never sync; \`global\` syncs only between the user's own devices unless the team shares it.
+The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). \`private-*\`, \`local-*\` and \`global\` collections never sync (\`global\` is personal; team-wide knowledge goes in a shared collection).
 
 ### Capture as you go (do not batch to the end)
 Call \`memory_store\` (salience >= 2.0) when: a bug's root cause is identified; a config value, env var, endpoint, or credential location is learned; the user states a preference, decision, or correction; a non-obvious technical fact is discovered; a solution took real effort; a decision or commitment surfaces.

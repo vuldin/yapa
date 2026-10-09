@@ -18,9 +18,9 @@ describe('resolveHostEnv', () => {
   });
 
   it('maps plugin options to YAPA_* and lets them beat ~/.claude.json', () => {
-    const add = resolveHostEnv({ CLAUDE_PLUGIN_OPTION_USERNAME: 'teammate', CLAUDE_PLUGIN_OPTION_SYNC_SHARE_GLOBAL: 'false' }, claudeConfig);
+    const add = resolveHostEnv({ CLAUDE_PLUGIN_OPTION_USERNAME: 'teammate', CLAUDE_PLUGIN_OPTION_STORAGE: 'local' }, claudeConfig);
     expect(add.YAPA_USERNAME).toBe('teammate');
-    expect(add.YAPA_SYNC_SHARE_GLOBAL).toBe('false');
+    expect(add.YAPA_STORAGE).toBe('local');
     expect(add.YAPA_SYNC_DATABASE_URL).toBe('postgres://u:p@h/yapa');
   });
 

@@ -6,21 +6,7 @@ import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, up
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
 
-/** Collection prefixes that should not be synced. */
-function isSyncable(collectionName: string): boolean {
-  return !collectionName.startsWith('private-') && !collectionName.startsWith('local-');
-}
-
-/**
- * Personal collections sync only between the same user's devices. `global`
- * holds cross-cutting personal notes (preferences, PTO, writing style), so a
- * teammate never receives it unless its OWNER opted in with
- * YAPA_SYNC_SHARE_GLOBAL=true (stamped on each pushed row as
- * `share_global`) and the reader opted in too.
- */
-export function isPersonalCollection(collectionName: string): boolean {
-  return collectionName === 'global';
-}
+import { isSyncableCollection as isSyncable } from './syncable.js';
 
 export interface PullStats {
   pulled: number;
@@ -130,11 +116,7 @@ export async function pullCollection(
       collectionName,
       since,
       { user: getConfig().USERNAME, device: getDeviceId() },
-      {
-        onlyOwnRows: isPersonalCollection(collectionName),
-        orOwnerShared: getConfig().SYNC_SHARE_GLOBAL,
-        includeOwnDevice: opts.includeOwnDevice,
-      },
+      { includeOwnDevice: opts.includeOwnDevice },
     );
     if (remoteDocs.length === 0) return stats;
 

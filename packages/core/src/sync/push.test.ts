@@ -37,13 +37,15 @@ afterAll(async () => {
 });
 
 describe('pushToRemote over the local store', () => {
-  it('pushes unsynced docs via the store port, skips private/local collections and sentinels', async () => {
+  it('pushes unsynced docs via the store port, skips global/private/local collections and sentinels', async () => {
     const store = (await import('../store/index.js')).getStore();
-    await store.createCollection('global');
+    await store.createCollection('project-acme');
     await store.createCollection('private-notes');
-    await store.addDocument('global', 'mem-1', 'deploy runs on port 3100', { type: 'memory', is_synced: false });
-    await store.addDocument('global', '__decay_sentinel__', 'sentinel', { type: 'decay_sentinel', is_synced: false });
+    await store.addDocument('project-acme', 'mem-1', 'deploy runs on port 3100', { type: 'memory', is_synced: false });
+    await store.addDocument('project-acme', '__decay_sentinel__', 'sentinel', { type: 'decay_sentinel', is_synced: false });
     await store.addDocument('private-notes', 'mem-2', 'never synced', { type: 'memory', is_synced: false });
+    await store.createCollection('global');
+    await store.addDocument('global', 'mem-g', 'my writing style', { type: 'memory', is_synced: false });
 
     const stats = await pushToRemote();
 
@@ -54,45 +56,34 @@ describe('pushToRemote over the local store', () => {
 
     const pushed = vi.mocked(upsertRemoteDocument).mock.calls[0][0] as any;
     expect(pushed.id).toBe('mem-1');
-    expect(pushed.collection).toBe('global');
+    expect(pushed.collection).toBe('project-acme');
     expect(pushed.origin_user).toBe('tester');
     expect(Array.isArray(pushed.embedding) && pushed.embedding.length).toBeGreaterThan(0);
 
     // The local doc was marked synced through the store port.
-    const after = await getDocumentsByFilter('global', { is_synced: false }, 10);
+    const after = await getDocumentsByFilter('project-acme', { is_synced: false }, 10);
     expect(after.map(d => d.id)).toEqual(['__decay_sentinel__']); // sentinel untouched, mem-1 now synced
   });
 
   it('links instead of duplicating when the remote has a similar doc', async () => {
     vi.mocked(findSimilarRemote).mockResolvedValueOnce([{ id: 'remote-9' } as any]);
     const store = (await import('../store/index.js')).getStore();
-    await store.addDocument('global', 'mem-3', 'teammate already knows this', { type: 'memory', is_synced: false });
+    await store.addDocument('project-acme', 'mem-3', 'teammate already knows this', { type: 'memory', is_synced: false });
 
     const stats = await pushToRemote();
     expect(stats.linked).toBe(1);
     expect(stats.pushed).toBe(0);
 
     // Local doc gained the remote related_id and is synced.
-    const [doc] = (await getDocumentsByFilter('global', {}, 10)).filter(d => d.id === 'mem-3');
+    const [doc] = (await getDocumentsByFilter('project-acme', {}, 10)).filter(d => d.id === 'mem-3');
     expect(doc.metadata.is_synced).toBe(true);
     expect(String(doc.metadata.related_ids)).toContain('remote-9');
-  });
-
-  it('global: stamps the owner\'s sharing choice and only dedups against the owner\'s own rows', async () => {
-    vi.mocked(upsertRemoteDocument).mockClear();
-    vi.mocked(findSimilarRemote).mockClear();
-    const store = (await import('../store/index.js')).getStore();
-    await store.addDocument('global', 'mem-g1', 'prefers async updates', { type: 'memory', is_synced: false });
-    await pushToRemote();
-    const pushed = vi.mocked(upsertRemoteDocument).mock.calls.map(c => c[0] as any).find(d => d.id === 'mem-g1');
-    expect(pushed.metadata.share_global).toBe(false);
-    expect(vi.mocked(findSimilarRemote).mock.calls.at(-1)?.[3]).toBe('tester');
   });
 
   it('stamps the pushing device as origin_device', async () => {
     vi.mocked(upsertRemoteDocument).mockClear();
     const store = (await import('../store/index.js')).getStore();
-    await store.addDocument('global', 'mem-4', 'stamped with the device', { type: 'memory', is_synced: false });
+    await store.addDocument('project-acme', 'mem-4', 'stamped with the device', { type: 'memory', is_synced: false });
 
     await pushToRemote();
     const pushed = vi.mocked(upsertRemoteDocument).mock.calls.find(c => (c[0] as any).id === 'mem-4')![0] as any;
@@ -103,7 +94,7 @@ describe('pushToRemote over the local store', () => {
     vi.mocked(addRemoteRelatedIds).mockClear();
     vi.mocked(findSimilarRemote).mockResolvedValueOnce([{ id: 'mem-5', similarity: 0.99 } as any]);
     const store = (await import('../store/index.js')).getStore();
-    await store.addDocument('global', 'mem-5', 'edited after the first push', { type: 'memory', is_synced: false });
+    await store.addDocument('project-acme', 'mem-5', 'edited after the first push', { type: 'memory', is_synced: false });
 
     const stats = await pushToRemote();
     expect(stats.linked).toBe(0);
@@ -112,14 +103,14 @@ describe('pushToRemote over the local store', () => {
   });
 
   it('keeps a delete queued while the remote delete is in flight', async () => {
-    await queueSyncDelete('mem-early', 'global');
+    await queueSyncDelete('mem-early', 'project-acme');
     vi.mocked(deleteRemoteDocuments).mockImplementationOnce(async () => {
-      await queueSyncDelete('mem-late', 'global');
+      await queueSyncDelete('mem-late', 'project-acme');
       return 1;
     });
     await pushToRemote();
     const { getPendingDeletes } = await import('./deletes.js');
-    expect(await getPendingDeletes()).toEqual(['global:mem-late']);
+    expect(await getPendingDeletes()).toEqual(['project-acme:mem-late']);
     vi.mocked(deleteRemoteDocuments).mockClear();
     await pushToRemote();
     expect(deleteRemoteDocuments).toHaveBeenCalledWith(['mem-late'], 'tester');
@@ -127,7 +118,7 @@ describe('pushToRemote over the local store', () => {
 
   it('propagates queued deletes scoped to the pushing user', async () => {
     vi.mocked(deleteRemoteDocuments).mockClear();
-    await queueSyncDelete('mem-1', 'global');
+    await queueSyncDelete('mem-1', 'project-acme');
 
     await pushToRemote();
     expect(deleteRemoteDocuments).toHaveBeenCalledWith(['mem-1'], 'tester');
@@ -164,6 +155,17 @@ describe('pushToRemote over the local store', () => {
 });
 
 describe('docs that now live in a private collection', () => {
+  it('removes this user\'s old shared copies of global docs (global is local-only)', async () => {
+    const store = (await import('../store/index.js')).getStore();
+    await store.addDocument('global', 'mem-g-old', 'synced by an older version', { type: 'memory', created_at: 1_700_000_000, is_synced: true });
+    vi.mocked(getRemoteOwnersByIds).mockResolvedValueOnce(new Map([['mem-g-old', { owner: 'tester', createdAt: 1_700_000_000 }]]));
+    vi.mocked(deleteRemoteDocuments).mockClear();
+    vi.mocked(deleteRemoteDocuments).mockResolvedValue(1);
+    await pushToRemote();
+    expect(vi.mocked(deleteRemoteDocuments).mock.calls.flatMap(c => c[0])).toContain('mem-g-old');
+    vi.mocked(deleteRemoteDocuments).mockResolvedValue(0);
+  });
+
   it('deletes this user\'s shared copy, keeps a teammate\'s row, never pushes the private doc', async () => {
     const store = (await import('../store/index.js')).getStore();
     await store.createCollection('private-moved');

@@ -7287,7 +7287,6 @@ function createConfig(env = process.env) {
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
-    SYNC_SHARE_GLOBAL: get(env, "SYNC_SHARE_GLOBAL", "false") === "true",
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
@@ -8217,6 +8216,9 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   if (!url2) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
+    if (caCertPath) {
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync2(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+    }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
   const sslmode = url2.searchParams.get("sslmode");
@@ -8343,12 +8345,8 @@ function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) 
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) {
-    const own2 = `origin_user = ${userParam ?? param(self.user)}`;
-    text += opts.orOwnerShared ? `
-       AND (${own2} OR metadata->>'share_global' = 'true')` : `
-       AND ${own2}`;
-  }
+  if (opts.onlyOwnRows) text += `
+       AND origin_user = ${userParam ?? param(self.user)}`;
   text += `
      ORDER BY synced_at ASC`;
   return { text, values };
@@ -38952,6 +38950,13 @@ async function updateSyncSubscriptions(collections) {
 
 // packages/core/src/collections/manage.ts
 init_store();
+
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+
+// packages/core/src/collections/manage.ts
 async function listCollectionsWithCounts() {
   const collections = await listCollections2();
   const results = await Promise.all(
@@ -38969,9 +38974,7 @@ async function listCollectionsWithCounts() {
 async function createNewCollection(name) {
   await createCollection2(name);
 }
-function isSyncable2(name) {
-  return !name.startsWith("private-") && !name.startsWith("local-");
-}
+var isSyncable2 = isSyncableCollection;
 async function removeCollection(name) {
   if (getConfig().SYNC_ENABLED && isSyncable2(name)) {
     const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
@@ -40091,9 +40094,6 @@ function getDeviceId() {
 }
 
 // packages/core/src/sync/push.ts
-function isSyncable3(collectionName) {
-  return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
-}
 async function pushToRemote() {
   const stats = { pushed: 0, linked: 0, deleted: 0, retracted: 0, errors: 0 };
   try {
@@ -40111,7 +40111,7 @@ async function pushToRemote() {
   }
   const collections = await listCollections2();
   for (const collection of collections) {
-    if (isSyncable3(collection.name)) continue;
+    if (isSyncableCollection(collection.name)) continue;
     try {
       stats.retracted += await retractSharedCopies(collection.name);
     } catch (e) {
@@ -40122,7 +40122,7 @@ async function pushToRemote() {
   }
   const pushedCollections = [];
   for (const collection of collections) {
-    if (!isSyncable3(collection.name)) continue;
+    if (!isSyncableCollection(collection.name)) continue;
     try {
       const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
       let collectionHadPush = false;
@@ -40130,7 +40130,6 @@ async function pushToRemote() {
         if (unsynced.id.startsWith("__")) continue;
         if (unsynced.metadata.type === "journal_draft") continue;
         let doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
-        if (collection.name === "global") doc.metadata.share_global = getConfig().SYNC_SHARE_GLOBAL;
         if (doc.metadata.type === "task") {
           try {
             doc = await rekeyIfTaskIdTaken(collection.name, doc) ?? doc;
@@ -40160,8 +40159,7 @@ async function pushToRemote() {
             collectionHadPush = true;
             continue;
           }
-          const owner = collection.name === "global" ? getConfig().USERNAME : void 0;
-          const similar = (await findSimilarRemote(collection.name, embedding, void 0, owner)).filter((s) => s.id !== doc.id);
+          const similar = (await findSimilarRemote(collection.name, embedding)).filter((s) => s.id !== doc.id);
           if (similar.length > 0) {
             const remoteId = similar[0].id;
             await addRemoteRelatedIds(remoteId, [doc.id]);
@@ -40271,12 +40269,6 @@ async function markSynced(collection, id, metadata) {
 init_config();
 init_store();
 init_postgres();
-function isSyncable4(collectionName) {
-  return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
-}
-function isPersonalCollection(collectionName) {
-  return collectionName === "global";
-}
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
 }
@@ -40287,7 +40279,7 @@ async function pullFromRemote() {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const mine = (await getRemoteCollectionsForUser(getConfig().USERNAME)).filter(isSyncable4);
+      const mine = (await getRemoteCollectionsForUser(getConfig().USERNAME)).filter(isSyncableCollection);
       const subs = await getSyncSubscriptions();
       const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -40300,12 +40292,12 @@ async function pullFromRemote() {
   const localCollectionNames = new Set(collections.map((c) => c.name));
   const pullCollectionNames = [];
   for (const col of collections) {
-    if (isSyncable4(col.name)) pullCollectionNames.push(col.name);
+    if (isSyncableCollection(col.name)) pullCollectionNames.push(col.name);
   }
   const backfill = /* @__PURE__ */ new Set();
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncable4(sub)) {
+    if (!localCollectionNames.has(sub) && isSyncableCollection(sub)) {
       await getOrCreateCollection2(sub);
       pullCollectionNames.push(sub);
       backfill.add(sub);
@@ -40322,7 +40314,7 @@ async function pullFromRemote() {
   return stats;
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
-  if (!isSyncable4(collectionName)) return stats;
+  if (!isSyncableCollection(collectionName)) return stats;
   if (opts.followedCollections) {
     await dropMovedOut(collectionName, opts.followedCollections, stats).catch((e) => {
       process.stderr.write(`[yapa-sync] Move check failed for ${collectionName}: ${e}
@@ -40335,11 +40327,7 @@ async function pullCollection(collectionName, since, stats = emptyPullStats(), o
       collectionName,
       since,
       { user: getConfig().USERNAME, device: getDeviceId() },
-      {
-        onlyOwnRows: isPersonalCollection(collectionName),
-        orOwnerShared: getConfig().SYNC_SHARE_GLOBAL,
-        includeOwnDevice: opts.includeOwnDevice
-      }
+      { includeOwnDevice: opts.includeOwnDevice }
     );
     if (remoteDocs.length === 0) return stats;
     const tombstones = await getLocalTombstones();
@@ -40383,7 +40371,7 @@ function localMetadataFor(remoteDoc) {
 async function copiesElsewhere(id, except) {
   const out = [];
   for (const col of await listCollections2()) {
-    if (col.name === except || !isSyncable4(col.name)) continue;
+    if (col.name === except || !isSyncableCollection(col.name)) continue;
     const [doc] = await getDocumentsByIds2(col.name, [id]).catch(() => []);
     if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
   }
@@ -42543,7 +42531,7 @@ ${r.content}`
           lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ":***@") : "not configured"}`);
           lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
           if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
-          lines.push(`global: ${getConfig().SYNC_SHARE_GLOBAL ? "shared with the team" : "personal (syncs only between your own devices)"}`);
+          lines.push("global: local only (never synced; like private-/local- collections)");
           try {
             const health = await checkRemoteHealth();
             lines.push(`Connection: ${health.ok ? "healthy" : `error \u2014 ${health.error}`}`);

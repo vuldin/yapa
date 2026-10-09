@@ -100,6 +100,7 @@ describe.skipIf(!URL)('sync against a real database', { timeout: 120_000 }, () =
       expect(stats.errors).toBe(0);
       expect((await remoteRow(mem))?.collection).toBe(COL);
       expect((await remoteRow(task))?.collection).toBe(COL);
+      expect(await remoteRow(personal)).toBeUndefined(); // global never leaves the machine
     });
 
     it('a teammate subscribing later backfills history but never gets personal global', async () => {
@@ -131,16 +132,30 @@ describe.skipIf(!URL)('sync against a real database', { timeout: 120_000 }, () =
       expect(await has(COL, mem)).toBe(false);
     });
 
-    it('a teammate opting in to shared global still never gets an owner\'s personal global', async () => {
+    it('global is never shared, even with a leftover YAPA_SYNC_SHARE_GLOBAL', async () => {
       as('bob', 'bob-B', { YAPA_SYNC_SHARE_GLOBAL: 'true' });
       await pullCollection('global', 0);
       expect(await has('global', personal)).toBe(false);
     });
 
-    it('the same user\'s second device receives their rows, including personal global', async () => {
+    it('the same user\'s second device receives their shared rows, but not global (local-only)', async () => {
       await freshDevice('alice', 'alice-A2', [COL]);
       expect(await has(COL, mem)).toBe(true);
-      expect(await has('global', personal)).toBe(true);
+      expect(await has('global', personal)).toBe(false);
+    });
+
+    it('an older client\'s shared copy of a global doc is removed by the next push', async () => {
+      as('alice', 'alice-A');
+      const [doc] = await getDocumentsByIds('global', [personal]);
+      await getPool().query(
+        `INSERT INTO documents (id, collection, content, embedding, metadata, origin_user, created_at, updated_at)
+         VALUES ($1, 'global', $2, '[1,0,0]', $3, $4, to_timestamp($5), to_timestamp($5))`,
+        [personal, doc.content, doc.metadata, user('alice'), doc.metadata.created_at],
+      );
+      await getStore().addDocument('global', personal, doc.content, { ...doc.metadata, updated_at: Number(doc.metadata.created_at) + 1 });
+      const stats = await pushToRemote();
+      expect(stats.retracted).toBe(1);
+      expect(await remoteRow(personal)).toBeUndefined();
     });
 
     it('a device does not re-pull its own writes', async () => {

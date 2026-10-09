@@ -9,6 +9,7 @@ import {
   getCollectionCount,
   type Collection,
 } from '../store/index.js';
+import { isSyncableCollection } from '../sync/syncable.js';
 
 export interface CollectionInfo {
   name: string;
@@ -39,9 +40,7 @@ export async function createNewCollection(name: string): Promise<void> {
   await chromaCreateCollection(name);
 }
 
-function isSyncable(name: string): boolean {
-  return !name.startsWith('private-') && !name.startsWith('local-');
-}
+const isSyncable = isSyncableCollection;
 
 /**
  * Delete a collection by name — and make the deletion stick under sync.

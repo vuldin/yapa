@@ -28,6 +28,10 @@ describe('buildPoolConfig (TLS)', () => {
     expect(buildPoolConfig('postgres://u:p@localhost:5433/yapa', '')).toMatchObject({ tls: 'off', ssl: false });
   });
 
+  it('verifies with the CA even for URLs the URL parser rejects', () => {
+    expect(buildPoolConfig('postgres://u:p@/yapa?host=db.example.com', ca).tls).toBe('verify-ca');
+  });
+
   it('treats a ?host= remote as remote (TLS), a socket path as local', () => {
     expect(buildPoolConfig('postgres://u:p@/yapa?host=db.example.com', '').tls).toBe('unverified');
     expect(buildPoolConfig('postgres://u:p@/yapa?host=/var/run/postgresql', '').tls).toBe('off');
@@ -59,11 +63,6 @@ describe('buildRemoteDocsSinceQuery', () => {
   it('restricts personal collections to the user\'s own rows', () => {
     const q = buildRemoteDocsSinceQuery('global', 0, self, { onlyOwnRows: true });
     expect(q.text).toMatch(/AND origin_user = \$3\s+ORDER BY/);
-  });
-
-  it('opens personal rows only where the owner stamped share_global', () => {
-    const q = buildRemoteDocsSinceQuery('global', 0, self, { onlyOwnRows: true, orOwnerShared: true });
-    expect(q.text).toContain(`AND (origin_user = $3 OR metadata->>'share_global' = 'true')`);
   });
 
   it('drops the echo filters only for a recovery pull', () => {

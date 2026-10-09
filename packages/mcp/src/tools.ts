@@ -1135,7 +1135,7 @@ export function registerTools(server: McpServer): void {
           lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
           lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
           if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
-          lines.push(`global: ${getConfig().SYNC_SHARE_GLOBAL ? 'shared with the team' : 'personal (syncs only between your own devices)'}`);
+          lines.push('global: local only (never synced; like private-/local- collections)');
           try {
             const health = await checkRemoteHealth();
             lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);

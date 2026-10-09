@@ -28,6 +28,9 @@ export function buildPoolConfig(databaseUrl: string, caCertPath: string): { conn
     // Fail safe: encrypted, unless it names a unix socket.
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith('/')) return { connectionString: databaseUrl, ssl: false, tls: 'off' };
+    if (caCertPath) {
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync(caCertPath, 'utf-8'), rejectUnauthorized: true, checkServerIdentity: () => undefined }, tls: 'verify-ca' };
+    }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: 'unverified' };
   }
 
@@ -202,12 +205,6 @@ export interface RemoteDocsQuery {
   /** Only rows originally written by this user (personal collections, e.g. `global`). */
   onlyOwnRows?: boolean;
   /**
-   * With onlyOwnRows: also return teammates' rows whose OWNER shared them
-   * (`metadata.share_global`, stamped on push from the owner's
-   * SYNC_SHARE_GLOBAL). The reader's own setting never unlocks others' rows.
-   */
-  orOwnerShared?: boolean;
-  /**
    * Also return rows this device wrote (normally skipped as echoes). Used once,
    * by a store's first-ever pull, to rebuild a wiped or brand-new store.
    */
@@ -242,12 +239,7 @@ export function buildRemoteDocsSinceQuery(
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) {
-    const own = `origin_user = ${userParam ?? param(self.user)}`;
-    text += opts.orOwnerShared
-      ? `\n       AND (${own} OR metadata->>'share_global' = 'true')`
-      : `\n       AND ${own}`;
-  }
+  if (opts.onlyOwnRows) text += `\n       AND origin_user = ${userParam ?? param(self.user)}`;
   text += `\n     ORDER BY synced_at ASC`;
   return { text, values };
 }

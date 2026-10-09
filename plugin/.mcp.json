@@ -14,7 +14,6 @@
         "YAPA_SYNC_ENABLED": "${user_config.sync_enabled}",
         "YAPA_SYNC_DATABASE_URL": "${user_config.sync_database_url}",
         "YAPA_SYNC_CA_CERT": "${user_config.sync_ca_cert}",
-        "YAPA_SYNC_SHARE_GLOBAL": "${user_config.sync_share_global}",
         "YAPA_RESPONSE_CAPTURE": "${user_config.response_capture}",
         "YAPA_MODEL_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/models"
       }

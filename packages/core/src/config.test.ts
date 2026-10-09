@@ -24,7 +24,6 @@ describe('createConfig', () => {
 
   it('keeps multi-user safety defaults conservative', () => {
     const c = createConfig({});
-    expect(c.SYNC_SHARE_GLOBAL).toBe(false);
     expect(c.RESPONSE_CAPTURE).toBe(false);
     expect(c.SYNC_PULL_OVERLAP_SECONDS).toBeGreaterThan(0);
     expect(c.SYNC_PUSH_DEBOUNCE_MS).toBeGreaterThan(0);
