@@ -8214,7 +8214,11 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     url2 = new URL(databaseUrl);
   } catch {
   }
-  if (!url2) return { connectionString: databaseUrl, ssl: void 0, tls: "off" };
+  if (!url2) {
+    const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
+    if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
+    return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
+  }
   const sslmode = url2.searchParams.get("sslmode");
   for (const k of ["sslmode", "sslrootcert", "sslcert", "sslkey", "uselibpqcompat"]) url2.searchParams.delete(k);
   const connectionString = url2.toString();
@@ -8230,7 +8234,9 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
   }
   if (sslmode) return unverified;
-  if (LOCAL_HOSTS.has(url2.hostname)) return { connectionString, ssl: false, tls: "off" };
+  const hostParam = url2.searchParams.get("host");
+  const local = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url2.hostname);
+  if (local) return { connectionString, ssl: false, tls: "off" };
   return unverified;
 }
 function getSyncTlsMode() {
@@ -8278,8 +8284,8 @@ async function getRemoteCreatedAt(id) {
 async function getRemoteOwnersByIds(ids) {
   if (ids.length === 0) return /* @__PURE__ */ new Map();
   const p = getPool();
-  const result = await p.query("SELECT id, origin_user FROM documents WHERE id = ANY($1::text[])", [ids]);
-  return new Map(result.rows.map((r) => [r.id, r.origin_user]));
+  const result = await p.query("SELECT id, origin_user, extract(epoch from created_at)::bigint AS c FROM documents WHERE id = ANY($1::text[])", [ids]);
+  return new Map(result.rows.map((r) => [r.id, { owner: r.origin_user, createdAt: Number(r.c) }]));
 }
 async function getRemoteCollectionsByIds(ids) {
   if (ids.length === 0) return /* @__PURE__ */ new Map();
@@ -8295,17 +8301,17 @@ async function getRemoteMaxTaskNumber(user) {
   );
   return Number(result.rows[0]?.n ?? 0);
 }
-async function findSimilarRemote(collection, embedding, threshold = getConfig().SYNC_SIMILARITY_THRESHOLD) {
+async function findSimilarRemote(collection, embedding, threshold = getConfig().SYNC_SIMILARITY_THRESHOLD, owner) {
   const p = getPool();
   const embeddingStr = `[${embedding.join(",")}]`;
   const result = await p.query(
     `SELECT id, 1 - (embedding <=> $1::vector) AS similarity
      FROM documents
      WHERE collection = $2
-       AND 1 - (embedding <=> $1::vector) > $3
+       AND 1 - (embedding <=> $1::vector) > $3${owner ? "\n       AND origin_user = $4" : ""}
      ORDER BY similarity DESC
      LIMIT 5`,
-    [embeddingStr, collection, threshold]
+    owner ? [embeddingStr, collection, threshold, owner] : [embeddingStr, collection, threshold]
   );
   return result.rows.map((r) => ({ id: r.id, similarity: parseFloat(r.similarity) }));
 }
@@ -8313,7 +8319,7 @@ async function addRemoteRelatedIds(id, newRelatedIds) {
   const p = getPool();
   await p.query(
     `UPDATE documents
-     SET related_ids = array_cat(related_ids, $1::text[]),
+     SET related_ids = ARRAY(SELECT DISTINCT unnest(array_cat(related_ids, $1::text[]))),
          synced_at = now()
      WHERE id = $2`,
     [newRelatedIds, id]
@@ -8337,8 +8343,12 @@ function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) 
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) text += `
-       AND origin_user = ${userParam ?? param(self.user)}`;
+  if (opts.onlyOwnRows) {
+    const own2 = `origin_user = ${userParam ?? param(self.user)}`;
+    text += opts.orOwnerShared ? `
+       AND (${own2} OR metadata->>'share_global' = 'true')` : `
+       AND ${own2}`;
+  }
   text += `
      ORDER BY synced_at ASC`;
   return { text, values };
@@ -38295,11 +38305,13 @@ async function getPendingDeletes() {
     return [];
   }
 }
-async function clearPendingDeletes() {
+async function clearPendingDeletes(processed) {
   try {
+    const done = processed ? new Set(processed) : void 0;
+    const remaining = done ? (await getPendingDeletes()).filter((e) => !done.has(e)) : [];
     await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
       type: "sync_sentinel",
-      pending_deletes: ""
+      pending_deletes: remaining.join(",")
     });
   } catch {
   }
@@ -40090,7 +40102,7 @@ async function pushToRemote() {
       const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
       const deletedCount = await deleteRemoteDocuments(docIds, getConfig().USERNAME);
       stats.deleted = deletedCount;
-      await clearPendingDeletes();
+      await clearPendingDeletes(pendingDeletes);
     }
   } catch (e) {
     process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
@@ -40118,6 +40130,7 @@ async function pushToRemote() {
         if (unsynced.id.startsWith("__")) continue;
         if (unsynced.metadata.type === "journal_draft") continue;
         let doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        if (collection.name === "global") doc.metadata.share_global = getConfig().SYNC_SHARE_GLOBAL;
         if (doc.metadata.type === "task") {
           try {
             doc = await rekeyIfTaskIdTaken(collection.name, doc) ?? doc;
@@ -40147,7 +40160,8 @@ async function pushToRemote() {
             collectionHadPush = true;
             continue;
           }
-          const similar = (await findSimilarRemote(collection.name, embedding)).filter((s) => s.id !== doc.id);
+          const owner = collection.name === "global" ? getConfig().USERNAME : void 0;
+          const similar = (await findSimilarRemote(collection.name, embedding, void 0, owner)).filter((s) => s.id !== doc.id);
           if (similar.length > 0) {
             const remoteId = similar[0].id;
             await addRemoteRelatedIds(remoteId, [doc.id]);
@@ -40234,8 +40248,12 @@ async function retractSharedCopies(collection) {
   const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.remote_checked_at !== versionOf(d));
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
-  const owners = await getRemoteOwnersByIds(unchecked.map((d) => d.id));
-  const mine = unchecked.filter((d) => owners.get(d.id) === me && (!d.metadata.origin_user || d.metadata.origin_user === me));
+  const remote = await getRemoteOwnersByIds(unchecked.map((d) => d.id));
+  const mine = unchecked.filter((d) => {
+    const row = remote.get(d.id);
+    const localCreated = Number(d.metadata.created_at);
+    return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
+  });
   const removed = mine.length > 0 ? await deleteRemoteDocuments(mine.map((d) => d.id), me) : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
@@ -40257,7 +40275,7 @@ function isSyncable4(collectionName) {
   return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
 }
 function isPersonalCollection(collectionName) {
-  return collectionName === "global" && !getConfig().SYNC_SHARE_GLOBAL;
+  return collectionName === "global";
 }
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
@@ -40317,7 +40335,11 @@ async function pullCollection(collectionName, since, stats = emptyPullStats(), o
       collectionName,
       since,
       { user: getConfig().USERNAME, device: getDeviceId() },
-      { onlyOwnRows: isPersonalCollection(collectionName), includeOwnDevice: opts.includeOwnDevice }
+      {
+        onlyOwnRows: isPersonalCollection(collectionName),
+        orOwnerShared: getConfig().SYNC_SHARE_GLOBAL,
+        includeOwnDevice: opts.includeOwnDevice
+      }
     );
     if (remoteDocs.length === 0) return stats;
     const tombstones = await getLocalTombstones();
@@ -40361,7 +40383,7 @@ function localMetadataFor(remoteDoc) {
 async function copiesElsewhere(id, except) {
   const out = [];
   for (const col of await listCollections2()) {
-    if (col.name === except) continue;
+    if (col.name === except || !isSyncable4(col.name)) continue;
     const [doc] = await getDocumentsByIds2(col.name, [id]).catch(() => []);
     if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
   }
@@ -40535,6 +40557,10 @@ async function startSync() {
   if (!getConfig().SYNC_DATABASE_URL) {
     process.stderr.write("[yapa-sync] YAPA_SYNC_DATABASE_URL not set \u2014 sync disabled\n");
     return;
+  }
+  if (!process.env.YAPA_USERNAME) {
+    process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.
+`);
   }
   try {
     const health = await checkRemoteHealth();
@@ -42516,10 +42542,12 @@ ${r.content}`
           const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1e3}s)`];
           lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ":***@") : "not configured"}`);
           lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
+          if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
           lines.push(`global: ${getConfig().SYNC_SHARE_GLOBAL ? "shared with the team" : "personal (syncs only between your own devices)"}`);
           try {
             const health = await checkRemoteHealth();
             lines.push(`Connection: ${health.ok ? "healthy" : `error \u2014 ${health.error}`}`);
+            lines.push(`TLS: ${{ "verify-ca": "encrypted, server verified", unverified: "encrypted, server NOT verified (set sync_ca_cert)", off: "off (local database)" }[getSyncTlsMode()]}`);
           } catch (e) {
             lines.push(`Connection: error \u2014 ${e}`);
           }

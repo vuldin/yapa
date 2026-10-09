@@ -53,13 +53,17 @@ export async function getPendingDeletes(): Promise<string[]> {
 }
 
 /**
- * Clear the pending deletes queue after successful remote deletion.
+ * Remove processed entries from the queue after successful remote deletion
+ * (all entries when none are given). Re-reads the queue so entries added
+ * while the remote delete ran are kept.
  */
-export async function clearPendingDeletes(): Promise<void> {
+export async function clearPendingDeletes(processed?: string[]): Promise<void> {
   try {
+    const done = processed ? new Set(processed) : undefined;
+    const remaining = done ? (await getPendingDeletes()).filter(e => !done.has(e)) : [];
     await addDocument('global', SYNC_DELETES_ID, 'sync delete queue', {
       type: 'sync_sentinel',
-      pending_deletes: '',
+      pending_deletes: remaining.join(','),
     });
   } catch {
     // Sentinel may not exist yet — that's fine

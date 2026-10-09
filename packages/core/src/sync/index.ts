@@ -152,6 +152,10 @@ export async function startSync(): Promise<void> {
     return;
   }
 
+  if (!process.env.YAPA_USERNAME) {
+    process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.\n`);
+  }
+
   // Validate connection and migrate schema
   try {
     const health = await checkRemoteHealth();

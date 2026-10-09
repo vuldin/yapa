@@ -2073,7 +2073,11 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     url = new URL(databaseUrl);
   } catch {
   }
-  if (!url) return { connectionString: databaseUrl, ssl: void 0, tls: "off" };
+  if (!url) {
+    const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
+    if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
+    return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
+  }
   const sslmode = url.searchParams.get("sslmode");
   for (const k of ["sslmode", "sslrootcert", "sslcert", "sslkey", "uselibpqcompat"]) url.searchParams.delete(k);
   const connectionString = url.toString();
@@ -2089,7 +2093,9 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
   }
   if (sslmode) return unverified;
-  if (LOCAL_HOSTS.has(url.hostname)) return { connectionString, ssl: false, tls: "off" };
+  const hostParam = url.searchParams.get("host");
+  const local = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url.hostname);
+  if (local) return { connectionString, ssl: false, tls: "off" };
   return unverified;
 }
 function getPool() {
@@ -2114,7 +2120,7 @@ async function addRemoteRelatedIds(id, newRelatedIds) {
   const p = getPool();
   await p.query(
     `UPDATE documents
-     SET related_ids = array_cat(related_ids, $1::text[]),
+     SET related_ids = ARRAY(SELECT DISTINCT unnest(array_cat(related_ids, $1::text[]))),
          synced_at = now()
      WHERE id = $2`,
     [newRelatedIds, id]
@@ -2138,8 +2144,12 @@ function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) 
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) text += `
-       AND origin_user = ${userParam ?? param(self.user)}`;
+  if (opts.onlyOwnRows) {
+    const own = `origin_user = ${userParam ?? param(self.user)}`;
+    text += opts.orOwnerShared ? `
+       AND (${own} OR metadata->>'share_global' = 'true')` : `
+       AND ${own}`;
+  }
   text += `
      ORDER BY synced_at ASC`;
   return { text, values };
@@ -2242,7 +2252,7 @@ function isSyncable(collectionName) {
   return !collectionName.startsWith("private-") && !collectionName.startsWith("local-");
 }
 function isPersonalCollection(collectionName) {
-  return collectionName === "global" && !getConfig().SYNC_SHARE_GLOBAL;
+  return collectionName === "global";
 }
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 };
@@ -2261,7 +2271,11 @@ async function pullCollection(collectionName, since, stats = emptyPullStats(), o
       collectionName,
       since,
       { user: getConfig().USERNAME, device: getDeviceId() },
-      { onlyOwnRows: isPersonalCollection(collectionName), includeOwnDevice: opts.includeOwnDevice }
+      {
+        onlyOwnRows: isPersonalCollection(collectionName),
+        orOwnerShared: getConfig().SYNC_SHARE_GLOBAL,
+        includeOwnDevice: opts.includeOwnDevice
+      }
     );
     if (remoteDocs.length === 0) return stats;
     const tombstones = await getLocalTombstones();
@@ -2305,7 +2319,7 @@ function localMetadataFor(remoteDoc) {
 async function copiesElsewhere(id, except) {
   const out = [];
   for (const col of await listCollections2()) {
-    if (col.name === except) continue;
+    if (col.name === except || !isSyncable(col.name)) continue;
     const [doc] = await getDocumentsByIds2(col.name, [id]).catch(() => []);
     if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
   }

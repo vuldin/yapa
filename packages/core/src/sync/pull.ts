@@ -14,11 +14,12 @@ function isSyncable(collectionName: string): boolean {
 /**
  * Personal collections sync only between the same user's devices. `global`
  * holds cross-cutting personal notes (preferences, PTO, writing style), so a
- * teammate subscribing to the shared DB must not receive it unless the team
- * opts in with YAPA_SYNC_SHARE_GLOBAL=true.
+ * teammate never receives it unless its OWNER opted in with
+ * YAPA_SYNC_SHARE_GLOBAL=true (stamped on each pushed row as
+ * `share_global`) and the reader opted in too.
  */
 export function isPersonalCollection(collectionName: string): boolean {
-  return collectionName === 'global' && !getConfig().SYNC_SHARE_GLOBAL;
+  return collectionName === 'global';
 }
 
 export interface PullStats {
@@ -129,7 +130,11 @@ export async function pullCollection(
       collectionName,
       since,
       { user: getConfig().USERNAME, device: getDeviceId() },
-      { onlyOwnRows: isPersonalCollection(collectionName), includeOwnDevice: opts.includeOwnDevice },
+      {
+        onlyOwnRows: isPersonalCollection(collectionName),
+        orOwnerShared: getConfig().SYNC_SHARE_GLOBAL,
+        includeOwnDevice: opts.includeOwnDevice,
+      },
     );
     if (remoteDocs.length === 0) return stats;
 
@@ -177,7 +182,8 @@ function localMetadataFor(remoteDoc: RemoteDocument): Record<string, any> {
 async function copiesElsewhere(id: string, except: string): Promise<Array<{ collection: string; dirty: boolean }>> {
   const out: Array<{ collection: string; dirty: boolean }> = [];
   for (const col of await listCollections()) {
-    if (col.name === except) continue;
+    // A private copy is personal: a shared row moving never relocates it.
+    if (col.name === except || !isSyncable(col.name)) continue;
     const [doc] = await getDocumentsByIds(col.name, [id]).catch(() => []);
     if (doc) out.push({ collection: col.name, dirty: doc.metadata.is_synced === false });
   }

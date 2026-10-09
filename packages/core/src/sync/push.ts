@@ -36,7 +36,8 @@ export async function pushToRemote(): Promise<PushStats> {
       const docIds = pendingDeletes.map(entry => entry.split(':')[1]).filter(Boolean);
       const deletedCount = await deleteRemoteDocuments(docIds, getConfig().USERNAME);
       stats.deleted = deletedCount;
-      await clearPendingDeletes();
+      // Only the entries handled here: a delete queued during the await stays.
+      await clearPendingDeletes(pendingDeletes);
     }
   } catch (e) {
     process.stderr.write(`[yapa-sync] Delete propagation error: ${e}\n`);
@@ -78,6 +79,8 @@ export async function pushToRemote(): Promise<PushStats> {
         // Stamp the last writer's device: pull on this device skips its own
         // echoes, while the same user's other devices still receive the row.
         let doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        // The owner decides whether their personal `global` is visible to teammates.
+        if (collection.name === 'global') doc.metadata.share_global = getConfig().SYNC_SHARE_GLOBAL;
 
         if (doc.metadata.type === 'task') {
           try {
@@ -113,7 +116,8 @@ export async function pushToRemote(): Promise<PushStats> {
 
           // Check for similar documents in remote
           // A re-push of an edited doc matches its own remote row; never self-link.
-          const similar = (await findSimilarRemote(collection.name, embedding)).filter(s => s.id !== doc.id);
+          const owner = collection.name === 'global' ? getConfig().USERNAME : undefined;
+          const similar = (await findSimilarRemote(collection.name, embedding, undefined, owner)).filter(s => s.id !== doc.id);
 
           if (similar.length > 0) {
             // Found similar doc(s) — link them via related_ids
@@ -231,8 +235,19 @@ async function retractSharedCopies(collection: string): Promise<number> {
   if (unchecked.length === 0) return 0;
 
   const me = getConfig().USERNAME;
-  const owners = await getRemoteOwnersByIds(unchecked.map(d => d.id));
-  const mine = unchecked.filter(d => owners.get(d.id) === me && (!d.metadata.origin_user || d.metadata.origin_user === me));
+  const remote = await getRemoteOwnersByIds(unchecked.map(d => d.id));
+  // Same id is not proof of the same doc: task ids are `user-N`, and a task
+  // minted in a private collection is invisible to the remote max, so
+  // another device can reuse its number for a different shared task. Only
+  // retract a row created at the same moment as this doc.
+  const mine = unchecked.filter(d => {
+    const row = remote.get(d.id);
+    const localCreated = Number(d.metadata.created_at);
+    return row?.owner === me
+      && (!d.metadata.origin_user || d.metadata.origin_user === me)
+      && Number.isFinite(localCreated) && localCreated > 0
+      && Math.abs(row.createdAt - localCreated) <= 1;
+  });
   const removed = mine.length > 0 ? await deleteRemoteDocuments(mine.map(d => d.id), me) : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? 'y' : 'ies'} of docs now in ${collection}\n`);
   for (const d of unchecked) await updateDocument(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });

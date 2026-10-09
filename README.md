@@ -86,7 +86,7 @@ Configure options, or `claude plugin configure yapa`):
 | `project_roots` | _(empty)_ | Comma-separated folders whose subfolders map to `project-{name}` / `customer-{name}` collections |
 | `customers` | _(empty)_ | Folder names under a root that are customers |
 | `sync_enabled`, `sync_database_url` | off | Team sync through PostgreSQL+pgvector (the URL is stored in the system credential store) |
-| `sync_share_global` | off | Let teammates receive your `global` collection |
+| `sync_share_global` | off | Share your `global` with teammates who also turned this on |
 | `response_capture` | off | Auto-capture durable findings after each turn (see hooks below) |
 
 For a whole team, add the marketplace and enable the plugin in managed or
@@ -284,7 +284,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_SYNC_DATABASE_URL` | PostgreSQL connection string | _(none)_ |
 | `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms | `300000` (5 min) |
 | `YAPA_SYNC_SIMILARITY_THRESHOLD` | Cosine similarity threshold for dedup | `0.95` |
-| `YAPA_SYNC_SHARE_GLOBAL` | Share `global` with teammates (otherwise it syncs only between your own devices) | `false` |
+| `YAPA_SYNC_SHARE_GLOBAL` | Share your `global` with teammates who also set it (otherwise it syncs only between your own devices) | `false` |
 | `YAPA_SYNC_PUSH_DEBOUNCE_MS` | Delay before a write-triggered push (`0` = interval only) | `2000` |
 | `YAPA_SYNC_PULL_OVERLAP_SECONDS` | Re-read window on each pull so mid-pull pushes are never skipped | `120` |
 | `YAPA_DEVICE_ID` | Stable id for this machine (else generated once at `YAPA_DEVICE_ID_PATH`) | _(generated)_ |
@@ -319,7 +319,7 @@ The cycle itself:
 ### Multi-user semantics
 
 - **Attribution** — documents keep their original author (`origin_user`); injected context marks teammates' items `by <user>`.
-- **`global` is personal by default** — it syncs only between your own devices. Set `YAPA_SYNC_SHARE_GLOBAL=true` (plugin: `sync_share_global`) to share it with the team.
+- **`global` is personal by default** — it syncs only between your own devices. Set `YAPA_SYNC_SHARE_GLOBAL=true` (plugin: `sync_share_global`) to share it with the team. The owner decides: each pushed `global` row records its owner's setting, and a teammate receives it only when the owner shared it and the teammate turned the option on too. Your setting never exposes anyone else's `global`.
 - **Same user, several machines** — use the same `YAPA_USERNAME` everywhere; each install has its own device id.
 - **No access control yet** — everyone with the database URL can read every shared collection. Use `private-`/`local-` collections for anything that must not leave your machine.
 
@@ -342,7 +342,7 @@ Deleting **your own** memory or task queues the deletion for the remote database
 
 Collections prefixed with `private-` or `local-` are never synced. Use these for personal notes, credentials, or anything that should stay on one machine.
 
-A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved, restored, or recreated with the same id), the next sync deletes its shared row. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
+A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved or restored), the next sync deletes its shared row. Only the same doc is removed (matched by id and creation time), never a different shared task that happens to reuse the id. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
 
 ### Testing sync against a real database
 

@@ -76,7 +76,7 @@ describe('pullCollection', () => {
 
   it('identifies itself by user AND device so the same user\'s other machines still sync', async () => {
     await pullCollection('project-acme', 0);
-    expect(mockedRemote).toHaveBeenCalledWith('project-acme', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: false, includeOwnDevice: undefined });
+    expect(mockedRemote).toHaveBeenCalledWith('project-acme', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: false, orOwnerShared: false, includeOwnDevice: undefined });
   });
 
   it('applies a newer remote version over a clean local copy', async () => {
@@ -136,16 +136,22 @@ describe('pullCollection', () => {
 });
 
 describe('personal collections', () => {
-  it('treats global as personal unless the team opts in', () => {
+  it('treats global as personal regardless of the reader\'s setting', () => {
     expect(isPersonalCollection('global')).toBe(true);
     expect(isPersonalCollection('project-acme')).toBe(false);
     configure({ YAPA_SYNC_SHARE_GLOBAL: 'true' });
-    expect(isPersonalCollection('global')).toBe(false);
+    expect(isPersonalCollection('global')).toBe(true);
   });
 
   it('pulls only the user\'s own rows into global', async () => {
     await pullCollection('global', 0);
-    expect(mockedRemote).toHaveBeenCalledWith('global', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: true, includeOwnDevice: undefined });
+    expect(mockedRemote).toHaveBeenCalledWith('global', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: true, orOwnerShared: false, includeOwnDevice: undefined });
+  });
+
+  it('a reader who opts in also gets rows their OWNERS shared, never everyone\'s', async () => {
+    configure({ YAPA_SYNC_SHARE_GLOBAL: 'true' });
+    await pullCollection('global', 0);
+    expect(mockedRemote).toHaveBeenCalledWith('global', 0, { user: 'tester', device: 'dev-A' }, { onlyOwnRows: true, orOwnerShared: true, includeOwnDevice: undefined });
   });
 });
 
@@ -237,6 +243,16 @@ describe('collection moves', () => {
     expect(stats.moved).toBe(1);
     expect(await has('customer-new', 'mv-1')).toBe(true);
     expect(await has('customer-old', 'mv-1')).toBe(false);
+  });
+
+  it('a personal copy in a private collection is never relocated or removed', async () => {
+    await getStore().createCollection('private-keep');
+    await local('private-keep', 'mv-p');
+    mockedRemote.mockResolvedValueOnce([remote('mv-p', 'customer-new', 'task mv-p', { metadata: { type: 'task', id: 'mv-p' } })]);
+
+    await pullCollection('customer-new', 0);
+    expect(await has('private-keep', 'mv-p')).toBe(true);
+    expect(await has('customer-new', 'mv-p')).toBe(true);
   });
 
   it('moved in, but the old copy has unpushed edits: keeps it (its push wins)', async () => {

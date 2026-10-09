@@ -4,6 +4,8 @@
  *
  *   YAPA_IT_DATABASE_URL=postgres://... npm run test:integration -w packages/core
  *
+ * Set YAPA_SYNC_CA_CERT too to run over verified TLS.
+ *
  * Every run uses unique throwaway usernames and collections (suffix below),
  * each user/device gets its own local store, and all rows written by the run
  * are deleted afterwards, even when a test fails. Rows of other users are
@@ -38,13 +40,15 @@ let dir: string;
 const stores = new Map<string, VectorStore>();
 
 /** Switch the process to `name` on `device` (own config + own local store). */
-function as(name: string, device: string): void {
+function as(name: string, device: string, env: Record<string, string> = {}): void {
   setConfig(createConfig({
     YAPA_USERNAME: user(name),
     YAPA_DEVICE_ID: `${device}-${RUN}`,
     YAPA_SYNC_ENABLED: 'true',
     YAPA_SYNC_DATABASE_URL: URL,
     YAPA_SYNC_PUSH_DEBOUNCE_MS: '0',
+    YAPA_SYNC_CA_CERT: process.env.YAPA_SYNC_CA_CERT ?? '',
+    ...env,
   }));
   if (!stores.has(device)) stores.set(device, createLocalStore(join(dir, device)));
   setStore(stores.get(device)!);
@@ -125,6 +129,12 @@ describe.skipIf(!URL)('sync against a real database', { timeout: 120_000 }, () =
       expect((await getLocalTombstones()).has(mem)).toBe(true);
       await pullCollection(COL, 0);
       expect(await has(COL, mem)).toBe(false);
+    });
+
+    it('a teammate opting in to shared global still never gets an owner\'s personal global', async () => {
+      as('bob', 'bob-B', { YAPA_SYNC_SHARE_GLOBAL: 'true' });
+      await pullCollection('global', 0);
+      expect(await has('global', personal)).toBe(false);
     });
 
     it('the same user\'s second device receives their rows, including personal global', async () => {

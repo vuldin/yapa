@@ -22,8 +22,14 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '']);
  */
 export function buildPoolConfig(databaseUrl: string, caCertPath: string): { connectionString: string; ssl: pg.PoolConfig['ssl']; tls: SyncTls } {
   let url: URL | undefined;
-  try { url = new URL(databaseUrl); } catch { /* not a URL: let pg report it */ }
-  if (!url) return { connectionString: databaseUrl, ssl: undefined, tls: 'off' };
+  try { url = new URL(databaseUrl); } catch { /* e.g. user:pass@ with an empty host */ }
+  if (!url) {
+    // Unparseable here but maybe not for pg (`postgres://u:p@/db?host=...`).
+    // Fail safe: encrypted, unless it names a unix socket.
+    const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
+    if (host && decodeURIComponent(host).startsWith('/')) return { connectionString: databaseUrl, ssl: false, tls: 'off' };
+    return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: 'unverified' };
+  }
 
   const sslmode = url.searchParams.get('sslmode');
   for (const k of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'uselibpqcompat']) url.searchParams.delete(k);
@@ -42,7 +48,10 @@ export function buildPoolConfig(databaseUrl: string, caCertPath: string): { conn
     throw new Error(`sslmode=${sslmode} needs the server CA: set YAPA_SYNC_CA_CERT (plugin option sync_ca_cert)`);
   }
   if (sslmode) return unverified; // require / prefer / allow
-  if (LOCAL_HOSTS.has(url.hostname)) return { connectionString, ssl: false, tls: 'off' };
+  // node-postgres also honors ?host=; a leading '/' there is a unix socket.
+  const hostParam = url.searchParams.get('host');
+  const local = hostParam ? hostParam.startsWith('/') || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url.hostname);
+  if (local) return { connectionString, ssl: false, tls: 'off' };
   return unverified;
 }
 
@@ -121,12 +130,12 @@ export async function getRemoteCreatedAt(id: string): Promise<number | undefined
   return result.rows[0] ? Number(result.rows[0].c) : undefined;
 }
 
-/** Owner (origin_user) of each id that exists remotely; missing ids are absent. */
-export async function getRemoteOwnersByIds(ids: string[]): Promise<Map<string, string>> {
+/** Owner and creation time (unix s) of each id that exists remotely; missing ids are absent. */
+export async function getRemoteOwnersByIds(ids: string[]): Promise<Map<string, { owner: string; createdAt: number }>> {
   if (ids.length === 0) return new Map();
   const p = getPool();
-  const result = await p.query('SELECT id, origin_user FROM documents WHERE id = ANY($1::text[])', [ids]);
-  return new Map(result.rows.map(r => [r.id as string, r.origin_user as string]));
+  const result = await p.query('SELECT id, origin_user, extract(epoch from created_at)::bigint AS c FROM documents WHERE id = ANY($1::text[])', [ids]);
+  return new Map(result.rows.map(r => [r.id as string, { owner: r.origin_user as string, createdAt: Number(r.c) }]));
 }
 
 /** Remote collection currently holding each of these ids (ids absent remotely are omitted). */
@@ -152,6 +161,8 @@ export async function findSimilarRemote(
   collection: string,
   embedding: number[],
   threshold: number = getConfig().SYNC_SIMILARITY_THRESHOLD,
+  /** Only match this user's rows (personal collections: never link to, or learn ids of, a teammate's `global`). */
+  owner?: string,
 ): Promise<Array<{ id: string; similarity: number }>> {
   const p = getPool();
   const embeddingStr = `[${embedding.join(',')}]`;
@@ -160,10 +171,10 @@ export async function findSimilarRemote(
     `SELECT id, 1 - (embedding <=> $1::vector) AS similarity
      FROM documents
      WHERE collection = $2
-       AND 1 - (embedding <=> $1::vector) > $3
+       AND 1 - (embedding <=> $1::vector) > $3${owner ? '\n       AND origin_user = $4' : ''}
      ORDER BY similarity DESC
      LIMIT 5`,
-    [embeddingStr, collection, threshold],
+    owner ? [embeddingStr, collection, threshold, owner] : [embeddingStr, collection, threshold],
   );
 
   return result.rows.map(r => ({ id: r.id, similarity: parseFloat(r.similarity) }));
@@ -174,7 +185,7 @@ export async function addRemoteRelatedIds(id: string, newRelatedIds: string[]): 
   const p = getPool();
   await p.query(
     `UPDATE documents
-     SET related_ids = array_cat(related_ids, $1::text[]),
+     SET related_ids = ARRAY(SELECT DISTINCT unnest(array_cat(related_ids, $1::text[]))),
          synced_at = now()
      WHERE id = $2`,
     [newRelatedIds, id],
@@ -190,6 +201,12 @@ export interface PullIdentity {
 export interface RemoteDocsQuery {
   /** Only rows originally written by this user (personal collections, e.g. `global`). */
   onlyOwnRows?: boolean;
+  /**
+   * With onlyOwnRows: also return teammates' rows whose OWNER shared them
+   * (`metadata.share_global`, stamped on push from the owner's
+   * SYNC_SHARE_GLOBAL). The reader's own setting never unlocks others' rows.
+   */
+  orOwnerShared?: boolean;
   /**
    * Also return rows this device wrote (normally skipped as echoes). Used once,
    * by a store's first-ever pull, to rebuild a wiped or brand-new store.
@@ -225,7 +242,12 @@ export function buildRemoteDocsSinceQuery(
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
-  if (opts.onlyOwnRows) text += `\n       AND origin_user = ${userParam ?? param(self.user)}`;
+  if (opts.onlyOwnRows) {
+    const own = `origin_user = ${userParam ?? param(self.user)}`;
+    text += opts.orOwnerShared
+      ? `\n       AND (${own} OR metadata->>'share_global' = 'true')`
+      : `\n       AND ${own}`;
+  }
   text += `\n     ORDER BY synced_at ASC`;
   return { text, values };
 }

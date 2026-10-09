@@ -13,6 +13,7 @@ import {
   bucketRoutePreview,
   bucketStatus,
   checkRemoteHealth,
+  getSyncTlsMode,
   classifyMemories,
   completeTask,
   createNewCollection,
@@ -1133,10 +1134,12 @@ export function registerTools(server: McpServer): void {
           const lines = [`Sync: **enabled** (interval: ${SYNC_INTERVAL_MS / 1000}s)`];
           lines.push(`Remote: ${SYNC_DATABASE_URL ? SYNC_DATABASE_URL.replace(/:[^:@]*@/, ':***@') : 'not configured'}`);
           lines.push(`Identity: user \`${getConfig().USERNAME}\`, device \`${getDeviceId()}\``);
+          if (!process.env.YAPA_USERNAME) lines.push(`Warning: username defaults to the OS login; set the \`username\` option to a name unique on your team (task ids and ownership use it)`);
           lines.push(`global: ${getConfig().SYNC_SHARE_GLOBAL ? 'shared with the team' : 'personal (syncs only between your own devices)'}`);
           try {
             const health = await checkRemoteHealth();
             lines.push(`Connection: ${health.ok ? 'healthy' : `error — ${health.error}`}`);
+            lines.push(`TLS: ${{ 'verify-ca': 'encrypted, server verified', unverified: 'encrypted, server NOT verified (set sync_ca_cert)', off: 'off (local database)' }[getSyncTlsMode()]}`);
           } catch (e) {
             lines.push(`Connection: error — ${e}`);
           }
