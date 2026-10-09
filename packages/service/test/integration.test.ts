@@ -116,6 +116,26 @@ describe.skipIf(!URL_)('service integration (real Postgres + RLS)', () => {
       expect((await pullAll('bob', 'B', 'customer-legacy')).body.documents.map((d: { id: string }) => d.id)).toEqual(['legacy-1']);
     });
 
+    it('echo spoof: a teammate writing with the owner device id cannot hide the edit from the owner', async () => {
+      await upsert('alice', 'A', [doc('spoof-1', 'customer-spoof')]);
+      // Bob claims alice's device id, in the header and in metadata.
+      const r = await upsert('bob', 'A', [{ ...doc('spoof-1', 'customer-spoof'), content: 'bob sneaky edit', updated_at: NOW, metadata: { type: 'memory', origin_device: 'A' } }]);
+      expect(r.body.results[0]).toMatchObject({ status: 'updated' });
+      const got = (await pullAll('alice', 'A', 'customer-spoof')).body.documents;
+      expect(got.map((d: { id: string }) => d.id)).toEqual(['spoof-1']);
+      expect(got[0]).toMatchObject({ content: 'bob sneaky edit', last_editor: 'bob' });
+      // Only bob's own device-A pulls treat it as an echo.
+      expect((await pullAll('bob', 'A', 'customer-spoof')).body.documents).toEqual([]);
+      expect((await pullAll('bob', 'B', 'customer-spoof')).body.documents).toHaveLength(1);
+
+      // A client-supplied metadata.origin_device is overwritten with the header device.
+      await upsert('bob', 'B', [{ ...doc('spoof-2', 'customer-spoof'), metadata: { type: 'memory', origin_device: 'A' } }]);
+      const row = (await db.adminPool.query("SELECT last_device, metadata FROM documents WHERE id = 'spoof-2'")).rows[0];
+      expect(row.last_device).toBe('B');
+      expect(row.metadata.origin_device).toBe('B');
+      expect((await pullAll('alice', 'A', 'customer-spoof')).body.documents.map((d: { id: string }) => d.id).sort()).toEqual(['spoof-1', 'spoof-2']);
+    });
+
     it('teammate update: allowed, attributed, audited with overwrote_teammate_edit; origin_user/created_at immutable', async () => {
       const r = await upsert('bob', 'B', [{ ...doc('acme-note-1', 'customer-acme'), content: 'bob edit', created_at: NOW - 5000, updated_at: NOW }]);
       expect(r.body.results[0]).toMatchObject({ status: 'updated' });
@@ -315,7 +335,94 @@ describe.skipIf(!URL_)('service integration (real Postgres + RLS)', () => {
     });
   });
 
+  describe('pull limits and ranges', () => {
+    it('orders same-second rows by microseconds, not whole seconds (no rows skipped)', async () => {
+      await upsert('alice', 'A', [doc('ord-a', 'project-order'), doc('ord-b', 'project-order')]);
+      // Same second; id order is the reverse of time order.
+      await db.adminPool.query("UPDATE documents SET synced_at = '2026-01-01T00:00:00.900000Z' WHERE id = 'ord-a'");
+      await db.adminPool.query("UPDATE documents SET synced_at = '2026-01-01T00:00:00.100000Z' WHERE id = 'ord-b'");
+      const seen: string[] = [];
+      let q = '?since=0&limit=1';
+      for (let i = 0; i < 4; i++) {
+        const r = await call('bob', 'B', 'GET', `/v1/collections/project-order/documents${q}`);
+        seen.push(...r.body.documents.map((d: { id: string }) => d.id));
+        if (!r.body.has_more) break;
+        q = `?cursor=${r.body.next_cursor}&limit=1`;
+      }
+      expect(seen).toEqual(['ord-b', 'ord-a']);
+    });
+
+    it('caps each page by serialized bytes (YAPA_PULL_MAX_BYTES) and keeps paging correct', async () => {
+      const words = 'lorem ipsum dolor sit amet consectetur adipiscing elit ';
+      const big = (i: number) => `${i} ${words.repeat(1100)}`.slice(0, 60_000); // ~60 KB each
+      const ids = Array.from({ length: 5 }, (_, i) => `bigdoc-${i}`);
+      const up = await upsert('alice', 'A', ids.map((id, i) => ({ ...doc(id, 'project-big'), content: big(i) })));
+      expect(up.body.results.every((x: { status: string }) => x.status === 'inserted')).toBe(true);
+      const small = createApp({
+        pool,
+        config: { similarityThreshold: 0.95, rateLimits: false, dailyWriteAlert: 20000, pullMaxBytes: 150_000 },
+        verifier: new InsecureTestVerifier(),
+      });
+      const get = async (q: string) => {
+        const r = await small.request(`/v1/collections/project-big/documents${q}`, { headers: { authorization: 'Bearer test:bob@example.com', 'x-yapa-device': 'B' } });
+        const text = await r.text();
+        expect(r.status).toBe(200);
+        expect(Buffer.byteLength(text)).toBeLessThan(150_000 + 4096);
+        return JSON.parse(text);
+      };
+      const seen: string[] = [];
+      let q = '?since=0';
+      let pages = 0;
+      for (;;) {
+        const body = await get(q);
+        pages++;
+        expect(body.documents.length).toBeGreaterThan(0);
+        seen.push(...body.documents.map((d: { id: string }) => d.id));
+        if (!body.has_more) break;
+        q = `?cursor=${body.next_cursor}`;
+        if (pages > 10) throw new Error('pagination did not terminate');
+      }
+      expect(seen).toEqual(ids); // all, in order, no duplicates
+      expect(pages).toBe(3); // 2 + 2 + 1 (each doc ~68 KB with its embedding)
+      // A single document over the budget still comes back alone.
+      const tiny = createApp({
+        pool, config: { similarityThreshold: 0.95, rateLimits: false, dailyWriteAlert: 20000, pullMaxBytes: 1000 },
+        verifier: new InsecureTestVerifier(),
+      });
+      const one = await (await tiny.request('/v1/collections/project-big/documents?since=0', { headers: { authorization: 'Bearer test:bob@example.com', 'x-yapa-device': 'B' } })).json();
+      expect(one.documents.map((d: { id: string }) => d.id)).toEqual(['bigdoc-0']);
+      expect(one.has_more).toBe(true);
+    });
+
+    it('huge since and cursor values are 400 invalid_request, not 500', async () => {
+      for (const since of ['1e300', '9223372036854775807', String(NOW + 3 * 86400)]) {
+        const r = await call('bob', 'B', 'GET', `/v1/collections/customer-acme/documents?since=${since}`);
+        expect(r.status, since).toBe(400);
+        expect(r.body.error.code).toBe('invalid_request');
+      }
+      const cur = Buffer.from(JSON.stringify({ c: 'customer-acme', d: { t: '99999999999999999999', id: 'a' }, x: { t: '0', id: null } })).toString('base64url');
+      const r = await call('bob', 'B', 'GET', `/v1/collections/customer-acme/documents?cursor=${cur}`);
+      expect(r.status).toBe(400);
+      expect(r.body.error.code).toBe('invalid_request');
+      expect((await call('bob', 'B', 'GET', `/v1/collections/customer-acme/documents?since=${NOW + 3600}`)).status).toBe(200);
+    });
+  });
+
   describe('idempotency', () => {
+    it('the same Idempotency-Key on PUTs to different ids does not replay', async () => {
+      const { id: _id, ...body } = doc('x', 'customer-acme');
+      const a = await call('alice', 'A', 'PUT', '/v1/documents/idem-put-a', body, { 'idempotency-key': 'k-put' });
+      expect(a.body).toMatchObject({ id: 'idem-put-a', status: 'inserted' });
+      const b = await call('alice', 'A', 'PUT', '/v1/documents/idem-put-b', body, { 'idempotency-key': 'k-put' });
+      expect(b.headers.get('idempotent-replay')).toBeNull();
+      expect(b.body).toMatchObject({ id: 'idem-put-b', status: 'inserted' });
+      expect((await db.adminPool.query("SELECT count(*)::int AS n FROM documents WHERE id IN ('idem-put-a', 'idem-put-b')")).rows[0].n).toBe(2);
+      // Same path + key + body still replays.
+      const again = await call('alice', 'A', 'PUT', '/v1/documents/idem-put-a', body, { 'idempotency-key': 'k-put' });
+      expect(again.headers.get('idempotent-replay')).toBe('true');
+      expect(again.body).toEqual(a.body);
+    });
+
     it('a retried batch with the same Idempotency-Key replays the response without re-auditing', async () => {
       const body = [doc('idem-1', 'customer-acme')];
       const first = await upsert('alice', 'A', body, { 'idempotency-key': 'k-123' });

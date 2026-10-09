@@ -77,6 +77,8 @@ export interface PullParams {
   limit: number;
   includeOwnDevice: boolean;
   embeddings: boolean;
+  /** Byte budget for the serialized documents of one page (at least one row is always returned). */
+  maxBytes: number;
 }
 
 export interface PullResult {
@@ -91,25 +93,64 @@ function posClause(tcol: string, pos: FeedPos, param: (v: unknown) => string): s
   return pos.id === null ? `${tcol} > ${ts}` : `(${tcol}, id) > (${ts}, ${param(pos.id)})`;
 }
 
+/**
+ * Echo rule (buildRemoteDocsSinceQuery): skip a row only when its LAST write
+ * was made by the caller from this device. Matching on the device alone let a
+ * teammate send X-Yapa-Device = <owner's device> and hide their edit from the
+ * owner's pulls. Legacy rows (no device stamp at all) are echoes only for
+ * their owner.
+ */
+export function echoClause(param: (v: unknown) => string, me: string, device: string): string {
+  const m = param(me);
+  const d = param(device);
+  return `NOT (COALESCE(last_editor, origin_user) = ${m} AND COALESCE(last_device, metadata->>'origin_device', '') = ${d})
+          AND NOT (origin_user = ${m} AND COALESCE(last_device, metadata->>'origin_device') IS NULL)`;
+}
+
+/**
+ * How many of the fetched rows fit in the page byte budget. `sizes` are the
+ * exact serialized sizes in feed order; the first row is always taken so a
+ * single oversized document cannot stall pagination.
+ */
+export function rowsWithinBudget(sizes: number[], maxBytes: number): number {
+  let total = 0;
+  let n = 0;
+  for (const s of sizes) {
+    if (n > 0 && total + s > maxBytes) break;
+    total += s;
+    n++;
+  }
+  return n;
+}
+
 export async function pull(pool: pg.Pool, ctx: RequestCtx, p: PullParams): Promise<PullResult> {
   return withUserTx(pool, ctx.caller.username, async c => {
     const values: unknown[] = [p.collection];
     const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
     let where = `collection = $1 AND ${posClause('synced_at', p.docsPos, param)}`;
-    if (!p.includeOwnDevice) {
-      // Echo rule (buildRemoteDocsSinceQuery): skip rows whose LAST writer was
-      // this device, and legacy rows of this user with no device stamp.
-      const dev = param(ctx.device ?? '');
-      const me = param(ctx.caller.username);
-      where += ` AND COALESCE(last_device, metadata->>'origin_device', '') <> ${dev}
-                 AND NOT (origin_user = ${me} AND COALESCE(last_device, metadata->>'origin_device') IS NULL)`;
-    }
+    if (!p.includeOwnDevice) where += ` AND ${echoClause(param, ctx.caller.username, ctx.device ?? '')}`;
     const lim = param(p.limit + 1);
+    const budget = param(p.maxBytes);
+    // The inner query takes at most limit+1 rows in feed order; the outer one
+    // drops rows whose raw size (a lower bound of their JSON size) is already
+    // past the budget, so big pages are never shipped from Postgres. ORDER BY
+    // uses documents.synced_at explicitly: the bare name would bind to the
+    // output column (whole seconds) and break (synced_at, id) pagination.
+    const est = `octet_length(content) + octet_length(metadata::text)${p.embeddings ? ' + octet_length(embedding::text)' : ''}`;
     const docs = await c.query(
-      `SELECT id, collection, content, ${p.embeddings ? 'embedding::text AS embedding,' : ''} metadata, origin_user, last_editor,
-              related_ids, ${SECS('created_at')}, ${SECS('updated_at')}, ${SECS('synced_at')}, ${MICROS('synced_at', 'synced_us')}
-         FROM documents WHERE ${where} AND ${LOCAL_ONLY_SQL}
-        ORDER BY synced_at, id LIMIT ${lim}`,
+      `SELECT * FROM (
+         SELECT s.*, sum(s.est_bytes) OVER w AS est_cum, row_number() OVER w AS rn, count(*) OVER () AS total
+           FROM (
+             SELECT id, collection, content, ${p.embeddings ? 'embedding::text AS embedding,' : ''} metadata, origin_user, last_editor,
+                    related_ids, ${SECS('created_at')}, ${SECS('updated_at')}, ${SECS('synced_at')}, ${MICROS('synced_at', 'synced_us')},
+                    documents.synced_at AS synced_ts, (${est})::bigint AS est_bytes
+               FROM documents WHERE ${where} AND ${LOCAL_ONLY_SQL}
+              ORDER BY documents.synced_at, documents.id LIMIT ${lim}
+           ) s
+         WINDOW w AS (ORDER BY s.synced_ts, s.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+       ) t
+       WHERE rn = 1 OR est_cum <= ${budget}
+       ORDER BY rn`,
       values,
     );
 
@@ -118,11 +159,15 @@ export async function pull(pool: pg.Pool, ctx: RequestCtx, p: PullParams): Promi
     const dwhere = `collection = $1 AND ${posClause('deleted_at', p.delsPos, dparam)}`;
     const dels = await c.query(
       `SELECT id, deleted_by, ${SECS('deleted_at')}, ${MICROS('deleted_at', 'deleted_us')}
-         FROM deletions WHERE ${dwhere} ORDER BY deleted_at, id LIMIT ${dparam(p.limit + 1)}`,
+         FROM deletions WHERE ${dwhere} ORDER BY deletions.deleted_at, deletions.id LIMIT ${dparam(p.limit + 1)}`,
       dvalues,
     );
 
-    const docRows = docs.rows.slice(0, p.limit);
+    const fetched = docs.rows.slice(0, p.limit);
+    const outs = fetched.map(r => toDocumentOut(r, p.embeddings));
+    const take = rowsWithinBudget(outs.map(o => Buffer.byteLength(JSON.stringify(o), 'utf8')), p.maxBytes);
+    const docRows = fetched.slice(0, take);
+    const totalCandidates = docs.rows.length ? Number(docs.rows[0].total) : 0;
     const delRows = dels.rows.slice(0, p.limit);
     const lastDoc = docRows[docRows.length - 1];
     const lastDel = delRows[delRows.length - 1];
@@ -132,10 +177,10 @@ export async function pull(pool: pg.Pool, ctx: RequestCtx, p: PullParams): Promi
       x: lastDel ? { t: lastDel.deleted_us, id: lastDel.id } : p.delsPos,
     };
     return {
-      documents: docRows.map(r => toDocumentOut(r, p.embeddings)),
+      documents: outs.slice(0, take),
       deletions: delRows.map(r => ({ id: r.id, deleted_by: r.deleted_by, deleted_at: Number(r.deleted_at) })),
       next_cursor: encodeCursor(cursor),
-      has_more: docs.rows.length > p.limit || dels.rows.length > p.limit,
+      has_more: docRows.length < totalCandidates || dels.rows.length > p.limit,
     };
   });
 }
@@ -411,8 +456,12 @@ export interface StoredResponse {
   body: unknown;
 }
 
-export function idempotencyStorageKey(username: string, route: string, key: string): string {
-  return sha256(`${username}\n${route}\n${key}`);
+/**
+ * `target` is the method plus the CONCRETE path (e.g. `PUT /v1/documents/acme-1`),
+ * so one key reused on a different document id cannot replay another response.
+ */
+export function idempotencyStorageKey(username: string, target: string, key: string): string {
+  return sha256(`${username}\n${target}\n${key}`);
 }
 
 export async function getIdempotent(pool: pg.Pool, ctx: RequestCtx, storageKey: string): Promise<StoredResponse | undefined> {
@@ -443,8 +492,8 @@ export async function putIdempotent(pool: pg.Pool, ctx: RequestCtx, storageKey: 
   });
 }
 
-export function requestHash(body: string): string {
-  return sha256(body);
+export function requestHash(target: string, body: string): string {
+  return sha256(`${target}\n${body}`);
 }
 
 // ------------------------------------------------------------------ users

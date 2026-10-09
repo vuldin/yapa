@@ -106,6 +106,25 @@ describe('authenticated, no-DB routes', () => {
     expect(r.status).toBe(413);
   });
 
+  it('out-of-range since and cursor positions are 400, not a bigint overflow 500', async () => {
+    const a = app(user);
+    const pull = (qs: string) => a.request(`/v1/collections/customer-acme/documents?${qs}`, { headers: auth });
+    for (const since of ['1e300', '99999999999999999999', String(Math.floor(Date.now() / 1000) + 2 * 86400), '-1', 'abc', 'Infinity']) {
+      const r = await pull(`since=${since}`);
+      expect(r.status, since).toBe(400);
+      expect((await r.json()).error.code).toBe('invalid_request');
+    }
+    const huge = { c: 'customer-acme', d: { t: '99999999999999999999', id: 'a' }, x: { t: '0', id: null } };
+    const r = await pull(`cursor=${encodeCursor(huge)}`);
+    expect(r.status).toBe(400);
+    expect((await r.json()).error.message).toMatch(/out of range/);
+  });
+
+  it('/v1/me reports the pull byte budget', async () => {
+    const r = await app(user).request('/v1/me', { headers: auth });
+    expect((await r.json()).limits.pull_max_bytes).toBe(8 * 1024 * 1024);
+  });
+
   it('rate limits reads with 429 and Retry-After', async () => {
     const a = app(user);
     let last: Response | undefined;
@@ -153,5 +172,15 @@ describe('cursor', () => {
     expect(() => decodeCursor('!!', 'customer-acme')).toThrow(/malformed/);
     expect(() => decodeCursor(Buffer.from('{"c":"customer-acme","d":{"t":"1; DROP","id":null},"x":{"t":"0","id":null}}').toString('base64url'), 'customer-acme')).toThrow(/malformed/);
     expect(posFromSince(2)).toEqual({ t: '2000000', id: null });
+  });
+  it('rejects positions past now + 1 day and accepts recent ones', () => {
+    const now = Date.UTC(2026, 9, 1);
+    const at = (t: string) => encodeCursor({ c: 'customer-acme', d: { t, id: 'a' }, x: { t: '0', id: null } });
+    expect(decodeCursor(at(String(now * 1000)), 'customer-acme', now).d.t).toBe(String(now * 1000));
+    expect(decodeCursor(at(String((now + 86_400_000) * 1000)), 'customer-acme', now)).toBeTruthy();
+    expect(() => decodeCursor(at(String((now + 86_400_001) * 1000)), 'customer-acme', now)).toThrow(/out of range/);
+    expect(() => decodeCursor(at('18446744073709551616'), 'customer-acme', now)).toThrow(/out of range/);
+    const delsHuge = encodeCursor({ c: 'customer-acme', d: { t: '0', id: null }, x: { t: '9223372036854775807', id: 'z' } });
+    expect(() => decodeCursor(delsHuge, 'customer-acme', now)).toThrow(/out of range/);
   });
 });

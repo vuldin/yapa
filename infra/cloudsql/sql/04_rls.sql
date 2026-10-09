@@ -28,11 +28,29 @@ CREATE POLICY docs_insert ON documents FOR INSERT TO :"runtime_user"
 -- Teammate edits are allowed (ADP-reviewed later); immutability of
 -- origin_user/created_at is enforced by the service.
 CREATE POLICY docs_update ON documents FOR UPDATE TO :"runtime_user"
-  USING (current_setting('yapa.user', true) IS NOT NULL)
+  -- On a pooled connection the setting reverts to '' (not NULL) after commit.
+  USING (NULLIF(current_setting('yapa.user', true), '') IS NOT NULL)
   WITH CHECK (collection <> 'global' AND collection NOT LIKE 'private-%' AND collection NOT LIKE 'local-%');
 
 -- Owner-only delete.
 CREATE POLICY docs_delete ON documents FOR DELETE TO :"runtime_user"
   USING (origin_user = current_setting('yapa.user', true));
+
+-- Authorship is immutable for everyone, even the table owner, unless an
+-- admin ownership transfer (design decision 10) opts in for its transaction:
+--   SELECT set_config('yapa.allow_owner_change', 'on', true);
+CREATE OR REPLACE FUNCTION yapa_guard_authorship() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (NEW.origin_user IS DISTINCT FROM OLD.origin_user OR NEW.created_at IS DISTINCT FROM OLD.created_at)
+     AND COALESCE(current_setting('yapa.allow_owner_change', true), '') <> 'on' THEN
+    RAISE EXCEPTION 'origin_user and created_at are immutable' USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+DROP TRIGGER IF EXISTS documents_guard_authorship ON documents;
+CREATE TRIGGER documents_guard_authorship BEFORE UPDATE ON documents
+  FOR EACH ROW EXECUTE FUNCTION yapa_guard_authorship();
 
 RESET ROLE;

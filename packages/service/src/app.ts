@@ -8,7 +8,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type pg from 'pg';
 import { APP_TOKEN_HEADER, authenticate, type Caller, type TokenVerifier, type UserLookup } from './auth.js';
-import type { RateLimitClass, RateLimits, ServiceConfig } from './config.js';
+import { PULL_MAX_BYTES_DEFAULT, type RateLimitClass, type RateLimits, type ServiceConfig } from './config.js';
 import { decodeCursor, posFromSince } from './cursor.js';
 import { isUnavailableError } from './db.js';
 import { ApiError, statusFor, type ErrorCode } from './errors.js';
@@ -17,7 +17,7 @@ import { DailyCounter, TokenBuckets } from './ratelimit.js';
 import {
   assertCollection, assertDocId, assertEmbedding, assertIdList, checkDevice, checkUpsertItem, clamp,
   MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, MAX_UPSERT_BYTES, MAX_UPSERT_DOCS, PULL_LIMIT_DEFAULT, PULL_LIMIT_MAX,
-  EMBEDDING_DIMS, MAX_CONTENT_BYTES, MAX_METADATA_BYTES,
+  EMBEDDING_DIMS, MAX_CONTENT_BYTES, MAX_FUTURE_SECONDS, MAX_METADATA_BYTES,
 } from './rules.js';
 import * as store from './store.js';
 import type { RequestCtx, UpsertResult } from './store.js';
@@ -35,7 +35,7 @@ type Env = {
 
 export interface AppDeps {
   pool: pg.Pool;
-  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'>;
+  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes'>>;
   verifier: TokenVerifier;
   /** Defaults to the users table. */
   lookupUser?: UserLookup;
@@ -56,6 +56,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
   const buckets = new TokenBuckets(deps.now);
   const daily = new DailyCounter(deps.now);
   const limits: RateLimits | false = config.rateLimits;
+  const pullMaxBytes = config.pullMaxBytes ?? PULL_MAX_BYTES_DEFAULT;
+  const nowMs = () => deps.now?.() ?? Date.now();
   const sweep = setInterval(() => buckets.sweep(), 5 * 60_000);
   sweep.unref();
 
@@ -176,8 +178,11 @@ export function createApp(deps: AppDeps): Hono<Env> {
     }
     if (!IDEM_KEY_RE.test(key)) throw new ApiError('invalid_request', 'Idempotency-Key must match ^[A-Za-z0-9._:-]{1,200}$');
     const ctx = ctxOf(c);
-    const storageKey = store.idempotencyStorageKey(ctx.caller.username, c.get('route'), key);
-    const hash = store.requestHash(raw);
+    // Method + concrete path (not the route template): the same key on
+    // PUT /v1/documents/a and PUT /v1/documents/b must not replay.
+    const target = `${c.req.method} ${c.req.path}`;
+    const storageKey = store.idempotencyStorageKey(ctx.caller.username, target, key);
+    const hash = store.requestHash(target, raw);
     const prior = await store.getIdempotent(pool, ctx, storageKey);
     if (prior) {
       if (prior.request_sha256 !== hash) throw new ApiError('invalid_request', 'Idempotency-Key was already used with a different request body');
@@ -221,6 +226,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         max_lookup_ids: MAX_LOOKUP_IDS,
         max_related_ids: MAX_RELATED_IDS,
         pull_limit_max: PULL_LIMIT_MAX,
+        pull_max_bytes: pullMaxBytes,
         similarity_threshold: config.similarityThreshold,
       },
     });
@@ -251,12 +257,15 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!Number.isInteger(lim) || lim < 1) throw new ApiError('invalid_request', 'limit must be a positive integer');
     let docsPos, delsPos;
     if (q.cursor) {
-      const cur = decodeCursor(q.cursor, collection);
+      const cur = decodeCursor(q.cursor, collection, nowMs());
       docsPos = cur.d;
       delsPos = cur.x;
     } else {
-      const since = q.since === undefined ? 0 : Number(q.since);
-      if (!Number.isFinite(since) || since < 0) throw new ApiError('invalid_request', 'since must be Unix seconds');
+      const since = q.since === undefined || q.since === '' ? 0 : Number(q.since);
+      // Bounded so the microsecond position always fits a bigint (a huge value was a 500).
+      if (!Number.isFinite(since) || since < 0 || since > nowMs() / 1000 + MAX_FUTURE_SECONDS) {
+        throw new ApiError('invalid_request', `since must be Unix seconds between 0 and now + ${MAX_FUTURE_SECONDS}`);
+      }
       docsPos = delsPos = posFromSince(since);
     }
     const result = await store.pull(pool, ctxOf(c), {
@@ -266,6 +275,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       limit: Math.min(lim, PULL_LIMIT_MAX),
       includeOwnDevice: bool(q.include_own_device, false),
       embeddings: bool(q.embeddings, true),
+      maxBytes: pullMaxBytes,
     });
     return c.json(result);
   });

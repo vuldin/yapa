@@ -20,6 +20,21 @@ Google identity; the database enforces the same rules again with RLS
 | `src/ratelimit.ts` | per-user token buckets and the daily write alert |
 | `src/log.ts` | structured JSON logs with Cloud Logging `severity` |
 
+## Client headers
+
+Behind Cloud Run IAM, send the same Google ID token twice:
+
+| Header | Purpose |
+|---|---|
+| `Authorization: Bearer <token>` | Cloud Run IAM (`roles/run.invoker`). Cloud Run forwards it with the signature replaced by `SIGNATURE_REMOVED_BY_GOOGLE`, so the app never trusts it there. |
+| `X-Yapa-Id-Token: <token>` | Verified by the app (signature, audience allow-list, issuer, expiry, `email_verified`, `hd`), then mapped to an active `users` row. |
+| `X-Yapa-Device: <device id>` | Required on writes and pulls (echo suppression, attribution). |
+| `Idempotency-Key: <key>` | Optional on upserts. |
+
+Without Cloud Run in front (local, self-host), `Authorization` alone is verified. Note: Cloud Run reserves `/healthz` for its own probes; external health checks use `/health`.
+
+Tests against the deployed service: `test/live.test.ts` (`YAPA_LIVE_URL`, `YAPA_LIVE_TOKEN`, `YAPA_LIVE_ADMIN_URL`, `YAPA_LIVE_ADMIN_CA`).
+
 ## Endpoints
 
 All under `/v1` need `Authorization: Bearer <Google ID token>`; pull and
@@ -57,6 +72,7 @@ upsert also need `X-Yapa-Device`. `GET /healthz` is the only open route
 | `YAPA_DB_POOL_MAX` | no | `5` | pool size per instance (pool x max instances must stay below `max_connections`) |
 | `YAPA_STATEMENT_TIMEOUT_MS` | no | `5000` | per-connection `statement_timeout` |
 | `YAPA_SIMILARITY_THRESHOLD` | no | `0.95` | threshold for the `similar` hint in upsert results and the default for `:similar` |
+| `YAPA_PULL_MAX_BYTES` | no | `8388608` | byte budget per pull page (min 64 KiB); a page stops early with `has_more` when exceeded |
 | `YAPA_RATE_LIMITS` | no | `on` | `off` disables the per-user token buckets (tests/local only) |
 | `YAPA_DAILY_WRITE_ALERT` | no | `20000` | per-user daily document writes that log a `daily_write_cap` warning (not a block) |
 | `YAPA_AUTH_MODE` | no | `google` | `insecure-test` accepts `Bearer test:<email>` WITHOUT verification. Local tests only; the service refuses to start in this mode when `K_SERVICE` is set (Cloud Run) |

@@ -22,7 +22,10 @@ export function encodeCursor(c: PullCursor): string {
   return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
 }
 
-export function decodeCursor(raw: string, collection: string): PullCursor {
+/** Cursor timestamps may be at most this far past the server clock. */
+const MAX_FUTURE_MICROS = 86_400n * 1_000_000n;
+
+export function decodeCursor(raw: string, collection: string, nowMs: number = Date.now()): PullCursor {
   let v: unknown;
   try {
     v = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
@@ -36,9 +39,13 @@ export function decodeCursor(raw: string, collection: string): PullCursor {
   const cur = v as PullCursor;
   if (!cur || typeof cur !== 'object' || !ok(cur.d) || !ok(cur.x)) throw new ApiError('invalid_request', 'malformed cursor');
   if (cur.c !== collection) throw new ApiError('invalid_request', 'cursor belongs to a different collection');
+  // Range check: an out-of-range t overflowed ::bigint in SQL (a 500).
+  const maxT = BigInt(Math.floor(nowMs)) * 1000n + MAX_FUTURE_MICROS;
+  if (BigInt(cur.d.t) > maxT || BigInt(cur.x.t) > maxT) throw new ApiError('invalid_request', 'cursor position is out of range');
   return cur;
 }
 
+/** `since` must already be range-checked (0 <= since <= now + 1 day). */
 export function posFromSince(since: number): FeedPos {
   return { t: (BigInt(Math.max(0, Math.floor(since))) * 1_000_000n).toString(), id: null };
 }
