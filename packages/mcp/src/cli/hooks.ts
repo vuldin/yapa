@@ -14,6 +14,8 @@ import {
   detectCollection,
   pullCollection,
   getSyncPullTimestamp,
+  getSyncSubscriptions,
+  updateSyncSubscriptions,
   isSyncConfigured,
   resolveSyncUsername,
   captureTurn,
@@ -96,12 +98,21 @@ export async function freshenFromRemote(collection: string): Promise<number> {
   // global/private-*/local-* never sync: skip the sign-in and the request.
   if (!isSyncableCollection(collection)) return 0;
   try {
-    const since = Math.max(0, (await getSyncPullTimestamp()) - HOOK_PULL_OVERLAP_SECONDS);
+    // First visit to a shared collection (a teammate's project folder, or one
+    // named in the prompt): pull its whole history, then follow it so the
+    // background sync keeps it current. Subscribe only after the backfill
+    // finished, so a pull cut off by the timeout simply retries next prompt.
+    const followed = (await getSyncSubscriptions()).includes(collection);
+    const since = followed ? Math.max(0, (await getSyncPullTimestamp()) - HOOK_PULL_OVERLAP_SECONDS) : 0;
     // The service's username (Google account) drives "by <user>" attribution.
     const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
     if (!stats) {
       process.stderr.write(`[yapa-hook] remote pull for ${collection} timed out\n`);
       return 0;
+    }
+    if (!followed && stats.errors === 0) {
+      const subs = await getSyncSubscriptions();
+      if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
     }
     return stats.pulled + stats.updated;
   } catch (e) {

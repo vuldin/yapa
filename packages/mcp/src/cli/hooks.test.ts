@@ -76,6 +76,25 @@ describe('freshenFromRemote', () => {
     expect(pullCollection).not.toHaveBeenCalled();
   });
 
+  it('first visit backfills the whole collection, then follows it; later visits pull recent changes', async () => {
+    const core = await import('@yapa/core');
+    await core.updateSyncSubscriptions([]);
+    await freshenFromRemote('project-newteam');
+    expect(pullCollection.mock.calls.at(-1)?.slice(0, 2)).toEqual(['project-newteam', 0]);
+    expect(await core.getSyncSubscriptions()).toContain('project-newteam');
+    await core.updateSyncPullTimestamp(1_800_000_000);
+    await freshenFromRemote('project-newteam');
+    expect(pullCollection.mock.calls.at(-1)?.[1]).toBeGreaterThan(0);
+  });
+
+  it('a first-visit backfill that times out does not subscribe (retries next prompt)', async () => {
+    const core = await import('@yapa/core');
+    await core.updateSyncSubscriptions([]);
+    pullCollection.mockImplementationOnce(() => new Promise(() => {}));
+    await freshenFromRemote('project-slow');
+    expect(await core.getSyncSubscriptions()).not.toContain('project-slow');
+  });
+
   it('is a no-op with sync disabled', async () => {
     configure({ YAPA_SYNC_ENABLED: 'false' });
     expect(await freshenFromRemote('project-acme')).toBe(0);

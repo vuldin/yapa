@@ -1,6 +1,6 @@
 {
   "name": "@yapa/service",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "YAPA sync service: HTTP API v1 in front of the shared Postgres store (docs/service-design.md)",
   "private": true,
   "type": "module",
