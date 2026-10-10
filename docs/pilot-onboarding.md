@@ -6,6 +6,12 @@ teammates' memories and tasks for the same customer or project.
 
 Ask the pilot admin for the sync service URL (`<SERVICE_URL>` below).
 
+> **How to use the prompts below:** lines starting with `>` are plain messages
+> to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
+> (`sync`, `memory_store`, `task_create`, ...). The `/` menu only lists slash
+> commands and skills, not tools; to see the tools, run `/mcp` and open the
+> `plugin:yapa:yapa` server.
+
 ## 1. Prerequisites
 
 - Claude Code, recent version (`claude --version`).
