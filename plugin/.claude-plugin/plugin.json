@@ -1,6 +1,6 @@
 {
   "name": "yapa",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Persistent, team-shareable memory and tasks for Claude Code: per-prompt recall, teammate sync through the YAPA sync service (Google sign-in), journal and compaction capture.",
   "author": {
     "name": "Josh Purcell"

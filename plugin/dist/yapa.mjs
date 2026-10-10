@@ -2424,10 +2424,33 @@ async function getSyncPullTimestamp() {
     return 0;
   }
 }
+async function getSyncSubscriptions() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_subscriptions" }
+    }, 1);
+    if (results.length === 0) return [];
+    const raw = results[0].metadata.collections;
+    if (!raw) return [];
+    return raw.split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function updateSyncSubscriptions(collections) {
+  await getOrCreateCollection2("global");
+  const deduped = [...new Set(collections)].sort();
+  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
+    type: "sync_subscriptions",
+    collections: deduped.join(",")
+  });
+}
+var SYNC_SUBSCRIPTIONS_ID;
 var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
     init_store();
+    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
   }
 });
 
@@ -3450,12 +3473,17 @@ async function freshenFromRemote(collection) {
   if (!isSyncConfigured(config)) return 0;
   if (!isSyncableCollection(collection)) return 0;
   try {
-    const since = Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS);
+    const followed = (await getSyncSubscriptions()).includes(collection);
+    const since = followed ? Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS) : 0;
     const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
     if (!stats) {
       process.stderr.write(`[yapa-hook] remote pull for ${collection} timed out
 `);
       return 0;
+    }
+    if (!followed && stats.errors === 0) {
+      const subs = await getSyncSubscriptions();
+      if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
     }
     return stats.pulled + stats.updated;
   } catch (e) {
