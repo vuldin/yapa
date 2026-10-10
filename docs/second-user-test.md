@@ -11,8 +11,8 @@ YAPA username (email local part), `<josh>` Josh's username.
 The prompts below are typed into Claude Code. Ask Claude to show the raw
 tool output when checking results.
 
-> **How to use the prompts below:** lines starting with `>` are plain messages
-> to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
+> **How to use the prompts below:** each **Type this message** block is a plain
+> message to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
 > (`sync`, `memory_store`, `task_create`, ...). The `/` menu only lists slash
 > commands and skills, not tools; to see the tools, run `/mcp` and open the
 > `plugin:yapa:yapa` server.
@@ -27,8 +27,11 @@ folder under one of Josh's `project_roots`), or name the collection explicitly.
 mkdir -p <JOSH_PROJECT_ROOT>/yapa-pilot-test && cd "$_" && claude
 ```
 
-> Store a memory in collection project-yapa-pilot-test: "Pilot test seed memory from Josh. Safe to delete."
-> Run the yapa sync tool with action now, then action collections.
+**Type this message:**
+```
+Store a memory in collection project-yapa-pilot-test: "Pilot test seed memory from Josh. Safe to delete."
+Run the yapa sync tool with action now, then action collections.
+```
 
 Expected: `project-yapa-pilot-test` listed with 1 doc, `(subscribed)`.
 Note the seed memory id (`<JOSH_MEMORY_ID>`).
@@ -39,7 +42,10 @@ Follow [pilot-onboarding.md](pilot-onboarding.md) steps 1-4, but set only
 `sync_enabled=true` and `sync_service_url=<SERVICE_URL>` (no project roots).
 Restart Claude Code, then:
 
-> Run the yapa sync tool with action status.
+**Type this message:**
+```
+Run the yapa sync tool with action status.
+```
 
 Expected: `Signed in as: <colleague> (<colleague>@<company-domain>)` and
 `Connection: healthy`. If it says "not mapped to a YAPA user", Josh runs
@@ -48,19 +54,28 @@ colleague retries.
 
 ## 2. Colleague: subscribe and backfill
 
-> Subscribe me to project-yapa-pilot-test with the yapa sync tool.
+**Type this message:**
+```
+Subscribe me to project-yapa-pilot-test with the yapa sync tool.
+```
 
 Expected: `Subscribed to: project-yapa-pilot-test (backfilled 1 docs)`.
 
-> List memories in collection project-yapa-pilot-test.
+**Type this message:**
+```
+List memories in collection project-yapa-pilot-test.
+```
 
 Expected: the seed memory, attributed to `<josh>`.
 
 ## 3. Colleague: write a memory and a task
 
-> Store a memory in collection project-yapa-pilot-test: "Pilot test: the colleague's favorite broker setting is retention.ms=604800000."
-> Create a task in collection project-yapa-pilot-test: "[pilot-test] Josh completes this task".
-> Run the yapa sync tool with action now.
+**Type this message:**
+```
+Store a memory in collection project-yapa-pilot-test: "Pilot test: the colleague's favorite broker setting is retention.ms=604800000."
+Create a task in collection project-yapa-pilot-test: "[pilot-test] Josh completes this task".
+Run the yapa sync tool with action now.
+```
 
 Expected: push reports 2 docs, no errors. Note the task id
 (`<colleague>-<n>`, call it `<TASK_ID>`).
@@ -69,7 +84,10 @@ Expected: push reports 2 docs, no errors. Note the task id
 
 In the `yapa-pilot-test` folder session from step 0:
 
-> What is the colleague's favorite broker setting? Show me the YAPA Context block you received.
+**Type this message:**
+```
+What is the colleague's favorite broker setting? Show me the YAPA Context block you received.
+```
 
 Expected: the injected context lists the colleague's memory with
 `, by <colleague>`, pulled by the prompt hook without a manual sync. (Using
@@ -78,15 +96,24 @@ once the background sync has pulled it, or after `sync` action `now`.)
 
 ## 5. Josh: complete the colleague's task
 
-> List open tasks in project-yapa-pilot-test.
+**Type this message:**
+```
+List open tasks in project-yapa-pilot-test.
+```
 
 Expected: `<TASK_ID>` shown `by <colleague>`.
 
-> Complete task <TASK_ID>. Then run the yapa sync tool with action now.
+**Type this message:**
+```
+Complete task <TASK_ID>. Then run the yapa sync tool with action now.
+```
 
 ## 6. Colleague: see the completion
 
-> Run the yapa sync tool with action now, then show task <TASK_ID>.
+**Type this message:**
+```
+Run the yapa sync tool with action now, then show task <TASK_ID>.
+```
 
 Expected: status `done`. The task is still the colleague's (no `by` label on
 their side); the service records Josh as its last editor (optional admin
@@ -95,14 +122,20 @@ over the admin tunnel).
 
 ## 7. Colleague: try to delete Josh's memory
 
-> Forget memory <JOSH_MEMORY_ID>. Then run the yapa sync tool with action now.
+**Type this message:**
+```
+Forget memory <JOSH_MEMORY_ID>. Then run the yapa sync tool with action now.
+```
 
 Expected on the colleague's side: the memory is gone locally and does not
 come back after the sync (tombstoned).
 
 Josh:
 
-> Run the yapa sync tool with action collections. List memories in project-yapa-pilot-test.
+**Type this message:**
+```
+Run the yapa sync tool with action collections. List memories in project-yapa-pilot-test.
+```
 
 Expected: the seed memory is still there, and the remote doc count did not
 drop. Only the owner can delete a shared row.
@@ -111,7 +144,10 @@ drop. Only the owner can delete a shared row.
 
 Colleague:
 
-> Store a memory in project-yapa-pilot-test: "test key AKIAABCDEFGHIJKLMNOP". Then sync now and show sync status.
+**Type this message:**
+```
+Store a memory in project-yapa-pilot-test: "test key AKIAABCDEFGHIJKLMNOP". Then sync now and show sync status.
+```
 
 Expected: the memory is stored locally but listed as refused (secret
 detected) in `sync status`, and Josh never receives it. Forget it afterwards.
@@ -122,21 +158,33 @@ Each person deletes their own items; owner deletes propagate.
 
 Colleague:
 
-> Forget my pilot-test memory and delete task <TASK_ID> in project-yapa-pilot-test. Sync now.
+**Type this message:**
+```
+Forget my pilot-test memory and delete task <TASK_ID> in project-yapa-pilot-test. Sync now.
+```
 
 Josh (on the next pull, the colleague's items disappear from Josh's machine):
 
-> List memories and tasks in project-yapa-pilot-test.
+**Type this message:**
+```
+List memories and tasks in project-yapa-pilot-test.
+```
 
 Expected: only Josh's seed memory remains. Then both run:
 
-> Delete collection project-yapa-pilot-test.
+**Type this message:**
+```
+Delete collection project-yapa-pilot-test.
+```
 
 `collection_delete` deletes your own rows on the service, drops teammates'
 copies locally only, and unsubscribes you. Josh runs it last, as the owner of
 the seed memory. Finally:
 
-> Run the yapa sync tool with action collections.
+**Type this message:**
+```
+Run the yapa sync tool with action collections.
+```
 
 Expected: `project-yapa-pilot-test` is no longer listed. Josh: remove the
 `yapa-pilot-test` folder.

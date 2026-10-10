@@ -6,8 +6,8 @@ teammates' memories and tasks for the same customer or project.
 
 Ask the pilot admin for the sync service URL (`<SERVICE_URL>` below).
 
-> **How to use the prompts below:** lines starting with `>` are plain messages
-> to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
+> **How to use the prompts below:** each **Type this message** block is a plain
+> message to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
 > (`sync`, `memory_store`, `task_create`, ...). The `/` menu only lists slash
 > commands and skills, not tools; to see the tools, run `/mcp` and open the
 > `plugin:yapa:yapa` server.
@@ -62,7 +62,10 @@ else is `global` (local-only, see Privacy).
 
 Restart Claude Code (quit and start again). Then ask:
 
-> Run the yapa sync tool with action status.
+**Type this message:**
+```
+Run the yapa sync tool with action status.
+```
 
 Expected lines:
 
@@ -82,9 +85,15 @@ You push to a collection automatically the first time you write to it, and
 you are then subscribed to it. To read teammates' collections you have not
 written to yet:
 
-> Run the yapa sync tool with action collections.
+**Type this message:**
+```
+Run the yapa sync tool with action collections.
+```
 
-> Subscribe me to customer-acme and project-cs-team.
+**Type this message:**
+```
+Subscribe me to customer-acme and project-cs-team.
+```
 
 Subscribing backfills the full history of that collection. `unsubscribe`
 stops pulling but keeps what is already on your machine.
