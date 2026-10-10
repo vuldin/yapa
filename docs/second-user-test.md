@@ -11,6 +11,12 @@ YAPA username (email local part), `<josh>` Josh's username.
 The prompts below are typed into Claude Code. Ask Claude to show the raw
 tool output when checking results.
 
+> **How to use the prompts below:** lines starting with `>` are plain messages
+> to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
+> (`sync`, `memory_store`, `task_create`, ...). The `/` menu only lists slash
+> commands and skills, not tools; to see the tools, run `/mcp` and open the
+> `plugin:yapa:yapa` server.
+
 ## 0. Josh: seed the collection
 
 Subscribing needs the collection to exist on the service, so Josh creates it.
