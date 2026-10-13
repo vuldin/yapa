@@ -10,6 +10,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "dev": "npm run dev --workspaces --if-present",
+    "pretest": "npm run build",
     "test": "npm run test --workspaces --if-present",
     "start": "node packages/mcp/dist/index.js",
     "build:plugin": "node scripts/build-plugin.mjs",
