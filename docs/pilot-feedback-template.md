@@ -2,7 +2,7 @@
 
 Report every pilot issue twice: a short reply in the pilot Slack thread (so
 others can say "me too") and a YAPA task (so it is tracked). Never paste
-customer secrets, tokens or passwords; `sync status` output is safe to share.
+customer secrets, tokens or passwords; the sync status output is safe to share.
 
 ## Slack thread reply
 
@@ -16,7 +16,7 @@ Repro:
   1. <step>
   2. <step>
 Sync status:
-  <paste `sync` action `status` output>
+  <paste the answer to "Is my YAPA sync working?">
 YAPA task: <task id>
 ```
 

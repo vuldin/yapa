@@ -64,10 +64,10 @@ Restart Claude Code (quit and start again). Then ask:
 
 **Type this message:**
 ```
-Run the yapa sync tool with action status.
+Is my YAPA sync working?
 ```
 
-Expected lines:
+Expected: Claude checks sync status and reports lines like:
 
 ```
 Backend: YAPA sync service
@@ -81,13 +81,15 @@ Your username is the local part of your company email (for example
 
 ## 5. Subscribe to shared collections
 
-You push to a collection automatically the first time you write to it, and
-you are then subscribed to it. To read teammates' collections you have not
-written to yet:
+Usually nothing to do: the first time you start Claude Code in a project or
+customer folder, YAPA pulls that collection's full history and keeps
+following it. Writing to a collection also subscribes you.
+
+To follow a teammate's collection you have no folder for:
 
 **Type this message:**
 ```
-Run the yapa sync tool with action collections.
+What shared YAPA collections are there?
 ```
 
 **Type this message:**
@@ -95,7 +97,7 @@ Run the yapa sync tool with action collections.
 Subscribe me to customer-acme and project-cs-team.
 ```
 
-Subscribing backfills the full history of that collection. `unsubscribe`
+Subscribing backfills the full history of that collection. Unsubscribing
 stops pulling but keeps what is already on your machine.
 
 ## 6. What you will see
@@ -130,7 +132,7 @@ progress and blocked tasks; teammates' tasks marked `(by <user>)`).
   employee** who uses YAPA. There are no per-collection ACLs in the pilot.
   Put restricted material in a `private-*` collection.
 - Content that looks like a secret (keys, tokens, passwords) is refused by
-  the service. It stays local and unsynced and is listed in `sync status`;
+  the service. It stays local and unsynced and is listed in the sync status;
   edit it out and it is retried.
 - Teammates can edit shared items (last writer wins). Only the author can
   delete a shared item; deleting a teammate's item removes it from your
@@ -138,7 +140,7 @@ progress and blocked tasks; teammates' tasks marked `(by <user>)`).
 
 ## 8. Troubleshooting
 
-Start with `sync` action `status`; the `Connection:` and `Last error:` lines
+Start by asking "Is my YAPA sync working?"; the `Connection:` and `Last error:` lines
 say what is wrong.
 
 | Symptom | Cause | Fix |
@@ -148,14 +150,14 @@ say what is wrong.
 | "not mapped to a YAPA user" | your derived username belongs to someone else | ask the admin to map you (`scripts/yapa-user.sh rename-conflict`) |
 | "your YAPA user is disabled" | admin disabled the account | ask the admin |
 | "Remote sync is disabled" | `sync_enabled` not set | set it (step 3) and restart |
-| A teammate's item is missing | not subscribed, or not pulled yet | `sync` action `collections`, subscribe, or `sync` action `now` |
-| Doc listed as refused in `sync status` | secret check matched | remove the secret from the memory/task |
+| A teammate's item is missing | not subscribed, or not pulled yet | ask "Subscribe me to <collection>" or "Sync YAPA now" |
+| Item listed as refused in the sync status | secret check matched | remove the secret from the memory/task |
 
 ## 9. Reporting issues
 
 Post in the pilot Slack thread and file a YAPA task using
 [pilot-feedback-template.md](pilot-feedback-template.md). Always include the
-`sync status` output (it has no secrets; trim emails if you prefer).
+answer to "Is my YAPA sync working?" (it has no secrets; trim emails if you prefer).
 
 ## 10. Rollback
 

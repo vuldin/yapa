@@ -1,6 +1,12 @@
 # YAPA — Yet Another Personal Assistant
 
-**DeepSeek Harness:** see [`packages/dsh/install.md`](packages/dsh/install.md) — the native plugin needs no wizard (and no database server under the default embedded store).
+YAPA is a personal assistant that gives your AI agent persistent memory and task management, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
+
+**Joining your team's YAPA pilot?** Start with
+[docs/pilot-onboarding.md](docs/pilot-onboarding.md): about 10 minutes to
+install the plugin, sign in with `gcloud`, set the sync service URL your
+pilot admin gives you, and check it works. Then just use Claude Code in your
+project folders as usual.
 
 **Claude Code (recommended):** install the plugin — MCP server, hooks, and skills in one step:
 
@@ -11,9 +17,9 @@ claude plugin install yapa@yapa
 
 **Claude Code via `claude mcp add` / Cursor / OpenCode:** see [Install](#install), or give your AI agent this prompt: `install https://github.com/vuldin/yapa`
 
-> **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. For MCP hosts, read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning. For the DeepSeek Harness, follow `packages/dsh/install.md` instead (no agent-driven wizard).
+**DeepSeek Harness:** see [`packages/dsh/install.md`](packages/dsh/install.md) — the native plugin needs no wizard (and no database server under the default embedded store).
 
-YAPA is a personal assistant that gives your AI agent persistent memory and task management, so your agent remembers what you told it, tracks your tasks, and organizes knowledge by project or customer — across every session.
+> **AGENTS — READ THIS FIRST.** Do NOT clone this repo. Do NOT run `git clone`, `npm install`, `npm run build`, or any other commands. For MCP hosts, read `CLAUDE.md` (Claude Code / Cursor) or `AGENTS.md` (OpenCode) from this repository FIRST — it contains a multi-phase install process that must be followed exactly. The install requires user input before cloning. For the DeepSeek Harness, follow `packages/dsh/install.md` instead (no agent-driven wizard).
 
 YAPA runs two frontends over one core:
 
@@ -369,6 +375,10 @@ Collections prefixed with `private-` or `local-`, and `global`, are never synced
 A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved, restored, or synced by an older YAPA version), the next sync deletes its shared row. Only the same doc is removed (matched by id and creation time), never a different shared task that happens to reuse the id. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
 
 ### Testing sync
+
+From a fresh clone: `npm ci && npm test` (`npm test` builds first, since the
+`yapa-mcp` and DSH tests import the built `@yapa/core`). The first run
+downloads the embedding model, so give it a minute.
 
 `npm test` mocks the remote (Postgres seam, and a mock HTTP server for the service client).
 

@@ -1,206 +1,161 @@
 # Second-user sync test
 
-Proves cross-user sync end to end with two people: **Josh** (admin, already
-syncing) and **one colleague** (new). About 20 minutes. Everything happens
-in the scratch shared collection `project-yapa-pilot-test` and is deleted at
-the end.
+Two people work on the same project the way they normally would: open Claude
+Code in the project folder, ask questions, and mention facts as they come up.
+YAPA picks the collection from the folder, recalls what the team knows,
+captures new facts and follow-ups, and syncs them through the service. About
+20 minutes. Everything lives in the scratch collection
+`project-yapa-pilot-test`, which is deleted at the end.
 
-Placeholders: `<SERVICE_URL>` the sync service, `<colleague>` the colleague's
-YAPA username (email local part), `<josh>` Josh's username.
+People: **Josh** (admin, already syncing) and **one colleague** (new). Both
+need YAPA installed, configured and verified per
+[pilot-onboarding.md](pilot-onboarding.md) first.
 
-The prompts below are typed into Claude Code. Ask Claude to show the raw
-tool output when checking results.
+> **How to use the prompts below:** each **Type this message** block is a
+> plain message to type into Claude Code (no leading `/`). Any similar
+> wording works; Claude calls the YAPA tools for you. You do not need to name
+> collections or tools.
 
-> **How to use the prompts below:** each **Type this message** block is a plain
-> message to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
-> (`sync`, `memory_store`, `task_create`, ...). The `/` menu only lists slash
-> commands and skills, not tools; to see the tools, run `/mcp` and open the
-> `plugin:yapa:yapa` server.
+## Setup (both)
 
-## 0. Josh: seed the collection
-
-Subscribing needs the collection to exist on the service, so Josh creates it.
-Start Claude Code in a folder that maps to the collection (a `yapa-pilot-test`
-folder under one of Josh's `project_roots`), or name the collection explicitly.
+Each person makes a `yapa-pilot-test` folder under one of their
+`project_roots` and starts Claude Code there. That folder maps to the shared
+collection `project-yapa-pilot-test` on both machines.
 
 ```sh
-mkdir -p <JOSH_PROJECT_ROOT>/yapa-pilot-test && cd "$_" && claude
+mkdir -p <YOUR_PROJECT_ROOT>/yapa-pilot-test && cd "$_" && claude
 ```
+
+## 1. Josh shares what he knows about the project
 
 **Type this message:**
 ```
-Store a memory in collection project-yapa-pilot-test: "Pilot test seed memory from Josh. Safe to delete."
-Run the yapa sync tool with action now, then action collections.
+For this project: we have one cluster, pilot-east, running Redpanda 25.3 with 3 brokers. The orders topic uses cleanup.policy=compact.
 ```
 
-Expected: `project-yapa-pilot-test` listed with 1 doc, `(subscribed)`.
-Note the seed memory id (`<JOSH_MEMORY_ID>`).
+Expected: Claude asks to confirm creating the new collection
+`project-yapa-pilot-test` (normal for a brand-new project; confirm it), then
+stores the facts. A couple of seconds later they are pushed to the service.
 
-## 1. Colleague: install with sync only
-
-Follow [pilot-onboarding.md](pilot-onboarding.md) steps 1-4, but set only
-`sync_enabled=true` and `sync_service_url=<SERVICE_URL>` (no project roots).
-Restart Claude Code, then:
+## 2. The colleague starts on the project
 
 **Type this message:**
 ```
-Run the yapa sync tool with action status.
+List all clusters for this project.
 ```
 
-Expected: `Signed in as: <colleague> (<colleague>@<company-domain>)` and
-`Connection: healthy`. If it says "not mapped to a YAPA user", Josh runs
-`scripts/yapa-user.sh rename-conflict <email> <new-username>` and the
-colleague retries.
+Expected: the answer names pilot-east (25.3, 3 brokers), marked `by <josh>`,
+with no manual sync. This is the first-visit backfill: the prompt hook pulled
+the project's history and now follows the collection.
 
-## 2. Colleague: subscribe and backfill
+If it says nothing is known, ask `Is my YAPA sync working?` and paste the
+output in the pilot thread.
+
+## 3. The colleague learns something and leaves a follow-up
 
 **Type this message:**
 ```
-Subscribe me to project-yapa-pilot-test with the yapa sync tool.
+I just checked pilot-east: the orders topic also has retention.ms=604800000 set. We should verify the compaction lag on orders before the next maintenance window.
 ```
 
-Expected: `Subscribed to: project-yapa-pilot-test (backfilled 1 docs)`.
+Expected: a memory (the retention.ms fact) and a task (verify compaction
+lag), both in `project-yapa-pilot-test`.
+
+## 4. Josh asks about it later
 
 **Type this message:**
 ```
-List memories in collection project-yapa-pilot-test.
+Does this project have anything to do with retention.ms or compaction?
 ```
 
-Expected: the seed memory, attributed to `<josh>`.
-
-## 3. Colleague: write a memory and a task
+Expected: the answer includes the colleague's retention.ms note, marked
+`by <colleague>`, pulled by the hook on this prompt.
 
 **Type this message:**
 ```
-Store a memory in collection project-yapa-pilot-test: "Pilot test: the colleague's favorite broker setting is retention.ms=604800000."
-Create a task in collection project-yapa-pilot-test: "[pilot-test] Josh completes this task".
-Run the yapa sync tool with action now.
+What's still open for this project?
 ```
 
-Expected: push reports 2 docs, no errors. Note the task id
-(`<colleague>-<n>`, call it `<TASK_ID>`).
+Expected: the compaction-lag task, `by <colleague>`.
 
-## 4. Josh: see it attributed on the next prompt
-
-In the `yapa-pilot-test` folder session from step 0:
+## 5. Josh does the follow-up
 
 **Type this message:**
 ```
-What is the colleague's favorite broker setting? Show me the YAPA Context block you received.
+I checked the compaction lag on orders, it's fine. That follow-up is done.
 ```
 
-Expected: the injected context lists the colleague's memory with
-`, by <colleague>`, pulled by the prompt hook without a manual sync. (Using
-another folder instead: the hit appears with `from project-yapa-pilot-test`
-once the background sync has pulled it, or after `sync` action `now`.)
+Expected: the task is completed.
 
-## 5. Josh: complete the colleague's task
+## 6. The colleague forgets Josh's note (for themselves only)
 
 **Type this message:**
 ```
-List open tasks in project-yapa-pilot-test.
+The pilot-east cluster note from Josh is outdated for me, forget it.
 ```
 
-Expected: `<TASK_ID>` shown `by <colleague>`.
+Expected: Claude forgets it on the colleague's machine only (only the author
+can delete a shared item). Then Josh asks:
 
 **Type this message:**
 ```
-Complete task <TASK_ID>. Then run the yapa sync tool with action now.
+What do we know about pilot-east?
 ```
 
-## 6. Colleague: see the completion
+Expected: Josh still has the note.
+
+## 7. The colleague sees the update
 
 **Type this message:**
 ```
-Run the yapa sync tool with action now, then show task <TASK_ID>.
+Anything still open on this project?
 ```
 
-Expected: status `done`. The task is still the colleague's (no `by` label on
-their side); the service records Josh as its last editor (optional admin
-check: `SELECT id, origin_user, last_editor FROM documents WHERE id = '<TASK_ID>';`
-over the admin tunnel).
+Expected: the compaction-lag task is no longer open.
 
-## 7. Colleague: try to delete Josh's memory
+## 8. Optional: something that must not be shared (colleague)
 
 **Type this message:**
 ```
-Forget memory <JOSH_MEMORY_ID>. Then run the yapa sync tool with action now.
+The pilot-east admin login is AKIAABCDEFGHIJKLMNOP, keep that handy.
 ```
 
-Expected on the colleague's side: the memory is gone locally and does not
-come back after the sync (tombstoned).
+Expected: if Claude stores it, the service refuses it (secret detected) and
+it stays only on the colleague's machine; Josh never sees it. Ask
+`Is my YAPA sync working?` to see it listed as refused. Then:
+`Forget that admin login note.`
 
-Josh:
+## 9. Clean up
+
+Colleague first:
 
 **Type this message:**
 ```
-Run the yapa sync tool with action collections. List memories in project-yapa-pilot-test.
+We're done with the pilot test project. Remove what I added to YAPA for it.
 ```
 
-Expected: the seed memory is still there, and the remote doc count did not
-drop. Only the owner can delete a shared row.
-
-## 8. Optional: secret check
-
-Colleague:
+Then Josh (last, as the owner of the remaining items):
 
 **Type this message:**
 ```
-Store a memory in project-yapa-pilot-test: "test key AKIAABCDEFGHIJKLMNOP". Then sync now and show sync status.
+We're done with the pilot test project. Delete its YAPA collection, including what's on the sync service.
 ```
 
-Expected: the memory is stored locally but listed as refused (secret
-detected) in `sync status`, and Josh never receives it. Forget it afterwards.
-
-## 9. Cleanup
-
-Each person deletes their own items; owner deletes propagate.
-
-Colleague:
-
-**Type this message:**
-```
-Forget my pilot-test memory and delete task <TASK_ID> in project-yapa-pilot-test. Sync now.
-```
-
-Josh (on the next pull, the colleague's items disappear from Josh's machine):
-
-**Type this message:**
-```
-List memories and tasks in project-yapa-pilot-test.
-```
-
-Expected: only Josh's seed memory remains. Then both run:
-
-**Type this message:**
-```
-Delete collection project-yapa-pilot-test.
-```
-
-`collection_delete` deletes your own rows on the service, drops teammates'
-copies locally only, and unsubscribes you. Josh runs it last, as the owner of
-the seed memory. Finally:
-
-**Type this message:**
-```
-Run the yapa sync tool with action collections.
-```
-
-Expected: `project-yapa-pilot-test` is no longer listed. Josh: remove the
+Expected: `project-yapa-pilot-test` is removed. Both: delete the
 `yapa-pilot-test` folder.
 
 ## Results checklist (paste back in the pilot thread)
 
 ```
 Second-user sync test - <date> - colleague: <colleague>, plugin version: <x.y.z>
-[ ] 1 colleague status shows "Signed in as: <colleague>" + Connection: healthy
-[ ] 2 subscribe backfilled Josh's seed memory (by <josh>)
-[ ] 3 colleague pushed memory + task, no errors
-[ ] 4 Josh's next prompt injected the memory "by <colleague>" (no manual sync)
-[ ] 5 Josh saw <TASK_ID> by <colleague> and completed it
-[ ] 6 colleague saw <TASK_ID> as done after sync
-[ ] 7 colleague's forget removed Josh's memory locally only; Josh still has it
+[ ] 1 Josh's pilot-east facts stored in project-yapa-pilot-test
+[ ] 2 colleague's first question answered from Josh's facts (by <josh>), no manual sync
+[ ] 3 colleague's retention.ms memory + compaction-lag task stored
+[ ] 4 Josh's next questions showed both (by <colleague>), no manual sync
+[ ] 5 Josh completed the task
+[ ] 6 colleague's forget removed Josh's note for the colleague only; Josh still has it
+[ ] 7 colleague saw the task as done
 [ ] 8 (optional) secret refused, stayed local, listed in sync status
-[ ] 9 cleanup done; collection gone from `sync collections`
-Notes / errors (paste sync status output for any failure):
+[ ] 9 cleanup done; collection gone
+Notes / errors (paste the "Is my YAPA sync working?" output for any failure):
 ```
