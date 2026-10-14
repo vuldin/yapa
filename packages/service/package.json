@@ -1,10 +1,18 @@
 {
   "name": "@yapa/service",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "YAPA sync service: HTTP API v1 in front of the shared Postgres store (docs/service-design.md)",
   "private": true,
   "type": "module",
   "main": "dist/server.js",
+  "exports": {
+    ".": "./dist/server.js",
+    "./lib": {
+      "types": "./dist/lib.d.ts",
+      "default": "./dist/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

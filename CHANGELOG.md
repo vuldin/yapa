@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.1.0 (2026-10-14)
+
+Adds `yapa-mcp`, a remote MCP server so people who don't use Claude Code (for example through an agent platform such as Redpanda's Agentic Data Plane, or other MCP clients) can ask the team's shared memory questions. Read-only. No plugin behavior changes.
+
+### Features
+- **`yapa-mcp` remote MCP service (`packages/mcp-remote`, `infra/mcp-remote`).** Stateless Streamable HTTP at `POST /mcp`, deployed as its own Cloud Run service that does its own authentication (the Cloud Run invoker IAM check is off because MCP clients can't present a Google ID token for our audience). The sync service and its database access are unchanged.
+- **Two ways to sign in.**
+  - **Static keys** (`yapa_sk_<kid>_<secret>`): only a sha256 is stored (Secret Manager); each key acts as a read-only service identity such as `svc-adp`. `scripts/new-static-key.mjs` generates one; rotation adds a second key id.
+  - **Per-user Google OAuth**: Google ID tokens, or access tokens checked with tokeninfo (the token must be issued to an allowed OAuth client, with a verified email in the company domain) plus userinfo. The caller is the real colleague, with the same username mapping and "by <user>" attribution as the plugin. RFC 9728 protected-resource metadata and `WWW-Authenticate` let clients discover the sign-in.
+- **One tool by default: `memory_recall`.** Users ask in plain words. The customer or project the question names ("what's new with Acme?") is detected and boosted (never used as a filter), each result is a whole memory (chunks are stitched back together) with its customer, author and date, and the customer's open follow-ups are appended, highest priority first. `collection` is optional and also accepts plain names ("Acme CT"). Blank form fields are treated as unset. `memory_list`, `task_list`, `task_search`, `collection_list` and `collection_changes` can be enabled per deployment (`YAPA_MCP_TOOLS`, Terraform `tools`).
+- **Server-side embeddings.** The same model as the plugin (all-MiniLM-L6-v2, q8, 384-d) is baked into the image and loaded offline; the core embedder was extracted as `createLocalEmbedder` with unchanged behavior.
+- **Database role for the MCP service.** `infra/cloudsql` adds a runtime service account and IAM database user; `sql/05_mcp_runtime.sql` grants SELECT (plus first-sign-in user creation) and a row-level-security read policy limited to shared collections. No update or delete rights.
+- **Limits and logging.** Per-identity rate limits, size caps per item and per result, a 256 KB request cap, and one `mcp_call` log line per call (never arguments or tokens). Alerts for 5xx rate and auth failures.
+
+### Fixes
+- **Cloud Build source uploads no longer include local-only files.** gcloud's default ignore only reads the root `.gitignore`, so `gcloud builds submit .` uploaded gitignored `infra/*/terraform.tfvars`, Terraform backend state and similar files. A `.gcloudignore` now excludes them for every image built from the repo.
+
+### Docs
+- `docs/adp-onboarding.md`: register YAPA in an agent platform, static keys, the Google OAuth client, example prompts.
+
 ## 1.0.2 (2026-10-14)
 
 Patch release: a safe way to merge collections, a guard on shared collection deletes, and two task-tool gaps. Motivation: a request to merge two collections could only be done with `collection_delete`, which hard-deletes the shared collection for every teammate.

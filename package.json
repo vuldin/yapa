@@ -1,11 +1,15 @@
 {
   "name": "yapa",
-  "version": "1.0.2",
-  "description": "YAPA — Memory & Task assistant: core library, MCP server, and DeepSeek Harness plugin",
+  "version": "1.1.0",
+  "description": "YAPA \u2014 Memory & Task assistant: core library, MCP server, and DeepSeek Harness plugin",
   "private": true,
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/core",
+    "packages/dsh",
+    "packages/mcp",
+    "packages/service",
+    "packages/mcp-remote"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -16,7 +20,9 @@
     "build:plugin": "node scripts/build-plugin.mjs",
     "build:all": "npm run build && npm run build:plugin",
     "test:service": "npm test -w packages/service",
-    "test:service:integration": "npm run test:integration -w packages/service"
+    "test:service:integration": "npm run test:integration -w packages/service",
+    "test:mcp-remote": "npm test -w packages/mcp-remote",
+    "test:mcp-remote:integration": "npm run test:integration -w packages/mcp-remote"
   },
   "devDependencies": {
     "@types/node": "^25.9.9",
