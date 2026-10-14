@@ -1,6 +1,6 @@
 {
   "name": "@yapa/core",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "YAPA core: memory, tasks, sync, curation, buckets, and training logic backed by ChromaDB",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./local-embedder": {
+      "types": "./dist/local-embedder.d.ts",
+      "default": "./dist/local-embedder.js"
+    },
+    "./ranking": {
+      "types": "./dist/memory/filters.d.ts",
+      "default": "./dist/memory/filters.js"
     },
     "./package.json": "./package.json"
   },

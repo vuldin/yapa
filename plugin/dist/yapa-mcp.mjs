@@ -7409,19 +7409,48 @@ var init_metadata_adapter = __esm({
   }
 });
 
-// packages/core/src/embeddings.ts
-async function getLocalPipeline() {
-  if (!localPipeline) {
-    const { pipeline, env } = await import("@huggingface/transformers");
-    if (getConfig().MODEL_CACHE_DIR) env.cacheDir = getConfig().MODEL_CACHE_DIR;
-    localPipeline = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { dtype: "q8" });
-  }
-  return localPipeline;
+// packages/core/src/local-embedder.ts
+function createLocalEmbedder(opts = {}) {
+  let pipe2 = null;
+  const load2 = () => {
+    if (!pipe2) {
+      pipe2 = (async () => {
+        const { pipeline, env } = await import("@huggingface/transformers");
+        if (opts.cacheDir) env.cacheDir = opts.cacheDir;
+        if (opts.allowRemote !== void 0) env.allowRemoteModels = opts.allowRemote;
+        if (opts.allowRemote === false && opts.cacheDir) env.localModelPath = opts.cacheDir;
+        return pipeline("feature-extraction", LOCAL_EMBEDDING_MODEL, { dtype: LOCAL_EMBEDDING_DTYPE });
+      })();
+      pipe2.catch(() => {
+        pipe2 = null;
+      });
+    }
+    return pipe2;
+  };
+  return {
+    async embed(text) {
+      const p = await load2();
+      const output2 = await p(text, { pooling: "mean", normalize: true });
+      return Array.from(output2.data);
+    },
+    async warm() {
+      await load2();
+    }
+  };
 }
+var LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_DTYPE;
+var init_local_embedder = __esm({
+  "packages/core/src/local-embedder.ts"() {
+    "use strict";
+    LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
+    LOCAL_EMBEDDING_DTYPE = "q8";
+  }
+});
+
+// packages/core/src/embeddings.ts
 async function embedLocal(text) {
-  const pipe2 = await getLocalPipeline();
-  const output2 = await pipe2(text, { pooling: "mean", normalize: true });
-  return Array.from(output2.data);
+  if (!localEmbedder) localEmbedder = createLocalEmbedder({ cacheDir: getConfig().MODEL_CACHE_DIR || void 0 });
+  return localEmbedder.embed(text);
 }
 function generateEmbedding(text) {
   const key = `${getConfig().EMBEDDING_PROVIDER}\0${getEmbeddingModel()}\0${text}`;
@@ -7520,12 +7549,13 @@ async function fetchOllama(model, texts) {
   }
   return results;
 }
-var localPipeline, MEMO_MAX, memo2;
+var localEmbedder, MEMO_MAX, memo2;
 var init_embeddings = __esm({
   "packages/core/src/embeddings.ts"() {
     "use strict";
     init_config();
-    localPipeline = null;
+    init_local_embedder();
+    localEmbedder = null;
     MEMO_MAX = 64;
     memo2 = /* @__PURE__ */ new Map();
   }

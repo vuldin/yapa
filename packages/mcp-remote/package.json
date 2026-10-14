@@ -1,0 +1,29 @@
+{
+  "name": "@yapa/mcp-remote",
+  "version": "1.1.0",
+  "description": "YAPA remote MCP service (yapa-mcp): read-only MCP tools over Streamable HTTP in front of the shared Postgres store",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:integration": "vitest run test/integration.test.ts",
+    "new-static-key": "node scripts/new-static-key.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.4",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@yapa/core": "^1.0.0",
+    "@yapa/service": "^1.0.0",
+    "hono": "4.13.13",
+    "pg": "8.23.1",
+    "zod": "^4.6.5"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

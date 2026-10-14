@@ -79,7 +79,7 @@ function int(env: Record<string, string | undefined>, name: string, dflt: number
 }
 
 const SERVICE_ACCOUNT_RE = /^[a-z0-9-]{1,63}@[a-z0-9-]{1,63}\.iam\.gserviceaccount\.com$/;
-const READER_USERNAME_RE = /^svc-[a-z0-9-]{1,60}$/;
+export const READER_USERNAME_RE = /^svc-[a-z0-9-]{1,60}$/;
 
 /**
  * `sa@proj.iam.gserviceaccount.com=svc-name,...`. Only service accounts (a

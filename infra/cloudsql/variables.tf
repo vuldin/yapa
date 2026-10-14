@@ -117,6 +117,12 @@ variable "service_account_id" {
   default     = "yapa-service"
 }
 
+variable "mcp_service_account_id" {
+  description = "Account id of the runtime service account used by the remote MCP service (yapa-mcp, josh-313)."
+  type        = string
+  default     = "yapa-mcp"
+}
+
 variable "enable_migration_bastion" {
   description = "Create a small VM without a public IP, reachable only through IAP, to tunnel to the private IP during migration and restore drills. Turn off afterwards."
   type        = bool

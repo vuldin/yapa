@@ -1,0 +1,27 @@
+project_id            = "<TEAM_PROJECT_ID>"
+region                = "us-central1"
+cloudsql_state_bucket = "<STATE_BUCKET>"
+allowed_hd            = "<COMPANY_DOMAIN>"
+
+# "YAPA ADP" Web OAuth client (docs/adp-onboarding.md). Empty = static keys only.
+oauth_client_ids = [
+  # "<ADP_WEB_CLIENT_ID>.apps.googleusercontent.com",
+]
+
+# Same as infra/service when the whole company may sign in.
+# auto_provision_users = true
+
+# Header ADP's Static Key auth sends the key in (Authorization: Bearer always works too).
+# key_header = "x-yapa-key"
+
+# Custom domain in front of the service; default is the *.run.app URL.
+# public_url = "https://yapa-mcp.<COMPANY_DOMAIN>"
+
+# Pin after adding a secret version so key changes roll out a new revision.
+# static_keys_version = "1"
+
+# min_instances         = 0
+# max_instances         = 3
+# notification_channels = ["projects/<TEAM_PROJECT_ID>/notificationChannels/<ID>"]
+
+# image is passed by deploy.sh (digest-pinned); do not set it here.

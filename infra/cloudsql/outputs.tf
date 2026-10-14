@@ -18,6 +18,16 @@ output "runtime_db_user" {
   value       = google_sql_user.runtime.name
 }
 
+output "mcp_service_account_email" {
+  description = "Runtime service account for the remote MCP service (yapa-mcp, josh-313)."
+  value       = google_service_account.mcp.email
+}
+
+output "mcp_runtime_db_user" {
+  description = "Postgres role name of the yapa-mcp IAM user (pass to sql/05_mcp_runtime.sql as mcp_user)."
+  value       = google_sql_user.mcp.name
+}
+
 output "admin_username" {
   description = "Built-in admin login."
   value       = google_sql_user.admin.name
