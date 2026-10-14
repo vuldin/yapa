@@ -88,17 +88,17 @@ describe('tool registration', () => {
     const names = registered.map(d => d.name).sort();
     expect(names).toEqual([
       // memory + tasks + collections + journal + compaction + hygiene
-      'yapa_collection_create', 'yapa_collection_delete', 'yapa_collection_list',
+      'yapa_collection_create', 'yapa_collection_delete', 'yapa_collection_list', 'yapa_collection_merge',
       'yapa_compaction_apply', 'yapa_compaction_suggest', 'yapa_decay_sweep',
       'yapa_journal_append', 'yapa_journal_consolidate',
       'yapa_memory_forget', 'yapa_memory_list', 'yapa_memory_recall', 'yapa_memory_store',
       'yapa_status', 'yapa_task_add_dependency', 'yapa_task_complete', 'yapa_task_create',
-      'yapa_task_delete', 'yapa_task_list', 'yapa_task_search', 'yapa_task_update',
+      'yapa_task_delete', 'yapa_task_list', 'yapa_task_remove_dependency', 'yapa_task_search', 'yapa_task_update',
       // advanced but mission-central: janitor, consolidated sync, storage import
       'yapa_janitor_now', 'yapa_sync', 'yapa_storage_import',
     ].sort());
     expect(names.every(n => n.startsWith('yapa_'))).toBe(true);
-    expect(names.length).toBe(23);
+    expect(names.length).toBe(25);
   });
 
   it('adds the 18 ML-ops tools when trainingPipeline is enabled', async () => {

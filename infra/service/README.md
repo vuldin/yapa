@@ -82,7 +82,7 @@ STATE_BUCKET=<STATE_BUCKET> ./deploy.sh        # or BUILDER=docker ...
 first run only, a targeted apply for the APIs + repo -> image build and push
 (`<region>-docker.pkg.dev/<project>/yapa/yapa-service:<git sha>`) -> digest
 lookup -> `terraform apply -var image=...@sha256:...` (prompts unless
-`AUTO_APPROVE=1`) -> `/healthz` smoke test with your gcloud identity token.
+`AUTO_APPROVE=1`) -> `/health` smoke test (Cloud Run reserves `/healthz` from outside) with your gcloud identity token.
 
 Plan only, without deploying a new image:
 

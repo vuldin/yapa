@@ -29,9 +29,11 @@ import {
   listCollectionsWithCounts,
   listMemories,
   listTasks,
+  mergeCollections,
   parseRelativeDate,
   recallMemory,
   removeCollection,
+  removeDependency,
   runDecaySweep,
   searchTasks,
   storeMemory,
@@ -654,9 +656,10 @@ export function registerTools(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'yapa_task_update',
-    description: 'Update durable task fields (status, priority, notes, due, tags, blocked reason).',
+    description: 'Update durable task fields (title, status, priority, notes, due, tags, blocked reason).',
     parameters: {
       id: { type: 'string', required: true },
+      title: { type: 'string', description: 'New task title (rename)' },
       status: { type: 'string', enum: ['pending', 'in_progress', 'blocked', 'complete'] },
       priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
       notes: { type: 'string' },
@@ -674,6 +677,7 @@ export function registerTools(ctx: Context): void {
     },
     async execute(args) {
       const updates: Record<string, any> = {};
+      if (args.title?.trim()) updates.title = args.title.trim();
       if (args.status) updates.status = args.status;
       if (args.priority) updates.priority = args.priority;
       if (args.notes !== undefined) updates.notes = args.notes;
@@ -822,6 +826,31 @@ export function registerTools(ctx: Context): void {
     presentCall: args => ({ card: 'generic', title: `${args.task_id} depends on ${args.depends_on_id}`, kind: 'edit' }),
   }));
 
+  ctx.tools.register(defineTool({
+    name: 'yapa_task_remove_dependency',
+    description: 'Remove a depends-on/blocks relationship between durable tasks (both sides; also clears a dangling edge to a deleted task).',
+    parameters: {
+      task_id: { type: 'string', required: true, description: 'Task that depends on another' },
+      depends_on_id: { type: 'string', required: true, description: 'Task it should no longer depend on' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          task_id: { type: 'string', required: true },
+          depends_on_id: { type: 'string', required: true },
+        },
+      },
+      render: (_args, v) => text(`${v.task_id} no longer depends on ${v.depends_on_id}`),
+    },
+    async execute(args) {
+      await removeDependency(args.task_id, args.depends_on_id);
+      return { task_id: args.task_id, depends_on_id: args.depends_on_id };
+    },
+    presentCall: args => ({ card: 'generic', title: `${args.task_id} no longer depends on ${args.depends_on_id}`, kind: 'edit' }),
+  }));
+
   // --- Collections ----------------------------------------------------------
 
   ctx.tools.register(defineTool({
@@ -882,10 +911,59 @@ export function registerTools(ctx: Context): void {
   }));
 
   ctx.tools.register(defineTool({
+    name: 'yapa_collection_merge',
+    description:
+      'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) '
+      + 'with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the '
+      + 'emptied `from`. Use this, never yapa_collection_delete, to combine or rename collections. Create `into` '
+      + 'first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared '
+      + 'merges. Pass dry_run to see counts first.',
+    parameters: {
+      from: { type: 'string', required: true, description: 'Collection to merge (removed afterwards)' },
+      into: { type: 'string', required: true, description: 'Existing collection that receives every document' },
+      dry_run: { type: 'boolean', description: 'Report what would move without changing anything' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          from: { type: 'string', required: true },
+          into: { type: 'string', required: true },
+          moved: { type: 'integer', required: true },
+          byType: { ...openObject, required: true },
+          dryRun: { type: 'boolean', required: true },
+          sourceRemoved: { type: 'boolean', required: true },
+          teammateRowsKept: { type: 'integer', required: true },
+        },
+      },
+      render: (_args, v) => {
+        const types = Object.entries(v.byType as Record<string, number>)
+          .sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
+        const lines = v.dryRun
+          ? [`Dry run: would move ${v.moved} document(s) from "${v.from}" into "${v.into}" (${types}), then remove "${v.from}". Nothing changed.`]
+          : [`Moved ${v.moved} document(s) from "${v.from}" into "${v.into}" (${types}) and removed the empty "${v.from}".`];
+        if (v.teammateRowsKept > 0) {
+          lines.push(`${v.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${v.from}" on the sync service.`);
+        }
+        return text(lines.join('\n'));
+      },
+    },
+    async execute(args) {
+      return await mergeCollections(args.from, args.into, { dryRun: args.dry_run });
+    },
+    presentCall: args => ({ card: 'generic', title: `Merge collection ${args.from} into ${args.into}`, kind: 'edit' }),
+  }));
+
+  ctx.tools.register(defineTool({
     name: 'yapa_collection_delete',
-    description: 'Delete a collection and ALL its contents. Confirm with the user first.',
+    description:
+      'Permanently delete a collection and ALL its contents. Not a merge; to combine collections use '
+      + 'yapa_collection_merge. A non-empty shared collection is deleted for every teammate on the sync service, '
+      + 'so it requires `confirm` set to the exact collection name, after the user explicitly asked for the deletion.',
     parameters: {
       name: { type: 'string', required: true },
+      confirm: { type: 'string', description: 'Exact collection name; required to delete a non-empty shared collection' },
     },
     output: {
       schema: {
@@ -896,7 +974,7 @@ export function registerTools(ctx: Context): void {
       render: (_args, v) => text(`Deleted collection "${v.name}"`),
     },
     async execute(args) {
-      await removeCollection(args.name);
+      await removeCollection(args.name, { confirm: args.confirm });
       return { name: args.name };
     },
     presentCall: args => ({ card: 'generic', title: `Delete collection ${args.name} (all contents)`, kind: 'delete' }),

@@ -23,7 +23,7 @@ claude plugin install yapa@yapa
 
 YAPA runs two frontends over one core:
 
-- **Native DeepSeek Harness plugin** (`yapa`, in `packages/dsh`) — 23 tools by default (+18 gated ML-ops) with structured outputs and GUI cards, always-on recall injected at the turn seam, **automatic capture of durable findings from every agent turn** (aux-LLM extractor + conservative conflict resolver), a **daily contradiction janitor** that archives duplicates and supersedes stale memories, hot-reloaded settings, schedule-bridged due dates, compaction capture, approval gating, and an embedded zero-server storage option. Docs: [install](packages/dsh/install.md) · [architecture](packages/dsh/architecture.md) · [future work & investigation record](docs/future-work.md).
+- **Native DeepSeek Harness plugin** (`yapa`, in `packages/dsh`) — 25 tools by default (+18 gated ML-ops) with structured outputs and GUI cards, always-on recall injected at the turn seam, **automatic capture of durable findings from every agent turn** (aux-LLM extractor + conservative conflict resolver), a **daily contradiction janitor** that archives duplicates and supersedes stale memories, hot-reloaded settings, schedule-bridged due dates, compaction capture, approval gating, and an embedded zero-server storage option. Docs: [install](packages/dsh/install.md) · [architecture](packages/dsh/architecture.md) · [future work & investigation record](docs/future-work.md).
 - **MCP server** (`yapa-mcp`, in `packages/mcp`) — the original stdio server plus the Claude-Code hook CLI. Everything below the "Repository layout" section primarily describes this frontend.
 
 ## Repository layout
@@ -56,9 +56,9 @@ YAPA runs two frontends over one core:
 
 ## How it works
 
-**Under DSH**, the plugin registers 23 `yapa_*` tools natively by default (+18 gated behind `trainingPipeline`), injects recall + open tasks into every turn at the `agent/pre-step` seam (no hooks, no wiring), judges every completed turn for durable findings via a background aux-LLM extractor (auto-stored, deduplicated, contradictions resolved by superseding stale memories), runs a daily janitor sweep over the existing store, and stores data in the embedded local store by default. See `packages/dsh/architecture.md` for the full seam map.
+**Under DSH**, the plugin registers 25 `yapa_*` tools natively by default (+18 gated behind `trainingPipeline`), injects recall + open tasks into every turn at the `agent/pre-step` seam (no hooks, no wiring), judges every completed turn for durable findings via a background aux-LLM extractor (auto-stored, deduplicated, contradictions resolved by superseding stale memories), runs a daily janitor sweep over the existing store, and stores data in the embedded local store by default. See `packages/dsh/architecture.md` for the full seam map.
 
-**Under MCP hosts**, YAPA is an MCP server with 23 tools by default (+18 gated behind `YAPA_TRAINING_PIPELINE`). Your agent connects to it through your editor's MCP configuration. Once connected:
+**Under MCP hosts**, YAPA is an MCP server with 25 tools by default (+18 gated behind `YAPA_TRAINING_PIPELINE`). Your agent connects to it through your editor's MCP configuration. Once connected:
 
 - **Before every response**, the agent queries your memories for relevant context
 - **When it learns something important**, it stores it automatically (bug fixes, preferences, decisions)
@@ -136,7 +136,7 @@ capabilities with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`),
 plus `yapa_status` and `yapa_storage_import`. `setup_instructions` and
 `uninstall` are MCP-only (the plugin has nothing to write into config files).
 
-**Tool surface, kept lean:** the 23 tools below are visible by default. The
+**Tool surface, kept lean:** the 25 tools below are visible by default. The
 ML-ops subsystem (curation classifier, bucket routing, system-prompt
 companion, training, eval, adapter promotion — 18 more) is operator workflow,
 not daily agent surface: it appears only when `trainingPipeline: true` (DSH
@@ -158,14 +158,16 @@ walkthrough and its tools.
 | `janitor_now` | Run the contradiction janitor: resolve near-duplicate pairs (archive duplicates, supersede stale memories, keep distinct facts) |
 | `task_create` | Create task with title, priority, due date, tags, collection |
 | `task_list` | List tasks with filters; pass `id` for a single task with full detail (notes, dependencies) |
-| `task_update` | Update task fields |
+| `task_update` | Update task fields (including renaming via `title`) |
 | `task_complete` | Mark done + handle recurring regeneration |
 | `task_delete` | Remove a task |
 | `task_search` | Semantic search across tasks |
 | `task_add_dependency` | Add depends-on/blocks relationship |
+| `task_remove_dependency` | Remove a depends-on/blocks relationship (both sides, dangling edges too) |
 | `collection_list` | List all collections with doc counts |
 | `collection_create` | Create new collection |
-| `collection_delete` | Delete a collection |
+| `collection_merge` | Move every document of one collection into another (ids and metadata kept, synced as a move), then remove the empty source |
+| `collection_delete` | Delete a collection (a non-empty shared one needs `confirm: "<name>"`; not a merge) |
 | `decay_sweep` | Manually trigger salience decay |
 | `sync` | Sync control via `action`: `status` (health, last pull, pending), `now` (push+pull cycle), `collections` (remote list + subscriptions), `subscribe` / `unsubscribe` (local data preserved) |
 | `uninstall` | Remove YAPA from your system |

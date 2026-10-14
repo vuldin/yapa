@@ -1,6 +1,6 @@
 # YAPA × DSH — Session Flow
 
-How every default-visible `yapa_*` tool (23) and every automatic plugin hook
+How every default-visible `yapa_*` tool (25) and every automatic plugin hook
 fits into a normal agent–human session inside the DeepSeek Harness. Source of
 truth: `packages/dsh/src/{index,tools,tools-advanced,injector,lifecycle,
 response-capture,compaction-capture,schedule-bridge,approval-gate}.ts`.
@@ -37,11 +37,11 @@ flowchart LR
             C8["yapa_task_create"]
             C9["yapa_task_update<br/><i>status / blocked+reason</i>"]
             C10["yapa_task_complete<br/><i>regenerates if recurring</i>"]
-            C12["yapa_task_add_dependency"]
+            C12["yapa_task_add_dependency /<br/>yapa_task_remove_dependency"]
             C13["yapa_journal_append<br/><i>one line per milestone</i>"]
             C7["yapa_memory_forget ⛨"]
             C11["yapa_task_delete ⛨"]
-            C14["yapa_collection_create /<br/>yapa_collection_delete ⛨"]
+            C14["yapa_collection_create /<br/>yapa_collection_merge /<br/>yapa_collection_delete ⛨"]
         end
         READ ~~~ WRITE
     end
@@ -114,13 +114,15 @@ requires `confirm: true`.
 | 14 | `yapa_task_delete` ⛨ | ③ | agent | Permanent removal |
 | 15 | `yapa_task_search` | ③ | agent | Semantic lookup across tasks |
 | 16 | `yapa_task_add_dependency` | ③ | agent | depends-on / blocks relationship |
-| 17 | `yapa_collection_list` | ③ | agent | Before creating a collection; scope sanity check |
-| 18 | `yapa_collection_create` | ③ | agent | New scope needed — after confirming the name with the user |
-| 19 | `yapa_collection_delete` ⛨ | ③ | agent | Deletes collection + all contents — confirm with user first |
-| 20 | `yapa_decay_sweep` | ⑦ | agent (rare) | Manual salience decay; normally the hourly timer handles it |
-| 21 | `yapa_janitor_now` | ⑦ | agent/user | Manual contradiction sweep; daily timer runs it otherwise |
-| 22 | `yapa_sync` | ⑦ | agent/user | `status` / `now` / `collections` / `subscribe` / `unsubscribe` against the remote pgvector DB |
-| 23 | `yapa_storage_import` ⛨ | ⑧ | user-driven | One-off ChromaDB → embedded-local migration (`confirm: true` required) |
+| 17 | `yapa_task_remove_dependency` | ③ | agent | Drop a depends-on / blocks relationship (both sides) |
+| 18 | `yapa_collection_list` | ③ | agent | Before creating a collection; scope sanity check |
+| 19 | `yapa_collection_create` | ③ | agent | New scope needed — after confirming the name with the user |
+| 20 | `yapa_collection_merge` | ③ | agent | Combine or rename collections: moves every doc, then removes the empty source (never use delete for this) |
+| 21 | `yapa_collection_delete` ⛨ | ③ | agent | Deletes collection + all contents for every teammate — confirm with user first; a non-empty shared one needs `confirm: "<name>"` |
+| 22 | `yapa_decay_sweep` | ⑦ | agent (rare) | Manual salience decay; normally the hourly timer handles it |
+| 23 | `yapa_janitor_now` | ⑦ | agent/user | Manual contradiction sweep; daily timer runs it otherwise |
+| 24 | `yapa_sync` | ⑦ | agent/user | `status` / `now` / `collections` / `subscribe` / `unsubscribe` against the remote pgvector DB |
+| 25 | `yapa_storage_import` ⛨ | ⑧ | user-driven | One-off ChromaDB → embedded-local migration (`confirm: true` required) |
 
 ## Automatic hooks that never appear as tool calls
 

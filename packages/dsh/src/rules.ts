@@ -63,6 +63,7 @@ When injected context flags a "compaction candidate" collection, call \`yapa_com
 - Folder scopes default to \`project-{name}\` — most folders are projects. Use \`customer-{name}\` only for folders that are customer names (via the plugin's \`customers\` config, an existing \`customer-{name}\` collection, or the user saying so). Cross-cutting → \`global\`; private/personal → \`private-{name}\` or \`local-{name}\` (these do NOT sync to the shared remote database).
 - If you are ever unsure which collection (or prefix) applies, ask the user rather than guessing.
 - Before creating a new collection, confirm the name with the user. Use \`yapa_collection_list\` to check what exists.
+- To combine or rename collections use \`yapa_collection_merge\`, never \`yapa_collection_delete\` (a shared delete removes the collection for every teammate).
 - Always pass the inferred collection explicitly on yapa tool calls.
 
 ### Removal

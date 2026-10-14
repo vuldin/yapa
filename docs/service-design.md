@@ -339,7 +339,7 @@ are Unix seconds (integers) to match the client code. Every response carries
 
 | Endpoint | Replaces (`postgres.ts`) |
 |----------|--------------------------|
-| `GET /healthz` (no auth), `GET /v1/health` | `checkRemoteHealth` |
+| `GET /healthz` / `GET /health` (no auth), `GET /v1/health` | `checkRemoteHealth` |
 | `GET /v1/me` | (new) username, email, server limits |
 | `GET /v1/collections/{c}/documents` | `getRemoteDocsSince` / `buildRemoteDocsSinceQuery` |
 | `POST /v1/documents:batchUpsert` (and `PUT /v1/documents/{id}`) | `upsertRemoteDocument` |
@@ -777,7 +777,7 @@ author (prompt injection via shared memories), compromised routine.
 - Alerts: 5xx rate > 2% for 10 min; p95 pull latency > 1 s; any
   `local_only_collection` rejection (indicates a client bug); auth failure spike;
   per-user write spike; Cloud SQL storage > 80%; backup failure.
-- Uptime check on `/healthz`.
+- Uptime check on `/health` (Cloud Run reserves `/healthz` externally).
 
 ### Backups and restore
 

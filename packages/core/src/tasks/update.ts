@@ -54,6 +54,12 @@ export async function updateTask(
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
 
+  // The title is the document content (what search embeds): rewrite the doc
+  // so the embedding follows, instead of only the metadata copy.
+  if (updates.title !== undefined && updates.title !== task.title) {
+    await addDocument(task.collection, id, updates.title, updatedMetadata);
+    return;
+  }
   await updateDocument(task.collection, id, updatedMetadata);
 }
 
