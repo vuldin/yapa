@@ -10,6 +10,7 @@ locals {
 
   # Postgres role name Cloud SQL creates for an IAM service account user.
   runtime_db_user = trimsuffix(google_service_account.runtime.email, ".gserviceaccount.com")
+  mcp_db_user     = trimsuffix(google_service_account.mcp.email, ".gserviceaccount.com")
 }
 
 resource "google_project_service" "apis" {
@@ -156,6 +157,37 @@ resource "google_project_iam_member" "runtime_sql_instance_user" {
 
 resource "google_sql_user" "runtime" {
   name     = local.runtime_db_user
+  instance = google_sql_database_instance.main.name
+  type     = "CLOUD_IAM_SERVICE_ACCOUNT"
+}
+
+# ---------------------------------------------------------------------------
+# Remote MCP runtime (yapa-mcp, josh-313): its own identity and database role
+# (sql/05_mcp_runtime.sql: SELECT only + an RLS read policy). Created here,
+# like the sync service's, so infra/mcp-remote only reads outputs.
+# ---------------------------------------------------------------------------
+
+resource "google_service_account" "mcp" {
+  account_id   = var.mcp_service_account_id
+  display_name = "YAPA remote MCP runtime"
+  description  = "Cloud Run runtime for yapa-mcp; read-only database role via IAM auth."
+  depends_on   = [google_project_service.apis]
+}
+
+resource "google_project_iam_member" "mcp_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.mcp.email}"
+}
+
+resource "google_project_iam_member" "mcp_sql_instance_user" {
+  project = var.project_id
+  role    = "roles/cloudsql.instanceUser"
+  member  = "serviceAccount:${google_service_account.mcp.email}"
+}
+
+resource "google_sql_user" "mcp" {
+  name     = local.mcp_db_user
   instance = google_sql_database_instance.main.name
   type     = "CLOUD_IAM_SERVICE_ACCOUNT"
 }

@@ -27,6 +27,7 @@ Files:
 | `sql/02_schema_v2.sql` | schema v2 (design section 6) |
 | `sql/03_grants.sql` | DML-only grants for the runtime IAM user |
 | `sql/04_rls.sql` | row-level security; apply with the first josh-311 release |
+| `sql/05_mcp_runtime.sql` | read-only grants + RLS read policy for the remote MCP IAM user (josh-313) |
 | `sql/verify_counts.sql` | read-only fingerprint for migration and restore checks |
 | `../../scripts/migrate-db.mjs` | copy + verify from the current database |
 | `RESTORE.md` | PITR restore drill |
@@ -81,6 +82,22 @@ psql "$ADMIN" -v ON_ERROR_STOP=1 --single-transaction \
 `sslmode=verify-ca` checks the server certificate against the instance CA
 but not the hostname (the cert names the instance, and we connect through
 localhost). The output of `03_grants.sql` must show `trunc = f` everywhere.
+
+### Remote MCP runtime (josh-313)
+
+`yapa-mcp` connects as its own IAM user (output `mcp_runtime_db_user`, service
+account `yapa-mcp`). 04_rls.sql policies name only the sync runtime, so this
+role sees nothing until 05 adds a SELECT grant and a read policy for it:
+
+```sh
+psql "$ADMIN" -v ON_ERROR_STOP=1 --single-transaction \
+  -v mcp_user="$(terraform output -raw mcp_runtime_db_user)" \
+  -f sql/05_mcp_runtime.sql
+```
+
+In the output only `sel` may be `t`; the
+`INSERT (username, email)` column grant on `users` (self-service sign-up) shows
+in `\dp users`.
 
 ## Migrate the data
 

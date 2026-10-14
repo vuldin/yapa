@@ -1,0 +1,20 @@
+# Files `gcloud builds submit .` must not upload. gcloud only reads the root
+# .gitignore through the include below, not the nested infra/*/.gitignore
+# files, so local-only infra files are listed here explicitly.
+.gcloudignore
+.git
+.gitignore
+#!include:.gitignore
+
+.claude/
+**/node_modules/
+**/.terraform/
+**/terraform.tfvars
+**/*.tfstate
+**/*.tfstate.*
+**/tfplan
+**/*.tfplan
+**/server-ca*.pem
+infra/cloudsql/users.json
+.env
+**/.env

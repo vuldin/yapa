@@ -846,16 +846,26 @@ SLA; acceptable for a pilot.
 1. **Cloud Run IAM also protects the v1 service.** `roles/run.invoker` is bound
    to the YAPA group with custom audiences for the desktop OAuth client; no
    `--allow-unauthenticated`. App verification stays as defense in depth. The
-   remote MCP endpoint (josh-313) is a second Cloud Run service from the same
-   image, open at the platform level with app auth only. A spike at the start
-   of josh-311 verifies the custom-audience setup.
+   remote MCP endpoint (josh-313) is a second Cloud Run service, `yapa-mcp`,
+   open at the platform level (`invoker_iam_disabled`) with app auth only.
+   Updated 2026-10-14: it is a separate package and image
+   (`packages/mcp-remote`, `infra/mcp-remote`) that imports the service code
+   as a library (`@yapa/service/lib`), not an MCP mode of this image, with its
+   own runtime service account and a read-only database role
+   (`05_mcp_runtime.sql`). A spike at the start of josh-311 verifies the
+   custom-audience setup.
 2. **Routine identity (josh-313/317): separate `routine-<name>` principal** with
    a named human owner. Shared collections only, never any `global` (it is
    local-only, decision 6); writes attributed "by routine-<name>". Keeps attribution honest and lets a routine
    be revoked without touching its owner.
-3. **MCP OAuth (josh-313): decided by a spike in 313.** Expected outcome: the
-   service runs a thin OAuth authorization server fronting Google sign-in,
-   since connectors need an MCP-spec authorization server.
+3. **MCP OAuth (josh-313): no authorization server of our own (2026-10-14).**
+   The first consumer, Redpanda ADP, proxies calls and brings the credential:
+   a colleague's Google token from an ADP User OAuth provider (our "YAPA ADP"
+   web client; the service requires that client as `aud`/`azp` and checks
+   `hd` via userinfo), or a static `yapa_sk_` key for `svc-*` principals.
+   The service publishes RFC 9728 protected-resource metadata pointing at
+   Google. A thin authorization server stays an option for connectors that
+   need one (docs/adp-onboarding.md).
 4. **Conflicts: last-writer-wins in v1.** The server writes an
    `overwrote_teammate_edit` audit event whenever a write replaces a version
    last written by a different user. Stricter governance belongs to ADP
@@ -887,7 +897,10 @@ SLA; acceptable for a pilot.
     team scale; a commit-ordered sequence can replace it later if needed.
 12. **Embedding integrity: v1 validates dimension (384), finiteness and
     approximate unit norm only.** Full server-side re-embedding on every write
-    once the model ships server-side with josh-313.
+    once the model ships server-side with josh-313. As of 2026-10-14 the model
+    ships in the `yapa-mcp` image only (baked in, read-only, query embedding
+    via core's `createLocalEmbedder`); the sync service image has no embedder,
+    so re-embedding writes waits for the MCP write phase or a shared embedder.
 13. **Self-host: direct DB sync stays as the advanced/self-host path in v1.**
     Our team uses only the service and direct DB credentials are never
     distributed. Revisit after the pilot (josh-316).

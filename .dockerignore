@@ -1,5 +1,5 @@
-# Docker build context is the repo root (packages/service/Dockerfile).
-# Allow-list: only what the service image needs.
+# Docker build context is the repo root (packages/service/Dockerfile and
+# packages/mcp-remote/Dockerfile). Allow-list: only what the images need.
 *
 !package.json
 !package-lock.json
@@ -10,4 +10,12 @@
 !packages/service/package.json
 !packages/service/tsconfig.json
 !packages/service/src/
+!packages/mcp-remote/package.json
+!packages/core/tsconfig.json
+!packages/core/src/
+!packages/mcp-remote/tsconfig.json
+!packages/mcp-remote/src/
+!packages/mcp-remote/scripts/
 packages/service/src/**/*.test.ts
+packages/core/src/**/*.test.ts
+packages/mcp-remote/src/**/*.test.ts

@@ -12,14 +12,17 @@ export interface Db {
   close(): Promise<void>;
 }
 
-export async function createDb(cfg: ServiceConfig): Promise<Db> {
+/** The connection settings createDb reads (yapa-mcp builds these from its own env). */
+export type DbConfig = Pick<ServiceConfig, 'poolMax' | 'statementTimeoutMs' | 'databaseUrl' | 'instanceConnectionName' | 'dbUser' | 'dbName' | 'dbIpType'>;
+
+export async function createDb(cfg: DbConfig, applicationName = 'yapa-service'): Promise<Db> {
   const common: pg.PoolConfig = {
     max: cfg.poolMax,
     statement_timeout: cfg.statementTimeoutMs,
     idle_in_transaction_session_timeout: cfg.statementTimeoutMs * 2,
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 60_000,
-    application_name: 'yapa-service',
+    application_name: applicationName,
   };
 
   if (cfg.databaseUrl) {

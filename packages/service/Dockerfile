@@ -12,6 +12,7 @@ COPY packages/core/package.json packages/core/
 COPY packages/mcp/package.json packages/mcp/
 COPY packages/dsh/package.json packages/dsh/
 COPY packages/service/package.json packages/service/
+COPY packages/mcp-remote/package.json packages/mcp-remote/
 RUN npm ci --workspace packages/service --include-workspace-root --ignore-scripts --no-audit --no-fund
 COPY packages/service/tsconfig.json packages/service/
 COPY packages/service/src packages/service/src
@@ -25,6 +26,7 @@ COPY packages/core/package.json packages/core/
 COPY packages/mcp/package.json packages/mcp/
 COPY packages/dsh/package.json packages/dsh/
 COPY packages/service/package.json packages/service/
+COPY packages/mcp-remote/package.json packages/mcp-remote/
 RUN npm ci --workspace packages/service --omit=dev --ignore-scripts --no-audit --no-fund \
  && rm -rf node_modules/@yapa node_modules/.package-lock.json \
  && npm cache clean --force

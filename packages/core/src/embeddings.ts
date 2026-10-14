@@ -1,23 +1,13 @@
 import { getConfig, getEmbeddingModel } from './config.js';
+import { createLocalEmbedder, type LocalEmbedder } from './local-embedder.js';
 
-// Lazy-loaded local embedding pipeline (MiniLM-L6-v2, 384 dims)
-let localPipeline: any = null;
-
-async function getLocalPipeline() {
-  if (!localPipeline) {
-    const { pipeline, env } = await import('@huggingface/transformers');
-    if (getConfig().MODEL_CACHE_DIR) env.cacheDir = getConfig().MODEL_CACHE_DIR;
-    // q8 is the same quantized ONNX model the previous embedder
-    // (chromadb-default-embed) loaded by default, so stored vectors stay valid.
-    localPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
-  }
-  return localPipeline;
-}
+// Lazy-loaded local embedding pipeline (MiniLM-L6-v2, 384 dims). Created on
+// first use so MODEL_CACHE_DIR is read from the config at that point.
+let localEmbedder: LocalEmbedder | null = null;
 
 async function embedLocal(text: string): Promise<number[]> {
-  const pipe = await getLocalPipeline();
-  const output = await pipe(text, { pooling: 'mean', normalize: true });
-  return Array.from(output.data);
+  if (!localEmbedder) localEmbedder = createLocalEmbedder({ cacheDir: getConfig().MODEL_CACHE_DIR || undefined });
+  return localEmbedder.embed(text);
 }
 
 // Small memo of recent single-text embeddings (promises, so concurrent callers
