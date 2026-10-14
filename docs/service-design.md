@@ -919,7 +919,9 @@ SLA; acceptable for a pilot.
   non-GET route (`403 read_only_principal`), so they can never write, delete
   or run the POST lookups. RLS is unchanged: `docs_select` doesn't depend on
   the caller, and with no writes the insert/update/delete policies never
-  apply. Revoke one by removing it from the variable or its invoker binding.
+  apply. `svc-` usernames are reserved: auto-provisioning refuses to create one
+  for a person, so a reader is never confused with a teammate. Revoke one by
+  removing it from the variable or its invoker binding.
 - **Pilot tokens.** `gcloud auth print-identity-token` user tokens (gcloud's
   client id as audience) are accepted for the pilot; switch to the YAPA
   desktop OAuth client audience before team rollout (josh-318).

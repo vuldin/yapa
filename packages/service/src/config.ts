@@ -84,8 +84,8 @@ const READER_USERNAME_RE = /^svc-[a-z0-9-]{1,60}$/;
 /**
  * `sa@proj.iam.gserviceaccount.com=svc-name,...`. Only service accounts (a
  * person's account must go through the hd check and users table), and only
- * `svc-` usernames, which auto-provisioning never hands to a person in
- * practice and which are shown as the reader in logs.
+ * `svc-` usernames, which auto-provisioning refuses to hand to a person
+ * (store.ts READER_USERNAME_PREFIX), so a reader is unambiguous in logs.
  */
 export function parseReaderPrincipals(raw: string | undefined): Map<string, string> {
   const out = new Map<string, string>();
