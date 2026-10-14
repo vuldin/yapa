@@ -35,7 +35,7 @@ type Env = {
 
 export interface AppDeps {
   pool: pg.Pool;
-  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes' | 'autoProvision' | 'allowedHd'>>;
+  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes' | 'autoProvision' | 'allowedHd' | 'readerPrincipals'>>;
   verifier: TokenVerifier;
   /** Defaults to the users table. */
   lookupUser?: UserLookup;
@@ -118,7 +118,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
   // Deny by default: everything below /healthz needs a verified, active user.
   app.use('*', async (c, next) => {
     if ((c.req.path === '/healthz' || c.req.path === '/health') && c.req.method === 'GET') return next();
-    const caller = await authenticate(c.req.header('authorization'), deps.verifier, lookupUser, c.get('requestId'), c.req.header(APP_TOKEN_HEADER));
+    const caller = await authenticate(c.req.header('authorization'), deps.verifier, lookupUser, c.get('requestId'), c.req.header(APP_TOKEN_HEADER), config.readerPrincipals);
+    // Reader principals (dashboards) only pull; every write and every POST lookup is refused.
+    if (caller.readOnly && c.req.method !== 'GET') throw new ApiError('read_only_principal', 'this principal is read-only');
     c.set('caller', caller);
     const rawDevice = c.req.header('x-yapa-device');
     const device = checkDevice(rawDevice);

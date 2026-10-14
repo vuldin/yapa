@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OAuth2Client } from 'google-auth-library';
 import { appToken, authenticate, bearerToken, checkGoogleClaims, GoogleTokenVerifier, InsecureTestVerifier, type UserRow } from './auth.js';
 import { ApiError } from './errors.js';
-import { loadConfig, ConfigError } from './config.js';
+import { loadConfig, ConfigError, parseReaderPrincipals } from './config.js';
 import { setLogSink } from './log.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -22,12 +22,15 @@ function mint(claims: Record<string, unknown>, kid = 'k1'): string {
   return `${head}.${body}.${sig}`;
 }
 
-function verifier(audiences = [AUD]): GoogleTokenVerifier {
+const SA = 'dash@proj-1.iam.gserviceaccount.com';
+const READERS = new Map([[SA, 'svc-dashboard']]);
+
+function verifier(audiences = [AUD], readers: ReadonlyMap<string, string> = new Map()): GoogleTokenVerifier {
   const client = new OAuth2Client();
   // Stub Google's JWKS fetch with our test key; everything else is the real verifyIdToken.
   (client as unknown as { getFederatedSignonCertsAsync: () => Promise<unknown> }).getFederatedSignonCertsAsync =
     async () => ({ certs: { k1: PEM }, format: 'PEM' });
-  return new GoogleTokenVerifier(audiences, 'example.com', client);
+  return new GoogleTokenVerifier(audiences, 'example.com', client, readers);
 }
 
 let lines: string[] = [];
@@ -67,6 +70,46 @@ describe('checkGoogleClaims', () => {
   });
 });
 
+describe('reader principals (service accounts, no hd)', () => {
+  const saToken = (claims: Record<string, unknown> = {}) => mint({ email: SA, hd: undefined, ...claims });
+
+  it('accepts a listed service account without hd', async () => {
+    expect(await verifier([AUD], READERS).verify(saToken())).toEqual({ email: SA });
+  });
+  it('still rejects an unlisted service account, and a listed one that is unverified', async () => {
+    await expect(verifier([AUD], READERS).verify(saToken({ email: 'other@proj-1.iam.gserviceaccount.com' }))).rejects.toMatchObject({ reason: 'wrong_hd' });
+    await expect(verifier([AUD]).verify(saToken())).rejects.toMatchObject({ reason: 'wrong_hd' });
+    await expect(verifier([AUD], READERS).verify(saToken({ email_verified: false }))).rejects.toMatchObject({ reason: 'email_unverified' });
+  });
+  it('a reader email never bypasses the audience or signature checks', async () => {
+    await expect(verifier([AUD], READERS).verify(saToken({ aud: 'other-app' }))).rejects.toMatchObject({ reason: 'wrong_audience' });
+    const [h, , s] = saToken().split('.');
+    await expect(verifier([AUD], READERS).verify(`${h}.${b64({ email: SA })}.${s}`)).rejects.toMatchObject({ reason: 'bad_signature' });
+  });
+  it('a person in the company domain is unaffected by the reader list', () => {
+    const claims = { iss: 'accounts.google.com', aud: AUD, iat: 1, exp: 2, sub: 's', email: 'alice@example.com', email_verified: true, hd: 'example.com' };
+    expect(checkGoogleClaims(claims, 'example.com', READERS)).toEqual({ email: 'alice@example.com' });
+    expect(() => checkGoogleClaims({ ...claims, hd: 'other.example' }, 'example.com', READERS)).toThrow(/wrong_hd/);
+  });
+});
+
+describe('parseReaderPrincipals', () => {
+  it('parses email=username pairs, lowercased', () => {
+    expect(parseReaderPrincipals(` ${SA.toUpperCase()}=SVC-Dashboard , b@p.iam.gserviceaccount.com=svc-b`)).toEqual(
+      new Map([[SA, 'svc-dashboard'], ['b@p.iam.gserviceaccount.com', 'svc-b']]),
+    );
+    expect(parseReaderPrincipals(undefined).size).toBe(0);
+    expect(parseReaderPrincipals('').size).toBe(0);
+  });
+  it('only service accounts, only svc- usernames, no duplicates', () => {
+    expect(() => parseReaderPrincipals('alice@example.com=svc-a')).toThrow(/not a service account/);
+    expect(() => parseReaderPrincipals(`${SA}=alice`)).toThrow(/svc-/);
+    expect(() => parseReaderPrincipals(SA)).toThrow(/email=username/);
+    expect(() => parseReaderPrincipals(`${SA}=svc-a=x`)).toThrow(/email=username/);
+    expect(() => parseReaderPrincipals(`${SA}=svc-a,${SA}=svc-b`)).toThrow(/twice/);
+  });
+});
+
 describe('InsecureTestVerifier', () => {
   it('takes test:<email>', async () => {
     expect(await new InsecureTestVerifier().verify('test:Bob@Example.com')).toEqual({ email: 'bob@example.com' });
@@ -100,6 +143,14 @@ describe('authenticate', () => {
     await expect(authenticate('Bearer test:carol@example.com', v, lookup)).rejects.toMatchObject({ code: 'user_inactive', status: 403 });
     expect(lines.join('\n')).not.toContain('dave@example.com');
   });
+  it('a reader principal is read-only and needs no users row', async () => {
+    const readers = new Map([['dash@p.iam.gserviceaccount.com', 'svc-dashboard']]);
+    const noLookup = async () => { throw new Error('users table must not be consulted'); };
+    expect(await authenticate('Bearer test:dash@p.iam.gserviceaccount.com', v, noLookup, undefined, undefined, readers))
+      .toEqual({ username: 'svc-dashboard', email: 'dash@p.iam.gserviceaccount.com', readOnly: true });
+    expect(await authenticate('Bearer test:alice@example.com', v, lookup, undefined, undefined, readers))
+      .toEqual({ username: 'alice', email: 'alice@example.com' });
+  });
   it('bearerToken parsing', () => {
     expect(bearerToken('Bearer abc')).toBe('abc');
     expect(bearerToken('bearer abc ')).toBe('abc');
@@ -118,6 +169,8 @@ describe('loadConfig', () => {
     expect(c.allowedHd).toBe('example.com');
     expect(c.port).toBe(8080);
     expect(c.authMode).toBe('google');
+    expect(c.readerPrincipals.size).toBe(0);
+    expect(loadConfig({ ...base, YAPA_READER_PRINCIPALS: `${SA}=svc-dashboard` }).readerPrincipals.get(SA)).toBe('svc-dashboard');
   });
   it('google mode needs audiences and hd', () => {
     expect(() => loadConfig({ ...base, YAPA_AUDIENCES: '' })).toThrow(ConfigError);

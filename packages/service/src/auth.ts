@@ -20,6 +20,8 @@ export interface VerifiedIdentity {
 export interface Caller {
   username: string;
   email: string;
+  /** A YAPA_READER_PRINCIPALS service account: GET routes only. */
+  readOnly?: true;
 }
 
 export interface TokenVerifier {
@@ -35,14 +37,24 @@ export class AuthFailure extends Error {
 
 const GOOGLE_ISSUERS = ['accounts.google.com', 'https://accounts.google.com'];
 
-/** Claims checks after signature/exp/aud/iss verification (exported for tests). */
-export function checkGoogleClaims(payload: TokenPayload | undefined, allowedHd: string): VerifiedIdentity {
+/**
+ * Claims checks after signature/exp/aud/iss verification (exported for tests).
+ * Service-account tokens have no `hd`; only the exact emails in `readers`
+ * (YAPA_READER_PRINCIPALS) are let through without it.
+ */
+export function checkGoogleClaims(
+  payload: TokenPayload | undefined,
+  allowedHd: string,
+  readers: ReadonlyMap<string, string> = new Map(),
+): VerifiedIdentity {
   if (!payload) throw new AuthFailure('no_payload');
   if (!payload.iss || !GOOGLE_ISSUERS.includes(payload.iss)) throw new AuthFailure('bad_issuer');
   if (!payload.email) throw new AuthFailure('no_email');
   if (payload.email_verified !== true) throw new AuthFailure('email_unverified');
+  const email = payload.email.toLowerCase();
+  if (readers.has(email) && !payload.hd) return { email };
   if (!payload.hd || payload.hd.toLowerCase() !== allowedHd) throw new AuthFailure('wrong_hd');
-  return { email: payload.email.toLowerCase() };
+  return { email };
 }
 
 export class GoogleTokenVerifier implements TokenVerifier {
@@ -51,6 +63,7 @@ export class GoogleTokenVerifier implements TokenVerifier {
     private readonly allowedHd: string,
     /** Injectable for tests (cert fetching is stubbed there). */
     readonly client: OAuth2Client = new OAuth2Client(),
+    private readonly readers: ReadonlyMap<string, string> = new Map(),
   ) {
     if (audiences.length === 0) throw new Error('at least one audience is required');
   }
@@ -69,7 +82,7 @@ export class GoogleTokenVerifier implements TokenVerifier {
       log('WARNING', 'token verification failed', { event: 'auth_verify_detail', reason, sig_removed: sigRemoved, detail });
       throw new AuthFailure(reason);
     }
-    return checkGoogleClaims(payload, this.allowedHd);
+    return checkGoogleClaims(payload, this.allowedHd, this.readers);
   }
 }
 
@@ -103,7 +116,7 @@ export function createVerifier(cfg: ServiceConfig): TokenVerifier {
     log('WARNING', 'YAPA_AUTH_MODE=insecure-test: tokens are NOT verified; never use outside local tests');
     return new InsecureTestVerifier();
   }
-  return new GoogleTokenVerifier(cfg.audiences, cfg.allowedHd);
+  return new GoogleTokenVerifier(cfg.audiences, cfg.allowedHd, undefined, cfg.readerPrincipals);
 }
 
 /**
@@ -141,7 +154,8 @@ export function logAuthFailure(reason: string, requestId?: string): void {
 }
 
 /**
- * Full authentication: token -> verified email -> active users row.
+ * Full authentication: token -> verified email -> active users row, or a
+ * read-only caller for a YAPA_READER_PRINCIPALS service account.
  * Throws ApiError 401 unauthenticated / 403 not_member / 403 user_inactive.
  */
 export async function authenticate(
@@ -150,6 +164,7 @@ export async function authenticate(
   lookup: UserLookup,
   requestId?: string,
   appHeader?: string,
+  readers: ReadonlyMap<string, string> = new Map(),
 ): Promise<Caller> {
   const token = appToken(appHeader, authorization);
   if (!token) {
@@ -165,6 +180,8 @@ export async function authenticate(
     if (reason === 'cert_fetch_failed') throw new ApiError('unavailable', 'could not verify token right now');
     throw new ApiError('unauthenticated', 'invalid or expired token');
   }
+  const reader = readers.get(id.email);
+  if (reader) return { username: reader, email: id.email, readOnly: true };
   const user = await lookup(id.email);
   if (!user) {
     logAuthFailure('no_user_mapping', requestId);

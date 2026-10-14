@@ -18,10 +18,17 @@ let restore: () => void;
 beforeEach(() => { restore = setLogSink(() => undefined); });
 afterEach(() => restore());
 
+const READER = 'dash@p.iam.gserviceaccount.com';
+
 function app(lookupUser = async () => undefined as never) {
   return createApp({
     pool: noPool,
-    config: { similarityThreshold: 0.95, rateLimits: DEFAULT_RATE_LIMITS, dailyWriteAlert: 20000 },
+    config: {
+      similarityThreshold: 0.95,
+      rateLimits: DEFAULT_RATE_LIMITS,
+      dailyWriteAlert: 20000,
+      readerPrincipals: new Map([[READER, 'svc-dashboard']]),
+    },
     verifier: new InsecureTestVerifier(),
     lookupUser,
   });
@@ -118,6 +125,21 @@ describe('authenticated, no-DB routes', () => {
     const r = await pull(`cursor=${encodeCursor(huge)}`);
     expect(r.status).toBe(400);
     expect((await r.json()).error.message).toMatch(/out of range/);
+  });
+
+  it('a reader principal can GET but every other method is 403 read_only_principal, before any DB access', async () => {
+    const a = app(async () => { throw new Error('users table must not be consulted'); });
+    const reader = { authorization: `Bearer test:${READER}`, 'x-yapa-device': 'task-dashboard' };
+    const me = await a.request('/v1/me', { headers: reader });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toMatchObject({ username: 'svc-dashboard', email: READER });
+    const writes = a.routes.filter(r => r.method !== 'ALL' && r.method !== 'GET');
+    expect(writes.length).toBeGreaterThan(5);
+    for (const r of writes) {
+      const res = await a.request(concrete(r.path), { method: r.method, headers: { ...reader, 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status, `${r.method} ${r.path}`).toBe(403);
+      expect((await res.json()).error.code).toBe('read_only_principal');
+    }
   });
 
   it('/v1/me reports the pull byte budget', async () => {

@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'not_owner'
   | 'local_only_collection'
   | 'task_namespace'
+  | 'read_only_principal'
   | 'not_found'
   | 'id_taken'
   | 'payload_too_large'
@@ -29,6 +30,7 @@ const STATUS: Record<ErrorCode, number> = {
   not_owner: 403,
   local_only_collection: 403,
   task_namespace: 403,
+  read_only_principal: 403,
   not_found: 404,
   id_taken: 409,
   payload_too_large: 413,
