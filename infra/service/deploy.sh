@@ -79,5 +79,5 @@ echo "==> terraform apply image=${IMAGE}@${DIGEST}"
 terraform apply -input=false ${TF_APPROVE[@]+"${TF_APPROVE[@]}"} -var "image=${IMAGE}@${DIGEST}"
 
 URL="$(terraform output -raw service_url)"
-echo "==> smoke test ${URL}/healthz (as the gcloud user; needs run.invoker)"
-curl -fsS -H "Authorization: Bearer $(gcloud auth print-identity-token)" "${URL}/healthz" && echo
+echo "==> smoke test ${URL}/health (as the gcloud user; needs run.invoker)"
+curl -fsS -H "Authorization: Bearer $(gcloud auth print-identity-token)" "${URL}/health" && echo

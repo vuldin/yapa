@@ -1,6 +1,6 @@
 # YAPA Training Pipeline (gated ML-ops subsystem)
 
-YAPA's default tool surface is memory & task management (23 tools). On top of
+YAPA's default tool surface is memory & task management (25 tools). On top of
 that sits an optional **ML-ops pipeline** — 18 additional tools that turn
 curated memories into (a) a versioned system-prompt companion and (b) a
 fine-tuned adapter. These are *operator workflows*: deliberate, occasional,

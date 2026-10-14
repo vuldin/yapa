@@ -1,6 +1,6 @@
 {
   "name": "yapa",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "YAPA — Memory & Task assistant: core library, MCP server, and DeepSeek Harness plugin",
   "private": true,
   "type": "module",

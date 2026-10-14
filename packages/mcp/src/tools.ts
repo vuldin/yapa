@@ -51,7 +51,9 @@ import {
   scheduleSyncSoon,
   getDeviceId,
   recallMemory,
+  mergeCollections,
   removeCollection,
+  removeDependency,
   runDecaySweep,
   searchTasks,
   storeMemory,
@@ -75,6 +77,7 @@ import {
 export const SYNC_ON_WRITE_TOOLS = new Set([
   'memory_store', 'memory_forget', 'compaction_apply', 'journal_consolidate', 'janitor_now',
   'task_create', 'task_update', 'task_complete', 'task_delete', 'task_add_dependency',
+  'task_remove_dependency', 'collection_merge',
 ]);
 
 /**
@@ -957,9 +960,10 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'task_update',
-    'Update task fields (status, priority, notes, due, tags)',
+    'Update task fields (title, status, priority, notes, due, tags)',
     {
       id: z.string().describe('Task ID'),
+      title: z.string().trim().min(1).optional().describe('New task title (rename)'),
       status: z.enum(['pending', 'in_progress', 'blocked', 'complete']).optional(),
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
       notes: z.string().optional(),
@@ -968,8 +972,9 @@ export function registerTools(server: McpServer): void {
       blocked_reason: z.string().optional(),
       duration: z.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
     },
-    async ({ id, status, priority, notes, due, tags, blocked_reason, duration }) => {
+    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration }) => {
       const updates: Record<string, any> = {};
+      if (title) updates.title = title;
       if (status) updates.status = status;
       if (priority) updates.priority = priority;
       if (notes !== undefined) updates.notes = notes;
@@ -1073,6 +1078,21 @@ export function registerTools(server: McpServer): void {
     },
   );
 
+  server.tool(
+    'task_remove_dependency',
+    'Remove a depends-on/blocks relationship between tasks (both sides; also clears a dangling edge to a deleted task)',
+    {
+      task_id: z.string().describe('Task that depends on another'),
+      depends_on_id: z.string().describe('Task it should no longer depend on'),
+    },
+    async ({ task_id, depends_on_id }) => {
+      await removeDependency(task_id, depends_on_id);
+      return {
+        content: [{ type: 'text' as const, text: `${task_id} no longer depends on ${depends_on_id}` }],
+      };
+    },
+  );
+
   // --- Collections ---
   server.tool(
     'collection_list',
@@ -1103,13 +1123,36 @@ export function registerTools(server: McpServer): void {
   );
 
   server.tool(
+    'collection_merge',
+    'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the emptied `from`. Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.',
+    {
+      from: z.string().describe('Collection to merge (removed afterwards)'),
+      into: z.string().describe('Existing collection that receives every document'),
+      dry_run: z.boolean().optional().describe('Report what would move without changing anything'),
+    },
+    async ({ from, into, dry_run }) => {
+      const r = await mergeCollections(from, into, { dryRun: dry_run });
+      const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
+      const lines = r.dryRun
+        ? [`Dry run: would move ${r.moved} document(s) from "${from}" into "${into}" (${types}), then remove "${from}". Nothing changed.`]
+        : [`Moved ${r.moved} document(s) from "${from}" into "${into}" (${types}) and removed the empty "${from}".`];
+      if (r.teammateRowsKept > 0) {
+        lines.push(`${r.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${from}" on the sync service.`);
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  server.tool(
     'collection_delete',
-    'Delete a collection and all its contents',
+    'Permanently delete a collection and all its contents. Not a merge; to combine collections use collection_merge. A non-empty shared collection is deleted for every teammate on the sync service, so it requires `confirm` set to the exact collection name, after the user explicitly asked for the deletion.',
     {
       name: z.string().describe('Collection name to delete'),
+      confirm: z.string().optional().describe('Exact collection name; required to delete a non-empty shared collection'),
     },
-    async ({ name }) => {
-      await removeCollection(name);
+    async ({ name, confirm }) => {
+      // Refusals (shared, non-empty, unconfirmed) throw with the reason for the model.
+      await removeCollection(name, { confirm });
       return { content: [{ type: 'text' as const, text: `Deleted collection "${name}"` }] };
     },
   );
@@ -1302,7 +1345,7 @@ export function registerTools(server: McpServer): void {
         steps.push(
           '',
           `${step++}. Delete all YAPA collections from ChromaDB:`,
-          '   Run `collection_list` to see all collections, then run `collection_delete` for each one.',
+          '   Run `collection_list` to see all collections, then run `collection_delete` for each one, passing `confirm` set to that collection\'s name (the user already chose to delete everything).',
         );
       }
 

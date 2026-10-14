@@ -210,7 +210,7 @@ describe('removeCollection under sync', () => {
     await store.addDocument('customer-gone', 'theirs-1', 'their note', { type: 'memory', origin_user: 'teammate' });
     await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'customer-gone']);
 
-    await removeCollection('customer-gone');
+    await removeCollection('customer-gone', { confirm: 'customer-gone' });
 
     expect(await getPendingDeletes()).toContain('customer-gone:mine-1');
     expect((await getLocalTombstones()).has('theirs-1')).toBe(true);

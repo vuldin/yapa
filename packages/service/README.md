@@ -38,12 +38,13 @@ Tests against the deployed service: `test/live.test.ts` (`YAPA_LIVE_URL`, `YAPA_
 ## Endpoints
 
 All under `/v1` need `Authorization: Bearer <Google ID token>`; pull and
-upsert also need `X-Yapa-Device`. `GET /healthz` is the only open route
-(no DB access). See section 5 of the design for request/response shapes.
+upsert also need `X-Yapa-Device`. `GET /healthz` and `GET /health` are the only
+open routes (no DB access); from outside Cloud Run only `/health` reaches the app. See section 5 of the design for request/response shapes.
 
 | Method and path | Purpose |
 |-----------------|---------|
 | `GET /healthz` | liveness, no auth |
+| `GET /health` | liveness, no auth (the external route: Cloud Run reserves `/healthz`) |
 | `GET /v1/health` | DB check |
 | `GET /v1/me` | caller username, email, server limits |
 | `GET /v1/collections/{c}/documents?since=&cursor=&limit=&include_own_device=&embeddings=` | pull (echo rules, deletions feed, cursor pagination) |

@@ -38679,6 +38679,7 @@ already captured in git history or in an existing memory.
 - **Before creating a new collection**, ask the user to confirm the collection name. Suggest a name based on context. Remind the user that \`private-\` or \`local-\` prefixed collections won't sync to the shared remote database.
 - When unsure which collection or prefix to use, ask the user rather than guessing
 - Use \`collection_list\` to check what collections exist before creating new ones
+- To combine or rename collections use \`collection_merge\`, never \`collection_delete\` (a shared delete removes the collection for every teammate)
 - Always pass the inferred collection explicitly on memory/task tool calls
 
 ### Uninstall
@@ -39180,9 +39181,9 @@ async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
   return last === void 0 || now - last > DAY;
 }
 async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
-  const { addDocument: addDocument4, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
+  const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
   await getOrCreateCollection3("global");
-  await addDocument4("global", DECAY_SENTINEL_ID, "decay sentinel", {
+  await addDocument3("global", DECAY_SENTINEL_ID, "decay sentinel", {
     type: "decay_sentinel",
     last_run: now
   });
@@ -39421,6 +39422,10 @@ async function updateTask(id, updates) {
     updated_at: Math.floor(Date.now() / 1e3)
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  if (updates.title !== void 0 && updates.title !== task.title) {
+    await addDocument2(task.collection, id, updates.title, updatedMetadata);
+    return;
+  }
   await updateDocument2(task.collection, id, updatedMetadata);
 }
 async function completeTask(id, durationMinutes) {
@@ -39524,6 +39529,26 @@ async function addDependency(taskId, dependsOnId) {
     await updateTask(dependsOnId, { blocks: depBlocks });
   }
 }
+async function removeDependency(taskId, dependsOnId) {
+  const task = await getTask(taskId);
+  const dep = await getTask(dependsOnId);
+  if (!task && !dep) {
+    throw new Error("Neither task found");
+  }
+  if (task) {
+    const taskDeps = toList(task.metadata.depends_on);
+    if (taskDeps.includes(dependsOnId)) {
+      await updateTask(taskId, { depends_on: taskDeps.filter((id) => id !== dependsOnId) });
+    }
+  }
+  if (dep) {
+    const depBlocks = toList(dep.metadata.blocks);
+    if (depBlocks.includes(taskId)) {
+      await updateTask(dependsOnId, { blocks: depBlocks.filter((id) => id !== taskId) });
+    }
+  }
+}
+var toList = (x) => Array.isArray(x) ? x : String(x ?? "").split(",").filter(Boolean);
 
 // packages/core/src/tasks/dates.ts
 function parseRelativeDate(phrase) {
@@ -39700,7 +39725,26 @@ async function createNewCollection(name) {
   await createCollection2(name);
 }
 var isSyncable2 = isSyncableCollection;
-async function removeCollection(name) {
+var CollectionDeleteRefusedError = class extends Error {
+  constructor(message, documentCount) {
+    super(message);
+    this.documentCount = documentCount;
+    this.name = "CollectionDeleteRefusedError";
+  }
+  documentCount;
+};
+async function removeCollection(name, opts = {}) {
+  if (isSyncable2(name) && !opts.force && opts.confirm !== name) {
+    const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
+    const count = docs.filter((d) => !d.id.startsWith("__")).length;
+    if (count > 0) {
+      const reach = getConfig().SYNC_ENABLED ? "Deleting it permanently deletes the collection for EVERY teammate on the sync service." : "Deleting it is permanent.";
+      throw new CollectionDeleteRefusedError(
+        `Refused: "${name}" is a shared collection with ${count} document${count === 1 ? "" : "s"}. ${reach} This is not a merge: to combine it with another collection, use collection_merge (it keeps every document). To delete it anyway, confirm with the user, then pass confirm: "${name}".`,
+        count
+      );
+    }
+  }
   if (getConfig().SYNC_ENABLED && isSyncable2(name)) {
     const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
     const me = getConfig().USERNAME;
@@ -39711,6 +39755,58 @@ async function removeCollection(name) {
     if (subs.includes(name)) await updateSyncSubscriptions(subs.filter((s) => s !== name));
   }
   await deleteCollection2(name);
+}
+var MERGE_BATCH = 100;
+async function mergeCollections(from, into, opts = {}) {
+  if (from === into) throw new Error("Source and target are the same collection");
+  const names = new Set((await listCollections2()).map((c) => c.name));
+  if (!names.has(from)) throw new Error(`Collection "${from}" not found`);
+  if (!names.has(into)) {
+    throw new Error(`Target collection "${into}" does not exist. Confirm the name with the user and create it first (collection_create), then merge.`);
+  }
+  if (!isSyncable2(from) && isSyncable2(into)) {
+    throw new Error(
+      `Refused: "${from}" is private (never synced) and "${into}" is shared. Merging would publish every document in "${from}" to all teammates on the sync service. Merge into another private collection, or store the specific documents that should be shared.`
+    );
+  }
+  const docs = await getDocumentsByFilter2(from, {}, 1e5);
+  const total = await getCollectionCount2(from);
+  if (docs.length < total) throw new Error(`Could only read ${docs.length} of ${total} documents in "${from}"; nothing was moved`);
+  const ids = docs.map((d) => d.id);
+  const clash = ids.length > 0 ? (await getDocumentsByIds2(into, ids).catch(() => [])).map((d) => d.id) : [];
+  if (clash.length > 0) {
+    throw new Error(`"${into}" already holds ${clash.length} id(s) from "${from}" (${clash.slice(0, 5).join(", ")}${clash.length > 5 ? ", ..." : ""}); nothing was moved`);
+  }
+  const byType = {};
+  for (const d of docs) {
+    const t = String(d.metadata.type ?? "unknown");
+    byType[t] = (byType[t] ?? 0) + 1;
+  }
+  const me = getConfig().USERNAME;
+  const teammateRowsKept = isSyncable2(from) && !isSyncable2(into) ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
+  const result = { from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept };
+  if (opts.dryRun) return result;
+  if (docs.length > 0) {
+    const before = await getCollectionCount2(into);
+    for (let i = 0; i < docs.length; i += MERGE_BATCH) {
+      await addDocumentsBatch2(into, docs.slice(i, i + MERGE_BATCH).map((d) => {
+        const metadata = { ...d.metadata, is_synced: false };
+        delete metadata.remote_checked_at;
+        return { id: d.id, content: d.content, metadata };
+      }));
+    }
+    const landed = await getDocumentsByIds2(into, ids);
+    const after = await getCollectionCount2(into);
+    if (landed.length !== ids.length || after !== before + ids.length) {
+      throw new Error(`Merge verification failed: "${into}" holds ${landed.length} of ${ids.length} moved docs (count ${before} -> ${after}); "${from}" was left intact`);
+    }
+    for (const id of ids) await deleteDocument2(from, id);
+    const left = await getCollectionCount2(from);
+    if (left !== 0) throw new Error(`"${from}" still holds ${left} document(s) after the move; it was not deleted`);
+  }
+  await removeCollection(from);
+  result.sourceRemoved = true;
+  return result;
 }
 
 // packages/core/src/curation/index.ts
@@ -42283,7 +42379,9 @@ var SYNC_ON_WRITE_TOOLS = /* @__PURE__ */ new Set([
   "task_update",
   "task_complete",
   "task_delete",
-  "task_add_dependency"
+  "task_add_dependency",
+  "task_remove_dependency",
+  "collection_merge"
 ]);
 function withSyncOnWrite(server2) {
   const register = server2.tool.bind(server2);
@@ -43098,9 +43196,10 @@ ${r.content}`
   );
   server2.tool(
     "task_update",
-    "Update task fields (status, priority, notes, due, tags)",
+    "Update task fields (title, status, priority, notes, due, tags)",
     {
       id: external_exports.string().describe("Task ID"),
+      title: external_exports.string().trim().min(1).optional().describe("New task title (rename)"),
       status: external_exports.enum(["pending", "in_progress", "blocked", "complete"]).optional(),
       priority: external_exports.enum(["critical", "high", "medium", "low"]).optional(),
       notes: external_exports.string().optional(),
@@ -43109,8 +43208,9 @@ ${r.content}`
       blocked_reason: external_exports.string().optional(),
       duration: external_exports.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"')
     },
-    async ({ id, status, priority, notes, due, tags, blocked_reason, duration: duration3 }) => {
+    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration: duration3 }) => {
       const updates = {};
+      if (title) updates.title = title;
       if (status) updates.status = status;
       if (priority) updates.priority = priority;
       if (notes !== void 0) updates.notes = notes;
@@ -43209,6 +43309,20 @@ ${r.content}`
     }
   );
   server2.tool(
+    "task_remove_dependency",
+    "Remove a depends-on/blocks relationship between tasks (both sides; also clears a dangling edge to a deleted task)",
+    {
+      task_id: external_exports.string().describe("Task that depends on another"),
+      depends_on_id: external_exports.string().describe("Task it should no longer depend on")
+    },
+    async ({ task_id, depends_on_id }) => {
+      await removeDependency(task_id, depends_on_id);
+      return {
+        content: [{ type: "text", text: `${task_id} no longer depends on ${depends_on_id}` }]
+      };
+    }
+  );
+  server2.tool(
     "collection_list",
     "List all collections with document counts",
     {},
@@ -43235,13 +43349,32 @@ ${r.content}`
     }
   );
   server2.tool(
-    "collection_delete",
-    "Delete a collection and all its contents",
+    "collection_merge",
+    "Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the emptied `from`. Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.",
     {
-      name: external_exports.string().describe("Collection name to delete")
+      from: external_exports.string().describe("Collection to merge (removed afterwards)"),
+      into: external_exports.string().describe("Existing collection that receives every document"),
+      dry_run: external_exports.boolean().optional().describe("Report what would move without changing anything")
     },
-    async ({ name }) => {
-      await removeCollection(name);
+    async ({ from, into, dry_run }) => {
+      const r = await mergeCollections(from, into, { dryRun: dry_run });
+      const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
+      const lines = r.dryRun ? [`Dry run: would move ${r.moved} document(s) from "${from}" into "${into}" (${types}), then remove "${from}". Nothing changed.`] : [`Moved ${r.moved} document(s) from "${from}" into "${into}" (${types}) and removed the empty "${from}".`];
+      if (r.teammateRowsKept > 0) {
+        lines.push(`${r.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${from}" on the sync service.`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+  server2.tool(
+    "collection_delete",
+    "Permanently delete a collection and all its contents. Not a merge; to combine collections use collection_merge. A non-empty shared collection is deleted for every teammate on the sync service, so it requires `confirm` set to the exact collection name, after the user explicitly asked for the deletion.",
+    {
+      name: external_exports.string().describe("Collection name to delete"),
+      confirm: external_exports.string().optional().describe("Exact collection name; required to delete a non-empty shared collection")
+    },
+    async ({ name, confirm }) => {
+      await removeCollection(name, { confirm });
       return { content: [{ type: "text", text: `Deleted collection "${name}"` }] };
     }
   );
@@ -43419,7 +43552,7 @@ Last error: ${last.message}` : ""}`);
         steps.push(
           "",
           `${step++}. Delete all YAPA collections from ChromaDB:`,
-          "   Run `collection_list` to see all collections, then run `collection_delete` for each one."
+          "   Run `collection_list` to see all collections, then run `collection_delete` for each one, passing `confirm` set to that collection's name (the user already chose to delete everything)."
         );
       }
       steps.push(

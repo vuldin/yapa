@@ -129,7 +129,8 @@ dsh plugin --profile web remove yapa
 …then delete the `yapa` row from `~/.dsh/profiles/web/cordis.patch.yml`.
 Collections (memories and tasks) are preserved — in `~/.local/share/yapa/store`
 (local store) or ChromaDB, per your `storage` setting; delete them with
-`yapa_collection_delete` first if you want a clean removal.
+`yapa_collection_delete` first if you want a clean removal (a non-empty shared
+collection needs `confirm` set to its name, and is deleted for every teammate).
 
 ## Deferred (upstream-limited)
 

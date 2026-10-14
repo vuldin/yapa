@@ -1,6 +1,6 @@
 {
   "name": "yapa-mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "YAPA — Memory & Task MCP Server backed by ChromaDB",
   "type": "module",
   "main": "dist/index.js",
