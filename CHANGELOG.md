@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 (2026-10-14)
+
+Service-only release: adds read-only reader principals so a team task dashboard can read shared collections as a service account. No plugin or client changes. This is the version for security review.
 
 ### Features
 - **Read-only reader principals for the sync service.** `YAPA_READER_PRINCIPALS` (`sa@project.iam.gserviceaccount.com=svc-name`, comma-separated) lets a service account, such as a team task dashboard, read every shared collection. Service-account tokens have no `hd` claim, so listed accounts are matched by exact email instead. They need no `users` row and may only call GET routes; anything else returns `403 read_only_principal`. Each one also needs `roles/run.invoker` (the `domain:` binding doesn't cover service accounts), and its tokens use the service URL as audience. Off by default; nothing changes for existing users. Sign-up never auto-creates a `svc-*` username for a person, so a reader is never confused with a teammate in logs.
