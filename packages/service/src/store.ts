@@ -515,10 +515,18 @@ export function usernameFromEmail(email: string): string | undefined {
 }
 
 /**
+ * Usernames starting with this belong to YAPA_READER_PRINCIPALS service
+ * accounts, so sign-up never hands one to a person (logs and attribution
+ * would be ambiguous). An admin can still map such a person explicitly.
+ */
+export const READER_USERNAME_PREFIX = 'svc-';
+
+/**
  * Self-service sign-up (YAPA_AUTO_PROVISION): a verified account in the allowed
  * domain gets a users row on first sign-in. Existing rows are never changed, so
- * a disabled user stays disabled; a username already held by another email is
- * left to an admin (returns undefined -> not_member).
+ * a disabled user stays disabled; a username already held by another email, or
+ * one in the reserved `svc-` namespace, is left to an admin (returns
+ * undefined -> not_member).
  */
 export async function findOrCreateUser(pool: pg.Pool, email: string, domain: string) {
   const found = await findUserByEmail(pool, email);
@@ -526,6 +534,10 @@ export async function findOrCreateUser(pool: pg.Pool, email: string, domain: str
   if (!domain || email.toLowerCase().split('@')[1] !== domain) return undefined;
   const username = usernameFromEmail(email);
   if (!username) return undefined;
+  if (username.startsWith(READER_USERNAME_PREFIX)) {
+    log('WARNING', 'username is reserved for reader principals', { event: 'user_provision_reserved', username });
+    return undefined;
+  }
   const r = await pool.query(
     'INSERT INTO users (username, email) VALUES ($1, lower($2)) ON CONFLICT DO NOTHING RETURNING username, email, active',
     [username, email],

@@ -29,6 +29,12 @@ export interface ServiceConfig {
   allowedHd: string;
   /** Create a users row on first sign-in for verified accounts in allowedHd (YAPA_AUTO_PROVISION=true). */
   autoProvision: boolean;
+  /**
+   * Read-only service-account principals (YAPA_READER_PRINCIPALS), email ->
+   * username. Their tokens carry no `hd`, so they are matched by exact email
+   * instead; they need no users row and may only call GET routes.
+   */
+  readerPrincipals: ReadonlyMap<string, string>;
   /** Direct connection string (local dev and tests). */
   databaseUrl?: string;
   /** Cloud SQL `project:region:instance` (production, with IAM auth over private IP). */
@@ -70,6 +76,34 @@ function int(env: Record<string, string | undefined>, name: string, dflt: number
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min) throw new ConfigError(`${name} must be an integer >= ${min}`);
   return n;
+}
+
+const SERVICE_ACCOUNT_RE = /^[a-z0-9-]{1,63}@[a-z0-9-]{1,63}\.iam\.gserviceaccount\.com$/;
+const READER_USERNAME_RE = /^svc-[a-z0-9-]{1,60}$/;
+
+/**
+ * `sa@proj.iam.gserviceaccount.com=svc-name,...`. Only service accounts (a
+ * person's account must go through the hd check and users table), and only
+ * `svc-` usernames, which auto-provisioning refuses to hand to a person
+ * (store.ts READER_USERNAME_PREFIX), so a reader is unambiguous in logs.
+ */
+export function parseReaderPrincipals(raw: string | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const entry of list(raw)) {
+    const [email, username, extra] = entry.split('=').map(s => s.trim().toLowerCase());
+    if (extra !== undefined || !email || !username) {
+      throw new ConfigError(`YAPA_READER_PRINCIPALS entries are email=username, got "${entry}"`);
+    }
+    if (!SERVICE_ACCOUNT_RE.test(email)) {
+      throw new ConfigError(`YAPA_READER_PRINCIPALS: ${email} is not a service account (*.iam.gserviceaccount.com)`);
+    }
+    if (!READER_USERNAME_RE.test(username)) {
+      throw new ConfigError(`YAPA_READER_PRINCIPALS: username "${username}" must match ${READER_USERNAME_RE}`);
+    }
+    if (out.has(email)) throw new ConfigError(`YAPA_READER_PRINCIPALS: ${email} is listed twice`);
+    out.set(email, username);
+  }
+  return out;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): ServiceConfig {
@@ -117,6 +151,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     audiences,
     allowedHd,
     autoProvision: (env.YAPA_AUTO_PROVISION ?? '').trim().toLowerCase() === 'true',
+    readerPrincipals: parseReaderPrincipals(env.YAPA_READER_PRINCIPALS),
     databaseUrl,
     instanceConnectionName,
     dbUser: env.YAPA_DB_USER || undefined,

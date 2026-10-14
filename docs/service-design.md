@@ -529,7 +529,7 @@ collection.
 |------|------|---------|
 | 400 | `invalid_request`, `invalid_collection`, `embedding_dimension`, `embedding_invalid` | malformed input |
 | 401 | `unauthenticated` | missing/expired/invalid token (client refreshes once, then surfaces "run yapa login") |
-| 403 | `not_member`, `user_inactive`, `not_owner`, `local_only_collection`, `task_namespace` | authz |
+| 403 | `not_member`, `user_inactive`, `not_owner`, `local_only_collection`, `task_namespace`, `read_only_principal` | authz |
 | 404 | `not_found` | missing or not readable (indistinguishable on purpose) |
 | 409 | `id_taken` | task id collision, includes `suggested_id` |
 | 413 | `payload_too_large` | over batch/doc limits |
@@ -910,6 +910,18 @@ SLA; acceptable for a pilot.
   disabled (no tokens), and/or `users.active=false`. Consequence: every
   employee can read every shared collection (decision 7, no ACLs in v1);
   restricted material stays in `private-` collections.
+- **Read-only reader principals (josh-330, 2026-10-14).** The task dashboard
+  reads every shared collection as one service account, with a single poller
+  fanned out to its viewers (who sign in through IAP on the dashboard itself).
+  Service-account ID tokens carry no `hd`, so `YAPA_READER_PRINCIPALS` lists
+  them by exact email, mapped to a `svc-` username. They skip the `users`
+  table (nothing to provision through the bastion) and are refused on every
+  non-GET route (`403 read_only_principal`), so they can never write, delete
+  or run the POST lookups. RLS is unchanged: `docs_select` doesn't depend on
+  the caller, and with no writes the insert/update/delete policies never
+  apply. `svc-` usernames are reserved: auto-provisioning refuses to create one
+  for a person, so a reader is never confused with a teammate. Revoke one by
+  removing it from the variable or its invoker binding.
 - **Pilot tokens.** `gcloud auth print-identity-token` user tokens (gcloud's
   client id as audience) are accepted for the pilot; switch to the YAPA
   desktop OAuth client audience before team rollout (josh-318).

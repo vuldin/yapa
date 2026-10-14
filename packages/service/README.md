@@ -64,6 +64,7 @@ upsert also need `X-Yapa-Device`. `GET /healthz` is the only open route
 | `PORT` | no | `8080` | listen port (Cloud Run sets it) |
 | `YAPA_AUDIENCES` | yes (google mode) | | comma-separated allow-list of accepted token `aud` values: the service URL, the YAPA desktop OAuth client id, and the gcloud client id only if gcloud user tokens are accepted |
 | `YAPA_ALLOWED_HD` | yes (google mode) | | required `hd` claim (the company Google Workspace domain) |
+| `YAPA_READER_PRINCIPALS` | no | | comma-separated `sa@project.iam.gserviceaccount.com=svc-name` pairs: read-only service accounts (e.g. the task dashboard). Matched by exact email instead of `hd` (service-account tokens have none), need no `users` row, and may only call GET routes; anything else is `403 read_only_principal`. `svc-*` usernames are reserved: auto-provisioning never creates one for a person. Each one also needs `roles/run.invoker` (add it to `invoker_members`, since the `domain:` binding doesn't cover service accounts) and mints tokens with `aud` = the service URL, which must be in `YAPA_AUDIENCES`. |
 | `YAPA_INSTANCE_CONNECTION_NAME` | prod | | Cloud SQL `project:region:instance`; enables the Cloud SQL Node connector with IAM auth |
 | `YAPA_DB_USER` | with the above | | IAM database user (the runtime service account, `name@project.iam`) |
 | `YAPA_DB_NAME` | with the above | | database name |

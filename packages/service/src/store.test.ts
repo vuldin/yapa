@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { decodeCursor, posFromSince } from './cursor.js';
-import { echoClause, idempotencyStorageKey, pull, requestHash, rowsWithinBudget, type RequestCtx, usernameFromEmail } from './store.js';
+import { echoClause, findOrCreateUser, idempotencyStorageKey, pull, requestHash, rowsWithinBudget, type RequestCtx, usernameFromEmail } from './store.js';
 
 interface Q { text: string; values: unknown[] }
 
@@ -109,6 +109,36 @@ describe('idempotency scoping', () => {
     expect(k('PUT /v1/documents/a')).not.toBe(k('POST /v1/documents/a'));
     expect(idempotencyStorageKey('bob', 'PUT /v1/documents/a', 'k-1')).not.toBe(k('PUT /v1/documents/a'));
     expect(requestHash('PUT /v1/documents/a', '{}')).not.toBe(requestHash('PUT /v1/documents/b', '{}'));
+  });
+});
+
+describe('findOrCreateUser reserves the svc- namespace (no database)', () => {
+  // Answers the users lookup with no row and records every statement.
+  function fakePool() {
+    const sql: string[] = [];
+    const pool = {
+      query: async (text: string) => {
+        sql.push(text);
+        return text.startsWith('INSERT')
+          ? { rows: [{ username: 'dana', email: 'dana@example.com', active: true }] }
+          : { rows: [] };
+      },
+    } as unknown as pg.Pool;
+    return { pool, sql };
+  }
+
+  it('never auto-provisions a svc-* username for a person', async () => {
+    const { pool, sql } = fakePool();
+    expect(await findOrCreateUser(pool, 'svc-task-dashboard@example.com', 'example.com')).toBeUndefined();
+    expect(await findOrCreateUser(pool, 'SVC.Reports@example.com', 'example.com')).toBeUndefined();
+    expect(sql.some(s => s.startsWith('INSERT'))).toBe(false);
+  });
+
+  it('still provisions ordinary names, including ones that merely contain svc', async () => {
+    const { pool, sql } = fakePool();
+    expect(await findOrCreateUser(pool, 'dana@example.com', 'example.com')).toMatchObject({ username: 'dana' });
+    await findOrCreateUser(pool, 'svcteam@example.com', 'example.com');
+    expect(sql.filter(s => s.startsWith('INSERT'))).toHaveLength(2);
   });
 });
 
