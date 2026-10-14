@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.2 (2026-10-14)
+
+Patch release: a safe way to merge collections, a guard on shared collection deletes, and two task-tool gaps. Motivation: a request to merge two collections could only be done with `collection_delete`, which hard-deletes the shared collection for every teammate.
+
+### Features
+- **`collection_merge` (`from`, `into`, optional `dry_run`).** Moves every document (memories, tasks, journals) into an existing collection with ids and metadata intact, marks each one unsynced so the next push moves the shared row in place (nothing is deleted remotely; other devices relocate their copy on pull), verifies the target, then removes the empty source. The target must already exist. Private (`private-*`, `local-*`, `global`) into shared is refused, since it would publish private notes; shared into private retracts your shared copies as any move into a private collection does. Also in the DSH plugin as `yapa_collection_merge`.
+- **`task_remove_dependency`.** Removes a depends-on/blocks edge from both tasks, and clears a dangling edge when the other task is gone. Core: `removeDependency`.
+- **`task_update` takes `title`.** Renaming a task also rewrites its document content, so search matches the new title.
+
+### Fixes
+- **`collection_delete` refuses a non-empty shared collection** unless `confirm` repeats its exact name. The refusal gives the document count, says the delete reaches every teammate on the sync service, and points to `collection_merge`. Local-only and empty collections delete as before. The uninstall steps pass `confirm`.
+- **Deploy smoke test uses `/health`.** Cloud Run reserves `/healthz` from outside, so `infra/service/deploy.sh` always got a 404.
+
 ## 1.0.1 (2026-10-14)
 
 Service-only release: adds read-only reader principals so a team task dashboard can read shared collections as a service account. No plugin or client changes. This is the version for security review.
