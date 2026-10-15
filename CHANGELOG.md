@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 (2026-10-14)
+
+`yapa-mcp` recall now knows what is recent. Asking an agent for "details from the most recent meeting with Acme" returned older, higher-salience notes instead of the meeting synced minutes earlier: ranking had no time signal, and salience on the service is a snapshot that favors old, much-used memories. No plugin changes.
+
+### Fixes
+- **Recency in `memory_recall` ranking.** Every recall gives recently updated memories a small boost (fading over about a month). Questions about what is recent ("latest", "recent", "last", "new", "this week", "yesterday", ...) get a much stronger boost, and the named customer's newest memories are always considered, so the latest meeting surfaces even when older notes match the wording better.
+- **Fresh follow-ups first.** The open follow-ups appended to recall list tasks updated in the last 14 days first (newest first), then the rest by priority, and each line shows its updated date, so action items from the latest meeting aren't crowded out by older high-priority tasks.
+
 ## 1.1.0 (2026-10-14)
 
 Adds `yapa-mcp`, a remote MCP server so people who don't use Claude Code (for example through an agent platform such as Redpanda's Agentic Data Plane, or other MCP clients) can ask the team's shared memory questions. Read-only. No plugin behavior changes.
