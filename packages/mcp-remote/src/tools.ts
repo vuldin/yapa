@@ -18,7 +18,7 @@ import type { QueryEmbedder } from './embedder.js';
 import {
   author, dueDate, isoDate, isoMinute, itemContent, joinBounded, list, salience, truncateBytes,
 } from './format.js';
-import { getTask, listMemories, listTasks, memoryChunks, vectorSearch, type DocRow } from './queries.js';
+import { getTask, listMemories, listTasks, memoryChunks, recentMemories, vectorSearch, type DocRow } from './queries.js';
 import { inferCollection, resolveCollection } from './resolve.js';
 
 export const READ_TOOLS = [
@@ -36,6 +36,10 @@ const INFERRED_BOOST = 0.1;
 /** Open tasks appended to memory_recall: all (up to this) for a focused customer, else a few close matches. */
 const RECALL_TASKS_FOCUSED = 8;
 const RECALL_TASKS_UNFOCUSED = 3;
+/** Tasks updated within this window lead the follow-up list. */
+const RECALL_TASKS_FRESH_SECS = 14 * 86400;
+/** Newest memories of the focused customer added as candidates for time-sensitive questions. */
+const RECALL_RECENT_CANDIDATES = 10;
 
 /**
  * Form-based clients (ADP's tool form, Inspector) send "" for fields left
@@ -163,9 +167,35 @@ function serviceCtx(ctx: ToolContext): RequestCtx {
  * Lower is better (distance minus a salience bonus), like core's recall;
  * rows in `boost` (the collection a question names) rank a little higher.
  */
-function rerank(rows: DocRow[], boost?: string): DocRow[] {
-  const score = (r: DocRow) => rankScore(r.distance ?? 1, r.metadata.salience) - (boost && r.collection === boost ? INFERRED_BOOST : 0);
+function rerank(rows: DocRow[], boost?: string, recency?: Recency): DocRow[] {
+  const score = (r: DocRow) => rankScore(r.distance ?? 1, r.metadata.salience)
+    - (boost && r.collection === boost ? INFERRED_BOOST : 0)
+    - (recency ? recencyBonus(r.updated_at, recency) : 0);
   return [...rows].sort((a, b) => score(a) - score(b));
+}
+
+interface Recency {
+  now: number;
+  /** The question asks about time ("latest", "this week"): weigh recency much more. */
+  temporal: boolean;
+}
+
+/**
+ * Bonus (distance units) for recently updated rows. Salience is a snapshot on
+ * the service and favors old, much-used memories, so without this a new
+ * meeting note loses to July's highlights. Mild by default; strong (and
+ * slower to fade) when the question is about what is recent.
+ */
+export function recencyBonus(updatedAt: number, r: Recency): number {
+  const days = Math.max(0, (r.now - updatedAt) / 86400);
+  return r.temporal ? 0.3 * Math.exp(-days / 14) : 0.05 * Math.exp(-days / 30);
+}
+
+const TEMPORAL_RE = /\b(recent|recently|latest|last|newest|lately|today|yesterday|this (week|month)|past (week|month|few days)|new|news|updates?)\b/i;
+
+/** Does the question ask about what happened recently? */
+export function isTemporal(query: string): boolean {
+  return TEMPORAL_RE.test(query);
 }
 
 function memoryBlock(r: DocRow, extra = ''): string {
@@ -177,7 +207,7 @@ function taskLine(t: DocRow): string {
   let line = `- **${t.id}** [${m.status ?? '?'}] ${m.priority ?? '?'} | ${truncateBytes(t.content, 512)}`;
   const due = dueDate(m);
   if (due) line += ` (due: ${due})`;
-  line += ` (${author(t)}) [${t.collection}]`;
+  line += ` (${author(t)}, updated ${isoDate(t.updated_at)}) [${t.collection}]`;
   return line;
 }
 
@@ -218,7 +248,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
   tool(
     'memory_recall',
     {
-      description: 'Search the team\'s shared YAPA memory (meeting notes, decisions, cluster and config facts, contacts, follow-ups) for anything relevant to a question. Just pass the question: when it names a customer or project ("what\'s new with Acme CT?"), that customer\'s memories rank first automatically, with strongly relevant hits from other customers included and labeled. You normally do NOT need `collection`. Each result is a whole memory with its customer/project, author and date, followed by the open follow-ups (tasks) for that customer. Use it before drafting a customer status update or answering a question about an account.',
+      description: 'Search the team\'s shared YAPA memory (meeting notes, decisions, cluster and config facts, contacts, follow-ups) for anything relevant to a question. Just pass the question: when it names a customer or project ("what\'s new with Acme CT?"), that customer\'s memories rank first automatically, with strongly relevant hits from other customers included and labeled. You normally do NOT need `collection`. Each result is a whole memory with its customer/project, author and date, followed by the open follow-ups (tasks) for that customer. Questions about what is recent ("latest meeting", "this week") favor the newest memories. Use it before drafting a customer status update or answering a question about an account.',
       inputSchema: {
         query: z.string().min(1).max(2000).describe('The question or topic, in plain words, e.g. "Acme CT shadow link DR status"'),
         collection: optString(z.string().max(200)).describe('Optional: restrict to one customer/project, by name ("globex", "Acme CT") or id (customer-globex). Leave empty to search everything.'),
@@ -237,29 +267,40 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       const search = (opts: { collection?: string; excludeCollection?: string; maxDistance?: number }, limit: number) =>
         vectorSearch(pool, me, { embedding, type: 'memory', limit, ...opts });
 
-      let main: DocRow[];
+      const focusColl = coll ?? inferred;
+      const now = ctx.nowSecs?.() ?? Date.now() / 1000;
+      const recency: Recency = { now, temporal: isTemporal(query) };
+
+      // Candidates: vector hits (the named customer's plus the best overall),
+      // and for "latest/recent" questions that customer's newest memories too.
+      const candidates: DocRow[] = [];
       if (inferred) {
-        // Boost, don't filter: the named customer's best hits plus the best overall.
         const [scoped, all] = await Promise.all([search({ collection: inferred }, n * RECALL_OVERFETCH), search({}, n * RECALL_OVERFETCH)]);
-        main = rerank(uniqueById([...scoped, ...all]), inferred);
+        candidates.push(...scoped, ...all); // boost, don't filter
       } else {
-        main = rerank(await search({ collection: coll }, n * RECALL_OVERFETCH));
+        candidates.push(...await search({ collection: coll }, n * RECALL_OVERFETCH));
       }
+      if (recency.temporal && focusColl) candidates.push(...await recentMemories(pool, me, focusColl, embedding, RECALL_RECENT_CANDIDATES));
+      let main = rerank(uniqueById(candidates), inferred, recency);
       main = (await wholeMemories(pool, me, main.slice(0, n * 2))).slice(0, n);
 
       const extraN = coll === undefined ? 0 : (other_collections ?? 2);
       const extras = extraN > 0
-        ? (await wholeMemories(pool, me, rerank(await search({ excludeCollection: coll, maxDistance: CROSS_COLLECTION_MAX_DISTANCE }, extraN * RECALL_OVERFETCH)).slice(0, extraN * 2))).slice(0, extraN)
+        ? (await wholeMemories(pool, me, rerank(await search({ excludeCollection: coll, maxDistance: CROSS_COLLECTION_MAX_DISTANCE }, extraN * RECALL_OVERFETCH), undefined, recency).slice(0, extraN * 2))).slice(0, extraN)
         : [];
-      // Open follow-ups: everything open for the focused customer (status updates
-      // need all of it, not just what matches the wording), else a few close matches.
-      const focusColl = coll ?? inferred;
+      // Open follow-ups: for the focused customer, recently created/updated ones
+      // first (new action items from the latest meeting), then the rest by
+      // priority; otherwise a few close matches.
       let tasks: DocRow[] = [];
       if (include_tasks ?? true) {
-        tasks = focusColl
-          ? await listTasks(pool, me, { collection: focusColl, includeComplete: false, limit: RECALL_TASKS_FOCUSED })
-          : (await vectorSearch(pool, me, { embedding, type: 'task', limit: RECALL_TASKS_UNFOCUSED * 4, maxDistance: CROSS_COLLECTION_MAX_DISTANCE }))
+        if (focusColl) {
+          const open = await listTasks(pool, me, { collection: focusColl, includeComplete: false, limit: 200 });
+          const fresh = open.filter(t => now - t.updated_at <= RECALL_TASKS_FRESH_SECS).sort((a, b) => b.updated_at - a.updated_at);
+          tasks = uniqueById([...fresh, ...open]).slice(0, RECALL_TASKS_FOCUSED);
+        } else {
+          tasks = (await vectorSearch(pool, me, { embedding, type: 'task', limit: RECALL_TASKS_UNFOCUSED * 4, maxDistance: CROSS_COLLECTION_MAX_DISTANCE }))
             .filter(t => t.metadata.status !== 'complete').slice(0, RECALL_TASKS_UNFOCUSED);
+        }
       }
 
       const collections = [...new Set([...main, ...extras, ...tasks].map(r => r.collection))];
@@ -271,7 +312,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         ...extras.map(r => memoryBlock(r, ', other collection')),
       ];
       if (tasks.length) {
-        const head = focusColl ? `Open follow-ups for ${focusColl} (highest priority first):` : 'Related open follow-ups:';
+        const head = focusColl ? `Open follow-ups for ${focusColl} (recently updated first, then by priority):` : 'Related open follow-ups:';
         blocks.push([head, ...tasks.map(taskLine)].join('\n'));
       }
       return { text: joinBounded(blocks, '\n\n---\n\n'), count: main.length + extras.length + tasks.length, collections };

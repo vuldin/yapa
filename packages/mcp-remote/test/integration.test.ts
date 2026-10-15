@@ -148,7 +148,7 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
   it('memory_recall appends open follow-ups: all open tasks of the focused customer, priority first', async () => {
     const r = await call('memory_recall', { query: 'seed:1 acme', collection: 'customer-acme' });
     const tail = r.text.slice(r.text.indexOf('Open follow-ups for customer-acme'));
-    expect(tail).toMatch(/^Open follow-ups for customer-acme \(highest priority first\):/);
+    expect(tail).toMatch(/^Open follow-ups for customer-acme \(recently updated first, then by priority\):/);
     expect(tail.indexOf('**bob-1**')).toBeLessThan(tail.indexOf('**alice-1**')); // critical before high
     expect(tail).not.toContain('bob-2'); // complete
     const none = await call('memory_recall', { query: 'seed:1 acme', collection: 'customer-acme', include_tasks: 'false' });
@@ -169,7 +169,7 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     const r = await call('task_list', { collection: 'customer-acme' });
     expect(r.text.indexOf('bob-1')).toBeLessThan(r.text.indexOf('alice-1'));
     expect(r.text).not.toContain('bob-2');
-    expect(r.text).toContain('(by bob) [customer-acme]');
+    expect(r.text).toMatch(/\(by bob, updated \d{4}-\d{2}-\d{2}\) \[customer-acme\]/);
     expect((await call('task_list', { collection: 'customer-acme', include_complete: true })).text).toContain('bob-2');
     const d = await call('task_list', { id: 'alice-1' });
     expect(d.text).toContain('Notes: waiting on numbers');
@@ -234,5 +234,32 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     expect(r.text).not.toContain('m-long-1');
     expect(r.text).toContain('phase one covers the orders topic and the DR runbook overlap text, then phase two adds consumer groups.');
     expect(r.text.match(/DR runbook overlap text/g)).toHaveLength(1);
+  });
+
+  // Runs last too: its own collection, so the counts above are unaffected.
+  it('"latest" questions surface the newest memory and new follow-ups lead the task list', async () => {
+    // A newer note that matches less well (cosine distance ~0.15) than 25 older exact matches.
+    const DAY = 86400;
+    const q = unitVector(9);
+    const other = unitVector(77);
+    const mix = q.map((x, i) => 0.85 * x + 0.5 * other[i]);
+    const norm = Math.hypot(...mix);
+    const near = mix.map(x => x / norm);
+    const d = 1 - near.reduce((acc, x, i) => acc + x * q[i], 0);
+    expect(d).toBeGreaterThan(0.05);
+    expect(d).toBeLessThan(0.25);
+    for (let i = 0; i < 25; i++) await insert(`m-old-${i}`, 'customer-initech', `initech july notes ${i}`, 9, { type: 'memory', salience: 1 }, 'alice', null, 90 * DAY);
+    await insert('m-new', 'customer-initech', 'initech oct 12 roadmap call', 1, { type: 'memory', salience: 1 }, 'alice', null, DAY);
+    await db.adminPool.query("UPDATE documents SET embedding = $1::vector WHERE id = 'm-new'", [`[${near.join(',')}]`]);
+    for (let i = 0; i < 9; i++) await insert(`alice-${100 + i}`, 'customer-initech', `old high task ${i}`, 60 + i, { type: 'task', status: 'pending', priority: 'high' }, 'alice', null, 30 * DAY);
+    await insert('alice-200', 'customer-initech', 'confirm onsite dates', 80, { type: 'task', status: 'pending', priority: 'medium' }, 'alice', null, DAY);
+
+    const plain = await call('memory_recall', { query: 'seed:9 initech notes' });
+    expect(plain.text).not.toContain('m-new');
+    const latest = await call('memory_recall', { query: 'seed:9 latest initech notes' });
+    const ids = [...latest.text.matchAll(/\*\*([^*]+)\*\*/g)].map(m => m[1]);
+    expect(ids[0]).toBe('m-new');
+    const tail = latest.text.slice(latest.text.indexOf('Open follow-ups for customer-initech'));
+    expect(tail.split('\n')[1]).toContain('**alice-200**'); // newest first, despite medium priority
   });
 });

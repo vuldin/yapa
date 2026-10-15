@@ -81,6 +81,26 @@ export async function vectorSearch(pool: pg.Pool, username: string, p: VectorSea
 }
 
 /**
+ * The newest memories of one collection (by updated_at), with their cosine
+ * distance to `embedding` so they can be ranked with vector hits. Recall adds
+ * them as candidates for time-sensitive questions ("latest meeting"), which a
+ * pure similarity search can rank below older, higher-salience memories.
+ */
+export async function recentMemories(pool: pg.Pool, username: string, collection: string, embedding: number[], limit: number): Promise<DocRow[]> {
+  return withUserTx(pool, username, async c => {
+    const r = await c.query(
+      `SELECT ${COLUMNS}, embedding <=> $1::vector AS distance
+         FROM documents
+        WHERE collection = $2 AND metadata->>'type' = 'memory' AND ${ACTIVE_SQL} AND ${LOCAL_ONLY_SQL}
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $3`,
+      [toPgVector(embedding), collection, limit],
+    );
+    return r.rows.map(toRow);
+  });
+}
+
+/**
  * Every chunk of the given multi-chunk memories (core stores long content as
  * `<parent_id>-<n>` docs with parent_id/chunk_index metadata), in order.
  */

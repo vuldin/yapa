@@ -1,6 +1,6 @@
 {
   "name": "@yapa/mcp-remote",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "YAPA remote MCP service (yapa-mcp): read-only MCP tools over Streamable HTTP in front of the shared Postgres store",
   "private": true,
   "type": "module",
