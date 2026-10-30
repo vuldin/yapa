@@ -1049,6 +1049,22 @@ var init_archive = __esm({
   }
 });
 
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+function isReadOnlyDoc(metadata) {
+  return metadata?.read_only === true;
+}
+function assertWritable(id, metadata) {
+  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
+}
+var init_syncable = __esm({
+  "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
 // packages/core/src/memory/store.ts
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
@@ -1088,6 +1104,14 @@ async function archiveSuperseded(collection, oldId, newId) {
 async function storeMemory(content, options = {}) {
   const collection = options.collection ?? "global";
   await getOrCreateCollection2(collection);
+  if (options.supersedes) {
+    const [old] = await getDocumentsByIds2(collection, [options.supersedes]).catch(() => []);
+    assertWritable(options.supersedes, old?.metadata);
+  }
+  if (options.metadata && "read_only" in options.metadata) {
+    const { read_only: _ignored, ...rest } = options.metadata;
+    options = { ...options, metadata: rest };
+  }
   const potential_conflicts = await detectConflicts(collection, content);
   const now = Math.floor(Date.now() / 1e3);
   const sector = options.sector ?? detectSector(content);
@@ -1146,6 +1170,7 @@ var init_store2 = __esm({
     init_lifecycle();
     init_chunking();
     init_config();
+    init_syncable();
   }
 });
 
@@ -1269,6 +1294,7 @@ var init_forget = __esm({
     init_config();
     init_store();
     init_deletes();
+    init_syncable();
   }
 });
 
@@ -2424,6 +2450,7 @@ var init_update = __esm({
     "use strict";
     init_config();
     init_store();
+    init_syncable();
     init_create();
   }
 });
@@ -2449,6 +2476,7 @@ var init_dependencies = __esm({
   "packages/core/src/tasks/dependencies.ts"() {
     "use strict";
     init_update();
+    init_syncable();
   }
 });
 
@@ -2498,16 +2526,6 @@ var init_sentinel = __esm({
     "use strict";
     init_store();
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
-  }
-});
-
-// packages/core/src/sync/syncable.ts
-function isSyncableCollection(name) {
-  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
-}
-var init_syncable = __esm({
-  "packages/core/src/sync/syncable.ts"() {
-    "use strict";
   }
 });
 

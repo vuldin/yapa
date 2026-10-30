@@ -2,7 +2,16 @@
 
 ## Unreleased
 
+Other services can now be a YAPA client's remote: the sync API is written down as a contract, with a conformance runner to check an implementation.
+
+### Features
+- **YAPA Sync API v1 spec** ([docs/sync-api.md](docs/sync-api.md)): the HTTP contract the client depends on (auth and identity, headers, idempotency, errors and how the client treats them, every endpoint and the fields the client reads, pull cursors and the deletions feed, document shapes, server rules, coordination), plus hints for implementers (durable vs volatile metadata, read-only documents). `packages/service` is the reference implementation.
+- **Conformance runner.** `npm run conformance -- <url>` runs the live suite (`packages/core/src/sync/live.test.ts`) against any remote: sign-in, push/pull across two devices, ownership lookups, deletes and the deletions feed, leases with two sessions, counters, task ids, JSON 404s. Throwaway collection, temporary local stores; skipped without a URL.
+- **Read-only documents.** Docs a remote serves with `metadata.read_only: true` are pulled as usual but cannot be forgotten, updated, completed, deleted or superseded ("read-only: owned by the remote service"), and are never pushed or queued for a remote delete. The client never mints `read_only` itself.
+- **Connecting to a remote** ([docs/connecting-to-a-remote.md](docs/connecting-to-a-remote.md)): configure, sign in, verify, what syncs, and how to evaluate a remote without pushing your data to it. Linked from the README, pilot onboarding, `.env.example`, the plugin option and the install wizard (new option "Yes - existing sync service (URL)").
+
 ### Fixes
+- Docs: `embedding_dimension` / `embedding_invalid` are `422`, not `400` (service design); the ID token is cached in a 0600 file, not kept in memory only (README, pilot onboarding); `.env.example` now covers the sync service URL.
 - **The prompt hook ignores background-task notifications.** Claude Code delivers each finished background command and each Monitor event through the UserPromptSubmit hook, as a prompt made of `<task-notification>` blocks. The hook treated these as the user's prompts: it ran a recall on the notification text (injecting unrelated matches under every build-log line) and recorded it as the user's turn, so response capture judged the notification instead of what the user asked. A notification-only prompt now gets no recall and isn't recorded, and the pending capture notice waits for the next real prompt. Its leases are still renewed, so a session waiting hours on a long job keeps them. A prompt that mixes user text with notifications gets recall on the user text only.
 
 ## 1.2.0 (2026-10-29)

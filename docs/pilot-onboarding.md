@@ -5,6 +5,9 @@ Claude Code persistent memory and tasks, and with team sync you see
 teammates' memories and tasks for the same customer or project.
 
 Ask the pilot admin for the sync service URL (`<SERVICE_URL>` below).
+Already using YAPA, or connecting to some other remote? Read
+[Connecting to a remote](connecting-to-a-remote.md) first: the first sync
+pushes every shared collection on this machine to the remote.
 
 > **How to use the prompts below:** each **Type this message** block is a plain
 > message to type into Claude Code (no leading `/`). Claude calls the YAPA tools for you
@@ -25,8 +28,10 @@ Ask the pilot admin for the sync service URL (`<SERVICE_URL>` below).
   ```
 
   No GCP project or IAM roles are needed. YAPA only runs
-  `gcloud auth print-identity-token` to get a short-lived Google ID token,
-  keeps it in memory, and refreshes it before it expires.
+  `gcloud auth print-identity-token` to get a short-lived (1 h) Google ID
+  token and refreshes it before it expires. The current token is cached in a
+  0600 file (`~/.local/share/yapa/id-token`; `YAPA_SYNC_ID_TOKEN_CACHE=off`
+  keeps it in memory only) so hooks don't mint a new one on every prompt.
 
 ## 2. Install
 

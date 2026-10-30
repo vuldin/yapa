@@ -8,7 +8,7 @@ import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
-import { isSyncableCollection as isSyncable } from './syncable.js';
+import { isSyncableCollection as isSyncable, isReadOnlyDoc } from './syncable.js';
 
 export interface PushStats {
   pushed: number;
@@ -109,6 +109,8 @@ export async function pushToRemote(): Promise<PushStats> {
         // Journal drafts are per-session scratch; only the consolidated
         // journal memory is worth sharing.
         if (unsynced.metadata.type === 'journal_draft') continue;
+        // Owned by the remote (metadata.read_only): local changes never go back.
+        if (isReadOnlyDoc(unsynced.metadata)) continue;
         // Refused before and unchanged since: stays local until edited.
         if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
         // Stamp the last writer's device: pull on this device skips its own
@@ -298,7 +300,7 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
 async function retractSharedCopies(backend: SyncBackend, collection: string): Promise<number> {
   const versionOf = (d: DocumentResult) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
   const unchecked = (await getDocumentsByFilter(collection, {}, 100_000)).filter(d =>
-    !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && d.metadata.remote_checked_at !== versionOf(d));
+    !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
   if (unchecked.length === 0) return 0;
 
   const me = getConfig().USERNAME;

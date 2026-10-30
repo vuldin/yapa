@@ -59,7 +59,7 @@
     "sync_service_url": {
       "type": "string",
       "title": "Sync service URL",
-      "description": "URL of the YAPA sync service, e.g. https://<your-service>.run.app. Sign in once with `gcloud auth login`; no database credentials are needed.",
+      "description": "Base URL of a YAPA sync service (any remote implementing YAPA Sync API v1), e.g. https://sync.example.com or https://example.com/api/yapa. Sign in once with `gcloud auth login`. See docs/connecting-to-a-remote.md before the first sync.",
       "default": ""
     },
     "sync_database_url": {

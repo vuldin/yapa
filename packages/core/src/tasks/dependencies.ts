@@ -1,4 +1,5 @@
 import { getTask, updateTask } from './update.js';
+import { assertWritable, isReadOnlyDoc } from '../sync/syncable.js';
 
 /** Add a dependency: taskId depends on dependsOnId. Updates both tasks. */
 export async function addDependency(taskId: string, dependsOnId: string): Promise<void> {
@@ -8,6 +9,7 @@ export async function addDependency(taskId: string, dependsOnId: string): Promis
   if (!task || !dep) {
     throw new Error('One or both tasks not found');
   }
+  assertWritable(taskId, task.metadata);
 
   // Update task with new dependency
   const taskDeps: string[] = Array.isArray(task.metadata.depends_on)
@@ -19,7 +21,9 @@ export async function addDependency(taskId: string, dependsOnId: string): Promis
     await updateTask(taskId, { depends_on: taskDeps });
   }
 
-  // Update dep with blocker info
+  // Update dep with blocker info (a read-only dep keeps the remote's version;
+  // the edge lives on taskId alone)
+  if (isReadOnlyDoc(dep.metadata)) return;
   const depBlocks: string[] = Array.isArray(dep.metadata.blocks)
     ? dep.metadata.blocks
     : (dep.metadata.blocks ?? '').split(',').filter(Boolean);
@@ -50,7 +54,7 @@ export async function removeDependency(taskId: string, dependsOnId: string): Pro
     }
   }
 
-  if (dep) {
+  if (dep && !isReadOnlyDoc(dep.metadata)) {
     const depBlocks = toList(dep.metadata.blocks);
     if (depBlocks.includes(taskId)) {
       await updateTask(dependsOnId, { blocks: depBlocks.filter(id => id !== taskId) });
