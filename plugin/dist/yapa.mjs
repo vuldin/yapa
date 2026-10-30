@@ -3610,7 +3610,8 @@ __export(hooks_exports, {
   sessionEnd: () => sessionEnd,
   sessionStart: () => sessionStart,
   stop: () => stop,
-  userPromptSubmit: () => userPromptSubmit
+  userPromptSubmit: () => userPromptSubmit,
+  userText: () => userText
 });
 import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -3796,14 +3797,20 @@ async function sessionStart(input) {
   );
   context("SessionStart", lines);
 }
+function userText(prompt) {
+  if (!prompt.includes("<task-notification") && !prompt.includes("[SYSTEM NOTIFICATION")) return prompt.trim();
+  return prompt.replace(/<task-notification>[\s\S]*?(<\/task-notification>|$)/g, "").replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\][\s\S]*?(\n\s*\n|$)/g, "").replace(/<system-reminder>\s*<\/system-reminder>/g, "").trim();
+}
 async function userPromptSubmit(input) {
-  const detection = await detectCollection(input.cwd);
-  const collection = detection.collection;
-  const prompt = (input.prompt ?? "").trim();
+  const raw = (input.prompt ?? "").trim();
+  const prompt = userText(raw);
   if (!prompt) {
     emit({});
+    if (raw) await keepLeasesAlive(input);
     return;
   }
+  const detection = await detectCollection(input.cwd);
+  const collection = detection.collection;
   recordPrompt(input.session_id, prompt);
   await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input)]);
   const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? "\u2026" : ""}`];
@@ -3838,15 +3845,15 @@ async function stop(input) {
   if (!config.RESPONSE_CAPTURE || input.stop_hook_active || !input.session_id) return;
   const assistantText = (input.last_assistant_message ?? "").trim();
   const turn = readTurn(input.session_id);
-  const userText = turn?.prompt ?? "";
-  if (!assistantText || userText.length + assistantText.length < config.CAPTURE_MIN_CHARS) return;
+  const userText2 = turn?.prompt ?? "";
+  if (!assistantText || userText2.length + assistantText.length < config.CAPTURE_MIN_CHARS) return;
   if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
     setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
   }
   try {
     const { collection } = await detectCollection(input.cwd);
     const result = await captureTurn(
-      { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText, assistantText },
+      { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText: userText2, assistantText },
       { maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE }
     );
     if (result.notice) writeFileSync4(stateFile(input.session_id, "notice"), result.notice);

@@ -307,15 +307,38 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   context('SessionStart', lines);
 }
 
+/**
+ * The user's own words in a prompt, without the background-task events
+ * Claude Code delivers through the same hook: `<task-notification>` blocks
+ * (a finished background command, a Monitor event) and the
+ * "[SYSTEM NOTIFICATION - NOT USER INPUT]" preamble that can introduce them.
+ * Empty when the prompt is nothing but notifications.
+ */
+export function userText(prompt: string): string {
+  if (!prompt.includes('<task-notification') && !prompt.includes('[SYSTEM NOTIFICATION')) return prompt.trim();
+  return prompt
+    .replace(/<task-notification>[\s\S]*?(<\/task-notification>|$)/g, '')
+    // The preamble runs to the first blank line (or the end).
+    .replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\][\s\S]*?(\n\s*\n|$)/g, '')
+    .replace(/<system-reminder>\s*<\/system-reminder>/g, '')
+    .trim();
+}
+
 export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<void> {
-  const detection = await detectCollection(input.cwd);
-  const collection = detection.collection;
-  const prompt = (input.prompt ?? '').trim();
+  const raw = (input.prompt ?? '').trim();
+  const prompt = userText(raw);
 
   if (!prompt) {
     emit({});
+    // A notification-only prompt: no recall, nothing recorded as the user's
+    // turn, and any capture notice waits for a real prompt. But a session
+    // waiting on a long background job may see nothing else for hours, so its
+    // leases still have to be renewed.
+    if (raw) await keepLeasesAlive(input);
     return;
   }
+  const detection = await detectCollection(input.cwd);
+  const collection = detection.collection;
   recordPrompt(input.session_id, prompt);
   await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input)]);
 

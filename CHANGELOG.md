@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **The prompt hook ignores background-task notifications.** Claude Code delivers each finished background command and each Monitor event through the UserPromptSubmit hook, as a prompt made of `<task-notification>` blocks. The hook treated these as the user's prompts: it ran a recall on the notification text (injecting unrelated matches under every build-log line) and recorded it as the user's turn, so response capture judged the notification instead of what the user asked. A notification-only prompt now gets no recall and isn't recorded, and the pending capture notice waits for the next real prompt. Its leases are still renewed, so a session waiting hours on a long job keeps them. A prompt that mixes user text with notifications gets recall on the user text only.
+
 ## 1.2.0 (2026-10-29)
 
 Multi-session coordination on the sync service, for any project whose tooling runs several sessions or people on one shared collection. Nothing changes for people who don't use it, except that task ids now come from the service.
