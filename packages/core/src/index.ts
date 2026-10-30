@@ -63,6 +63,7 @@ export * from './buckets/training-manifest.js';
 // Remote sync (the YAPA sync service, or a direct Postgres+pgvector database).
 export * from './sync/index.js';
 export * from './sync/backend.js';
+export * from './sync/coordination.js';
 export { HttpBackend, IdTokenProvider, ServiceError } from './sync/http-backend.js';
 export { PostgresBackend } from './sync/postgres-backend.js';
 export * from './sync/pull.js';

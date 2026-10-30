@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 const SQL_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../../infra/cloudsql/sql');
-const FILES = ['00_roles.sql', '01_schema_v1.sql', '02_schema_v2.sql', '03_grants.sql', '04_rls.sql'];
+const FILES = ['00_roles.sql', '01_schema_v1.sql', '02_schema_v2.sql', '03_grants.sql', '04_rls.sql', '06_coordination.sql'];
 export const RUNTIME_ROLE = 'yapa_it_runtime';
 
 const ident = (s: string) => `"${s.replace(/"/g, '""')}"`;

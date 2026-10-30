@@ -90,6 +90,57 @@ export interface RemoteOwner {
 
 export type SyncBackendKind = 'service' | 'postgres';
 
+// ------------------------------------------------------------ coordination
+// Leases and counters (service schema v3, docs/service-design.md section 5
+// "Coordination"). Synchronous: the answer is the service's, not a queued push.
+
+export interface Lease {
+  collection: string;
+  key: string;
+  holder: { user: string; session: string; device: string | null };
+  title: string | null;
+  scope: string[];
+  ttl_seconds: number;
+  /** Unix seconds. */
+  acquired_at: number;
+  heartbeat_at: number;
+  expires_at: number;
+  expired: boolean;
+  took_over_from: Record<string, unknown> | null;
+}
+
+export interface LeaseAcquireRequest {
+  collection: string;
+  key: string;
+  /** Who holds it inside the user: a Claude session id, a process, ... */
+  session: string;
+  /** What the work touches, e.g. `doc:runbook`, `res:staging-cluster`; `key:<key>` is always added. */
+  scope?: string[];
+  ttlSeconds?: number;
+  title?: string;
+}
+
+export type LeaseAcquireResult =
+  | { granted: true; lease: Lease; renewed: boolean; took_over_from?: Record<string, unknown> }
+  | { granted: false; conflicts: Array<{ lease: Lease; overlap: string[] }> };
+
+export type LeaseReleaseResult =
+  | { released: true; lease: Lease }
+  | { released: false; reason: 'not_held' }
+  | { released: false; reason: 'held_by_other'; lease: Lease };
+
+export interface Coordination {
+  leaseAcquire(req: LeaseAcquireRequest): Promise<LeaseAcquireResult>;
+  /** No collection: renew the session's leases in every collection. */
+  leaseHeartbeat(collection: string | undefined, session: string, keys?: string[]): Promise<{ renewed: Lease[]; lost: string[] }>;
+  leaseRelease(collection: string, key: string, session: string, outcome?: string): Promise<LeaseReleaseResult>;
+  leaseList(collection: string, includeExpired?: boolean): Promise<{ leases: Lease[]; now: number }>;
+  /** Next value strictly above the last one handed out and above `floor`. */
+  counterNext(collection: string, name: string, floor?: number): Promise<number>;
+  /** Next `<caller>-<n>` task id: one sequence per user, floored by the server's own max and `floor`. */
+  nextTaskId(floor?: number): Promise<string>;
+}
+
 export interface SyncBackend {
   readonly kind: SyncBackendKind;
   /** Where it syncs to, safe to show (credentials redacted). */
@@ -113,6 +164,8 @@ export interface SyncBackend {
   createdAt(id: string): Promise<number | undefined>;
   /** Highest `<caller>-<n>` task number remotely (0 if none). */
   maxTaskNumber(): Promise<number>;
+  /** Leases and counters; only the sync service has them. */
+  readonly coordination?: Coordination;
   similar(collection: string, embedding: number[], threshold?: number): Promise<SimilarMatch[]>;
   addRelatedIds(id: string, add: string[]): Promise<void>;
   health(): Promise<{ ok: boolean; error?: string }>;

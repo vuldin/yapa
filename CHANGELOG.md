@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Multi-session coordination on the sync service, for any project whose tooling runs several sessions or people on one shared collection. Apply `infra/cloudsql/sql/06_coordination.sql` before deploying the service.
+
+### Features
+- **Leases.** `POST /v1/leases:acquire`, `:heartbeat`, `:release` and `GET /v1/leases`: take a lease on a key with a scope and a TTL. It is granted only if no live lease (anyone else's, or your own other sessions) has the same key or an overlapping scope. Answered synchronously from Postgres under a per-collection advisory lock. Expired leases can be taken over (recorded in `lease_log`); the listing doubles as presence.
+- **Atomic counters.** `POST /v1/counters:next` hands out strictly increasing values per collection and name, above a caller-supplied floor (for numbered record ids).
+- **Task ids from the service.** `POST /v1/me/task-ids:next` gives each user one sequence across all collections, so two sessions (or machines) of one user no longer mint the same `<user>-N`. `task_create` uses it and falls back to the local max + 1 when the service is unreachable or older.
+- **Hands-off leases.** One session identity for the tool, the CLI, the hooks and scripts (Claude Code's session id unless `YAPA_SESSION` or `--session` says otherwise); the prompt and turn-end hooks renew a session's leases automatically while it is active (only sessions that hold leases make the call); session start lists live leases in the active collection under "Work in progress"; the standing rules tell the agent how to react to refusals, takeovers and offline fallbacks without leasing on its own.
+- **Plugin: `lease` and `counter_next` MCP tools, and the `yapa coord` CLI** (`acquire`, `heartbeat`, `release`, `list`, `counter-next`, `task-id`) with stable exit codes for scripts: 0 done, 3 refused, 4 service unavailable (fall back locally), 2 bad input. The CLI reads the plugin options from Claude Code `settings.json`.
+
 ## 1.1.1 (2026-10-14)
 
 `yapa-mcp` recall now knows what is recent. Asking an agent for "details from the most recent meeting with Acme" returned older, higher-salience notes instead of the meeting synced minutes earlier: ranking had no time signal, and salience on the service is a snapshot that favors old, much-used memories. No plugin changes.

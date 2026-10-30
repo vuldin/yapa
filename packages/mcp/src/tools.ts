@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import { setupInstructions } from './instructions.js';
+import { counterNext, EXIT, leaseAcquire, leaseHeartbeat, leaseList, leaseRelease } from './coord.js';
 
 import {
   getConfig,
@@ -1090,6 +1091,54 @@ export function registerTools(server: McpServer): void {
       return {
         content: [{ type: 'text' as const, text: `${task_id} no longer depends on ${depends_on_id}` }],
       };
+    },
+  );
+
+  // --- Coordination (leases and counters on the sync service) ---
+  server.tool(
+    'lease',
+    'Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. '
+      + 'acquire is granted only if no live lease (anyone else\'s, or this user\'s other sessions) has the same key or an overlapping scope; '
+      + 'the answer comes from the service, not a queued push. YAPA\'s hooks renew this session\'s leases while it is active, so explicit heartbeats are rarely needed; '
+      + 'a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). '
+      + 'list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.',
+    {
+      action: z.enum(['acquire', 'heartbeat', 'release', 'list']),
+      collection: z.string().optional().describe('Shared collection (not global/private-*/local-*), e.g. project-acme; heartbeat without it renews the session\'s leases everywhere'),
+      key: z.string().optional().describe('acquire/release: what is leased, e.g. a task id or record id'),
+      session: z.string().optional().describe('Holder within your user; defaults to this Claude Code session (the hooks renew its leases automatically)'),
+      scope: z.array(z.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included'),
+      ttl_seconds: z.number().int().optional().describe('acquire: expiry without a heartbeat, 30..86400 (default 7200)'),
+      title: z.string().optional().describe('acquire: short description shown in list'),
+      keys: z.array(z.string()).optional().describe('heartbeat: only these keys (default: every lease of the session)'),
+      outcome: z.string().optional().describe('release: done | blocked | pending | ... (logged)'),
+      include_expired: z.boolean().optional().describe('list: also show expired leases'),
+    },
+    async ({ action, collection, key, session, scope, ttl_seconds, title, keys, outcome, include_expired }) => {
+      const need = (v: string | undefined, what: string) => {
+        if (!v) throw new Error(`lease ${action} needs ${what}`);
+        return v;
+      };
+      const r = action === 'acquire' ? await leaseAcquire({ collection: need(collection, 'collection'), key: need(key, 'key'), session, scope, ttlSeconds: ttl_seconds, title })
+        : action === 'heartbeat' ? await leaseHeartbeat(collection, session, keys)
+          : action === 'release' ? await leaseRelease(need(collection, 'collection'), need(key, 'key'), session, outcome)
+            : await leaseList(need(collection, 'collection'), include_expired ?? false);
+      return { content: [{ type: 'text' as const, text: r.text }], ...(r.exit === EXIT.error || r.exit === EXIT.usage ? { isError: true } : {}) };
+    },
+  );
+
+  server.tool(
+    'counter_next',
+    'Take the next value of an atomic counter in a shared collection on the YAPA sync service (e.g. numbered record ids). '
+      + 'Never hands out a value twice, and never one at or below floor (pass the highest id you already have).',
+    {
+      collection: z.string().describe('Shared collection, e.g. project-acme'),
+      name: z.string().describe('Counter name, e.g. RFC, INCIDENT-2026'),
+      floor: z.number().int().min(0).optional().describe('Highest value already in use locally'),
+    },
+    async ({ collection, name, floor }) => {
+      const r = await counterNext(collection, name, floor);
+      return { content: [{ type: 'text' as const, text: r.text }], ...(r.exit === EXIT.ok ? {} : { isError: true }) };
     },
   );
 

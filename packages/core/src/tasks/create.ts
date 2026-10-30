@@ -57,10 +57,28 @@ export async function getNextTaskId(): Promise<string> {
     }
   }
 
-  // A wiped store, or this user's other machine, may already have used higher
-  // numbers on the shared database; reusing one would overwrite that task
-  // remotely. Best-effort: an unreachable remote falls back to local numbering
-  // (push still refuses to overwrite a different task, see sync/push.ts).
+  // The service hands out task numbers from one atomic per-user counter,
+  // floored by this store's max and its own, so two sessions (or machines)
+  // of one user never mint the same id. Bounded like the lookups above.
+  if (isSyncConfigured()) {
+    try {
+      const backend = await getSyncBackend();
+      if (backend?.coordination) {
+        const id = await Promise.race([
+          backend.coordination.nextTaskId(maxId),
+          new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 3000).unref()),
+        ]);
+        if (id && id.startsWith(`${getConfig().USERNAME}-`)) return id;
+      }
+    } catch {
+      // older service or offline: fall back to max + 1 below
+    }
+  }
+
+  // Fallback: a wiped store, or this user's other machine, may already have
+  // used higher numbers on the shared database; reusing one would overwrite
+  // that task remotely. Best-effort: an unreachable remote falls back to local
+  // numbering (push still refuses to overwrite a different task, see sync/push.ts).
   if (isSyncConfigured()) {
     try {
       const backend = await getSyncBackend();

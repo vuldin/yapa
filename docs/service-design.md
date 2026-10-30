@@ -352,6 +352,9 @@ are Unix seconds (integers) to match the client code. Every response carries
 | `GET /v1/me/max-task-number` | `getRemoteMaxTaskNumber` |
 | `POST /v1/collections/{c}:similar` | `findSimilarRemote` |
 | `POST /v1/documents/{id}/related-ids` | `addRemoteRelatedIds` |
+| `POST /v1/leases:acquire`, `:heartbeat`, `:release`, `GET /v1/leases` | (new, schema v3) leases, josh-631 |
+| `POST /v1/counters:next` | (new, schema v3) atomic counters, josh-631 |
+| `POST /v1/me/task-ids:next` | (new, schema v3) replaces the client's max + 1 over `max-task-number` |
 | (part of pull) `deletions` in the pull response | (new, v1) delete propagation, gap 5, decision 5 |
 | `POST /mcp` on `yapa-mcp` (not `yapa-service`) | (new, later) remote MCP, josh-313 |
 
@@ -555,6 +558,86 @@ Normal load is far below this (a 5 minute cycle per device plus a pull per
 prompt); the limits exist to stop a runaway loop. A per-user daily write cap
 (e.g. 20,000 docs) raises an alert rather than silently blocking.
 
+### Coordination (schema v3, josh-631)
+
+Synchronous operations for sessions and people that must not do the same work
+at once, and for task ids. YAPA knows nothing about the workflows that use
+them: a key, a scope string and a counter name are opaque to it, and any
+project's tooling (a slash command, a script, an agent loop) can build on
+them. Document writes are last-writer-wins and reach the service a
+couple of seconds after the tool returns; these answer from the database in
+the request. Shared collections only (`local_only_collection` otherwise).
+Implementation: `packages/service/src/coord.ts`; tables in
+`infra/cloudsql/sql/06_coordination.sql`.
+
+**Leases.** A lease is `(collection, key)` held by `(user, session)`, with a
+`scope` (opaque strings chosen by the caller, e.g. `doc:runbook`,
+`res:staging-cluster`; `key:<key>` is always included) and a TTL (30 s to 24 h, default 2 h).
+
+- `POST /v1/leases:acquire` `{collection, key, session, scope?, ttl_seconds?, title?}`
+  -> `{granted: true, lease, renewed, took_over_from?}` or
+  `{granted: false, conflicts: [{lease, overlap}]}` (200 either way). Refused
+  when a live lease held by anyone else, including the caller's other
+  sessions, has the same key or an intersecting scope. Re-acquiring your own
+  lease renews it and replaces its scope. An expired lease is taken over and
+  the previous holder recorded.
+- `POST /v1/leases:heartbeat` `{collection?, session, keys?}` -> `{renewed, lost}`:
+  renews the session's leases, in one collection or (no collection) in all of
+  them; an expired one nobody took is renewed too; `lost` lists requested keys
+  that were taken over or released.
+- `POST /v1/leases:release` `{collection, key, session, outcome?}` ->
+  `{released: true, lease}` or `{released: false, reason: not_held | held_by_other}`.
+  Only the holding session releases.
+- `GET /v1/leases?collection=&include_expired=` -> `{leases, now}`: live
+  leases, which doubles as presence.
+
+Every lease mutation in a collection first takes a transaction-scoped advisory
+lock on the collection, so the overlap check and the write are one step even
+for different keys. `lease_log` keeps the history (acquire, reacquire,
+takeover, release, refused). Expired rows are pruned after 7 days.
+
+**Counters.** `POST /v1/counters:next` `{collection, name, floor?}` ->
+`{value}`: strictly above the last value handed out and above `floor` (the
+caller's highest id already in use). One `INSERT ... ON CONFLICT DO UPDATE`.
+Send an `Idempotency-Key` so a retried request returns the same value.
+
+**Task ids.** `POST /v1/me/task-ids:next` `{floor?}` -> `{id, number}`: one
+sequence per user across all collections (counter collection `@tasks`, name =
+username), floored by the client's local max and by the highest `<user>-<n>`
+already on the server. The client uses it in `getNextTaskId` and falls back
+to max + 1 when the service is unreachable or older; the `id_taken` rename on
+push stays as the safety net.
+
+**Hands-off by default.** Nothing leases on its own: only a project's
+tooling, or the agent following a project's instructions, takes a lease. Once
+one is held, the plugin keeps the person out of the mechanics:
+
+- One session identity everywhere: an explicit value, else `YAPA_SESSION`,
+  else Claude Code's `CLAUDE_CODE_SESSION_ID`, which the MCP server and shell
+  commands both see. A lease taken by a script can be released by the tool
+  and the other way round.
+- Automatic heartbeat: a grant on this machine leaves a marker file
+  (`LEASE_STATE_DIR`, default `~/.local/share/yapa/leases/`); the prompt and
+  turn-end hooks renew that session's leases in every collection when due (at
+  most every 5 minutes, or a third of the shortest TTL), and drop the marker
+  once nothing is held. Sessions without leases never make the call. A lease
+  therefore lives while its session is active and lapses one TTL after it
+  goes quiet; a single turn longer than the TTL with no prompt in between
+  needs a longer TTL or an explicit heartbeat.
+- Presence: the session-start context lists live leases in the active
+  collection under "Work in progress" (you, your other sessions, teammates).
+- Rules: the agent says who holds refused work, mentions takeovers and
+  unshared fallbacks, and does not lease on its own initiative.
+
+Coordination calls never set the "last sync error" shown by `sync status`.
+
+**Clients.** The plugin exposes `lease` (action acquire | heartbeat | release |
+list) and `counter_next` as MCP tools, and `yapa coord ...` as a CLI for
+scripts: one JSON object on stdout; exit 0 done, 3 refused, 4 unavailable
+(nothing shared: fall back to local coordination), 2 bad input, 1 other
+error. The CLI reads the plugin's options from Claude Code `settings.json`,
+so it works from a plain shell; `--session` defaults as above.
+
 ### Remote MCP (josh-313)
 
 Not part of v1. Served by the separate `yapa-mcp` Cloud Run service (same
@@ -665,6 +748,16 @@ CREATE TABLE idempotency_keys (
   working against v2 (they ignore new columns), which makes the cutover
   reversible until the shared login is revoked. Clients in service mode never
   run DDL; `migrateSchema` stays only in the self-host adapter.
+
+Schema v3 (josh-631, `06_coordination.sql`) adds three tables for section 5
+"Coordination", none holding document content and none under RLS (the service
+enforces holder-only renew and release, and shared collections only):
+`leases` (primary key `(collection, key)`, holder user/session/device, scope
+`text[]` with a GIN index, TTL, expiry, previous holder on takeover),
+`lease_log` (append-only history) and `counters` (primary key
+`(collection, name)`, monotonic `value`; task ids under collection `@tasks`).
+The runtime gets DML on `leases`, SELECT/INSERT on `lease_log`, and
+SELECT/INSERT/UPDATE on `counters`.
 
 ## 7. Threat model (STRIDE)
 

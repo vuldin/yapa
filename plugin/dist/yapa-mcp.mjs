@@ -7291,6 +7291,7 @@ function createConfig(env = process.env) {
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
+    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
@@ -8492,8 +8493,8 @@ var init_http_backend = __esm({
         this.timeoutMs = opts.timeoutMs ?? config2.SYNC_HTTP_TIMEOUT_MS;
         this.device = opts.device ?? getDeviceId;
       }
-      fail(err) {
-        noteSyncError(err);
+      fail(err, quiet = false) {
+        if (!quiet) noteSyncError(err);
         throw err;
       }
       async request(method, path, opts = {}) {
@@ -8505,7 +8506,7 @@ var init_http_backend = __esm({
           try {
             token = await this.tokens.get();
           } catch (e) {
-            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"));
+            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"), opts.quiet);
           }
           const headers = {
             authorization: `Bearer ${token}`,
@@ -8520,7 +8521,7 @@ var init_http_backend = __esm({
             res = await fetch(url2, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
           } catch (e) {
             const why = e?.name === "TimeoutError" || e?.name === "AbortError" ? `timed out after ${this.timeoutMs} ms` : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
-            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"));
+            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"), opts.quiet);
           }
           const text = await res.text().catch(() => "");
           let json2;
@@ -8541,7 +8542,7 @@ var init_http_backend = __esm({
           const details = { ...apiErr?.details ?? {} };
           const retryAfter = res.headers.get("retry-after");
           if (retryAfter) details.retry_after = Number(retryAfter);
-          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details));
+          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details), opts.quiet);
         }
       }
       /** GET /v1/me, cached per process until the token is re-minted. */
@@ -8626,6 +8627,22 @@ var init_http_backend = __esm({
       async maxTaskNumber() {
         return Number((await this.request("GET", "/v1/me/max-task-number")).max ?? 0);
       }
+      coordination = {
+        leaseAcquire: (req) => this.request("POST", "/v1/leases:acquire", {
+          body: { collection: req.collection, key: req.key, session: req.session, scope: req.scope ?? [], ttl_seconds: req.ttlSeconds, title: req.title },
+          quiet: true
+        }),
+        leaseHeartbeat: (collection, session, keys) => this.request("POST", "/v1/leases:heartbeat", { body: { collection, session, keys }, quiet: true }),
+        leaseRelease: (collection, key, session, outcome) => this.request("POST", "/v1/leases:release", { body: { collection, key, session, outcome }, quiet: true }),
+        leaseList: (collection, includeExpired = false) => {
+          const q = new URLSearchParams({ collection });
+          if (includeExpired) q.set("include_expired", "true");
+          return this.request("GET", `/v1/leases?${q}`, { quiet: true });
+        },
+        // Idempotent: a retried request (401 refresh) must not burn a second value.
+        counterNext: async (collection, name, floor) => Number((await this.request("POST", "/v1/counters:next", { body: { collection, name, floor }, idempotent: true, quiet: true })).value),
+        nextTaskId: async (floor) => (await this.request("POST", "/v1/me/task-ids:next", { body: { floor }, idempotent: true, quiet: true })).id
+      };
       async similar(collection, embedding, threshold) {
         const r = await this.request("POST", `/v1/collections/${encodeURIComponent(collection)}:similar`, {
           body: { embedding, ...threshold !== void 0 ? { threshold } : {}, limit: 5 }
@@ -9187,6 +9204,19 @@ async function getNextTaskId() {
       }
     } catch {
       continue;
+    }
+  }
+  if (isSyncConfigured()) {
+    try {
+      const backend = await getSyncBackend();
+      if (backend?.coordination) {
+        const id = await Promise.race([
+          backend.coordination.nextTaskId(maxId),
+          new Promise((resolve) => setTimeout(() => resolve(void 0), 3e3).unref())
+        ]);
+        if (id && id.startsWith(`${getConfig().USERNAME}-`)) return id;
+      }
+    } catch {
     }
   }
   if (isSyncConfigured()) {
@@ -13661,7 +13691,7 @@ function putProp(target, key, value) {
   else
     target[key] = value;
 }
-function mirrorShape(target, source, keys, wrap) {
+function mirrorShape(target, source, keys, wrap2) {
   const raw = sourceShape(source);
   for (const key of keys) {
     const desc = Object.getOwnPropertyDescriptor(raw, key);
@@ -13670,10 +13700,10 @@ function mirrorShape(target, source, keys, wrap) {
     if (desc.get) {
       deferProp(target, key, () => {
         const value = source._zod.def.shape[key];
-        return wrap ? wrap(value, key) : value;
+        return wrap2 ? wrap2(value, key) : value;
       });
     } else
-      putProp(target, key, wrap ? wrap(desc.value, key) : desc.value);
+      putProp(target, key, wrap2 ? wrap2(desc.value, key) : desc.value);
   }
 }
 function mirrorProps(target, source) {
@@ -29877,7 +29907,7 @@ function visit(schema, fnOrHandlers) {
     return h ? h(node2, rewritten) : node2;
   };
   const cache = /* @__PURE__ */ new Map();
-  function run(s) {
+  function run2(s) {
     const cached3 = cache.get(s);
     if (cached3 === RESOLVING) {
       return new $ZodLazy({
@@ -29903,21 +29933,21 @@ function visit(schema, fnOrHandlers) {
         let changed = false;
         const newShape = {};
         for (const k of keys) {
-          const mapped = run(oldShape[k]);
+          const mapped = run2(oldShape[k]);
           if (mapped !== oldShape[k])
             changed = true;
           newShape[k] = mapped;
         }
         let newCatchall = def.catchall;
         if (def.catchall) {
-          newCatchall = run(def.catchall);
+          newCatchall = run2(def.catchall);
           if (newCatchall !== def.catchall)
             changed = true;
         }
         return changed ? clone(s, { ...def, shape: newShape, catchall: newCatchall }) : s;
       }
       case "array": {
-        const mapped = run(def.element);
+        const mapped = run2(def.element);
         return mapped === def.element ? s : clone(s, { ...def, element: mapped });
       }
       case "tuple": {
@@ -29925,14 +29955,14 @@ function visit(schema, fnOrHandlers) {
         let changed = false;
         const newItems = [];
         for (const item of oldItems) {
-          const mapped = run(item);
+          const mapped = run2(item);
           if (mapped !== item)
             changed = true;
           newItems.push(mapped);
         }
         let newRest = def.rest;
         if (def.rest) {
-          newRest = run(def.rest);
+          newRest = run2(def.rest);
           if (newRest !== def.rest)
             changed = true;
         }
@@ -29940,12 +29970,12 @@ function visit(schema, fnOrHandlers) {
       }
       case "record":
       case "map": {
-        const newKey = run(def.keyType);
-        const newVal = run(def.valueType);
+        const newKey = run2(def.keyType);
+        const newVal = run2(def.valueType);
         return newKey === def.keyType && newVal === def.valueType ? s : clone(s, { ...def, keyType: newKey, valueType: newVal });
       }
       case "set": {
-        const newVal = run(def.valueType);
+        const newVal = run2(def.valueType);
         return newVal === def.valueType ? s : clone(s, { ...def, valueType: newVal });
       }
       case "union": {
@@ -29953,7 +29983,7 @@ function visit(schema, fnOrHandlers) {
         let changed = false;
         const newOptions = [];
         for (const opt of oldOptions) {
-          const mapped = run(opt);
+          const mapped = run2(opt);
           if (mapped !== opt)
             changed = true;
           newOptions.push(mapped);
@@ -29961,8 +29991,8 @@ function visit(schema, fnOrHandlers) {
         return changed ? clone(s, { ...def, options: newOptions }) : s;
       }
       case "intersection": {
-        const newLeft = run(def.left);
-        const newRight = run(def.right);
+        const newLeft = run2(def.left);
+        const newRight = run2(def.right);
         return newLeft === def.left && newRight === def.right ? s : clone(s, { ...def, left: newLeft, right: newRight });
       }
       case "optional":
@@ -29974,23 +30004,23 @@ function visit(schema, fnOrHandlers) {
       case "nonoptional":
       case "promise":
       case "success": {
-        const newInner = run(def.innerType);
+        const newInner = run2(def.innerType);
         return newInner === def.innerType ? s : clone(s, { ...def, innerType: newInner });
       }
       case "pipe": {
-        const newIn = run(def.in);
-        const newOut = run(def.out);
+        const newIn = run2(def.in);
+        const newOut = run2(def.out);
         return newIn === def.in && newOut === def.out ? s : clone(s, { ...def, in: newIn, out: newOut });
       }
       case "function": {
-        const newInput = run(def.input);
-        const newOutput = run(def.output);
+        const newInput = run2(def.input);
+        const newOutput = run2(def.output);
         return newInput === def.input && newOutput === def.output ? s : clone(s, { ...def, input: newInput, output: newOutput });
       }
       case "lazy": {
         const original = def.getter;
         const { _cachedInner, ...rest } = def;
-        return clone(s, { ...rest, getter: () => run(original()) });
+        return clone(s, { ...rest, getter: () => run2(original()) });
       }
       // A leaf by choice: `parts` are regex fragments, not data positions.
       case "template_literal":
@@ -30021,7 +30051,7 @@ function visit(schema, fnOrHandlers) {
       }
     }
   }
-  return run(schema);
+  return run2(schema);
 }
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
@@ -38694,6 +38724,14 @@ already captured in git history or in an existing memory.
   a duplicate
 - Session start: covered by Per-Prompt Routine step 3
 
+### Shared Work (leases)
+- Some projects coordinate work through YAPA leases (the \`lease\` tool, or a
+  project script calling \`yapa coord\`). Take a lease only when the
+  project's own instructions or tooling call for it.
+- If an acquire is refused, tell the user who holds the work and since when,
+  and offer something else. If you took over an expired lease, say whose it
+  was. If the service is unreachable, say the work is not shared.
+
 ### Periodic Compaction
 - When YAPA emits a "compaction candidate" reminder at session start, call
   \`compaction_suggest\` for the named collection, write a rolling summary of
@@ -41443,6 +41481,86 @@ async function stopSync() {
 
 // packages/core/src/index.ts
 init_backend();
+
+// packages/core/src/sync/coordination.ts
+init_config();
+init_backend();
+import { mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { join as join4 } from "node:path";
+var SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+function currentSession(explicit, env = process.env) {
+  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
+    if (v && SESSION_RE.test(v)) return v;
+  }
+  return void 0;
+}
+function markerPath(session) {
+  return join4(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function readMarker(session) {
+  try {
+    return JSON.parse(readFileSync6(markerPath(session), "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeMarker(m) {
+  try {
+    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync5(markerPath(m.session), JSON.stringify(m), { mode: 384 });
+  } catch {
+  }
+}
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3)) {
+  const prev = readMarker(session);
+  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now });
+}
+var CoordinationUnavailableError = class extends Error {
+  constructor(reason, message) {
+    super(message);
+    this.reason = reason;
+    this.name = "CoordinationUnavailableError";
+  }
+  reason;
+  code = "coordination_unavailable";
+};
+async function requireCoordination() {
+  if (!isSyncConfigured()) {
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+  }
+  const backend = await getSyncBackend();
+  if (!backend?.coordination) {
+    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
+  }
+  return wrap(backend.coordination);
+}
+function isCoordinationUnavailable(e) {
+  if (e instanceof CoordinationUnavailableError) return true;
+  const err = e;
+  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
+}
+function wrap(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (isCoordinationUnavailable(e)) {
+        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+
+// packages/core/src/index.ts
 init_http_backend();
 init_postgres_backend();
 init_device();
@@ -41451,8 +41569,8 @@ init_device();
 init_config();
 init_store();
 import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync6 } from "fs";
-import { join as join5 } from "path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync7 } from "fs";
+import { join as join6 } from "path";
 
 // packages/core/src/training/fireworks.ts
 init_config();
@@ -41614,21 +41732,21 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "fs";
-import { join as join4 } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "fs";
+import { join as join5 } from "path";
 function registryPath() {
-  return join4(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join5(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join4(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync3(dir)) mkdirSync5(dir, { recursive: true });
+  const dir = join5(getConfig().ARTIFACTS_DIR, "adapters");
+  if (!existsSync3(dir)) mkdirSync6(dir, { recursive: true });
 }
 function load() {
   ensureDir();
   const path = registryPath();
   if (!existsSync3(path)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync6(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync7(path, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -41639,7 +41757,7 @@ function load() {
 }
 function save(file2) {
   ensureDir();
-  writeFileSync5(registryPath(), JSON.stringify(file2, null, 2) + "\n");
+  writeFileSync6(registryPath(), JSON.stringify(file2, null, 2) + "\n");
 }
 function addAdapter(entry) {
   const file2 = load();
@@ -41670,7 +41788,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync7 } from "fs";
+import { readFileSync as readFileSync8 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -41773,7 +41891,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path) {
-  const content = readFileSync7(path, "utf-8");
+  const content = readFileSync8(path, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -41801,8 +41919,8 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join5(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync4(dir)) mkdirSync6(dir, { recursive: true });
+  const dir = join6(getConfig().ARTIFACTS_DIR, "training-runs");
+  if (!existsSync4(dir)) mkdirSync7(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
@@ -41835,8 +41953,8 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join5(dir, filename);
-  writeFileSync6(previewPath, jsonl);
+  const previewPath = join6(dir, filename);
+  writeFileSync7(previewPath, jsonl);
   return {
     manifestVersion,
     previewPath,
@@ -41852,7 +41970,7 @@ async function trainingTrigger(args) {
   if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync8(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync9(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -42396,6 +42514,81 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
   const passedCount = items.filter((i) => i.passed).length;
   const failedCount = items.length - passedCount;
   return { adapterRef, manifestVersion, passedCount, failedCount, items };
+}
+
+// packages/mcp/src/coord.ts
+var EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
+function defaultSession() {
+  return currentSession() ?? `${getDeviceId()}:${process.pid}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 128);
+}
+var ago = (now, t) => {
+  const s = Math.max(0, now - t);
+  return s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+};
+function describeLease(l, now = Math.floor(Date.now() / 1e3)) {
+  const state = l.expired ? `EXPIRED ${ago(now, l.expires_at)} ago` : `expires in ${ago(l.expires_at, now)}`;
+  return `${l.key} held by ${l.holder.user} (session ${l.holder.session}${l.holder.device ? `, ${l.holder.device}` : ""}) since ${new Date(l.acquired_at * 1e3).toISOString()}, ${state}; scope ${l.scope.join(", ")}` + (l.title ? `; "${l.title}"` : "");
+}
+async function run(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    const err = e;
+    if (isCoordinationUnavailable(e)) {
+      return {
+        exit: EXIT.unavailable,
+        json: { ok: false, unavailable: true, reason: err.reason ?? "unreachable", message: err.message },
+        text: `not shared: ${err.message} (fall back to local coordination and say the work is not shared)`
+      };
+    }
+    const usage = err.status === 400 || err.status === 403 || err.status === 413;
+    return { exit: usage ? EXIT.usage : EXIT.error, json: { ok: false, code: err.code, message: err.message }, text: `error: ${err.message}` };
+  }
+}
+function leaseAcquire(a) {
+  return run(async () => {
+    const session = a.session ?? defaultSession();
+    const r = await (await requireCoordination()).leaseAcquire({ ...a, session });
+    if (!r.granted) {
+      const lines = r.conflicts.map((c) => `CONFLICT ${a.key}: ${describeLease(c.lease)} (overlap: ${c.overlap.join(", ")})`);
+      return { exit: EXIT.refused, json: { ok: false, ...r }, text: lines.join("\n") };
+    }
+    const prev = r.took_over_from;
+    noteLeaseHeld(session, r.lease.ttl_seconds);
+    const verb = r.renewed ? "renewed" : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
+    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}` };
+  });
+}
+function leaseHeartbeat(collection, session, keys) {
+  return run(async () => {
+    const s = session ?? defaultSession();
+    const r = await (await requireCoordination()).leaseHeartbeat(collection, s, keys);
+    if (r.renewed.length) noteLeaseHeld(s, Math.min(...r.renewed.map((l) => l.ttl_seconds)));
+    const lost = r.lost.length ? `; LOST (taken over or released): ${r.lost.join(", ")}` : "";
+    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `renewed ${r.renewed.length} lease(s) for session ${s}${lost}` };
+  });
+}
+function leaseRelease(collection, key, session, outcome) {
+  return run(async () => {
+    const s = session ?? defaultSession();
+    const r = await (await requireCoordination()).leaseRelease(collection, key, s, outcome);
+    if (r.released) return { exit: EXIT.ok, json: { ok: true, ...r }, text: `released ${key} (${outcome ?? "done"})` };
+    if (r.reason === "not_held") return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${key} is not leased` };
+    return { exit: EXIT.refused, json: { ok: false, ...r }, text: `${key} is not yours to release: ${describeLease(r.lease)}` };
+  });
+}
+function leaseList(collection, includeExpired = false) {
+  return run(async () => {
+    const r = await (await requireCoordination()).leaseList(collection, includeExpired);
+    const text = r.leases.length ? r.leases.map((l) => `- ${describeLease(l, r.now)}`).join("\n") : `no ${includeExpired ? "" : "live "}leases in ${collection}`;
+    return { exit: EXIT.ok, json: { ok: true, ...r }, text };
+  });
+}
+function counterNext(collection, name, floor) {
+  return run(async () => {
+    const value = await (await requireCoordination()).counterNext(collection, name, floor);
+    return { exit: EXIT.ok, json: { ok: true, value }, text: String(value) };
+  });
 }
 
 // packages/mcp/src/tools.ts
@@ -43350,6 +43543,43 @@ ${r.content}`
       return {
         content: [{ type: "text", text: `${task_id} no longer depends on ${depends_on_id}` }]
       };
+    }
+  );
+  server2.tool(
+    "lease",
+    "Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. acquire is granted only if no live lease (anyone else's, or this user's other sessions) has the same key or an overlapping scope; the answer comes from the service, not a queued push. YAPA's hooks renew this session's leases while it is active, so explicit heartbeats are rarely needed; a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.",
+    {
+      action: external_exports.enum(["acquire", "heartbeat", "release", "list"]),
+      collection: external_exports.string().optional().describe("Shared collection (not global/private-*/local-*), e.g. project-acme; heartbeat without it renews the session's leases everywhere"),
+      key: external_exports.string().optional().describe("acquire/release: what is leased, e.g. a task id or record id"),
+      session: external_exports.string().optional().describe("Holder within your user; defaults to this Claude Code session (the hooks renew its leases automatically)"),
+      scope: external_exports.array(external_exports.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included'),
+      ttl_seconds: external_exports.number().int().optional().describe("acquire: expiry without a heartbeat, 30..86400 (default 7200)"),
+      title: external_exports.string().optional().describe("acquire: short description shown in list"),
+      keys: external_exports.array(external_exports.string()).optional().describe("heartbeat: only these keys (default: every lease of the session)"),
+      outcome: external_exports.string().optional().describe("release: done | blocked | pending | ... (logged)"),
+      include_expired: external_exports.boolean().optional().describe("list: also show expired leases")
+    },
+    async ({ action, collection, key, session, scope, ttl_seconds, title, keys, outcome, include_expired }) => {
+      const need = (v, what) => {
+        if (!v) throw new Error(`lease ${action} needs ${what}`);
+        return v;
+      };
+      const r = action === "acquire" ? await leaseAcquire({ collection: need(collection, "collection"), key: need(key, "key"), session, scope, ttlSeconds: ttl_seconds, title }) : action === "heartbeat" ? await leaseHeartbeat(collection, session, keys) : action === "release" ? await leaseRelease(need(collection, "collection"), need(key, "key"), session, outcome) : await leaseList(need(collection, "collection"), include_expired ?? false);
+      return { content: [{ type: "text", text: r.text }], ...r.exit === EXIT.error || r.exit === EXIT.usage ? { isError: true } : {} };
+    }
+  );
+  server2.tool(
+    "counter_next",
+    "Take the next value of an atomic counter in a shared collection on the YAPA sync service (e.g. numbered record ids). Never hands out a value twice, and never one at or below floor (pass the highest id you already have).",
+    {
+      collection: external_exports.string().describe("Shared collection, e.g. project-acme"),
+      name: external_exports.string().describe("Counter name, e.g. RFC, INCIDENT-2026"),
+      floor: external_exports.number().int().min(0).optional().describe("Highest value already in use locally")
+    },
+    async ({ collection, name, floor }) => {
+      const r = await counterNext(collection, name, floor);
+      return { content: [{ type: "text", text: r.text }], ...r.exit === EXIT.ok ? {} : { isError: true } };
     }
   );
   server2.tool(
