@@ -12,6 +12,7 @@ Other services can now be a YAPA client's remote: the sync API is written down a
 
 ### Fixes
 - Docs: `embedding_dimension` / `embedding_invalid` are `422`, not `400` (service design); the ID token is cached in a 0600 file, not kept in memory only (README, pilot onboarding); `.env.example` now covers the sync service URL.
+- **The prompt hook ignores background-task notifications.** Claude Code delivers each finished background command and each Monitor event through the UserPromptSubmit hook, as a prompt made of `<task-notification>` blocks. The hook treated these as the user's prompts: it ran a recall on the notification text (injecting unrelated matches under every build-log line) and recorded it as the user's turn, so response capture judged the notification instead of what the user asked. A notification-only prompt now gets no recall and isn't recorded, and the pending capture notice waits for the next real prompt. Its leases are still renewed, so a session waiting hours on a long job keeps them. A prompt that mixes user text with notifications gets recall on the user text only.
 
 ## 1.2.0 (2026-10-29)
 

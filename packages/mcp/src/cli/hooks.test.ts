@@ -3,14 +3,15 @@ import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { pullCollection, captureTurn } = vi.hoisted(() => ({
+const { pullCollection, captureTurn, heartbeatIfDue } = vi.hoisted(() => ({
   pullCollection: vi.fn(),
   captureTurn: vi.fn(),
+  heartbeatIfDue: vi.fn(),
 }));
-vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn }));
+vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines } from './hooks.js';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -55,6 +56,8 @@ beforeEach(() => {
   pullCollection.mockReset();
   pullCollection.mockResolvedValue({ pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 });
   captureTurn.mockReset();
+  heartbeatIfDue.mockReset();
+  heartbeatIfDue.mockResolvedValue(0);
 });
 
 describe('freshenFromRemote', () => {
@@ -125,6 +128,60 @@ describe('userPromptSubmit', () => {
     capture();
     await userPromptSubmit({ session_id: 's1', cwd: dir, prompt: '  ' });
     expect(restore()).toEqual({});
+  });
+});
+
+describe('background-task notifications', () => {
+  const block = (id: string) => [
+    '<task-notification>',
+    `<task-id>${id}</task-id>`,
+    '<tool-use-id>toolu_01abc</tool-use-id>',
+    `<output-file>/tmp/tasks/${id}.output</output-file>`,
+    '<status>completed</status>',
+    '<summary>Background command "acme prod maintenance build" completed (exit code 0)</summary>',
+    '</task-notification>',
+  ].join('\n');
+  const preamble = [
+    '[SYSTEM NOTIFICATION - NOT USER INPUT]',
+    'This is an automated background-task event, NOT a message from the user.',
+    'Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question.',
+    '',
+  ].join('\n');
+  const cwd = () => join(dir, 'proj', 'acme');
+
+  it('finds the user text, if any', () => {
+    expect(userText(block('b1'))).toBe('');
+    expect(userText(`${block('b1')}\n${block('b2')}`)).toBe('');
+    expect(userText(`<system-reminder>\n${preamble}\n${block('b1')}\n</system-reminder>`)).toBe('');
+    expect(userText(`${block('b1')}\nwhen is acme prod maintenance?`)).toBe('when is acme prod maintenance?');
+    expect(userText('a plain prompt')).toBe('a plain prompt');
+  });
+
+  it('a notification-only prompt gets no recall and is not recorded, but leases are renewed', async () => {
+    configure({ YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' });
+    capture();
+    await userPromptSubmit({ session_id: 'n1', cwd: cwd(), prompt: 'when is acme prod maintenance?' });
+    restore();
+
+    capture();
+    await userPromptSubmit({ session_id: 'n1', cwd: cwd(), prompt: block('b1') });
+    expect(restore()).toEqual({});
+    expect(heartbeatIfDue).toHaveBeenCalledTimes(2);
+    expect(pullCollection).toHaveBeenCalledOnce(); // only for the real prompt
+
+    // The Stop hook still judges the user's turn, not the notification.
+    captureTurn.mockResolvedValueOnce({ stored: 0, skipped: 0, superseded: 0 });
+    await stop({ session_id: 'n1', cwd: cwd(), last_assistant_message: 'Thursdays 02:00 UTC. '.repeat(20) });
+    expect(captureTurn.mock.calls[0][0]).toMatchObject({ turn: 1, userText: 'when is acme prod maintenance?' });
+  });
+
+  it('a mixed prompt gets recall on the user text only', async () => {
+    capture();
+    await userPromptSubmit({ session_id: 'n2', cwd: cwd(), prompt: `${preamble}\n${block('b3')}\nwhen is acme prod maintenance?` });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('**Query:** when is acme prod maintenance?');
+    expect(ctx).not.toContain('task-notification');
+    expect(ctx).toMatch(/Thursdays 02:00 UTC/);
   });
 });
 
