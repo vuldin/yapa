@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-10-30)
 
 Other services can now be a YAPA client's remote: the sync API is written down as a contract, with a conformance runner to check an implementation.
+
+**Upgrading:** update the plugin. There is no schema change and nothing to deploy; `yapa-mcp` picks up the dependency bumps on its next deploy.
 
 ### Features
 - **YAPA Sync API v1 spec** ([docs/sync-api.md](docs/sync-api.md)): the HTTP contract the client depends on (auth and identity, headers, idempotency, errors and how the client treats them, every endpoint and the fields the client reads, pull cursors and the deletions feed, document shapes, server rules, coordination), plus hints for implementers (durable vs volatile metadata, read-only documents). `packages/service` is the reference implementation.
@@ -13,6 +15,7 @@ Other services can now be a YAPA client's remote: the sync API is written down a
 ### Fixes
 - Docs: `embedding_dimension` / `embedding_invalid` are `422`, not `400` (service design); the ID token is cached in a 0600 file, not kept in memory only (README, pilot onboarding); `.env.example` now covers the sync service URL.
 - **The prompt hook ignores background-task notifications.** Claude Code delivers each finished background command and each Monitor event through the UserPromptSubmit hook, as a prompt made of `<task-notification>` blocks. The hook treated these as the user's prompts: it ran a recall on the notification text (injecting unrelated matches under every build-log line) and recorded it as the user's turn, so response capture judged the notification instead of what the user asked. A notification-only prompt now gets no recall and isn't recorded, and the pending capture notice waits for the next real prompt. Its leases are still renewed, so a session waiting hours on a long job keeps them. A prompt that mixes user text with notifications gets recall on the user text only.
+- Dependencies: fast-uri 3.1.9, body-parser 2.4.0, ip-address 10.7.5, zod 4.6.7, qs 6.17.1 (#38-#42); the plugin bundle is rebuilt with them (#45).
 
 ## 1.2.0 (2026-10-29)
 
