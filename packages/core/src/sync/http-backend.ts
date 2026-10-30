@@ -23,7 +23,7 @@ import { getConfig, getEmbeddingModel } from '../config.js';
 import { getDeviceId } from './device.js';
 import {
   applyServerUsername, chunk, noteSyncError, syncUsernameNote, type PullPage, type PullRequest, type RemoteDocument, type RemoteOwner, type SimilarMatch, type SyncBackend,
-  type UpsertDoc, type UpsertOutcome,
+  type UpsertDoc, type UpsertOutcome, type Coordination, type Lease, type LeaseAcquireResult, type LeaseReleaseResult,
 } from './backend.js';
 
 /** Refresh this long before the token's `exp`. */
@@ -197,6 +197,8 @@ interface RequestOpts {
   idempotent?: boolean;
   /** Return undefined instead of throwing on 404. */
   allow404?: boolean;
+  /** Do not record a failure as the last sync error (coordination is not sync). */
+  quiet?: boolean;
 }
 
 /** One-line, user-facing explanation of a failed service response. */
@@ -239,8 +241,8 @@ export class HttpBackend implements SyncBackend {
     this.device = opts.device ?? getDeviceId;
   }
 
-  private fail(err: Error): never {
-    noteSyncError(err);
+  private fail(err: Error, quiet = false): never {
+    if (!quiet) noteSyncError(err);
     throw err;
   }
 
@@ -253,7 +255,7 @@ export class HttpBackend implements SyncBackend {
       try {
         token = await this.tokens.get();
       } catch (e) {
-        return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, 'token_command'));
+        return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, 'token_command'), opts.quiet);
       }
       const headers: Record<string, string> = {
         authorization: `Bearer ${token}`,
@@ -271,7 +273,7 @@ export class HttpBackend implements SyncBackend {
         const why = e?.name === 'TimeoutError' || e?.name === 'AbortError'
           ? `timed out after ${this.timeoutMs} ms`
           : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
-        return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, 'unreachable'));
+        return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, 'unreachable'), opts.quiet);
       }
 
       const text = await res.text().catch(() => '');
@@ -293,7 +295,7 @@ export class HttpBackend implements SyncBackend {
       const details: Record<string, unknown> = { ...(apiErr?.details ?? {}) };
       const retryAfter = res.headers.get('retry-after');
       if (retryAfter) details.retry_after = Number(retryAfter);
-      return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details));
+      return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details), opts.quiet);
     }
   }
 
@@ -395,6 +397,27 @@ export class HttpBackend implements SyncBackend {
   async maxTaskNumber(): Promise<number> {
     return Number((await this.request<{ max: number }>('GET', '/v1/me/max-task-number')).max ?? 0);
   }
+
+  readonly coordination: Coordination = {
+    leaseAcquire: req => this.request<LeaseAcquireResult>('POST', '/v1/leases:acquire', {
+      body: { collection: req.collection, key: req.key, session: req.session, scope: req.scope ?? [], ttl_seconds: req.ttlSeconds, title: req.title },
+      quiet: true,
+    }),
+    leaseHeartbeat: (collection, session, keys) =>
+      this.request<{ renewed: Lease[]; lost: string[] }>('POST', '/v1/leases:heartbeat', { body: { collection, session, keys }, quiet: true }),
+    leaseRelease: (collection, key, session, outcome) =>
+      this.request<LeaseReleaseResult>('POST', '/v1/leases:release', { body: { collection, key, session, outcome }, quiet: true }),
+    leaseList: (collection, includeExpired = false) => {
+      const q = new URLSearchParams({ collection });
+      if (includeExpired) q.set('include_expired', 'true');
+      return this.request<{ leases: Lease[]; now: number }>('GET', `/v1/leases?${q}`, { quiet: true });
+    },
+    // Idempotent: a retried request (401 refresh) must not burn a second value.
+    counterNext: async (collection, name, floor) =>
+      Number((await this.request<{ value: number }>('POST', '/v1/counters:next', { body: { collection, name, floor }, idempotent: true, quiet: true })).value),
+    nextTaskId: async floor =>
+      (await this.request<{ id: string }>('POST', '/v1/me/task-ids:next', { body: { floor }, idempotent: true, quiet: true })).id,
+  };
 
   async similar(collection: string, embedding: number[], threshold?: number): Promise<SimilarMatch[]> {
     const r = await this.request<{ matches: SimilarMatch[] }>('POST', `/v1/collections/${encodeURIComponent(collection)}:similar`, {

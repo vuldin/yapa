@@ -23,6 +23,9 @@ Call \`task_create\` in the active collection BEFORE starting multi-step or long
 ### Journal
 Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.
 
+### Shared work (leases)
+Some projects coordinate work through YAPA leases (the \`lease\` tool, or a project script calling \`yapa coord\`). Take a lease only when the project's own instructions or tooling call for it, never on your own initiative. Session start lists live leases in the active collection under "Work in progress": before starting something listed there, tell the user who holds it. If an acquire is refused, say who holds the work and since when, and offer something else; don't retry in a loop. If you took over an expired lease, say whose it was. If the service is unreachable, say the work is not shared. Heartbeats are automatic while this session is active; don't schedule them.
+
 ### Memory compaction
 When the injected context lists a "compaction candidate", call \`compaction_suggest\` for it, write a rolling summary per group, and submit with \`compaction_apply\`.
 

@@ -98,6 +98,7 @@ function createConfig(env = process.env) {
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
+    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
@@ -1690,8 +1691,8 @@ var init_http_backend = __esm({
         this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
         this.device = opts.device ?? getDeviceId;
       }
-      fail(err) {
-        noteSyncError(err);
+      fail(err, quiet = false) {
+        if (!quiet) noteSyncError(err);
         throw err;
       }
       async request(method, path, opts = {}) {
@@ -1703,7 +1704,7 @@ var init_http_backend = __esm({
           try {
             token = await this.tokens.get();
           } catch (e) {
-            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"));
+            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"), opts.quiet);
           }
           const headers = {
             authorization: `Bearer ${token}`,
@@ -1718,7 +1719,7 @@ var init_http_backend = __esm({
             res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
           } catch (e) {
             const why = e?.name === "TimeoutError" || e?.name === "AbortError" ? `timed out after ${this.timeoutMs} ms` : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
-            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"));
+            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"), opts.quiet);
           }
           const text = await res.text().catch(() => "");
           let json;
@@ -1739,7 +1740,7 @@ var init_http_backend = __esm({
           const details = { ...apiErr?.details ?? {} };
           const retryAfter = res.headers.get("retry-after");
           if (retryAfter) details.retry_after = Number(retryAfter);
-          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details));
+          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details), opts.quiet);
         }
       }
       /** GET /v1/me, cached per process until the token is re-minted. */
@@ -1824,6 +1825,22 @@ var init_http_backend = __esm({
       async maxTaskNumber() {
         return Number((await this.request("GET", "/v1/me/max-task-number")).max ?? 0);
       }
+      coordination = {
+        leaseAcquire: (req) => this.request("POST", "/v1/leases:acquire", {
+          body: { collection: req.collection, key: req.key, session: req.session, scope: req.scope ?? [], ttl_seconds: req.ttlSeconds, title: req.title },
+          quiet: true
+        }),
+        leaseHeartbeat: (collection, session, keys) => this.request("POST", "/v1/leases:heartbeat", { body: { collection, session, keys }, quiet: true }),
+        leaseRelease: (collection, key, session, outcome) => this.request("POST", "/v1/leases:release", { body: { collection, key, session, outcome }, quiet: true }),
+        leaseList: (collection, includeExpired = false) => {
+          const q = new URLSearchParams({ collection });
+          if (includeExpired) q.set("include_expired", "true");
+          return this.request("GET", `/v1/leases?${q}`, { quiet: true });
+        },
+        // Idempotent: a retried request (401 refresh) must not burn a second value.
+        counterNext: async (collection, name, floor) => Number((await this.request("POST", "/v1/counters:next", { body: { collection, name, floor }, idempotent: true, quiet: true })).value),
+        nextTaskId: async (floor) => (await this.request("POST", "/v1/me/task-ids:next", { body: { floor }, idempotent: true, quiet: true })).id
+      };
       async similar(collection, embedding, threshold) {
         const r = await this.request("POST", `/v1/collections/${encodeURIComponent(collection)}:similar`, {
           body: { embedding, ...threshold !== void 0 ? { threshold } : {}, limit: 5 }
@@ -3265,6 +3282,118 @@ var init_sync = __esm({
   }
 });
 
+// packages/core/src/sync/coordination.ts
+import { mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync5, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
+function currentSession(explicit, env = process.env) {
+  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
+    if (v && SESSION_RE.test(v)) return v;
+  }
+  return void 0;
+}
+function markerPath(session) {
+  return join3(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function readMarker(session) {
+  try {
+    return JSON.parse(readFileSync5(markerPath(session), "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeMarker(m) {
+  try {
+    mkdirSync3(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync3(markerPath(m.session), JSON.stringify(m), { mode: 384 });
+  } catch {
+  }
+}
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3)) {
+  const prev = readMarker(session);
+  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now });
+}
+function noteRenewed(session, renewed, now) {
+  if (renewed.length === 0) {
+    try {
+      rmSync2(markerPath(session), { force: true });
+    } catch {
+    }
+    return;
+  }
+  writeMarker({ session, min_ttl: Math.min(...renewed.map((l) => l.ttl_seconds)), last_beat: now });
+}
+async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
+  if (!isSyncConfigured()) return 0;
+  let n = 0;
+  for (const session of new Set(sessions.filter((s) => !!s && SESSION_RE.test(s)))) {
+    const m = readMarker(session);
+    if (!m) continue;
+    const interval = Math.max(10, Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.floor(m.min_ttl / 3)));
+    if (now - m.last_beat < interval) continue;
+    try {
+      const r = await (await requireCoordination()).leaseHeartbeat(void 0, session);
+      noteRenewed(session, r.renewed, now);
+      n += r.renewed.length;
+    } catch {
+    }
+  }
+  return n;
+}
+async function requireCoordination() {
+  if (!isSyncConfigured()) {
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+  }
+  const backend = await getSyncBackend();
+  if (!backend?.coordination) {
+    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
+  }
+  return wrap(backend.coordination);
+}
+function isCoordinationUnavailable(e) {
+  if (e instanceof CoordinationUnavailableError) return true;
+  const err = e;
+  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
+}
+function wrap(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (isCoordinationUnavailable(e)) {
+        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+var SESSION_RE, HEARTBEAT_MAX_INTERVAL_S, CoordinationUnavailableError;
+var init_coordination = __esm({
+  "packages/core/src/sync/coordination.ts"() {
+    "use strict";
+    init_config();
+    init_backend();
+    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+    HEARTBEAT_MAX_INTERVAL_S = 300;
+    CoordinationUnavailableError = class extends Error {
+      constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+        this.name = "CoordinationUnavailableError";
+      }
+      reason;
+      code = "coordination_unavailable";
+    };
+  }
+});
+
 // packages/core/src/training/fireworks.ts
 var init_fireworks = __esm({
   "packages/core/src/training/fireworks.ts"() {
@@ -3412,6 +3541,7 @@ var init_src = __esm({
     init_training_manifest();
     init_sync();
     init_backend();
+    init_coordination();
     init_http_backend();
     init_postgres_backend();
     init_pull();
@@ -3457,6 +3587,9 @@ Call \`task_create\` in the active collection BEFORE starting multi-step or long
 ### Journal
 Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.
 
+### Shared work (leases)
+Some projects coordinate work through YAPA leases (the \`lease\` tool, or a project script calling \`yapa coord\`). Take a lease only when the project's own instructions or tooling call for it, never on your own initiative. Session start lists live leases in the active collection under "Work in progress": before starting something listed there, tell the user who holds it. If an acquire is refused, say who holds the work and since when, and offer something else; don't retry in a loop. If you took over an expired lease, say whose it was. If the service is unreachable, say the work is not shared. Heartbeats are automatic while this session is active; don't schedule them.
+
 ### Memory compaction
 When the injected context lists a "compaction candidate", call \`compaction_suggest\` for it, write a rolling summary per group, and submit with \`compaction_apply\`.
 
@@ -3472,15 +3605,16 @@ __export(hooks_exports, {
   attribution: () => attribution,
   freshenFromRemote: () => freshenFromRemote,
   postCompact: () => postCompact,
+  presenceLines: () => presenceLines,
   reloadConfig: () => reloadConfig,
   sessionEnd: () => sessionEnd,
   sessionStart: () => sessionStart,
   stop: () => stop,
   userPromptSubmit: () => userPromptSubmit
 });
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
 }
@@ -3523,17 +3657,17 @@ async function freshenFromRemote(collection) {
   }
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join3(tmpdir(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join3(base, "sessions");
-  mkdirSync3(dir, { recursive: true });
+  const base = process.env.CLAUDE_PLUGIN_DATA || join4(tmpdir(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join4(base, "sessions");
+  mkdirSync4(dir, { recursive: true });
   return dir;
 }
 function stateFile(sessionId, kind) {
-  return join3(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join4(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId) {
   try {
-    return JSON.parse(readFileSync5(stateFile(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync6(stateFile(sessionId, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -3542,7 +3676,7 @@ function recordPrompt(sessionId, prompt) {
   if (!sessionId) return;
   try {
     const turn = (readTurn(sessionId)?.turn ?? 0) + 1;
-    writeFileSync3(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
+    writeFileSync4(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
@@ -3552,11 +3686,44 @@ function takeNotice(sessionId) {
   if (!sessionId) return void 0;
   const file = stateFile(sessionId, "notice");
   try {
-    const notice = readFileSync5(file, "utf-8").trim();
-    rmSync2(file, { force: true });
+    const notice = readFileSync6(file, "utf-8").trim();
+    rmSync3(file, { force: true });
     return notice || void 0;
   } catch {
     return void 0;
+  }
+}
+function leaseSessions(input) {
+  return [input.session_id, currentSession()];
+}
+async function keepLeasesAlive(input) {
+  try {
+    await withTimeout(heartbeatIfDue(leaseSessions(input)), HEARTBEAT_BUDGET_MS);
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] lease heartbeat failed (non-fatal): ${e}
+`);
+  }
+}
+function presenceLines(leases, now, mySessions, me) {
+  if (!leases.length) return [];
+  const mine = new Set(mySessions.filter(Boolean));
+  const out = ["", "## Work in progress (leases)"];
+  for (const l of leases.slice(0, 10)) {
+    const who = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session.slice(0, 8)})` : l.holder.user;
+    const title = l.title ? ` ${l.title}` : "";
+    out.push(`- **${l.key}**${title}: ${who}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
+  }
+  if (leases.length > 10) out.push(`- _\u2026${leases.length - 10} more (\`lease\` action \`list\`)_`);
+  return out;
+}
+async function presence(collection, input) {
+  if (!isSyncConfigured() || !isSyncableCollection(collection)) return [];
+  try {
+    const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
+    if (!r) return [];
+    return presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME);
+  } catch {
+    return [];
   }
 }
 async function findCompactionCandidates() {
@@ -3578,6 +3745,7 @@ async function sessionStart(input) {
   if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
+  const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
     if (tasks.length) {
@@ -3593,6 +3761,7 @@ async function sessionStart(input) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}
 `);
   }
+  lines.push(...held);
   try {
     const memories = await listMemories({ collection, limit: 5 });
     if (memories.length) {
@@ -3636,7 +3805,7 @@ async function userPromptSubmit(input) {
     return;
   }
   recordPrompt(input.session_id, prompt);
-  await freshenFromRemote(collection);
+  await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input)]);
   const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? "\u2026" : ""}`];
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
@@ -3664,6 +3833,7 @@ async function userPromptSubmit(input) {
 }
 async function stop(input) {
   emit({});
+  await keepLeasesAlive(input);
   const config = getConfig();
   if (!config.RESPONSE_CAPTURE || input.stop_hook_active || !input.session_id) return;
   const assistantText = (input.last_assistant_message ?? "").trim();
@@ -3679,7 +3849,7 @@ async function stop(input) {
       { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText, assistantText },
       { maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE }
     );
-    if (result.notice) writeFileSync3(stateFile(input.session_id, "notice"), result.notice);
+    if (result.notice) writeFileSync4(stateFile(input.session_id, "notice"), result.notice);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -3710,7 +3880,7 @@ async function sessionEnd(input) {
   if (!input.session_id) return;
   for (const kind of ["turn", "notice"]) {
     try {
-      rmSync2(stateFile(input.session_id, kind), { force: true });
+      rmSync3(stateFile(input.session_id, kind), { force: true });
     } catch {
     }
   }
@@ -3718,7 +3888,7 @@ async function sessionEnd(input) {
 function reloadConfig() {
   setConfig(createConfig(process.env));
 }
-var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS;
+var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, relTime;
 var init_hooks = __esm({
   "packages/mcp/src/cli/hooks.ts"() {
     "use strict";
@@ -3726,6 +3896,9 @@ var init_hooks = __esm({
     init_rules();
     HOOK_PULL_OVERLAP_SECONDS = 600;
     STALE_JOURNAL_BUDGET_MS = 2e3;
+    LEASE_LIST_BUDGET_MS = 1500;
+    HEARTBEAT_BUDGET_MS = 1500;
+    relTime = (secs) => secs < 120 ? `${secs}s` : secs < 7200 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`;
   }
 });
 
@@ -3740,9 +3913,9 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { dirname as dirname3, join as join5 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -3769,14 +3942,14 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath() {
-  return join4(process.env.CLAUDE_CONFIG_DIR ?? join4(homedir3(), ".claude"), "settings.json");
+  return join5(process.env.CLAUDE_CONFIG_DIR ?? join5(homedir3(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
 function readSettings(path) {
   try {
-    return JSON.parse(readFileSync6(path, "utf-8"));
+    return JSON.parse(readFileSync7(path, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);
@@ -3784,12 +3957,12 @@ function readSettings(path) {
 }
 function installHooks(path = defaultSettingsPath(), command = selfCommand()) {
   const merged = mergeHooks(readSettings(path), command);
-  mkdirSync4(dirname3(path), { recursive: true });
-  writeFileSync4(path, JSON.stringify(merged, null, 2) + "\n");
+  mkdirSync5(dirname3(path), { recursive: true });
+  writeFileSync5(path, JSON.stringify(merged, null, 2) + "\n");
   return path;
 }
 function uninstallHooks(path = defaultSettingsPath()) {
-  writeFileSync4(path, JSON.stringify(removeHooks(readSettings(path)), null, 2) + "\n");
+  writeFileSync5(path, JSON.stringify(removeHooks(readSettings(path)), null, 2) + "\n");
   return path;
 }
 var HOOK_EVENTS, MARKER;
@@ -3805,6 +3978,107 @@ var init_install_hooks = __esm({
       { event: "SessionEnd", sub: "session-end" }
     ];
     MARKER = "yapa";
+  }
+});
+
+// packages/mcp/src/coord.ts
+var coord_exports = {};
+__export(coord_exports, {
+  EXIT: () => EXIT,
+  counterNext: () => counterNext,
+  currentSession: () => currentSession,
+  defaultSession: () => defaultSession,
+  describeLease: () => describeLease,
+  leaseAcquire: () => leaseAcquire,
+  leaseHeartbeat: () => leaseHeartbeat,
+  leaseList: () => leaseList,
+  leaseRelease: () => leaseRelease,
+  nextTaskId: () => nextTaskId
+});
+function defaultSession() {
+  return currentSession() ?? `${getDeviceId()}:${process.pid}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 128);
+}
+function describeLease(l, now = Math.floor(Date.now() / 1e3)) {
+  const state = l.expired ? `EXPIRED ${ago(now, l.expires_at)} ago` : `expires in ${ago(l.expires_at, now)}`;
+  return `${l.key} held by ${l.holder.user} (session ${l.holder.session}${l.holder.device ? `, ${l.holder.device}` : ""}) since ${new Date(l.acquired_at * 1e3).toISOString()}, ${state}; scope ${l.scope.join(", ")}` + (l.title ? `; "${l.title}"` : "");
+}
+async function run(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    const err = e;
+    if (isCoordinationUnavailable(e)) {
+      return {
+        exit: EXIT.unavailable,
+        json: { ok: false, unavailable: true, reason: err.reason ?? "unreachable", message: err.message },
+        text: `not shared: ${err.message} (fall back to local coordination and say the work is not shared)`
+      };
+    }
+    const usage2 = err.status === 400 || err.status === 403 || err.status === 413;
+    return { exit: usage2 ? EXIT.usage : EXIT.error, json: { ok: false, code: err.code, message: err.message }, text: `error: ${err.message}` };
+  }
+}
+function leaseAcquire(a) {
+  return run(async () => {
+    const session = a.session ?? defaultSession();
+    const r = await (await requireCoordination()).leaseAcquire({ ...a, session });
+    if (!r.granted) {
+      const lines = r.conflicts.map((c) => `CONFLICT ${a.key}: ${describeLease(c.lease)} (overlap: ${c.overlap.join(", ")})`);
+      return { exit: EXIT.refused, json: { ok: false, ...r }, text: lines.join("\n") };
+    }
+    const prev = r.took_over_from;
+    noteLeaseHeld(session, r.lease.ttl_seconds);
+    const verb = r.renewed ? "renewed" : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
+    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}` };
+  });
+}
+function leaseHeartbeat(collection, session, keys) {
+  return run(async () => {
+    const s = session ?? defaultSession();
+    const r = await (await requireCoordination()).leaseHeartbeat(collection, s, keys);
+    if (r.renewed.length) noteLeaseHeld(s, Math.min(...r.renewed.map((l) => l.ttl_seconds)));
+    const lost = r.lost.length ? `; LOST (taken over or released): ${r.lost.join(", ")}` : "";
+    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `renewed ${r.renewed.length} lease(s) for session ${s}${lost}` };
+  });
+}
+function leaseRelease(collection, key, session, outcome) {
+  return run(async () => {
+    const s = session ?? defaultSession();
+    const r = await (await requireCoordination()).leaseRelease(collection, key, s, outcome);
+    if (r.released) return { exit: EXIT.ok, json: { ok: true, ...r }, text: `released ${key} (${outcome ?? "done"})` };
+    if (r.reason === "not_held") return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${key} is not leased` };
+    return { exit: EXIT.refused, json: { ok: false, ...r }, text: `${key} is not yours to release: ${describeLease(r.lease)}` };
+  });
+}
+function leaseList(collection, includeExpired = false) {
+  return run(async () => {
+    const r = await (await requireCoordination()).leaseList(collection, includeExpired);
+    const text = r.leases.length ? r.leases.map((l) => `- ${describeLease(l, r.now)}`).join("\n") : `no ${includeExpired ? "" : "live "}leases in ${collection}`;
+    return { exit: EXIT.ok, json: { ok: true, ...r }, text };
+  });
+}
+function counterNext(collection, name, floor) {
+  return run(async () => {
+    const value = await (await requireCoordination()).counterNext(collection, name, floor);
+    return { exit: EXIT.ok, json: { ok: true, value }, text: String(value) };
+  });
+}
+function nextTaskId(floor) {
+  return run(async () => {
+    const id = await (await requireCoordination()).nextTaskId(floor);
+    return { exit: EXIT.ok, json: { ok: true, id }, text: id };
+  });
+}
+var EXIT, ago;
+var init_coord = __esm({
+  "packages/mcp/src/coord.ts"() {
+    "use strict";
+    init_src();
+    EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
+    ago = (now, t) => {
+      const s = Math.max(0, now - t);
+      return s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+    };
   }
 });
 
@@ -3837,6 +4111,31 @@ function resolveHostEnv(env, claudeConfig, cwd) {
   }
   return add;
 }
+function pluginSettingsEnv(env, settings) {
+  const add = {};
+  if (settings?.enabledPlugins?.["yapa@yapa"] !== true) return add;
+  const options = settings?.pluginConfigs?.["yapa@yapa"]?.options;
+  if (!options || typeof options !== "object") return add;
+  for (const [key, value] of Object.entries(options)) {
+    const name = `YAPA_${key.toUpperCase()}`;
+    const v = typeof value === "boolean" || typeof value === "number" ? String(value) : value;
+    if (typeof v === "string" && v !== "" && env[name] === void 0) add[name] = v;
+  }
+  return add;
+}
+function adoptCliEnv(cwd) {
+  try {
+    const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+    const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
+    const add = pluginSettingsEnv(process.env, settings);
+    if (Object.keys(add).length) {
+      Object.assign(process.env, add);
+      return;
+    }
+  } catch {
+  }
+  adoptHostEnv(cwd);
+}
 function adoptHostEnv(cwd) {
   let claudeConfig;
   try {
@@ -3849,7 +4148,8 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n";
+var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nExit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
   process.exit(2);
@@ -3906,8 +4206,80 @@ async function runHooksCommand(action, args) {
       usage();
   }
 }
+function flag(args, name) {
+  const i = args.indexOf(name);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
+}
+function list2(v) {
+  return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+}
+function int(v, name) {
+  if (v === void 0) return void 0;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer`);
+  return n;
+}
+async function runCoord(sub, args) {
+  if (!sub || sub === "help" || args.includes("--help")) {
+    process.stderr.write(COORD_USAGE);
+    return sub ? 0 : 2;
+  }
+  adoptCliEnv(process.cwd());
+  const coord = await Promise.resolve().then(() => (init_coord(), coord_exports));
+  const collection = flag(args, "--collection");
+  const need = (v, name) => {
+    if (!v) throw new Error(`${name} is required`);
+    return v;
+  };
+  let r;
+  try {
+    const session = coord.currentSession(flag(args, "--session"));
+    if (!session && ["acquire", "heartbeat", "release"].includes(sub)) {
+      throw new Error("--session is required outside Claude Code (or set YAPA_SESSION)");
+    }
+    switch (sub) {
+      case "acquire":
+        r = await coord.leaseAcquire({
+          collection: need(collection, "--collection"),
+          key: need(flag(args, "--key"), "--key"),
+          session,
+          scope: list2(flag(args, "--scope")),
+          ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
+          title: flag(args, "--title")
+        });
+        break;
+      case "heartbeat":
+        r = await coord.leaseHeartbeat(collection, session, list2(flag(args, "--keys")));
+        break;
+      case "release":
+        r = await coord.leaseRelease(need(collection, "--collection"), need(flag(args, "--key"), "--key"), session, flag(args, "--outcome"));
+        break;
+      case "list":
+        r = await coord.leaseList(need(collection, "--collection"), args.includes("--include-expired"));
+        break;
+      case "counter-next":
+        r = await coord.counterNext(need(collection, "--collection"), need(flag(args, "--name"), "--name"), int(flag(args, "--floor"), "--floor"));
+        break;
+      case "task-id":
+        r = await coord.nextTaskId(int(flag(args, "--floor"), "--floor"));
+        break;
+      default:
+        process.stderr.write(COORD_USAGE);
+        return 2;
+    }
+  } catch (e) {
+    process.stderr.write(`yapa coord ${sub}: ${e instanceof Error ? e.message : e}
+`);
+    return 2;
+  }
+  process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
+  return r.exit;
+}
 async function main() {
   const [command, sub, ...rest] = process.argv.slice(2);
+  if (command === "coord") {
+    process.exit(await runCoord(sub, rest));
+  }
   if (command === "hooks") {
     await runHooksCommand(sub, rest);
     return;

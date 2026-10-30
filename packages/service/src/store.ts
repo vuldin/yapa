@@ -208,7 +208,7 @@ export type UpsertResult =
   | { id: string; status: 'inserted' | 'updated' | 'unchanged' | 'pending'; synced_at: number; stale?: boolean; similar: Array<{ id: string; similarity: number }> }
   | { id: string | undefined; status: 'error'; error: ItemError };
 
-async function maxTaskNumber(c: pg.PoolClient, username: string): Promise<number> {
+export async function maxTaskNumber(c: pg.PoolClient, username: string): Promise<number> {
   const r = await c.query(
     `SELECT COALESCE(MAX(substring(id from length($1) + 2)::numeric), 0)::text AS n
        FROM documents

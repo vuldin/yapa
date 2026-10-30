@@ -18,7 +18,7 @@
     "dev": "tsc --watch",
     "start": "node dist/server.js",
     "test": "vitest run",
-    "test:integration": "vitest run test/integration.test.ts"
+    "test:integration": "vitest run test/integration.test.ts test/coord.integration.test.ts"
   },
   "dependencies": {
     "@google-cloud/cloud-sql-connector": "1.12.0",

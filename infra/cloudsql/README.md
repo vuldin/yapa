@@ -28,6 +28,7 @@ Files:
 | `sql/03_grants.sql` | DML-only grants for the runtime IAM user |
 | `sql/04_rls.sql` | row-level security; apply with the first josh-311 release |
 | `sql/05_mcp_runtime.sql` | read-only grants + RLS read policy for the remote MCP IAM user (josh-313) |
+| `sql/06_coordination.sql` | schema v3: leases, lease log and counters, with their runtime grants (josh-631) |
 | `sql/verify_counts.sql` | read-only fingerprint for migration and restore checks |
 | `../../scripts/migrate-db.mjs` | copy + verify from the current database |
 | `RESTORE.md` | PITR restore drill |
@@ -98,6 +99,20 @@ psql "$ADMIN" -v ON_ERROR_STOP=1 --single-transaction \
 In the output only `sel` may be `t`; the
 `INSERT (username, email)` column grant on `users` (self-service sign-up) shows
 in `\dp users`.
+
+### Coordination tables (schema v3, josh-631)
+
+Leases and counters for multi-session coordination (`docs/service-design.md`
+section 5, "Coordination"). Apply before deploying a service release that has
+the `/v1/leases` routes; an older service ignores the tables. Re-run it after
+any re-run of `03_grants.sql`, which revokes everything first.
+
+```sh
+psql "$ADMIN" -v ON_ERROR_STOP=1 --single-transaction \
+  -v runtime_user="$(terraform output -raw runtime_db_user)" \
+  -f sql/06_coordination.sql
+psql "$ADMIN" -c 'SELECT max(version) FROM schema_version'   # 3
+```
 
 ## Migrate the data
 

@@ -101,6 +101,14 @@ already captured in git history or in an existing memory.
   a duplicate
 - Session start: covered by Per-Prompt Routine step 3
 
+### Shared Work (leases)
+- Some projects coordinate work through YAPA leases (the \`lease\` tool, or a
+  project script calling \`yapa coord\`). Take a lease only when the
+  project's own instructions or tooling call for it.
+- If an acquire is refused, tell the user who holds the work and since when,
+  and offer something else. If you took over an expired lease, say whose it
+  was. If the service is unreachable, say the work is not shared.
+
 ### Periodic Compaction
 - When YAPA emits a "compaction candidate" reminder at session start, call
   \`compaction_suggest\` for the named collection, write a rolling summary of

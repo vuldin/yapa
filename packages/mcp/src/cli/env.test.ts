@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { resolveHostEnv } from './env.js';
+import { pluginSettingsEnv, resolveHostEnv } from './env.js';
+
+describe('pluginSettingsEnv (yapa coord from a plain shell)', () => {
+  const settings = {
+    enabledPlugins: { 'yapa@yapa': true },
+    pluginConfigs: { 'yapa@yapa': { options: { sync_enabled: true, sync_service_url: 'https://svc.example', username: '', project_roots: '~/p' } } },
+  };
+
+  it('maps the enabled plugin options to YAPA_* (booleans as strings, empty values skipped)', () => {
+    expect(pluginSettingsEnv({}, settings)).toEqual({ YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://svc.example', YAPA_PROJECT_ROOTS: '~/p' });
+  });
+
+  it('never overrides explicit env, and ignores a disabled or absent plugin', () => {
+    expect(pluginSettingsEnv({ YAPA_SYNC_SERVICE_URL: 'http://local' }, settings).YAPA_SYNC_SERVICE_URL).toBeUndefined();
+    expect(pluginSettingsEnv({}, { ...settings, enabledPlugins: { 'yapa@yapa': false } })).toEqual({});
+    expect(pluginSettingsEnv({}, {})).toEqual({});
+  });
+});
 
 const claudeConfig = {
   mcpServers: { yapa: { env: { YAPA_USERNAME: 'josh', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_DATABASE_URL: 'postgres://u:p@h/yapa' } } },

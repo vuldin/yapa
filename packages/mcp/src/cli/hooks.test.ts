@@ -10,7 +10,7 @@ const { pullCollection, captureTurn } = vi.hoisted(() => ({
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution } from './hooks.js';
+import { userPromptSubmit, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -197,5 +197,28 @@ describe('attribution', () => {
     expect(attribution({ origin_user: 'teammate' })).toBe(', by teammate');
     expect(attribution({ origin_user: 'josh' })).toBe('');
     expect(attribution({})).toBe('');
+  });
+});
+
+describe('lease presence at session start', () => {
+  const lease = (key: string, user: string, session: string, extra: Record<string, unknown> = {}) => ({
+    collection: 'project-acme', key, holder: { user, session, device: null }, title: null, scope: [`key:${key}`],
+    ttl_seconds: 7200, acquired_at: 1000, heartbeat_at: 1000, expires_at: 8200, expired: false, took_over_from: null, ...extra,
+  });
+
+  it('shows nothing when nobody holds anything', () => {
+    expect(presenceLines([], 2000, ['s1'], 'josh')).toEqual([]);
+  });
+
+  it("names teammates, this session and the user's other sessions", () => {
+    const out = presenceLines([
+      lease('josh-7', 'josh', 's1', { title: 'upgrade runbook' }),
+      lease('josh-8', 'josh', 'other-session-id'),
+      lease('dana-3', 'dana', 'd1'),
+    ], 2800, ['s1', undefined], 'josh');
+    expect(out[1]).toBe('## Work in progress (leases)');
+    expect(out[2]).toBe('- **josh-7** upgrade runbook: you (this session), for 30m, expires in 90m');
+    expect(out[3]).toBe('- **josh-8**: you (another session, other-se), for 30m, expires in 90m');
+    expect(out[4]).toBe('- **dana-3**: dana, for 30m, expires in 90m');
   });
 });

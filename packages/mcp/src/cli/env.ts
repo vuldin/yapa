@@ -55,6 +55,44 @@ export function resolveHostEnv(
   return add;
 }
 
+/**
+ * Plugin options as YAPA_* variables, read from Claude Code settings
+ * (`pluginConfigs["yapa@yapa"].options`), for commands run from a plain
+ * shell (`yapa coord`, called by scripts) that get no CLAUDE_PLUGIN_OPTION_*.
+ * Only when the plugin is enabled; never overrides what's already set.
+ */
+export function pluginSettingsEnv(env: Record<string, string | undefined>, settings: any): Record<string, string> {
+  const add: Record<string, string> = {};
+  if (settings?.enabledPlugins?.['yapa@yapa'] !== true) return add;
+  const options = settings?.pluginConfigs?.['yapa@yapa']?.options;
+  if (!options || typeof options !== 'object') return add;
+  for (const [key, value] of Object.entries(options)) {
+    const name = `YAPA_${key.toUpperCase()}`;
+    const v = typeof value === 'boolean' || typeof value === 'number' ? String(value) : value;
+    if (typeof v === 'string' && v !== '' && env[name] === undefined) add[name] = v;
+  }
+  return add;
+}
+
+/**
+ * For `yapa coord` from a shell: explicit env, then the enabled plugin's
+ * options in settings.json, then a `claude mcp add` install (adoptHostEnv).
+ */
+export function adoptCliEnv(cwd?: string): void {
+  try {
+    const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    const settings = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf-8'));
+    const add = pluginSettingsEnv(process.env, settings);
+    if (Object.keys(add).length) {
+      Object.assign(process.env, add);
+      return; // the plugin is the install; do not mix in a legacy mcp entry
+    }
+  } catch {
+    // no settings.json: fall through
+  }
+  adoptHostEnv(cwd);
+}
+
 /** Apply resolveHostEnv to process.env (reads ~/.claude.json if present). */
 export function adoptHostEnv(cwd?: string): void {
   let claudeConfig: any;

@@ -23,6 +23,10 @@ import {
   consolidateStaleDrafts,
   type CollectionDetection,
   isSyncableCollection,
+  currentSession,
+  heartbeatIfDue,
+  requireCoordination,
+  type Lease,
 } from '@yapa/core';
 
 import { CLAUDE_CODE_RULES } from '../rules.js';
@@ -61,6 +65,9 @@ interface SessionEndInput extends BaseHookInput {
 const HOOK_PULL_OVERLAP_SECONDS = 600;
 /** Budget for the session-start fallback that rolls up crashed sessions' journal drafts. */
 const STALE_JOURNAL_BUDGET_MS = 2000;
+/** Budgets for lease presence (session start) and the automatic heartbeat (prompt path). */
+const LEASE_LIST_BUDGET_MS = 1500;
+const HEARTBEAT_BUDGET_MS = 1500;
 
 function emit(payload: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(payload));
@@ -171,6 +178,55 @@ function takeNotice(sessionId: string | undefined): string | undefined {
   }
 }
 
+// --- Leases: automatic heartbeat and presence --------------------------------
+
+/**
+ * The hook input's session and the Claude Code session id in the env: they
+ * can differ after /clear (the MCP server keeps the id it started with), and
+ * a lease taken under either should stay alive while this session is active.
+ */
+function leaseSessions(input: BaseHookInput): Array<string | undefined> {
+  return [input.session_id, currentSession()];
+}
+
+/** Renew this session's leases when due. Only sessions that hold leases ever reach the network. */
+async function keepLeasesAlive(input: BaseHookInput): Promise<void> {
+  try {
+    await withTimeout(heartbeatIfDue(leaseSessions(input)), HEARTBEAT_BUDGET_MS);
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] lease heartbeat failed (non-fatal): ${e}\n`);
+  }
+}
+
+const relTime = (secs: number) => (secs < 120 ? `${secs}s` : secs < 7200 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`);
+
+/** Lines for the session-start block: who holds what in the active collection right now. */
+export function presenceLines(leases: Lease[], now: number, mySessions: Array<string | undefined>, me: string): string[] {
+  if (!leases.length) return [];
+  const mine = new Set(mySessions.filter(Boolean));
+  const out = ['', '## Work in progress (leases)'];
+  for (const l of leases.slice(0, 10)) {
+    const who = l.holder.user === me
+      ? (mine.has(l.holder.session) ? 'you (this session)' : `you (another session, ${l.holder.session.slice(0, 8)})`)
+      : l.holder.user;
+    const title = l.title ? ` ${l.title}` : '';
+    out.push(`- **${l.key}**${title}: ${who}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
+  }
+  if (leases.length > 10) out.push(`- _…${leases.length - 10} more (\`lease\` action \`list\`)_`);
+  return out;
+}
+
+async function presence(collection: string, input: BaseHookInput): Promise<string[]> {
+  if (!isSyncConfigured() || !isSyncableCollection(collection)) return [];
+  try {
+    const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
+    if (!r) return [];
+    return presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME);
+  } catch {
+    return []; // offline, older service, signed out: presence is optional
+  }
+}
+
 // --- Hooks -------------------------------------------------------------------
 
 async function findCompactionCandidates(): Promise<string[]> {
@@ -194,6 +250,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
+  const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
 
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
@@ -209,6 +266,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   } catch (e) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}\n`);
   }
+
+  lines.push(...held);
 
   try {
     const memories = await listMemories({ collection, limit: 5 });
@@ -258,7 +317,7 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
     return;
   }
   recordPrompt(input.session_id, prompt);
-  await freshenFromRemote(collection);
+  await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input)]);
 
   const lines: string[] = ['# YAPA Recall', '', `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`];
   const notice = takeNotice(input.session_id);
@@ -295,6 +354,7 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
  */
 export async function stop(input: StopInput): Promise<void> {
   emit({}); // never blocks or alters the stop; all work below is best-effort
+  await keepLeasesAlive(input); // a long turn ends: renew before the session may go quiet
   const config = getConfig();
   if (!config.RESPONSE_CAPTURE || input.stop_hook_active || !input.session_id) return;
 

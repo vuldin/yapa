@@ -564,6 +564,130 @@ describe('username comes from the service (GET /v1/me)', () => {
   });
 });
 
+describe('coordination (leases, counters, task ids)', () => {
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'yapa-http-coord-'));
+  });
+
+  afterAll(async () => {
+    setSyncBackend(undefined);
+    resetStore();
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base }));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('each call hits its route with the documented body; counters send an Idempotency-Key', async () => {
+    const lease = { collection: 'project-acme', key: 'tester-1', holder: { user: 'tester', session: 's1', device: 'dev-A' }, scope: ['key:tester-1'] };
+    handler = s => {
+      if (s.path === '/v1/leases:acquire') return { json: { granted: true, renewed: false, lease } };
+      if (s.path === '/v1/leases:heartbeat') return { json: { renewed: [lease], lost: [] } };
+      if (s.path === '/v1/leases:release') return { json: { released: true, lease } };
+      if (s.path === '/v1/leases') return { json: { leases: [lease], now: 5 } };
+      if (s.path === '/v1/counters:next') return { json: { value: 150 } };
+      if (s.path === '/v1/me/task-ids:next') return { json: { id: 'tester-9', number: 9 } };
+      return { status: 404, json: { error: { code: 'not_found', message: 'no' } } };
+    };
+    const c = backend().coordination;
+    const a = await c.leaseAcquire({ collection: 'project-acme', key: 'tester-1', session: 's1', scope: ['res:staging'], ttlSeconds: 600, title: 't' });
+    expect(a.granted).toBe(true);
+    expect(seen[0]).toMatchObject({ method: 'POST', body: { collection: 'project-acme', key: 'tester-1', session: 's1', scope: ['res:staging'], ttl_seconds: 600, title: 't' } });
+    await c.leaseHeartbeat('project-acme', 's1', ['tester-1']);
+    expect(seen[1].body).toEqual({ collection: 'project-acme', session: 's1', keys: ['tester-1'] });
+    await c.leaseRelease('project-acme', 'tester-1', 's1', 'done');
+    expect(seen[2].body).toEqual({ collection: 'project-acme', key: 'tester-1', session: 's1', outcome: 'done' });
+    expect((await c.leaseList('project-acme', true)).leases).toHaveLength(1);
+    expect(Object.fromEntries(seen[3].query)).toEqual({ collection: 'project-acme', include_expired: 'true' });
+    expect(await c.counterNext('project-acme', 'RFC', 148)).toBe(150);
+    expect(seen[4].body).toEqual({ collection: 'project-acme', name: 'RFC', floor: 148 });
+    expect(seen[4].headers['idempotency-key']).toBeTruthy();
+    expect(await c.nextTaskId(3)).toBe('tester-9');
+    expect(seen[5].headers['idempotency-key']).toBeTruthy();
+  });
+
+  it('getNextTaskId takes the id from the service counter, floored by the local max', async () => {
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base }));
+    setStore(createLocalStore(dir));
+    await getStore().createCollection('project-x');
+    await getStore().addDocument('project-x', 'tester-12', 'local task', { type: 'task', id: 'tester-12', created_at: 1 });
+    handler = s => {
+      if (s.path === '/v1/me') return { json: { username: 'tester', email: 'tester@example.com', limits: {} } };
+      if (s.path === '/v1/me/task-ids:next') return { json: { id: `tester-${Math.max(s.body.floor, 40) + 1}`, number: 0 } };
+      return { status: 500, json: { error: { code: 'internal', message: 'should not be called' } } };
+    };
+    setSyncBackend(backend());
+    expect(await getNextTaskId()).toBe('tester-41');
+    expect(seen.find(s => s.path === '/v1/me/task-ids:next')?.body).toEqual({ floor: 12 });
+  });
+
+  it('getNextTaskId falls back to max + 1 when the service has no counter route (older service)', async () => {
+    handler = s => {
+      if (s.path === '/v1/me') return { json: { username: 'tester', email: 'tester@example.com', limits: {} } };
+      if (s.path === '/v1/me/max-task-number') return { json: { max: 20 } };
+      return { status: 404, json: { error: { code: 'not_found', message: 'no such route' } } };
+    };
+    setSyncBackend(backend());
+    expect(await getNextTaskId()).toBe('tester-21');
+  });
+
+  it('requireCoordination: offline or an older service is "unavailable"; bad input is a real error', async () => {
+    const { requireCoordination, CoordinationUnavailableError } = await import('./coordination.js');
+    handler = () => ({ status: 404, json: { error: { code: 'not_found', message: 'no such route' } } });
+    setSyncBackend(backend());
+    await expect((await requireCoordination()).leaseList('project-acme')).rejects.toBeInstanceOf(CoordinationUnavailableError);
+    handler = () => ({ status: 400, json: { error: { code: 'invalid_request', message: 'key must match' } } });
+    const err = await (await requireCoordination()).leaseAcquire({ collection: 'project-acme', key: 'k', session: 's' }).catch(e => e);
+    expect(err).not.toBeInstanceOf(CoordinationUnavailableError);
+    expect(err.code).toBe('invalid_request');
+    setSyncBackend(backend({ timeoutMs: 1 }));
+    handler = async () => { await new Promise(r => setTimeout(r, 50)); return { json: {} }; };
+    await expect((await requireCoordination()).counterNext('project-acme', 'x')).rejects.toMatchObject({ reason: 'unreachable' });
+  });
+
+  it('currentSession: explicit, then YAPA_SESSION, then the Claude Code session id', async () => {
+    const { currentSession } = await import('./coordination.js');
+    const env = { YAPA_SESSION: 'from-yapa', CLAUDE_CODE_SESSION_ID: 'from-claude' };
+    expect(currentSession('explicit', env)).toBe('explicit');
+    expect(currentSession(undefined, env)).toBe('from-yapa');
+    expect(currentSession(undefined, { CLAUDE_CODE_SESSION_ID: 'from-claude' })).toBe('from-claude');
+    expect(currentSession('bad session id', {})).toBeUndefined();
+  });
+
+  it('heartbeatIfDue: no marker means no request; due renews everywhere; nothing left clears the marker', async () => {
+    const { heartbeatIfDue, noteLeaseHeld, sessionsHoldingLeases } = await import('./coordination.js');
+    const leaseDir = join(dir, 'leases');
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_LEASE_STATE_DIR: leaseDir }));
+    let renewed: unknown[] = [{ key: 'k', ttl_seconds: 600 }];
+    handler = s => (s.path === '/v1/leases:heartbeat' ? { json: { renewed, lost: [] } } : { status: 404, json: { error: { code: 'not_found', message: 'no' } } });
+    setSyncBackend(backend());
+
+    expect(await heartbeatIfDue(['sess-1'], 1000)).toBe(0);
+    expect(seen.filter(s => s.path === '/v1/leases:heartbeat')).toHaveLength(0);
+
+    noteLeaseHeld('sess-1', 600, 1000);
+    expect(sessionsHoldingLeases()).toEqual(['sess-1']);
+    expect(await heartbeatIfDue(['sess-1'], 1100)).toBe(0); // interval = min(300, 600/3) = 200 s
+    expect(await heartbeatIfDue(['sess-1', 'sess-1', undefined], 1200)).toBe(1);
+    const calls = seen.filter(s => s.path === '/v1/leases:heartbeat');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body).toEqual({ session: 'sess-1' }); // no collection: every collection
+
+    renewed = [];
+    expect(await heartbeatIfDue(['sess-1'], 1500)).toBe(0);
+    expect(sessionsHoldingLeases()).toEqual([]);
+  });
+
+  it('requireCoordination without the service says so', async () => {
+    const { requireCoordination } = await import('./coordination.js');
+    setSyncBackend(undefined);
+    const prev = getConfig();
+    setConfig(createConfig({ YAPA_USERNAME: 'tester' }));
+    await expect(requireCoordination()).rejects.toMatchObject({ reason: 'not_configured' });
+    setConfig(prev);
+  });
+});
+
 describe('IdTokenProvider disk cache', () => {
   const jwt = (exp: number) => `h.${Buffer.from(JSON.stringify({ exp, email: 'a@example.com' })).toString('base64url')}.s`;
 

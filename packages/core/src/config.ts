@@ -138,6 +138,8 @@ export interface YapaConfig {
    */
   DEVICE_ID: string;
   DEVICE_ID_PATH: string;
+  /** Where this machine notes which sessions hold leases, so hooks heartbeat only when there is something to renew. */
+  LEASE_STATE_DIR: string;
   /** Seconds of overlap re-read on each pull so mid-pull pushes are never skipped. */
   SYNC_PULL_OVERLAP_SECONDS: number;
   /** Debounce before a write-triggered push (0 disables push-on-write). */
@@ -268,6 +270,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, 'SYNC_SIMILARITY_THRESHOLD', '0.95')),
     DEVICE_ID: get(env, 'DEVICE_ID', ''),
     DEVICE_ID_PATH: get(env, 'DEVICE_ID_PATH', pathJoin(homedir(), '.local', 'share', 'yapa', 'device-id')),
+    LEASE_STATE_DIR: get(env, 'LEASE_STATE_DIR', pathJoin(homedir(), '.local', 'share', 'yapa', 'leases')),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
     SYNC_CA_CERT: get(env, 'SYNC_CA_CERT', ''),

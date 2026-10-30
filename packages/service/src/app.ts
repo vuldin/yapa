@@ -19,6 +19,7 @@ import {
   MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, MAX_UPSERT_BYTES, MAX_UPSERT_DOCS, PULL_LIMIT_DEFAULT, PULL_LIMIT_MAX,
   EMBEDDING_DIMS, MAX_CONTENT_BYTES, MAX_FUTURE_SECONDS, MAX_METADATA_BYTES,
 } from './rules.js';
+import * as coord from './coord.js';
 import * as store from './store.js';
 import type { RequestCtx, UpsertResult } from './store.js';
 
@@ -372,6 +373,72 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const { body } = await jsonBody(c);
     const add = assertIdList(body.add, MAX_RELATED_IDS, 'add');
     return c.json({ related_ids: await store.addRelatedIds(pool, ctxOf(c), id, add) });
+  });
+
+  // ------------------------------------------------- coordination (schema v3)
+  // Synchronous on purpose: the caller learns before it starts whether it
+  // holds the work. Shared collections only.
+
+  route('post', '/v1/leases:acquire', async c => {
+    limit(c, 'write');
+    const { body } = await jsonBody(c);
+    const collection = assertCollection(body.collection);
+    const key = coord.assertKey(body.key);
+    const out = await coord.acquire(pool, ctxOf(c), {
+      collection,
+      key,
+      session: coord.assertSession(body.session),
+      scope: coord.assertScope(body.scope),
+      ttlSeconds: coord.assertTtl(body.ttl_seconds),
+      title: coord.assertTitle(body.title),
+    });
+    return c.json(out);
+  });
+
+  route('post', '/v1/leases:heartbeat', async c => {
+    limit(c, 'write');
+    const { body } = await jsonBody(c);
+    // No collection: renew the session's leases everywhere (the client hooks do this).
+    const collection = body.collection === undefined ? undefined : assertCollection(body.collection);
+    const keys = body.keys === undefined ? undefined : coord.assertScope(body.keys);
+    return c.json(await coord.heartbeat(pool, ctxOf(c), collection, coord.assertSession(body.session), keys));
+  });
+
+  route('post', '/v1/leases:release', async c => {
+    limit(c, 'write');
+    const { body } = await jsonBody(c);
+    const collection = assertCollection(body.collection);
+    return c.json(await coord.release(pool, ctxOf(c), collection, coord.assertKey(body.key), coord.assertSession(body.session), coord.assertOutcome(body.outcome)));
+  });
+
+  route('get', '/v1/leases', async c => {
+    limit(c, 'read');
+    const q = c.req.query();
+    const collection = assertCollection(q.collection);
+    const includeExpired = q.include_expired === 'true' || q.include_expired === '1';
+    return c.json({ leases: await coord.list(pool, ctxOf(c), collection, includeExpired), now: Math.floor(nowMs() / 1000) });
+  });
+
+  // Not idempotent by nature (every call hands out a new value); an
+  // Idempotency-Key makes a retried request return the same value.
+  route('post', '/v1/counters:next', async c => {
+    limit(c, 'write');
+    const { raw, body } = await jsonBody(c);
+    const collection = assertCollection(body.collection);
+    const name = coord.assertCounterName(body.name);
+    const floor = coord.assertFloor(body.floor);
+    return idempotent(c, raw, async () => ({ status: 200, body: { value: await coord.counterNext(pool, ctxOf(c), collection, name, floor) } }));
+  });
+
+  route('post', '/v1/me/task-ids:next', async c => {
+    limit(c, 'write');
+    const { raw, body } = await jsonBody(c);
+    const floor = coord.assertFloor(body.floor);
+    return idempotent(c, raw, async () => {
+      const ctx = ctxOf(c);
+      const n = await coord.nextTaskNumber(pool, ctx, floor, cl => store.maxTaskNumber(cl, ctx.caller.username));
+      return { status: 200, body: { id: `${ctx.caller.username}-${n}`, number: n } };
+    });
   });
 
   // `/v1/collections/{c}:similar`: the colon is inside one path segment.
