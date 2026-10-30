@@ -20,6 +20,12 @@ import { getNextTaskId } from '../tasks/create.js';
 import { pushToRemote, listRejectedDocs } from './push.js';
 import { pullCollection, pullFromRemote } from './pull.js';
 import { queueSyncDelete } from './deletes.js';
+import { forgetMemory } from '../memory/forget.js';
+import { storeMemory } from '../memory/store.js';
+import { createTask } from '../tasks/create.js';
+import { updateTask, completeTask } from '../tasks/update.js';
+import { deleteTask } from '../tasks/delete.js';
+import { addDependency } from '../tasks/dependencies.js';
 
 interface Seen {
   method: string;
@@ -187,6 +193,25 @@ describe('every API call', () => {
     expect(seen[1].query.get('cursor')).toBe('CUR');
     expect(seen[1].query.has('since')).toBe(false);
     expect(p2.hasMore).toBe(false);
+  });
+
+  it('a base URL with a path prefix keeps it: every request goes to <prefix>/v1/...', async () => {
+    expect(createConfig({ YAPA_SYNC_SERVICE_URL: 'https://sync.example.com/api/yapa/' }).SYNC_SERVICE_URL).toBe('https://sync.example.com/api/yapa');
+    handler = s => (s.path.endsWith('/v1/me')
+      ? { json: { username: 'tester', email: 'tester@example.com' } }
+      : { json: { documents: [], deletions: [], has_more: false, results: [], deleted: 0, leases: [], now: 0 } });
+    const b = new HttpBackend({ baseUrl: `${base}/api/yapa/`, tokens: tokens().provider, device: () => 'dev-A', timeoutMs: 2000 });
+    expect(b.target).toBe(`${base}/api/yapa`);
+    await b.me(true);
+    await b.pull('project-x', { since: 0 });
+    await b.delete(['a'], 'delete');
+    await b.coordination.leaseList('project-x');
+    expect(seen.map(s => s.path)).toEqual([
+      '/api/yapa/v1/me',
+      '/api/yapa/v1/collections/project-x/documents',
+      '/api/yapa/v1/documents:batchDelete',
+      '/api/yapa/v1/leases',
+    ]);
   });
 
   it('upsertMany: per-item outcomes (id_taken with suggested_id, permanent secret rejection, pending is success)', async () => {
@@ -473,6 +498,44 @@ describe('push and pull through the service', () => {
     expect(stats.retracted).toBe(1);
     expect(seen.filter(s => s.path === '/v1/documents:batchDelete').map(s => s.body)).toEqual([{ ids: ['own-2'], reason: 'retract' }]);
     expect(fake.docs.has('own-2')).toBe(false);
+  });
+
+  it('read_only docs from the remote: edits, deletes and supersedes refuse; never pushed or queued for delete', async () => {
+    fake.putTeammate('ro-mem', 'project-ro', 'a note the remote service owns');
+    fake.docs.get('ro-mem').metadata = { type: 'memory', read_only: true };
+    fake.docs.set('ro-task', { id: 'ro-task', collection: 'project-ro', content: 'a task the remote service owns', metadata: { type: 'task', status: 'pending', read_only: true }, origin_user: 'svc-remote', related_ids: [], created_at: 1_800_000_000, updated_at: 1_800_000_000, seq: ++fake.seq, device: 'dev-remote' });
+    await pullCollection('project-ro', 0);
+    expect(await getDocumentsByIds('project-ro', ['ro-mem', 'ro-task'])).toHaveLength(2);
+
+    const refusal = /read-only: owned by the remote service/;
+    await expect(forgetMemory('ro-mem')).rejects.toThrow(refusal);
+    await expect(deleteTask('ro-task')).rejects.toThrow(refusal);
+    await expect(updateTask('ro-task', { status: 'in_progress' })).rejects.toThrow(refusal);
+    await expect(completeTask('ro-task')).rejects.toThrow(refusal);
+    await expect(storeMemory('a correction of the owned note', { collection: 'project-ro', supersedes: 'ro-mem' })).rejects.toThrow(refusal);
+    await expect(addDependency('ro-task', 'ro-task')).rejects.toThrow(refusal);
+    const kept = await getDocumentsByIds('project-ro', ['ro-mem', 'ro-task']);
+    expect(kept).toHaveLength(2);
+    expect(kept.find(d => d.id === 'ro-task')?.metadata.status).toBe('pending');
+
+    // A dependency on a read-only task lives on my task only.
+    const mine = await createTask('my task that waits on the owned one', {}, 'project-ro');
+    await addDependency(mine, 'ro-task');
+    expect((await getDocumentsByIds('project-ro', ['ro-task']))[0].metadata.blocks ?? []).toEqual([]);
+
+    // The client cannot mint read_only, and a local change to an owned doc
+    // (an archive by compaction, say) never goes back to the remote.
+    const [own] = (await storeMemory('i claim to be read only', { collection: 'project-ro', metadata: { read_only: true } })).ids;
+    expect((await getDocumentsByIds('project-ro', [own]))[0].metadata.read_only).toBeUndefined();
+    const [mem] = await getDocumentsByIds('project-ro', ['ro-mem']);
+    await getStore().addDocument('project-ro', 'ro-mem', 'edited here anyway', { ...mem.metadata, is_synced: false });
+    seen.length = 0;
+    await pushToRemote();
+    const sent = seen.flatMap(s => s.path === '/v1/documents:batchUpsert' ? s.body.documents.map((d: any) => d.id) : s.path === '/v1/documents:batchDelete' ? s.body.ids : []);
+    expect(sent).toContain(own);
+    expect(sent).not.toContain('ro-mem');
+    expect(sent).not.toContain('ro-task');
+    expect(fake.docs.get('ro-mem').content).toBe('a note the remote service owns');
   });
 
   it('an auth failure stops the cycle early, does not advance the pull point, and is reported', async () => {

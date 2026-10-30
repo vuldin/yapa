@@ -3,6 +3,7 @@ import { archivedMetadata } from './archive.js';
 import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
 import { getConfig, SALIENCE_START } from '../config.js';
+import { assertWritable } from '../sync/syncable.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -110,6 +111,16 @@ export async function storeMemory(
 ): Promise<StoreMemoryResult> {
   const collection = options.collection ?? 'global';
   await getOrCreateCollection(collection);
+  // Superseding archives the old doc: refuse before storing anything when
+  // the remote owns it. `read_only` itself is set only by the remote.
+  if (options.supersedes) {
+    const [old] = await getDocumentsByIds(collection, [options.supersedes]).catch(() => []);
+    assertWritable(options.supersedes, old?.metadata);
+  }
+  if (options.metadata && 'read_only' in options.metadata) {
+    const { read_only: _ignored, ...rest } = options.metadata;
+    options = { ...options, metadata: rest };
+  }
 
   const potential_conflicts = await detectConflicts(collection, content);
 

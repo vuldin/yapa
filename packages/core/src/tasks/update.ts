@@ -1,6 +1,7 @@
 import { getConfig } from '../config.js';
 import { updateDocument, getDocumentsByIds, listCollections, addDocument } from '../store/index.js';
 import { fromChroma } from '../metadata-adapter.js';
+import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
 import { createTask } from './create.js';
@@ -42,6 +43,7 @@ export async function updateTask(
 ): Promise<void> {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
+  assertWritable(id, task.metadata);
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
   const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes'];

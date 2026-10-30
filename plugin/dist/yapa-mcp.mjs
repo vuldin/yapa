@@ -38881,6 +38881,19 @@ function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
 
 // packages/core/src/memory/store.ts
 init_config();
+
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+function isReadOnlyDoc(metadata) {
+  return metadata?.read_only === true;
+}
+function assertWritable(id, metadata) {
+  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
+}
+
+// packages/core/src/memory/store.ts
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
     id: c.id,
@@ -38919,6 +38932,14 @@ async function archiveSuperseded(collection, oldId, newId) {
 async function storeMemory(content, options = {}) {
   const collection = options.collection ?? "global";
   await getOrCreateCollection2(collection);
+  if (options.supersedes) {
+    const [old] = await getDocumentsByIds2(collection, [options.supersedes]).catch(() => []);
+    assertWritable(options.supersedes, old?.metadata);
+  }
+  if (options.metadata && "read_only" in options.metadata) {
+    const { read_only: _ignored, ...rest } = options.metadata;
+    options = { ...options, metadata: rest };
+  }
   const potential_conflicts = await detectConflicts(collection, content);
   const now = Math.floor(Date.now() / 1e3);
   const sector = options.sector ?? detectSector(content);
@@ -39147,6 +39168,7 @@ async function deleteDocumentEverywhere(id) {
       continue;
     }
     if (!found) continue;
+    assertWritable(id, found.metadata);
     await deleteDocument2(collection.name, id);
     if (getConfig().SYNC_ENABLED && isSyncable(collection.name)) {
       const owner = found.metadata.origin_user;
@@ -39482,6 +39504,7 @@ async function getTask(id) {
 async function updateTask(id, updates) {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
+  assertWritable(id, task.metadata);
   const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const updatedMetadata = {
@@ -39586,11 +39609,13 @@ async function addDependency(taskId, dependsOnId) {
   if (!task || !dep) {
     throw new Error("One or both tasks not found");
   }
+  assertWritable(taskId, task.metadata);
   const taskDeps = Array.isArray(task.metadata.depends_on) ? task.metadata.depends_on : (task.metadata.depends_on ?? "").split(",").filter(Boolean);
   if (!taskDeps.includes(dependsOnId)) {
     taskDeps.push(dependsOnId);
     await updateTask(taskId, { depends_on: taskDeps });
   }
+  if (isReadOnlyDoc(dep.metadata)) return;
   const depBlocks = Array.isArray(dep.metadata.blocks) ? dep.metadata.blocks : (dep.metadata.blocks ?? "").split(",").filter(Boolean);
   if (!depBlocks.includes(taskId)) {
     depBlocks.push(taskId);
@@ -39609,7 +39634,7 @@ async function removeDependency(taskId, dependsOnId) {
       await updateTask(taskId, { depends_on: taskDeps.filter((id) => id !== dependsOnId) });
     }
   }
-  if (dep) {
+  if (dep && !isReadOnlyDoc(dep.metadata)) {
     const depBlocks = toList(dep.metadata.blocks);
     if (depBlocks.includes(taskId)) {
       await updateTask(dependsOnId, { blocks: depBlocks.filter((id) => id !== taskId) });
@@ -39768,13 +39793,6 @@ async function updateSyncSubscriptions(collections) {
 
 // packages/core/src/collections/manage.ts
 init_store();
-
-// packages/core/src/sync/syncable.ts
-function isSyncableCollection(name) {
-  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
-}
-
-// packages/core/src/collections/manage.ts
 async function listCollectionsWithCounts() {
   const collections = await listCollections2();
   const results = await Promise.all(
@@ -40939,6 +40957,7 @@ async function pushToRemote() {
       for (const unsynced of unsyncedDocs) {
         if (unsynced.id.startsWith("__")) continue;
         if (unsynced.metadata.type === "journal_draft") continue;
+        if (isReadOnlyDoc(unsynced.metadata)) continue;
         if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
         const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
         try {
@@ -41085,7 +41104,7 @@ async function rekeyTask(collection, doc, suggestedId) {
 }
 async function retractSharedCopies(backend, collection) {
   const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
-  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.remote_checked_at !== versionOf(d));
+  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
   const remote = await backend.ownersByIds(unchecked.map((d) => d.id));

@@ -325,8 +325,8 @@ Remote sync lets multiple machines or teammates share memories and tasks. It is 
 ### Setup (sync service)
 
 1. Install the plugin (above) and enable `sync_enabled`.
-2. Set `sync_service_url` to your team's YAPA sync service URL (ask your YAPA admin).
-3. Sign in once: `gcloud auth login` with your company Google account. YAPA calls `gcloud auth print-identity-token` for a short-lived ID token, keeps it in memory only, and refreshes it before it expires. Other token sources: set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints an ID token.
+2. Set `sync_service_url` to your team's YAPA sync service URL (ask your YAPA admin). Any remote that implements [YAPA Sync API v1](docs/sync-api.md) works, including one under a path prefix such as `https://example.com/api/yapa`. Read [Connecting to a remote](docs/connecting-to-a-remote.md) first: the first sync pushes every shared collection to it.
+3. Sign in once: `gcloud auth login` with your company Google account. YAPA calls `gcloud auth print-identity-token` for a short-lived (1 h) ID token and refreshes it before it expires. The current token is cached in a 0600 file (`~/.local/share/yapa/id-token`, set `YAPA_SYNC_ID_TOKEN_CACHE` to another path, or `off` to keep it in memory only) so short-lived hook processes don't mint a new one each time. Other token sources: set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints an ID token.
 4. Check with the `sync` tool, `action: 'status'`: it shows the backend, the service URL, who you are signed in as, the last error, and any docs the service refused.
 
 With the service, your username comes from your Google account (shown in `sync status`); task ids use it, and the `username` option is informational. The service enforces ownership (only the owner deletes a shared row), refuses content that looks like a secret (the doc stays local and unsynced, listed in `sync status`, and is retried only after you edit it), renames a task whose id already belongs to a different task, and sends deletions to teammates' machines (a clean copy is removed; a copy with unpushed edits is kept and reported).
