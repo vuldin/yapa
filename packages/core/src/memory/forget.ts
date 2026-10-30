@@ -2,6 +2,7 @@ import { getConfig } from '../config.js';
 import { deleteDocument, getDocumentsByIds, listCollections } from '../store/index.js';
 
 import { addLocalTombstone, queueSyncDelete } from '../sync/deletes.js';
+import { assertWritable } from '../sync/syncable.js';
 
 function isSyncable(collection: string): boolean {
   return !collection.startsWith('private-') && !collection.startsWith('local-');
@@ -23,6 +24,7 @@ export async function deleteDocumentEverywhere(id: string): Promise<string> {
       continue;
     }
     if (!found) continue;
+    assertWritable(id, found.metadata);
 
     await deleteDocument(collection.name, id);
     if (getConfig().SYNC_ENABLED && isSyncable(collection.name)) {

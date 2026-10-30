@@ -32,9 +32,9 @@ You MUST use the AskUserQuestion tool here. Do NOT skip this phase. Do NOT ask q
 - If neither `~/.claude/`, `~/.cursor/`, nor `.opencode/` was found: question "Which editor are you using?" with options: "Claude Code", "Cursor", "OpenCode"
 - Always ask: "Username for task IDs?" with options: the output of `whoami` (labeled with the actual username), "Custom username"
 - Always ask: "Where should YAPA instructions be installed?" — first option MUST be "This project only", second option "Globally for all sessions". Do not reorder these options.
-- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database". If the user selects "Yes — existing database", ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`). If the user selects "Yes — new database", ask a follow-up: "How would you like to host PostgreSQL?" with options: "Docker (local)", "Managed service (Neon, Supabase)", "Cloud provider (AWS, GCP, Azure)". If "Managed service": ask "Which service?" with options: "Neon (free serverless)", "Supabase (free hosted)". If "Cloud provider": ask "Which provider?" with options: "AWS (RDS)", "GCP (Cloud SQL)", "Azure (Flexible Server)". Do NOT ask for a connection URL yet — Phase 3 will handle setup.
+- Always ask: "Enable remote syncing?" with options: "No", "Yes — new database", "Yes — existing database", "Yes - existing sync service (URL)". If the user selects "Yes — existing database", ask for their PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/yapa`). If the user selects "Yes - existing sync service (URL)", ask for the base URL of the remote that implements YAPA Sync API v1 (e.g., `https://sync.example.com`, or with a path prefix `https://example.com/api/yapa`); no database is involved. If the user selects "Yes — new database", ask a follow-up: "How would you like to host PostgreSQL?" with options: "Docker (local)", "Managed service (Neon, Supabase)", "Cloud provider (AWS, GCP, Azure)". If "Managed service": ask "Which service?" with options: "Neon (free serverless)", "Supabase (free hosted)". If "Cloud provider": ask "Which provider?" with options: "AWS (RDS)", "GCP (Cloud SQL)", "Azure (Flexible Server)". Do NOT ask for a connection URL yet — Phase 3 will handle setup.
 
-STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and either SYNC_DATABASE_URL (if "existing database") or SYNC_PROVIDER (if "new database" — one of: docker, neon, supabase, aws, gcp, azure) from these answers for Phase 3.
+STOP. Wait for the user's answers before proceeding. You need USERNAME, SCOPE, and one of SYNC_DATABASE_URL (if "existing database"), SYNC_SERVICE_URL (if "existing sync service") or SYNC_PROVIDER (if "new database" — one of: docker, neon, supabase, aws, gcp, azure) from these answers for Phase 3.
 
 ## Phase 3 — Install (only after Phase 2 answers are received)
 
@@ -265,13 +265,15 @@ Now execute these steps in order, without asking anything else:
    **For all providers**, after obtaining SYNC_DATABASE_URL, tell the user:
    > **Save this connection URL** — you'll need it if you reinstall YAPA or add another machine. Share it with teammates who want to sync with you.
 
+   If the user chose "Yes - existing sync service (URL)", there is no database to set up. Tell the user to sign in once with `gcloud auth login` (or set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints a Google ID token), and point them to `docs/connecting-to-a-remote.md`, in particular its warning: the first sync pushes every document in every shared collection (anything except `global`, `private-*` and `local-*`) to that remote.
+
 6. Register the YAPA MCP server, replacing ABSOLUTE_PATH with this repo's absolute path and USERNAME with the user's answer from Phase 2. If the user enabled remote syncing, also add the sync env vars shown below:
 
    Claude Code — run:
    ```
    claude mcp add -e YAPA_USERNAME=USERNAME -s user yapa -- node ABSOLUTE_PATH/packages/mcp/dist/index.js
    ```
-   If sync enabled, also add: `-e YAPA_SYNC_ENABLED=true -e YAPA_SYNC_DATABASE_URL=SYNC_DATABASE_URL`
+   If sync enabled, also add: `-e YAPA_SYNC_ENABLED=true -e YAPA_SYNC_DATABASE_URL=SYNC_DATABASE_URL` (with an existing sync service: `-e YAPA_SYNC_ENABLED=true -e YAPA_SYNC_SERVICE_URL=SYNC_SERVICE_URL` instead)
 
    Then install the always-on hooks (they read the same `-e` settings from `~/.claude.json`):
    ```
@@ -295,7 +297,7 @@ Now execute these steps in order, without asking anything else:
      }
    }
    ```
-   Omit the `YAPA_SYNC_*` keys if sync is not enabled.
+   Omit the `YAPA_SYNC_*` keys if sync is not enabled. With an existing sync service, use `"YAPA_SYNC_SERVICE_URL": "SYNC_SERVICE_URL"` instead of `YAPA_SYNC_DATABASE_URL`.
 
    OpenCode — merge into `mcpServers` in `.opencode/config.json`:
    ```json
@@ -313,7 +315,7 @@ Now execute these steps in order, without asking anything else:
      }
    }
    ```
-   Omit the `YAPA_SYNC_*` keys if sync is not enabled.
+   Omit the `YAPA_SYNC_*` keys if sync is not enabled. With an existing sync service, use `"YAPA_SYNC_SERVICE_URL": "SYNC_SERVICE_URL"` instead of `YAPA_SYNC_DATABASE_URL`.
 
 7. Write the YAPA behavioral instructions. Append the following block to the correct file based on the user's SCOPE and editor choice from Phase 2:
    - If scope=project and Claude Code: append to `CLAUDE.md` in the user's current working directory

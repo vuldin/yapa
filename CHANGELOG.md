@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+Other services can now be a YAPA client's remote: the sync API is written down as a contract, with a conformance runner to check an implementation.
+
+### Features
+- **YAPA Sync API v1 spec** ([docs/sync-api.md](docs/sync-api.md)): the HTTP contract the client depends on (auth and identity, headers, idempotency, errors and how the client treats them, every endpoint and the fields the client reads, pull cursors and the deletions feed, document shapes, server rules, coordination), plus hints for implementers (durable vs volatile metadata, read-only documents). `packages/service` is the reference implementation.
+- **Conformance runner.** `npm run conformance -- <url>` runs the live suite (`packages/core/src/sync/live.test.ts`) against any remote: sign-in, push/pull across two devices, ownership lookups, deletes and the deletions feed, leases with two sessions, counters, task ids, JSON 404s. Throwaway collection, temporary local stores; skipped without a URL.
+- **Read-only documents.** Docs a remote serves with `metadata.read_only: true` are pulled as usual but cannot be forgotten, updated, completed, deleted or superseded ("read-only: owned by the remote service"), and are never pushed or queued for a remote delete. The client never mints `read_only` itself.
+- **Connecting to a remote** ([docs/connecting-to-a-remote.md](docs/connecting-to-a-remote.md)): configure, sign in, verify, what syncs, and how to evaluate a remote without pushing your data to it. Linked from the README, pilot onboarding, `.env.example`, the plugin option and the install wizard (new option "Yes - existing sync service (URL)").
+
+### Fixes
+- Docs: `embedding_dimension` / `embedding_invalid` are `422`, not `400` (service design); the ID token is cached in a 0600 file, not kept in memory only (README, pilot onboarding); `.env.example` now covers the sync service URL.
+
 ## 1.2.0 (2026-10-29)
 
 Multi-session coordination on the sync service, for any project whose tooling runs several sessions or people on one shared collection. Nothing changes for people who don't use it, except that task ids now come from the service.

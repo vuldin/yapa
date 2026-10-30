@@ -530,12 +530,13 @@ collection.
 
 | HTTP | code | Meaning |
 |------|------|---------|
-| 400 | `invalid_request`, `invalid_collection`, `embedding_dimension`, `embedding_invalid` | malformed input |
+| 400 | `invalid_request`, `invalid_collection` | malformed input |
 | 401 | `unauthenticated` | missing/expired/invalid token (client refreshes once, then surfaces "run yapa login") |
 | 403 | `not_member`, `user_inactive`, `not_owner`, `local_only_collection`, `task_namespace`, `read_only_principal` | authz |
 | 404 | `not_found` | missing or not readable (indistinguishable on purpose) |
 | 409 | `id_taken` | task id collision, includes `suggested_id` |
 | 413 | `payload_too_large` | over batch/doc limits |
+| 422 | `embedding_dimension`, `embedding_invalid` | embedding is not 384 finite numbers with L2 norm 1 +/- 0.01 |
 | 422 | `secret_detected` | content matches a secret pattern; doc stays local (decision 8) |
 | 429 | `rate_limited` | with `Retry-After` seconds |
 | 503 | `unavailable` | DB down / overloaded; client keeps local changes unsynced and retries next cycle |
@@ -806,7 +807,7 @@ author (prompt injection via shared memories), compromised routine.
   cross-user similarity if mixed.
 - v1 validation (decision 12): the server checks every incoming embedding for
   dimension (exactly 384), finiteness (no NaN/Inf) and approximate unit norm
-  (L2 norm within `1 +/- 0.01`); otherwise `400 embedding_dimension` /
+  (L2 norm within `1 +/- 0.01`); otherwise `422 embedding_dimension` /
   `embedding_invalid`. `embedding` is required on every upsert.
   `embedding_model` is recorded but not trusted (it is self-asserted), so v1
   does not detect a well-formed vector that was not produced from `content`.
