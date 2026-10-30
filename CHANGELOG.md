@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 (2026-10-29)
 
-Multi-session coordination on the sync service, for any project whose tooling runs several sessions or people on one shared collection. Apply `infra/cloudsql/sql/06_coordination.sql` before deploying the service.
+Multi-session coordination on the sync service, for any project whose tooling runs several sessions or people on one shared collection. Nothing changes for people who don't use it, except that task ids now come from the service.
+
+**Upgrading:** apply `infra/cloudsql/sql/06_coordination.sql` (schema v3), then deploy the service, then update the plugin. A 1.2.0 plugin against an older service works as before: task ids fall back to local numbering and the "Work in progress" list is skipped.
 
 ### Features
 - **Leases.** `POST /v1/leases:acquire`, `:heartbeat`, `:release` and `GET /v1/leases`: take a lease on a key with a scope and a TTL. It is granted only if no live lease (anyone else's, or your own other sessions) has the same key or an overlapping scope. Answered synchronously from Postgres under a per-collection advisory lock. Expired leases can be taken over (recorded in `lease_log`); the listing doubles as presence.
