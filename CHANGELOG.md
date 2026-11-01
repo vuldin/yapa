@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 (2026-11-01)
 
 Working in YAPA now leaves findings, decisions, questions and follow-ups behind on its own, keeps them current as people answer, and shows each person what waits on them.
 
