@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 (2026-11-01)
+
+You can see whether team sync is working without asking: a status line segment under the prompt shows synced, signed out (with the fix), offline or local only.
+
+**Upgrading:** update the plugin and restart Claude Code, then run `/yapa:statusline` once (with `claude mcp add`: `yapa statusline install`). There is no schema change and nothing to deploy.
 
 ### Features
 - **Sync health in the Claude Code status line.** An expired `gcloud` sign-in used to stop sync silently: errors went to stderr and an in-memory "last error" that was never cleared. Every sync outcome (the MCP server's cycles, the hooks' pulls, and sign-in failures on lease calls, which were not recorded at all) now goes to `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`), with when the outage started and how many local writes are waiting. `/yapa:statusline` (or `yapa statusline install`) adds a status line segment that reads it: `yapa ● synced 2m ago`, `yapa ● signed out since 09:12 · run: gcloud auth login`, `yapa ● offline since 09:12`. An existing status line is kept and restored on uninstall. New option `status_label` (`YAPA_STATUS_LABEL`) renames the segment. `yapa statusline show` prints it.
