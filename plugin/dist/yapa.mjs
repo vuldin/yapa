@@ -6925,7 +6925,7 @@ __export(statusline_exports, {
   uninstallStatusLine: () => uninstallStatusLine
 });
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync8, readFileSync as readFileSync12, renameSync as renameSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync, renameSync as renameSync3, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname4, join as join7, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7108,6 +7108,14 @@ async function main(args, self2) {
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), { color, label: argValue(args, "--label") }) + "\n");
 }
+function isMain(argv1, self2) {
+  if (!argv1 || !/statusline\.m?js$/.test(self2)) return false;
+  try {
+    return realpathSync(resolve(argv1)) === realpathSync(self2);
+  } catch {
+    return false;
+  }
+}
 var DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_MS, ANSI, self;
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
@@ -7117,7 +7125,7 @@ var init_statusline = __esm({
     WRAP_TIMEOUT_MS = 5e3;
     ANSI = { green: "\x1B[32m", red: "\x1B[31m", yellow: "\x1B[33m", dim: "\x1B[2m", reset: "\x1B[0m" };
     self = fileURLToPath(import.meta.url);
-    if (/statusline\.m?js$/.test(self) && process.argv[1] && resolve(process.argv[1]) === self) {
+    if (isMain(process.argv[1], self)) {
       main(process.argv.slice(2), self).catch(() => process.stdout.write("yapa \u25CB sync status unknown\n"));
     }
   }

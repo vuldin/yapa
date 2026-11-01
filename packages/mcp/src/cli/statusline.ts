@@ -15,7 +15,7 @@
 //   node statusline.mjs --uninstall      remove it (restores a wrapped status line)
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -255,7 +255,18 @@ export async function main(args: string[], self: string): Promise<void> {
 }
 
 // Run only as the script itself: the CLI bundle imports these functions too.
+// Compare real paths: node reports the main module's resolved path, and the
+// path Claude Code runs may go through a symlink (macOS /var -> /private/var).
+function isMain(argv1: string | undefined, self: string): boolean {
+  if (!argv1 || !/statusline\.m?js$/.test(self)) return false;
+  try {
+    return realpathSync(resolve(argv1)) === realpathSync(self);
+  } catch {
+    return false;
+  }
+}
+
 const self = fileURLToPath(import.meta.url);
-if (/statusline\.m?js$/.test(self) && process.argv[1] && resolve(process.argv[1]) === self) {
+if (isMain(process.argv[1], self)) {
   main(process.argv.slice(2), self).catch(() => process.stdout.write('yapa ○ sync status unknown\n'));
 }

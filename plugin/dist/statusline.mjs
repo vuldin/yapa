@@ -3,7 +3,7 @@ import { createRequire as __yapaCreateRequire } from 'node:module'; const requir
 
 // packages/mcp/src/cli/statusline.ts
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,8 +190,16 @@ async function main(args, self2) {
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), { color, label: argValue(args, "--label") }) + "\n");
 }
+function isMain(argv1, self2) {
+  if (!argv1 || !/statusline\.m?js$/.test(self2)) return false;
+  try {
+    return realpathSync(resolve(argv1)) === realpathSync(self2);
+  } catch {
+    return false;
+  }
+}
 var self = fileURLToPath(import.meta.url);
-if (/statusline\.m?js$/.test(self) && process.argv[1] && resolve(process.argv[1]) === self) {
+if (isMain(process.argv[1], self)) {
   main(process.argv.slice(2), self).catch(() => process.stdout.write("yapa \u25CB sync status unknown\n"));
 }
 export {

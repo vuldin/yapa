@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
@@ -100,15 +100,20 @@ describe('settings.json', () => {
 describe('the script as Claude Code runs it', () => {
   let d: string;
   let bundled: string;
+  const cleanup: string[] = [];
 
   beforeAll(async () => {
-    d = mkdtempSync(join(tmpdir(), 'yapa-sl-run-'));
+    // Through a symlink, as on macOS (/var -> /private/var) or a linked home dir.
+    const real = mkdtempSync(join(tmpdir(), 'yapa-sl-run-'));
+    d = `${real}-link`;
+    symlinkSync(real, d);
+    cleanup.push(real, d);
     // The same single-file bundle the plugin ships (it must need nothing else).
     bundled = join(d, 'statusline.mjs');
     await build({ entryPoints: [join(__dirname, 'statusline.ts')], outfile: bundled, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' });
   });
 
-  afterAll(() => rmSync(d, { recursive: true, force: true }));
+  afterAll(() => { for (const p of cleanup) rmSync(p, { recursive: true, force: true }); });
 
   const run = (args: string[] = [], env: Record<string, string> = {}) =>
     spawnSync(process.execPath, [bundled, ...args], { input: '{"session_id":"s"}', encoding: 'utf-8', env: { ...process.env, NO_COLOR: '1', ...env } });
@@ -137,6 +142,6 @@ describe('the script as Claude Code runs it', () => {
   it('--install points settings at the script itself', () => {
     const settings = join(d, 'settings.json');
     expect(run(['--install', '--settings', settings]).status).toBe(0);
-    expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine.command).toBe(`node "${bundled}"`);
+    expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine.command).toBe(`node "${realpathSync(bundled)}"`);
   });
 });
