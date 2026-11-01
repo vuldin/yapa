@@ -406,10 +406,20 @@ Now execute these steps in order, without asking anything else:
      a duplicate
    - Session start: covered by Per-Prompt Routine step 3
 
+   ### Task Claims
+   - In a shared collection, setting a task to `in_progress` claims it for
+     this session (a lease on its id); completing, blocking, resetting or
+     deleting it releases the claim. Set `in_progress` when you start a task.
+   - If the update is refused, nothing changed: tell the user who holds the
+     task and since when, and offer other work. Use `reclaim: true` only for
+     your own other session, after the user confirms.
+   - If the claim is NOT shared (offline, signed out), tell the user others may
+     start the same task.
+
    ### Shared Work (leases)
-   - Some projects coordinate work through YAPA leases (the `lease` tool, or a
-     project script calling `yapa coord`). Take a lease only when the
-     project's own instructions or tooling call for it.
+   - For other shared resources, some projects coordinate through bare YAPA
+     leases (the `lease` tool, or a project script calling `yapa coord`).
+     Take a lease only when the project's own instructions or tooling call for it.
    - If an acquire is refused, tell the user who holds the work and since when,
      and offer something else. If you took over an expired lease, say whose it
      was. If the service is unreachable, say the work is not shared.

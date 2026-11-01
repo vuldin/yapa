@@ -25,6 +25,8 @@ import {
   type CollectionDetection,
   isSyncableCollection,
   currentSession,
+  claimNote,
+  takeClaimNotices,
   heartbeatIfDue,
   requireCoordination,
   type Lease,
@@ -271,7 +273,8 @@ export function presenceLines(leases: Lease[], now: number, mySessions: Array<st
   const out = ['', '## Work in progress (leases)'];
   for (const l of leases.slice(0, 10)) {
     const who = l.holder.user === me
-      ? (mine.has(l.holder.session) ? 'you (this session)' : `you (another session, ${l.holder.session.slice(0, 8)})`)
+      // Your own sessions in full: an abbreviated id gets copied back as a session name.
+      ? (mine.has(l.holder.session) ? 'you (this session)' : `you (another session, ${l.holder.session})`)
       : l.holder.user;
     const title = l.title ? ` ${l.title}` : '';
     out.push(`- **${l.key}**${title}: ${who}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
@@ -280,15 +283,26 @@ export function presenceLines(leases: Lease[], now: number, mySessions: Array<st
   return out;
 }
 
-async function presence(collection: string, input: BaseHookInput): Promise<string[]> {
-  if (!isSyncConfigured() || !isSyncableCollection(collection)) return [];
+/**
+ * Live leases in the active collection: the presence block, plus the claims
+ * by key so open tasks can say who holds them. `claims` is undefined when the
+ * service could not be asked (no holders shown rather than guessed).
+ */
+async function presence(collection: string, input: BaseHookInput): Promise<{ lines: string[]; claims?: Map<string, Lease> }> {
+  if (!isSyncConfigured() || !isSyncableCollection(collection)) return { lines: [] };
   try {
     const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
-    if (!r) return [];
-    return presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME);
+    if (!r) return { lines: [] };
+    const live = r.leases.filter(l => !l.expired);
+    return { lines: presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME), claims: new Map(live.map(l => [l.key, l])) };
   } catch {
-    return []; // offline, older service, signed out: presence is optional
+    return { lines: [] }; // offline, older service, signed out: presence is optional
   }
+}
+
+/** Claim notices (a claim taken over, an offline claim that clashed) as context lines. */
+function claimNoticeLines(): string[] {
+  return takeClaimNotices().map(n => `**YAPA claim:** ${n}`);
 }
 
 // --- Hooks -------------------------------------------------------------------
@@ -319,6 +333,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
   const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
+  lines.push(...claimNoticeLines());
 
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
@@ -327,7 +342,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
       for (const t of tasks.slice(0, 10)) {
         const status = t.metadata.status ?? 'open';
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : '';
-        lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}] ${t.title}`);
+        const claim = claimNote(t, held.claims, leaseSessions(input));
+        lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ''}] ${t.title}`);
       }
       if (tasks.length > 10) lines.push(`- _…${tasks.length - 10} more (call \`task_list\` for the full list)_`);
     }
@@ -335,7 +351,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}\n`);
   }
 
-  lines.push(...held);
+  lines.push(...held.lines);
 
   try {
     const memories = await listMemories({ collection, limit: 5 });
@@ -415,10 +431,12 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
   if (notice) lines.push(`_${notice}_`);
   const down = syncDownLine();
   if (down) lines.push(down);
+  const claimNotices = claimNoticeLines();
+  lines.push(...claimNotices);
 
   try {
     const recall = await recallMemory(prompt, { collection, nResults: 3, crossCollection: getConfig().CROSS_COLLECTION_RESULTS });
-    if (recall.length === 0 && !notice && !down) {
+    if (recall.length === 0 && !notice && !down && !claimNotices.length) {
       emit({});
       return;
     }

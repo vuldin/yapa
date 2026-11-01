@@ -402,7 +402,11 @@ export class HttpBackend implements SyncBackend {
 
   readonly coordination: Coordination = {
     leaseAcquire: req => this.request<LeaseAcquireResult>('POST', '/v1/leases:acquire', {
-      body: { collection: req.collection, key: req.key, session: req.session, scope: req.scope ?? [], ttl_seconds: req.ttlSeconds, title: req.title },
+      // scope and ttl_seconds only when given: an omitted one keeps a renewed lease's stored value.
+      body: {
+        collection: req.collection, key: req.key, session: req.session, scope: req.scope, ttl_seconds: req.ttlSeconds, title: req.title,
+        ...(req.reclaim ? { reclaim: true } : {}),
+      },
       quiet: true,
     }),
     leaseHeartbeat: (collection, session, keys) =>

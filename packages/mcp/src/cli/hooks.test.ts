@@ -275,7 +275,7 @@ describe('lease presence at session start', () => {
     ], 2800, ['s1', undefined], 'josh');
     expect(out[1]).toBe('## Work in progress (leases)');
     expect(out[2]).toBe('- **josh-7** upgrade runbook: you (this session), for 30m, expires in 90m');
-    expect(out[3]).toBe('- **josh-8**: you (another session, other-se), for 30m, expires in 90m');
+    expect(out[3]).toBe('- **josh-8**: you (another session, other-session-id), for 30m, expires in 90m');
     expect(out[4]).toBe('- **dana-3**: dana, for 30m, expires in 90m');
   });
 });
@@ -348,5 +348,19 @@ describe('sync health (status line)', () => {
     rmSync(settings);
     configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_SYNC_ENABLED: 'false' });
     expect(prepareStatusLine(undefined)).toBeUndefined();
+  });
+});
+
+describe('task claims in hook context', () => {
+  it('a claim notice reaches the next prompt once, even with no recall hits', async () => {
+    const { addClaimNotice } = await import('@yapa/core');
+    configure({ YAPA_LEASE_STATE_DIR: join(dir, 'leases-notice') });
+    addClaimNotice('Your claim on josh-9 (project-acme) is no longer held: another session took it over or released it.');
+    capture();
+    await userPromptSubmit({ session_id: 'h1', cwd: join(dir, 'proj', 'empty-project'), prompt: 'zzqx unrelated words' });
+    expect(restore().hookSpecificOutput.additionalContext).toContain('**YAPA claim:** Your claim on josh-9');
+    capture();
+    await userPromptSubmit({ session_id: 'h1', cwd: join(dir, 'proj', 'empty-project'), prompt: 'zzqx unrelated words' });
+    expect(JSON.stringify(restore())).not.toContain('YAPA claim');
   });
 });

@@ -39,6 +39,7 @@ import {
   storeMemory,
   suggestCompaction,
   updateTask,
+  describeClaim,
   getConfig,
 } from '@yapa/core';
 
@@ -671,9 +672,9 @@ export function registerTools(ctx: Context): void {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { id: { type: 'string', required: true } },
+        properties: { id: { type: 'string', required: true }, claim: { type: 'string' } },
       },
-      render: (_args, v) => text(`Updated task ${v.id}`),
+      render: (_args, v) => text(`Updated task ${v.id}${v.claim ? `\n${v.claim}` : ''}`),
     },
     async execute(args) {
       const updates: Record<string, any> = {};
@@ -687,8 +688,11 @@ export function registerTools(ctx: Context): void {
         const ts = parseRelativeDate(args.due);
         if (ts) updates.due_date = ts;
       }
-      await updateTask(args.id, updates);
-      return { id: args.id };
+      // A move to in_progress claims the task; someone else's claim throws
+      // TaskClaimedError, whose message names the holder.
+      const r = await updateTask(args.id, updates);
+      const claim = r.claim ? describeClaim(r.claim) : '';
+      return { id: r.id, ...(claim && { claim }) };
     },
     presentCall: args => ({ card: 'generic', title: `Update task ${args.id}`, kind: 'edit' }),
   }));

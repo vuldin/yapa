@@ -21,6 +21,8 @@ export interface TaskOptions {
   salience?: number;
   duration_minutes?: number;
   completed_at?: number;
+  /** Soft scope: what the task touches. The ready queue ranks tasks near live claims last. */
+  claim_scope?: string[];
 }
 
 const PRIORITY_SALIENCE: Record<string, number> = {
@@ -119,6 +121,7 @@ export async function createTask(
     project: options.project,
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
+    ...(options.claim_scope?.length ? { claim_scope: options.claim_scope } : {}),
     is_recurring: options.is_recurring ?? false,
     recurrence_pattern: options.recurrence_pattern,
     created_at: now,

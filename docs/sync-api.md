@@ -527,7 +527,8 @@ to `max(local max, GET /v1/me/max-task-number) + 1`.
 
 Validation (reference): `key` and scope entries
 `^[A-Za-z0-9._:@/-]{1,200}$`; `session` `^[A-Za-z0-9._:-]{1,128}$`; at most
-64 scope entries; `ttl_seconds` an integer 30..86400 (default 7200);
+64 scope entries; `ttl_seconds` an integer 30..86400 (default 7200, or
+the stored value on a renewal); `reclaim` a boolean (default false);
 counter `name` `^[A-Za-z0-9._:-]{1,64}$`; `floor` a non-negative integer;
 `title` at most 300 characters; `outcome` `^[A-Za-z0-9._ :-]{0,64}$`
 (default `done`). Violations are `400 invalid_request`.
@@ -542,14 +543,35 @@ Lease object:
   "expires_at": 1767232800, "expired": false, "took_over_from": null }
 ```
 
-- `POST /v1/leases:acquire` `{ collection, key, session, scope?, ttl_seconds?, title? }`.
+`took_over_from`, when set, is `{ user, session, device, expired_at,
+acquired_at, reclaim? }` of the lease this one replaced: `expired_at` is that
+lease's `expires_at`, and `reclaim: true` marks a live lease of the same
+user's other session replaced by an acquire with `reclaim`.
+
+- `POST /v1/leases:acquire` `{ collection, key, session, scope?, ttl_seconds?, title?, reclaim? }`.
   The effective scope always includes `key:<key>`. Refused when a LIVE lease
-  held by anyone else (including the same user's other sessions) has the same
-  key or an overlapping scope:
+  held by anyone else (including the same user's other sessions, unless
+  `reclaim`) has the same key or overlaps the scope that would be stored:
   `{ "granted": false, "conflicts": [ { "lease": {...}, "overlap": ["key:..."] } ] }`.
   Otherwise `{ "granted": true, "lease": {...}, "renewed": <same holder re-acquired>,
   "took_over_from"?: {...} }` (`took_over_from` when an expired lease of
-  someone else was replaced). Check-and-write MUST be atomic per collection.
+  another holder, or with `reclaim` a live one of the caller's other
+  session, was replaced). Check-and-write MUST be atomic per collection.
+  - Renewal: an acquire by the lease's holder (same user and same session),
+    of a live or an expired lease. An omitted `scope` keeps the stored scope
+    (the overlap check uses it), an omitted `ttl_seconds` keeps the stored
+    TTL (`expires_at` = now + that TTL), and an omitted `title` keeps the
+    stored title. A field that is sent replaces the stored value
+    (`scope: []` leaves just `key:<key>`). On a fresh acquire or a takeover,
+    an omitted `scope` means just `key:<key>` and an omitted `ttl_seconds`
+    means 7200.
+  - `reclaim: true`: live leases of the caller's own other sessions are not
+    conflicts. If any conflicting lease belongs to another user, the acquire
+    is refused as usual and `conflicts` lists only the other users' leases.
+    Otherwise it is granted; a live lease on `key` held by the caller's other
+    session is replaced (a takeover with `took_over_from.reclaim: true`), and
+    the caller's other leases on other keys stay as they are. Without
+    `reclaim` the caller's other sessions conflict as before.
 - `POST /v1/leases:heartbeat` `{ collection?, session, keys? }` renews the
   caller's leases for that session (all collections when `collection` is
   absent; `keys` needs a collection): `{ "renewed": [lease...], "lost": [key...] }`.
@@ -611,9 +633,12 @@ link failures).
 suite `packages/core/src/sync/live.test.ts` against a remote with your Google
 ID token (`gcloud auth login`, or `YAPA_SYNC_ID_TOKEN_CMD`). It checks:
 sign-in (`/v1/me`), push from one device and pull from a second, ownership
-lookups, delete and the deletions feed, leases with two sessions, counters,
-task ids, and the JSON 404 for an unknown route. Coordination cases are
-skipped when the remote answers them with `404 not_found`.
+lookups, delete and the deletions feed, leases with two sessions, a
+renewal without `scope` keeping the stored scope, `reclaim` over the
+signed-in user's other session, counters, task ids, and the JSON 404 for an
+unknown route. It signs in as one user, so `reclaim` refused for another
+user is not checked. Coordination cases are skipped when the remote answers
+them with `404 not_found`.
 
 It uses temporary local stores (never your YAPA data), writes only to a
 throwaway collection `project-yapa-it-<run>`, and deletes the rows it

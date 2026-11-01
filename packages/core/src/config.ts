@@ -1,4 +1,4 @@
-import { homedir, userInfo } from 'os';
+import { homedir, tmpdir, userInfo } from 'os';
 import { join as pathJoin } from 'path';
 
 // ---------------------------------------------------------------------------
@@ -278,7 +278,8 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, 'SYNC_SIMILARITY_THRESHOLD', '0.95')),
     DEVICE_ID: get(env, 'DEVICE_ID', ''),
     DEVICE_ID_PATH: get(env, 'DEVICE_ID_PATH', pathJoin(homedir(), '.local', 'share', 'yapa', 'device-id')),
-    LEASE_STATE_DIR: get(env, 'LEASE_STATE_DIR', pathJoin(homedir(), '.local', 'share', 'yapa', 'leases')),
+    // Under vitest, never the developer's real lease markers and claim notices.
+    LEASE_STATE_DIR: get(env, 'LEASE_STATE_DIR', process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir(), '.local', 'share', 'yapa', 'leases')),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
     SYNC_CA_CERT: get(env, 'SYNC_CA_CERT', ''),

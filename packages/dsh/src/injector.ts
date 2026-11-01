@@ -26,6 +26,11 @@ import {
   listCollections,
   collectionSize,
   getConfig,
+  claimNote,
+  claimSession,
+  claimsFor,
+  heartbeatIfDue,
+  takeClaimNotices,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
@@ -69,6 +74,10 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
     const decision = await next();
     if (decision.kind !== 'enter') return decision;
 
+    // Keep this process's task claims alive while the agent is working (no
+    // network unless it holds leases and one is due). Never awaited.
+    heartbeatIfDue([claimSession()]).catch(() => undefined);
+
     try {
       const resolved = getResolved();
       const state = states.get(agent.id) ?? { tasksSurfaced: new Set<string>() };
@@ -89,8 +98,9 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         && state.recalledMessageId !== promptMessage.id;
       const doTasks = resolved.injectTasks && !state.tasksSurfaced.has(collection);
       const captureNotice = takeCaptureNotice(agent.id);
+      const claimNotices = takeClaimNotices();
 
-      if (!doRecall && !doTasks && !captureNotice) return decision;
+      if (!doRecall && !doTasks && !captureNotice && !claimNotices.length) return decision;
       const lines: string[] = ['# YAPA Context', ''];
       if (detection.ambiguous) {
         lines.push(
@@ -103,6 +113,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       }
 
       if (captureNotice) lines.push('', `## Auto-capture\n${captureNotice}`);
+      for (const n of claimNotices) lines.push('', `**YAPA claim:** ${n}`);
 
       if (doRecall && promptMessage) {
         const results = await recallMemory(promptText, {
@@ -127,11 +138,14 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         const tasks = await listTasks({ collection, includeComplete: false }).catch(() => []);
         signal.throwIfAborted();
         if (tasks.length) {
+          const claims = await claimsFor(collection);
+          signal.throwIfAborted();
           lines.push('', '## Open tasks');
           for (const t of tasks.slice(0, 10)) {
             const status = t.metadata.status ?? 'open';
             const prio = t.metadata.priority ? `, ${t.metadata.priority}` : '';
-            lines.push(`- **${t.id}** [${status}${prio}] ${t.title}`);
+            const claim = claimNote(t, claims, [claimSession()]);
+            lines.push(`- **${t.id}** [${status}${prio}${claim ? `; ${claim}` : ''}] ${t.title}`);
           }
           if (tasks.length > 10) lines.push(`- _…${tasks.length - 10} more (call \`yapa_task_list\`)_`);
         }

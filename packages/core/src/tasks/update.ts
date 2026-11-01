@@ -5,6 +5,8 @@ import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
 import { createTask } from './create.js';
+import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
+import { pushDocsNow } from '../sync/push.js';
 
 export interface TaskResult {
   id: string;
@@ -36,17 +38,50 @@ export async function getTask(id: string): Promise<TaskResult | null> {
   return null;
 }
 
-/** Update task fields. */
+/** How a status change was coordinated (see tasks/claim.ts). */
+export interface TaskUpdateResult {
+  /** The task's id after the update (a claim can push a task created offline, which may re-key it). */
+  id: string;
+  claim?: ClaimResult;
+  release?: ReleaseResult;
+}
+
+/** Caller context for an update: who is acting, and claim options for a move to in_progress. */
+export type TaskUpdateContext = ClaimOptions;
+
+const RELEASE_OUTCOME: Record<string, string> = { complete: 'done', blocked: 'blocked', pending: 'pending' };
+
+/**
+ * Update task fields. Setting status `in_progress` on a task in a shared
+ * collection claims it first (a lease on its id): refused when someone else
+ * holds it (TaskClaimedError, nothing written). Moving it out of
+ * `in_progress` releases this session's claim.
+ */
 export async function updateTask(
   id: string,
   updates: Partial<TaskOptions> & { title?: string; blockedReason?: string },
-): Promise<void> {
-  const task = await getTask(id);
+  ctx: TaskUpdateContext = {},
+): Promise<TaskUpdateResult> {
+  let task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
+  const prevStatus = task.metadata.status;
+  const result: TaskUpdateResult = { id };
+
+  if (updates.status === 'in_progress') {
+    const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
+    if (claim.kind === 'refused') throw new TaskClaimedError(claim);
+    result.claim = claim;
+    if (claim.id !== task.id) {
+      // Pushed and re-keyed on the way: continue with the task's new id.
+      task = await getTask(claim.id);
+      if (!task) throw new Error(`Task ${claim.id} not found after re-key`);
+      result.id = task.id;
+    }
+  }
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes', 'claim_scope'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   const updatedMetadata: Record<string, any> = {
@@ -55,18 +90,33 @@ export async function updateTask(
     updated_at: Math.floor(Date.now() / 1000),
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  // Local-only marker: an offline claim to retry once sync is back.
+  if (result.claim?.kind === 'unshared') updatedMetadata.claim_unshared = result.claim.session;
+  // Cleared with '' rather than deleted: a store update merges metadata keys.
+  else if (updates.status !== undefined && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = '';
 
   // The title is the document content (what search embeds): rewrite the doc
   // so the embedding follows, instead of only the metadata copy.
   if (updates.title !== undefined && updates.title !== task.title) {
-    await addDocument(task.collection, id, updates.title, updatedMetadata);
-    return;
+    await addDocument(task.collection, task.id, updates.title, updatedMetadata);
+  } else {
+    await updateDocument(task.collection, task.id, updatedMetadata);
   }
-  await updateDocument(task.collection, id, updatedMetadata);
+
+  // A granted claim is visible to teammates at once, not after the debounce.
+  if (result.claim?.kind === 'granted') {
+    await pushDocsNow(task.collection, [task.id]).catch(() => undefined);
+  }
+
+  const outcome = updates.status !== undefined ? RELEASE_OUTCOME[updates.status] : undefined;
+  if (outcome && prevStatus === 'in_progress') {
+    result.release = await releaseTaskClaim(task.id, task.collection, outcome, ctx.session).catch(() => undefined);
+  }
+  return result;
 }
 
 /** Mark task as complete. Handles recurring regeneration. */
-export async function completeTask(id: string, durationMinutes?: number): Promise<{ regeneratedId?: string }> {
+export async function completeTask(id: string, durationMinutes?: number, ctx: TaskUpdateContext = {}): Promise<{ regeneratedId?: string; release?: ReleaseResult }> {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
 
@@ -83,7 +133,7 @@ export async function completeTask(id: string, durationMinutes?: number): Promis
     completionUpdates.duration_minutes = durationMinutes;
   }
 
-  await updateTask(id, completionUpdates);
+  const { release } = await updateTask(id, completionUpdates, ctx);
 
   // Handle recurring tasks
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
@@ -106,10 +156,10 @@ export async function completeTask(id: string, durationMinutes?: number): Promis
       recurrence_pattern: task.metadata.recurrence_pattern,
     }, task.collection);
 
-    return { regeneratedId: newId };
+    return { regeneratedId: newId, ...(release ? { release } : {}) };
   }
 
-  return {};
+  return release ? { release } : {};
 }
 
 function computeNextDue(currentDue: number, pattern: string): number {

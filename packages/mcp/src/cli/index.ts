@@ -11,10 +11,11 @@ const USAGE =
   '       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n' +
   '       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n' +
   '       yapa statusline show                      print the status line segment now\n' +
-  '       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n';
+  '       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n' +
+  '       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n';
 
 const COORD_USAGE =
-  'Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T]\n' +
+  'Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n' +
   '       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n' +
   '       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n' +
   '       yapa coord list      --collection C [--include-expired]\n' +
@@ -152,6 +153,7 @@ async function runCoord(sub: string | undefined, args: string[]): Promise<number
         r = await coord.leaseAcquire({
           collection: need(collection, '--collection'), key: need(flag(args, '--key'), '--key'), session,
           scope: list(flag(args, '--scope')), ttlSeconds: int(flag(args, '--ttl'), '--ttl'), title: flag(args, '--title'),
+          ...(args.includes('--reclaim') ? { reclaim: true } : {}),
         });
         break;
       case 'heartbeat':
@@ -186,6 +188,18 @@ async function main(): Promise<void> {
   if (command === 'coord') {
     // Exit explicitly: an idle keep-alive socket or timer must not hold the process.
     process.exit(await runCoord(sub, rest));
+  }
+  if (command === 'task') {
+    if (!sub || sub === 'help' || rest.includes('--help')) {
+      const { TASK_USAGE } = await import('./task.js');
+      process.stderr.write(TASK_USAGE);
+      process.exit(sub ? 0 : 2);
+    }
+    adoptCliEnv(process.cwd());
+    const { runTask } = await import('./task.js');
+    const r = await runTask(sub, rest);
+    process.stdout.write((rest.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
+    process.exit(r.exit);
   }
   if (command === 'hooks') {
     await runHooksCommand(sub, rest);

@@ -153,6 +153,68 @@ describe.skipIf(!URL_)('live sync remote (opt-in conformance)', () => {
     expect(await c.leaseRelease(COL, key, s1)).toMatchObject({ released: false, reason: 'not_held' });
   }, 60_000);
 
+  it('leases: a renewal without scope or ttl keeps the stored ones; an explicit scope replaces', async ctx => {
+    const c = backend.coordination;
+    const key = `it-renew-${RUN}`;
+    const s1 = `it-s1-${RUN}`;
+    const res = `res:it-renew-${RUN}`;
+    let first: LeaseAcquireResult;
+    try {
+      first = await c.leaseAcquire({ collection: COL, key, session: s1, scope: [res], ttlSeconds: 90 });
+    } catch (e) {
+      if (notImplemented(e)) return ctx.skip();
+      throw e;
+    }
+    try {
+      expect(first.granted).toBe(true);
+      const renewed = await c.leaseAcquire({ collection: COL, key, session: s1 });
+      expect(renewed).toMatchObject({ granted: true, renewed: true });
+      if (!renewed.granted) return;
+      expect([...renewed.lease.scope].sort()).toEqual([`key:${key}`, res].sort());
+      expect(renewed.lease.ttl_seconds).toBe(90);
+
+      const replaced = await c.leaseAcquire({ collection: COL, key, session: s1, scope: [] });
+      expect(replaced).toMatchObject({ granted: true, renewed: true });
+      if (replaced.granted) {
+        expect(replaced.lease.scope).toEqual([`key:${key}`]);
+        expect(replaced.lease.ttl_seconds).toBe(90);
+      }
+    } finally {
+      await c.leaseRelease(COL, key, s1).catch(() => undefined);
+    }
+  }, 60_000);
+
+  // One signed-in identity here, so only the own-other-session half of reclaim
+  // is checked; "refused when another user holds it" is covered by the
+  // reference service's integration tests (packages/service/test/coord.integration.test.ts).
+  it('leases: reclaim takes over a live lease of your own other session', async ctx => {
+    const c = backend.coordination;
+    const key = `it-reclaim-${RUN}`;
+    const sOld = `it-old-${RUN}`;
+    const sNew = `it-new-${RUN}`;
+    let first: LeaseAcquireResult;
+    try {
+      first = await c.leaseAcquire({ collection: COL, key, session: sOld, ttlSeconds: 60 });
+    } catch (e) {
+      if (notImplemented(e)) return ctx.skip();
+      throw e;
+    }
+    try {
+      expect(first.granted).toBe(true);
+      expect((await c.leaseAcquire({ collection: COL, key, session: sNew, ttlSeconds: 60 })).granted).toBe(false);
+
+      const r = await c.leaseAcquire({ collection: COL, key, session: sNew, ttlSeconds: 60, reclaim: true });
+      expect(r).toMatchObject({ granted: true, renewed: false, took_over_from: { user: getConfig().USERNAME, session: sOld, reclaim: true } });
+      if (!r.granted) return;
+      expect(r.lease.holder.session).toBe(sNew);
+      expect(r.lease.took_over_from).toMatchObject({ session: sOld, reclaim: true });
+      expect(await c.leaseRelease(COL, key, sOld)).toMatchObject({ released: false, reason: 'held_by_other' });
+    } finally {
+      await c.leaseRelease(COL, key, sNew).catch(() => undefined);
+      await c.leaseRelease(COL, key, sOld).catch(() => undefined);
+    }
+  }, 60_000);
+
   it('counters:next is strictly increasing and honors the floor', async ctx => {
     const c = backend.coordination;
     let a: number;

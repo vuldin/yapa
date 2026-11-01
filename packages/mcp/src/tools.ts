@@ -6,6 +6,12 @@ import { counterNext, EXIT, leaseAcquire, leaseHeartbeat, leaseList, leaseReleas
 
 import {
   getConfig,
+  claimNote,
+  claimsFor,
+  describeClaim,
+  nextTasks,
+  TaskClaimedError,
+  type Lease,
   adapterDemote,
   adapterPromote,
   addDependency,
@@ -78,7 +84,7 @@ import {
 // on the next sync interval tick.
 export const SYNC_ON_WRITE_TOOLS = new Set([
   'memory_store', 'memory_forget', 'compaction_apply', 'journal_consolidate', 'janitor_now',
-  'task_create', 'task_update', 'task_complete', 'task_delete', 'task_add_dependency',
+  'task_create', 'task_update', 'task_complete', 'task_delete', 'task_add_dependency', 'task_next',
   'task_remove_dependency', 'collection_merge',
 ]);
 
@@ -100,6 +106,22 @@ export function withSyncOnWrite(server: McpServer): McpServer {
     return register(name, ...rest);
   };
   return server;
+}
+
+/** Live claims for each shared collection among `collections` (unknown ones are left out). */
+async function claimsByCollection(collections: string[]): Promise<Map<string, Map<string, Lease> | undefined>> {
+  const out = new Map<string, Map<string, Lease> | undefined>();
+  await Promise.all([...new Set(collections)].map(async c => { out.set(c, await claimsFor(c)); }));
+  return out;
+}
+
+/** What a release reported, when worth telling the agent. */
+function releaseNote(r: Awaited<ReturnType<typeof completeTask>>['release']): string {
+  if (!r) return '';
+  if (r.kind === 'released') return 'Claim released.';
+  if (r.kind === 'held_by_other') return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
+  if (r.kind === 'unshared') return `Claim release not shared (${r.reason}); it lapses on its own.`;
+  return '';
 }
 
 export function registerTools(server: McpServer): void {
@@ -890,11 +912,12 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional().describe('Collection (default: global)'),
       is_recurring: z.boolean().optional().describe('Whether task recurs'),
       recurrence_pattern: z.enum(['daily', 'weekly', 'monthly']).optional().describe('Recurrence pattern'),
+      claim_scope: z.array(z.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra"); task_next ranks tasks near live claims last'),
     },
-    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern }) => {
+    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? undefined : undefined;
       const id = await createTask(title, {
-        priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern,
+        priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, claim_scope,
       }, collection ?? 'global');
 
       let text = `Created task ${id}: "${title}"`;
@@ -931,6 +954,8 @@ export function registerTools(server: McpServer): void {
         if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
         if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
         if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines.push(`Owner: ${task.metadata.origin_user}`);
+        const held = claimNote(task, await claimsFor(task.collection));
+        if (held) lines.push(`Claim: ${held}`);
         if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
         const tags = norm(task.metadata.tags);
         if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
@@ -947,8 +972,11 @@ export function registerTools(server: McpServer): void {
       if (tasks.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No tasks found.' }] };
       }
+      const claims = await claimsByCollection(tasks.filter(t => t.metadata.status !== 'complete').map(t => t.collection));
       const text = tasks.map(t => {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
+        const held = t.metadata.status === 'complete' ? '' : claimNote(t, claims.get(t.collection));
+        if (held) line += ` (${held})`;
         if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
         if (t.metadata.duration_minutes != null) line += ` (effort: ${formatDuration(t.metadata.duration_minutes)})`;
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
@@ -973,9 +1001,12 @@ export function registerTools(server: McpServer): void {
       tags: z.array(z.string()).optional(),
       blocked_reason: z.string().optional(),
       duration: z.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
+      reclaim: z.boolean().optional().describe('With status in_progress: take over a claim held by another session of your own user (e.g. after --resume). Confirm with the user first.'),
+      claim_scope: z.array(z.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra", "res:staging-cluster"); task_next ranks tasks near live claims last'),
     },
-    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration }) => {
+    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration, reclaim, claim_scope }) => {
       const updates: Record<string, any> = {};
+      if (claim_scope) updates.claim_scope = claim_scope;
       if (title) updates.title = title;
       if (status) updates.status = status;
       if (priority) updates.priority = priority;
@@ -999,8 +1030,18 @@ export function registerTools(server: McpServer): void {
         updates.duration_minutes = parsed;
       }
 
-      await updateTask(id, updates);
-      return { content: [{ type: 'text' as const, text: `Updated task ${id}` }] };
+      try {
+        const r = await updateTask(id, updates, { reclaim });
+        let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
+        const claim = r.claim ? describeClaim(r.claim) : '';
+        if (claim) text += `\n${claim}`;
+        const release = releaseNote(r.release);
+        if (release) text += `\n${release}`;
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (e) {
+        if (e instanceof TaskClaimedError) return { content: [{ type: 'text' as const, text: e.message }], isError: true };
+        throw e;
+      }
     },
   );
 
@@ -1023,10 +1064,54 @@ export function registerTools(server: McpServer): void {
       const result = await completeTask(id, durationMinutes);
       let text = `Completed task ${id}`;
       if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
+      const release = releaseNote(result.release);
+      if (release) text += `\n${release}`;
       if (result.regeneratedId) {
         text += ` → regenerated as ${result.regeneratedId} (recurring)`;
       }
       return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  server.tool(
+    'task_next',
+    'The ready queue for a collection: pending tasks whose dependencies are complete and that nobody has claimed, best first (priority, due date, how many tasks each unblocks, age; tasks near live claims last), with the reason each other open task was skipped. claim: true also claims the first ready task (moves it to in_progress), trying the next one if someone else got it first.',
+    {
+      collection: z.string().describe('Collection to pick from'),
+      tags: z.array(z.string()).optional().describe('Only tasks carrying all of these tags'),
+      exclude_tags: z.array(z.string()).optional().describe('Skip tasks carrying any of these tags'),
+      claim: z.boolean().optional().describe('Claim the first ready task'),
+      limit: z.number().int().min(1).max(50).optional().describe('Ready tasks to show (default 5)'),
+    },
+    async ({ collection, tags, exclude_tags, claim, limit }) => {
+      const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim });
+      const lines: string[] = [];
+      if (!r.claimsKnown) lines.push('_Claims could not be read (offline or signed out): teammates may already be on some of these._');
+      if (claim) {
+        if (!r.claimed) lines.push('Nothing ready to claim.');
+        else lines.push(describeClaim(r.claimed) || `Started ${r.claimed.id} (local collection: no claim needed).`);
+      }
+      const shown = r.ready.slice(0, limit ?? 5);
+      if (shown.length) {
+        lines.push('', '**Ready:**');
+        for (const t of shown) {
+          let line = `- **${t.id}** [${t.priority}] ${t.title}`;
+          if (t.due_date) line += ` (due: ${formatTaskDate(t.due_date)})`;
+          if (t.unblocks) line += ` (unblocks ${t.unblocks})`;
+          if (t.lapsed) line += ' (was in_progress; its claim lapsed)';
+          if (t.near.length) line += ` (near live work: ${t.near.join(', ')})`;
+          lines.push(line);
+        }
+        if (r.ready.length > shown.length) lines.push(`- _…${r.ready.length - shown.length} more_`);
+      } else if (!claim) {
+        lines.push('No ready tasks.');
+      }
+      if (r.skipped.length) {
+        lines.push('', '**Skipped:**');
+        for (const s of r.skipped.slice(0, 15)) lines.push(`- ${s.id}: ${s.reason}`);
+        if (r.skipped.length > 15) lines.push(`- _…${r.skipped.length - 15} more_`);
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n').trim() }] };
     },
   );
 
@@ -1099,7 +1184,8 @@ export function registerTools(server: McpServer): void {
   server.tool(
     'lease',
     'Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. '
-      + 'acquire is granted only if no live lease (anyone else\'s, or this user\'s other sessions) has the same key or an overlapping scope; '
+      + 'acquire is granted only if no live lease (anyone else\'s, or this user\'s other sessions unless reclaim) has the same key or an overlapping scope; '
+      + 're-acquiring your own lease renews it, keeping its scope and ttl_seconds unless you pass new ones; '
       + 'the answer comes from the service, not a queued push. YAPA\'s hooks renew this session\'s leases while it is active, so explicit heartbeats are rarely needed; '
       + 'a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). '
       + 'list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.',
@@ -1108,19 +1194,20 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional().describe('Shared collection (not global/private-*/local-*), e.g. project-acme; heartbeat without it renews the session\'s leases everywhere'),
       key: z.string().optional().describe('acquire/release: what is leased, e.g. a task id or record id'),
       session: z.string().optional().describe('Holder within your user; defaults to this Claude Code session (the hooks renew its leases automatically)'),
-      scope: z.array(z.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included'),
-      ttl_seconds: z.number().int().optional().describe('acquire: expiry without a heartbeat, 30..86400 (default 7200)'),
+      scope: z.array(z.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included. Omitted on a renewal: the stored scope is kept'),
+      ttl_seconds: z.number().int().optional().describe('acquire: expiry without a heartbeat, 30..86400 (default 7200; omitted on a renewal: the stored ttl is kept)'),
+      reclaim: z.boolean().optional().describe('acquire: take over a live lease held by another session of your own user (e.g. after --resume); confirm with the user first'),
       title: z.string().optional().describe('acquire: short description shown in list'),
       keys: z.array(z.string()).optional().describe('heartbeat: only these keys (default: every lease of the session)'),
       outcome: z.string().optional().describe('release: done | blocked | pending | ... (logged)'),
       include_expired: z.boolean().optional().describe('list: also show expired leases'),
     },
-    async ({ action, collection, key, session, scope, ttl_seconds, title, keys, outcome, include_expired }) => {
+    async ({ action, collection, key, session, scope, ttl_seconds, title, reclaim, keys, outcome, include_expired }) => {
       const need = (v: string | undefined, what: string) => {
         if (!v) throw new Error(`lease ${action} needs ${what}`);
         return v;
       };
-      const r = action === 'acquire' ? await leaseAcquire({ collection: need(collection, 'collection'), key: need(key, 'key'), session, scope, ttlSeconds: ttl_seconds, title })
+      const r = action === 'acquire' ? await leaseAcquire({ collection: need(collection, 'collection'), key: need(key, 'key'), session, scope, ttlSeconds: ttl_seconds, title, reclaim })
         : action === 'heartbeat' ? await leaseHeartbeat(collection, session, keys)
           : action === 'release' ? await leaseRelease(need(collection, 'collection'), need(key, 'key'), session, outcome)
             : await leaseList(need(collection, 'collection'), include_expired ?? false);

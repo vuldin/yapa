@@ -40,14 +40,16 @@ export function assertSession(v: unknown): string {
   return v;
 }
 
-export function assertScope(v: unknown): string[] {
-  if (v === undefined) return [];
+/** undefined when omitted: acquire then keeps a renewed lease's stored scope. */
+export function assertScope(v: unknown): string[] | undefined {
+  if (v === undefined) return undefined;
   if (!Array.isArray(v) || v.length > MAX_SCOPE) throw new ApiError('invalid_request', `scope must be an array of at most ${MAX_SCOPE} strings`);
   return [...new Set(v.map(s => assertKey(s, 'scope entries')))].sort();
 }
 
-export function assertTtl(v: unknown): number {
-  if (v === undefined) return LEASE_TTL_DEFAULT;
+/** undefined when omitted: acquire then keeps a renewed lease's stored TTL (else LEASE_TTL_DEFAULT). */
+export function assertTtl(v: unknown): number | undefined {
+  if (v === undefined) return undefined;
   if (typeof v !== 'number' || !Number.isInteger(v) || v < LEASE_TTL_MIN || v > LEASE_TTL_MAX) {
     throw new ApiError('invalid_request', `ttl_seconds must be an integer from ${LEASE_TTL_MIN} to ${LEASE_TTL_MAX}`);
   }
@@ -68,6 +70,12 @@ export function assertFloor(v: unknown): number {
 export function assertOutcome(v: unknown): string {
   if (v === undefined) return 'done';
   if (typeof v !== 'string' || !OUTCOME_RE.test(v)) throw new ApiError('invalid_request', `outcome must match ${OUTCOME_RE.source}`);
+  return v;
+}
+
+export function assertReclaim(v: unknown): boolean {
+  if (v === undefined) return false;
+  if (typeof v !== 'boolean') throw new ApiError('invalid_request', 'reclaim must be a boolean');
   return v;
 }
 
@@ -140,44 +148,70 @@ export interface AcquireParams {
   collection: string;
   key: string;
   session: string;
-  scope: string[];
-  ttlSeconds: number;
+  /** undefined = omitted: a renewal keeps the stored scope, anything else gets just key:<key>. */
+  scope?: string[];
+  /** undefined = omitted: a renewal keeps the stored TTL, anything else gets LEASE_TTL_DEFAULT. */
+  ttlSeconds?: number;
   title: string | null;
+  /** Live leases of the caller's other sessions are not conflicts; one on `key` is taken over. */
+  reclaim?: boolean;
 }
 
 /**
  * Grant `key` to (caller, session) unless a live lease held by anyone else
- * (including the caller's other sessions) has the same key or an overlapping
- * scope. Re-acquiring your own lease renews it and replaces its scope.
+ * (including the caller's other sessions, unless `reclaim`) has the same key
+ * or an overlapping scope. Re-acquiring your own lease (same user and
+ * session, live or expired) renews it; scope and TTL are replaced when sent
+ * and kept when omitted. With `reclaim`, a live lease on `key` held by the
+ * caller's other session is taken over; the caller's other leases on other
+ * keys stay as they are.
  */
 export async function acquire(pool: pg.Pool, ctx: RequestCtx, p: AcquireParams): Promise<AcquireResult> {
   assertCollection(p.collection);
   const me = ctx.caller.username;
-  const scope = effectiveScope(p.key, p.scope);
   return withUserTx(pool, me, async c => {
     await lockCollection(c, p.collection);
     await c.query(
       `DELETE FROM leases WHERE collection = $1 AND expires_at < clock_timestamp() - make_interval(secs => $2)`,
       [p.collection, EXPIRED_KEEP_SECONDS],
     );
+    // The row on this key first: whether this is a renewal decides the
+    // effective scope and TTL, and the conflict check uses the stored scope.
+    const prevRow = (await c.query(`SELECT ${LEASE_COLS} FROM leases WHERE collection = $1 AND key = $2 FOR UPDATE`, [p.collection, p.key])).rows[0];
+    const prev = prevRow ? toLease(prevRow) : undefined;
+    const renewed = prev !== undefined && isMine(prev, me, p.session);
+    const scope = p.scope !== undefined ? effectiveScope(p.key, p.scope)
+      : renewed ? effectiveScope(p.key, prev.scope)
+        : effectiveScope(p.key, []);
+    const ttlSeconds = p.ttlSeconds ?? (renewed ? prev.ttl_seconds : LEASE_TTL_DEFAULT);
+
     const live = await c.query(
       `SELECT ${LEASE_COLS} FROM leases
         WHERE collection = $1 AND expires_at > clock_timestamp() AND (key = $2 OR scope && $3::text[])`,
       [p.collection, p.key, scope],
     );
-    const conflicts = live.rows.map(toLease)
-      .filter(l => !isMine(l, me, p.session))
+    const liveLeases = live.rows.map(toLease);
+    const conflicts = liveLeases
+      .filter(l => !isMine(l, me, p.session) && !(p.reclaim && l.holder.user === me))
       .map(l => ({ lease: l, overlap: l.key === p.key ? [`key:${p.key}`] : l.scope.filter(s => scope.includes(s)) }));
     if (conflicts.length) {
-      await logLease(c, ctx, p.collection, p.key, 'refused', p.session, { conflicts: conflicts.map(x => ({ key: x.lease.key, holder: x.lease.holder, overlap: x.overlap })) });
+      await logLease(c, ctx, p.collection, p.key, 'refused', p.session, {
+        conflicts: conflicts.map(x => ({ key: x.lease.key, holder: x.lease.holder, overlap: x.overlap })),
+        ...(p.reclaim ? { reclaim: true } : {}),
+      });
       return { granted: false as const, conflicts };
     }
 
-    const prevRow = (await c.query(`SELECT ${LEASE_COLS} FROM leases WHERE collection = $1 AND key = $2 FOR UPDATE`, [p.collection, p.key])).rows[0];
-    const prev = prevRow ? toLease(prevRow) : undefined;
-    const renewed = prev !== undefined && isMine(prev, me, p.session);
+    // Past the conflict check, a live lease on this key that is not a renewal
+    // can only be the caller's other session, granted because of reclaim.
+    // (Judged from the live query, so a lease that lapsed in between is an
+    // ordinary takeover of an expired lease.)
+    const reclaimed = !renewed && liveLeases.some(l => l.key === p.key);
     const takeover = prev !== undefined && !renewed
-      ? { user: prev.holder.user, session: prev.holder.session, device: prev.holder.device, expired_at: prev.expires_at, acquired_at: prev.acquired_at }
+      ? {
+        user: prev.holder.user, session: prev.holder.session, device: prev.holder.device,
+        expired_at: prev.expires_at, acquired_at: prev.acquired_at, ...(reclaimed ? { reclaim: true } : {}),
+      }
       : undefined;
     const r = await c.query(
       `INSERT INTO leases (collection, key, holder_user, holder_device, holder_session, title, scope, ttl_seconds,
@@ -192,12 +226,12 @@ export async function acquire(pool: pg.Pool, ctx: RequestCtx, p: AcquireParams):
          heartbeat_at = EXCLUDED.heartbeat_at, expires_at = EXCLUDED.expires_at,
          took_over_from = CASE WHEN $10::boolean THEN leases.took_over_from ELSE EXCLUDED.took_over_from END
        RETURNING ${LEASE_COLS}`,
-      [p.collection, p.key, me, ctx.device, p.session, p.title, scope, p.ttlSeconds,
+      [p.collection, p.key, me, ctx.device, p.session, p.title, scope, ttlSeconds,
         takeover ? JSON.stringify(takeover) : null, renewed],
     );
     const lease = toLease(r.rows[0]);
     await logLease(c, ctx, p.collection, p.key, renewed ? 'reacquire' : takeover ? 'takeover' : 'acquire', p.session,
-      { scope, ttl_seconds: p.ttlSeconds, ...(takeover ? { took_over_from: takeover } : {}) });
+      { scope, ttl_seconds: ttlSeconds, ...(takeover ? { took_over_from: takeover } : {}), ...(reclaimed ? { reclaim: true } : {}) });
     return { granted: true as const, lease, renewed, ...(takeover ? { took_over_from: takeover } : {}) };
   });
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+Two people (or two of your own sessions) can no longer start the same task without knowing: claiming a task is a lease the sync service grants or refuses on the spot.
+
+**Upgrading:** deploy the sync service (or a remote that implements the section 9 changes below) before or with the client; an older service still grants ordinary claims, it just doesn't keep a renewal's scope or support `reclaim`.
+
+### Features
+- **Task claims.** In a shared collection, setting a task to `in_progress` (`task_update`, `task_next` with `claim`, `yapa task claim`) takes a lease on its id first. Someone else's live claim refuses the change (nothing is written; the reply names the holder and since when); a granted claim is pushed at once instead of after the debounce; leaving `in_progress` (complete, blocked, pending, delete) releases it. Offline or signed out, the status changes locally with a "not shared" warning, the claim is retried after the next good sync, and a clash found then is reported on the next prompt. A session that loses a claim to a takeover hears about it on its next prompt. A task created offline is pushed before it is claimed, so a re-keyed id cannot leave the lease on the wrong key. Works the same in the DSH plugin, which now also renews its claims each turn.
+- **Who holds what.** `task_list`, session-start open tasks and the DSH open-tasks block show `claimed by <who> since <time>`, or `no live claim` for an `in_progress` task nobody holds. Your own other sessions are shown with their full id.
+- **`task_next`: the ready queue.** Pending tasks whose dependencies are complete and that nobody holds, ordered by priority, due date, how many open tasks each unblocks, then age, with the reason every other open task was skipped; tag filters; `claim: true` claims the first one and moves on if someone got there first. An `in_progress` task whose claim lapsed is offered again. New task field `claim_scope` (soft scope) ranks tasks near live claims last.
+- **`yapa task list|next|claim|release|show`** for scripts and project tooling: the same claims, JSON output, `yapa coord` exit codes (0 done, 3 refused, 4 not shared). `release --status pending|blocked|complete` sets the status, appends `--note`, adds `--tag`s and pushes before exiting.
+- **Lease renewal keeps scope and TTL.** Re-acquiring your own lease (same user and session, live or expired) without `scope` now keeps the stored scope, and without `ttl_seconds` keeps the stored TTL, the way `title` already did; the overlap check uses the kept scope. A value that is sent still replaces the stored one (`scope: []` leaves just `key:<key>`). A fresh acquire or a takeover without them still gets `key:<key>` and 7200 s. The client no longer sends `scope: []` when none was given ([docs/sync-api.md](docs/sync-api.md) section 9).
+- **`reclaim` on lease acquire.** `POST /v1/leases:acquire` takes `reclaim: true` (non-boolean: `400 invalid_request`): live leases of your own other sessions stop being conflicts, so a resumed or restarted session can take its work back. A live lease on the same key held by your other session is taken over (`took_over_from.reclaim: true`, logged as `takeover`); your leases on other keys stay. Another user's overlapping lease still refuses, and `conflicts` then lists only theirs. Exposed as `yapa coord acquire --reclaim` and the `lease` tool's `reclaim` parameter ("took over from <session> (your other session)").
+- Conformance: the live suite checks a renewal without `scope` and `reclaim` over your own other session.
+
 ## 1.4.0 (2026-11-01)
 
 You can see whether team sync is working without asking: a status line segment under the prompt shows synced, signed out (with the fix), offline or local only.

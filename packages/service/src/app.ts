@@ -391,6 +391,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       scope: coord.assertScope(body.scope),
       ttlSeconds: coord.assertTtl(body.ttl_seconds),
       title: coord.assertTitle(body.title),
+      reclaim: coord.assertReclaim(body.reclaim),
     });
     return c.json(out);
   });
