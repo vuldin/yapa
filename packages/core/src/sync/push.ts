@@ -256,6 +256,24 @@ async function markRejected(collection: string, doc: DocumentResult, code: strin
   process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.\n`);
 }
 
+/**
+ * Local docs a push would send: unsynced, in a shared collection, and not
+ * skipped for good (sentinels, journal drafts, read-only, refused unchanged).
+ */
+export async function countUnpushed(): Promise<number> {
+  let n = 0;
+  for (const col of await listCollections()) {
+    if (!isSyncable(col.name)) continue;
+    const docs = await getDocumentsByFilter(col.name, { is_synced: false }, 100_000).catch(() => []);
+    for (const d of docs) {
+      if (d.id.startsWith('__') || d.metadata.type === 'journal_draft' || isReadOnlyDoc(d.metadata)) continue;
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
+      n++;
+    }
+  }
+  return n;
+}
+
 /** Docs currently refused by the remote (kept local), for `sync status`. */
 export async function listRejectedDocs(): Promise<Array<{ collection: string; id: string; code: string }>> {
   const out: Array<{ collection: string; id: string; code: string }> = [];

@@ -91,6 +91,10 @@ function createConfig(env = process.env) {
     SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
     SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
     SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
+    // Not recorded under vitest unless a test names a file: suites that fail
+    // sync on purpose must not paint the developer's own status line red.
+    SYNC_HEALTH_FILE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_HEALTH_FILE", process.env.VITEST ? "" : pathJoin(homedir2(), ".local", "share", "yapa", "sync-health.json"))),
+    STATUS_LABEL: get(env, "STATUS_LABEL", "yapa").trim().slice(0, 32) || "yapa",
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
@@ -118,6 +122,9 @@ function getConfig() {
 }
 function setConfig(config) {
   active = config;
+}
+function resetConfig() {
+  active = void 0;
 }
 function getCurationModel(config = getConfig()) {
   if (config.CURATION_MODEL) return config.CURATION_MODEL;
@@ -153,7 +160,10 @@ function getEmbeddingModel(config = getConfig()) {
       return "";
   }
 }
-var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, CHUNK_SIZE, CHUNK_OVERLAP, active;
+function getSynthesisModel(config = getConfig()) {
+  return config.TRAINING_SYNTHESIS_MODEL || getCurationModel(config);
+}
+var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, DECAY_INTERVAL_MS, CHUNK_SIZE, CHUNK_OVERLAP, active;
 var init_config = __esm({
   "packages/core/src/config.ts"() {
     "use strict";
@@ -161,6 +171,7 @@ var init_config = __esm({
     SALIENCE_BOOST_ON_ACCESS = 0.1;
     SALIENCE_FLOOR = 0.05;
     SALIENCE_MAX = 5;
+    DECAY_INTERVAL_MS = 864e5;
     CHUNK_SIZE = 2e3;
     CHUNK_OVERLAP = 200;
   }
@@ -220,7 +231,7 @@ var init_metadata_adapter = __esm({
 // packages/core/src/local-embedder.ts
 function createLocalEmbedder(opts = {}) {
   let pipe = null;
-  const load = () => {
+  const load2 = () => {
     if (!pipe) {
       pipe = (async () => {
         const { pipeline, env } = await import("@huggingface/transformers");
@@ -237,12 +248,12 @@ function createLocalEmbedder(opts = {}) {
   };
   return {
     async embed(text) {
-      const p = await load();
+      const p = await load2();
       const output = await p(text, { pooling: "mean", normalize: true });
       return Array.from(output.data);
     },
     async warm() {
-      await load();
+      await load2();
     }
   };
 }
@@ -273,6 +284,9 @@ function generateEmbedding(text) {
   work.catch(() => memo.delete(key));
   if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value);
   return work;
+}
+function clearEmbeddingMemo() {
+  memo.clear();
 }
 async function generateEmbeddingsBatch(texts, batchSize = 50) {
   if (getConfig().EMBEDDING_PROVIDER === "chromadb") {
@@ -372,6 +386,45 @@ var init_embeddings = __esm({
 // packages/core/src/chroma.ts
 function apiBase() {
   return `${getConfig().CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database`;
+}
+async function detectChromaVersion() {
+  try {
+    const v2Heartbeat = await fetch(`${getConfig().CHROMA_URL}/api/v2/heartbeat`);
+    if (!v2Heartbeat.ok) {
+      try {
+        const v1Check = await fetch(`${getConfig().CHROMA_URL}/api/v1/heartbeat`);
+        if (v1Check.ok) {
+          return {
+            version: "1.x (legacy)",
+            isV2: false,
+            error: "ChromaDB v1 API detected. YAPA requires ChromaDB v2 API. Please upgrade ChromaDB to version 0.4.0 or higher (or 1.0.0+)."
+          };
+        }
+      } catch {
+      }
+      return {
+        version: "unknown",
+        isV2: false,
+        error: "ChromaDB is not responding. Ensure ChromaDB is running at " + getConfig().CHROMA_URL
+      };
+    }
+    let version = "unknown";
+    try {
+      const versionResp = await fetch(`${getConfig().CHROMA_URL}/api/v2/version`);
+      if (versionResp.ok) {
+        const data = await versionResp.json();
+        version = data.version || "unknown";
+      }
+    } catch {
+    }
+    return { version, isV2: true };
+  } catch (e) {
+    return {
+      version: "unreachable",
+      isV2: false,
+      error: `Cannot connect to ChromaDB at ${getConfig().CHROMA_URL}. Ensure ChromaDB is running.`
+    };
+  }
 }
 function buildChromaFilter(filter) {
   const entries = Object.entries(filter).filter(([_, v]) => v !== void 0 && v !== null);
@@ -730,7 +783,7 @@ function createLocalStore(rootDir) {
       throw new Error(`local store: collection "${name}" is unreadable: ${e.message ?? e}`);
     }
   }
-  async function load(name) {
+  async function load2(name) {
     const cached2 = cache.get(name);
     if (!cached2) return readFromDisk(name);
     try {
@@ -747,7 +800,7 @@ function createLocalStore(rootDir) {
     return cached2;
   }
   async function loadOrCreate(name) {
-    return await load(name) ?? {
+    return await load2(name) ?? {
       version: 1,
       name,
       created: (/* @__PURE__ */ new Date()).toISOString(),
@@ -782,7 +835,7 @@ function createLocalStore(rootDir) {
       return names.map((name) => ({ id: name, name }));
     },
     async createCollection(name, metadata) {
-      if (await load(name)) throw new Error(`Collection "${name}" already exists`);
+      if (await load2(name)) throw new Error(`Collection "${name}" already exists`);
       const cf = await loadOrCreate(name);
       cache.set(name, cf);
       await persist(cf);
@@ -793,11 +846,11 @@ function createLocalStore(rootDir) {
       await rm(fileFor(name), { force: true });
     },
     async getCollectionCount(name) {
-      const cf = await load(name);
+      const cf = await load2(name);
       return cf ? Object.keys(cf.docs).length : 0;
     },
     async getOrCreateCollection(name) {
-      if (!await load(name)) {
+      if (!await load2(name)) {
         const cf = await loadOrCreate(name);
         cache.set(name, cf);
         await persist(cf);
@@ -830,7 +883,7 @@ function createLocalStore(rootDir) {
       await persist(cf);
     },
     async queryDocuments(collection, queryText, nResults = 5, filter) {
-      const cf = await load(collection);
+      const cf = await load2(collection);
       if (!cf) return [];
       const qe = await generateEmbedding(queryText);
       const model = embedderId();
@@ -848,7 +901,7 @@ function createLocalStore(rootDir) {
       const model = embedderId();
       const out = [];
       for (const name of await collectionNames()) {
-        const cf = await load(name);
+        const cf = await load2(name);
         if (!cf) continue;
         for (const [id, doc] of Object.entries(cf.docs)) {
           if (doc.embedding_model !== model) continue;
@@ -860,7 +913,7 @@ function createLocalStore(rootDir) {
       return out.slice(0, nResults);
     },
     async getDocumentsByFilter(collection, filter, limit = 1e3) {
-      const cf = await load(collection);
+      const cf = await load2(collection);
       if (!cf) return [];
       const out = [];
       for (const id of Object.keys(cf.docs)) {
@@ -870,19 +923,19 @@ function createLocalStore(rootDir) {
       return out;
     },
     async getDocumentsByIds(collection, ids) {
-      const cf = await load(collection);
+      const cf = await load2(collection);
       if (!cf) return [];
       return ids.filter((id) => cf.docs[id]).map((id) => toResult(cf, id));
     },
     async updateDocument(collection, id, metadata) {
-      const cf = await load(collection);
+      const cf = await load2(collection);
       if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
       cf.docs[id].metadata = toChroma(metadata);
       await persist(cf);
     },
     async updateDocumentsBatch(collection, entries) {
       if (entries.length === 0) return;
-      const cf = await load(collection);
+      const cf = await load2(collection);
       if (!cf) throw new Error(`Collection "${collection}" not found`);
       let changed = 0;
       for (const e of entries) {
@@ -893,13 +946,13 @@ function createLocalStore(rootDir) {
       if (changed > 0) await persist(cf);
     },
     async deleteDocument(collection, id) {
-      const cf = await load(collection);
+      const cf = await load2(collection);
       if (!cf) return;
       if (delete cf.docs[id]) await persist(cf);
     },
     async findAndDeleteDocument(id) {
       for (const name of await collectionNames()) {
-        const cf = await load(name);
+        const cf = await load2(name);
         if (cf?.docs[id]) {
           delete cf.docs[id];
           await persist(cf);
@@ -927,13 +980,42 @@ var init_types = __esm({
 });
 
 // packages/core/src/store/index.ts
+var store_exports = {};
+__export(store_exports, {
+  addDocument: () => addDocument2,
+  addDocumentsBatch: () => addDocumentsBatch2,
+  chromaStore: () => chromaStore,
+  createCollection: () => createCollection2,
+  createLocalStore: () => createLocalStore,
+  deleteCollection: () => deleteCollection2,
+  deleteDocument: () => deleteDocument2,
+  findAndDeleteDocument: () => findAndDeleteDocument2,
+  getCollectionCount: () => getCollectionCount2,
+  getDocumentsByFilter: () => getDocumentsByFilter2,
+  getDocumentsByIds: () => getDocumentsByIds2,
+  getOrCreateCollection: () => getOrCreateCollection2,
+  getStore: () => getStore,
+  listCollections: () => listCollections2,
+  queryAllCollections: () => queryAllCollections2,
+  queryDocuments: () => queryDocuments2,
+  resetStore: () => resetStore,
+  setStore: () => setStore,
+  updateDocument: () => updateDocument2,
+  updateDocumentsBatch: () => updateDocumentsBatch2
+});
+function setStore(store) {
+  active2 = store;
+}
 function getStore() {
   if (!active2) {
     active2 = getConfig().STORAGE === "local" ? createLocalStore(getConfig().LOCAL_STORE_PATH) : chromaStore;
   }
   return active2;
 }
-var active2, listCollections2, getOrCreateCollection2, addDocument2, addDocumentsBatch2, queryDocuments2, queryAllCollections2, getDocumentsByFilter2, getDocumentsByIds2, updateDocument2, deleteDocument2;
+function resetStore() {
+  active2 = void 0;
+}
+var active2, listCollections2, createCollection2, deleteCollection2, getCollectionCount2, getOrCreateCollection2, addDocument2, addDocumentsBatch2, queryDocuments2, queryAllCollections2, getDocumentsByFilter2, getDocumentsByIds2, updateDocument2, updateDocumentsBatch2, deleteDocument2, findAndDeleteDocument2;
 var init_store = __esm({
   "packages/core/src/store/index.ts"() {
     "use strict";
@@ -944,6 +1026,9 @@ var init_store = __esm({
     init_chroma_adapter();
     init_local_adapter();
     listCollections2 = () => getStore().listCollections();
+    createCollection2 = (name, metadata) => getStore().createCollection(name, metadata);
+    deleteCollection2 = (name) => getStore().deleteCollection(name);
+    getCollectionCount2 = (name) => getStore().getCollectionCount(name);
     getOrCreateCollection2 = (name) => getStore().getOrCreateCollection(name);
     addDocument2 = (collection, id, content, metadata) => getStore().addDocument(collection, id, content, metadata);
     addDocumentsBatch2 = (collection, documents) => getStore().addDocumentsBatch(collection, documents);
@@ -952,7 +1037,9 @@ var init_store = __esm({
     getDocumentsByFilter2 = (collection, filter, limit) => getStore().getDocumentsByFilter(collection, filter, limit);
     getDocumentsByIds2 = (collection, ids) => getStore().getDocumentsByIds(collection, ids);
     updateDocument2 = (collection, id, metadata) => getStore().updateDocument(collection, id, metadata);
+    updateDocumentsBatch2 = (collection, entries) => getStore().updateDocumentsBatch(collection, entries);
     deleteDocument2 = (collection, id) => getStore().deleteDocument(collection, id);
+    findAndDeleteDocument2 = (id) => getStore().findAndDeleteDocument(id);
   }
 });
 
@@ -993,6 +1080,16 @@ function touchDocument(metadata, now = Math.floor(Date.now() / 1e3)) {
     salience: Math.min(metadata.salience + SALIENCE_BOOST_ON_ACCESS, SALIENCE_MAX),
     boost_day: day,
     boosts_today: boostsToday + 1
+  };
+}
+function decayFactor(sector, days) {
+  const perDay = sector === "semantic" ? Math.pow(getConfig().SALIENCE_DECAY_RATE, 0.5) : getConfig().SALIENCE_DECAY_RATE;
+  return Math.pow(perDay, Math.max(0, days));
+}
+function applyDecay(metadata, days = 1) {
+  return {
+    ...metadata,
+    salience: Math.max(metadata.salience * decayFactor(metadata.sector, days), SALIENCE_FLOOR)
   };
 }
 function detectSector(content) {
@@ -1271,6 +1368,66 @@ var init_recall = __esm({
 });
 
 // packages/core/src/sync/deletes.ts
+async function queueSyncDelete(docId, collection) {
+  await getOrCreateCollection2("global");
+  const existing = await getPendingDeletes();
+  const entry = `${collection}:${docId}`;
+  if (!existing.includes(entry)) {
+    existing.push(entry);
+  }
+  await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
+    type: "sync_sentinel",
+    pending_deletes: existing.join(",")
+  });
+}
+async function queueSyncDeletes(docIds, collection) {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection2("global");
+  const existing = new Set(await getPendingDeletes());
+  for (const id of docIds) existing.add(`${collection}:${id}`);
+  await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
+    type: "sync_sentinel",
+    pending_deletes: [...existing].join(",")
+  });
+}
+async function getPendingDeletes() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: "sync_sentinel" }, 10);
+    const sentinel = results.find((r) => r.id === SYNC_DELETES_ID);
+    if (!sentinel) return [];
+    const raw = sentinel.metadata.pending_deletes;
+    if (!raw || raw === "") return [];
+    return typeof raw === "string" ? raw.split(",").filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+async function clearPendingDeletes(processed) {
+  try {
+    const done = processed ? new Set(processed) : void 0;
+    const remaining = done ? (await getPendingDeletes()).filter((e) => !done.has(e)) : [];
+    await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
+      type: "sync_sentinel",
+      pending_deletes: remaining.join(",")
+    });
+  } catch {
+  }
+}
+async function addLocalTombstone(docId) {
+  await addLocalTombstones([docId]);
+}
+async function addLocalTombstones(docIds) {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection2("global");
+  const existing = await getLocalTombstones();
+  const before = existing.size;
+  for (const id of docIds) existing.add(id);
+  if (existing.size === before) return;
+  await addDocument2("global", SYNC_TOMBSTONES_ID, "sync tombstones", {
+    type: "sync_tombstones",
+    ids: [...existing].join(",")
+  });
+}
 async function getLocalTombstones() {
   try {
     const results = await getDocumentsByFilter2("global", { type: "sync_tombstones" }, 1);
@@ -1280,14 +1437,46 @@ async function getLocalTombstones() {
     return /* @__PURE__ */ new Set();
   }
 }
+var SYNC_DELETES_ID, SYNC_TOMBSTONES_ID;
 var init_deletes = __esm({
   "packages/core/src/sync/deletes.ts"() {
     "use strict";
     init_store();
+    SYNC_DELETES_ID = "__sync_deletes__";
+    SYNC_TOMBSTONES_ID = "__sync_tombstones__";
   }
 });
 
 // packages/core/src/memory/forget.ts
+function isSyncable(collection) {
+  return !collection.startsWith("private-") && !collection.startsWith("local-");
+}
+async function deleteDocumentEverywhere(id) {
+  for (const collection of await listCollections2()) {
+    let found;
+    try {
+      [found] = await getDocumentsByIds2(collection.name, [id]);
+    } catch {
+      continue;
+    }
+    if (!found) continue;
+    assertWritable(id, found.metadata);
+    await deleteDocument2(collection.name, id);
+    if (getConfig().SYNC_ENABLED && isSyncable(collection.name)) {
+      const owner = found.metadata.origin_user;
+      if (!owner || owner === getConfig().USERNAME) {
+        await queueSyncDelete(id, collection.name);
+      } else {
+        await addLocalTombstone(id);
+      }
+    }
+    return collection.name;
+  }
+  throw new Error(`Document '${id}' not found in any collection`);
+}
+async function forgetMemory(id) {
+  return deleteDocumentEverywhere(id);
+}
 var init_forget = __esm({
   "packages/core/src/memory/forget.ts"() {
     "use strict";
@@ -1338,11 +1527,69 @@ var init_list = __esm({
 });
 
 // packages/core/src/memory/decay.ts
+async function lastSweepAt() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: { $eq: "decay_sentinel" } }, 1);
+    return results[0]?.metadata.last_run;
+  } catch {
+    return void 0;
+  }
+}
+async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
+  const collections = await listCollections2();
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY;
+  let decayedCount = 0;
+  for (const collection of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
+      const updates = [];
+      for (const doc of docs) {
+        const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
+        const days = (now - anchor) / DAY;
+        if (days <= 0) continue;
+        const lifecycleMeta = {
+          salience: doc.metadata.salience ?? 1,
+          accessed_at: doc.metadata.accessed_at ?? now,
+          created_at: doc.metadata.created_at ?? now,
+          sector: doc.metadata.sector ?? "episodic"
+        };
+        const decayed = applyDecay(lifecycleMeta, days);
+        updates.push({
+          id: doc.id,
+          metadata: { ...doc.metadata, salience: decayed.salience, decayed_at: now }
+        });
+      }
+      if (updates.length > 0) {
+        await updateDocumentsBatch2(collection.name, updates);
+        decayedCount += updates.length;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return decayedCount;
+}
+async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
+  const last = await lastSweepAt();
+  return last === void 0 || now - last > DAY;
+}
+async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
+  const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
+  await getOrCreateCollection3("global");
+  await addDocument3("global", DECAY_SENTINEL_ID, "decay sentinel", {
+    type: "decay_sentinel",
+    last_run: now
+  });
+}
+var DECAY_SENTINEL_ID, DAY, SWEEP_LIMIT;
 var init_decay = __esm({
   "packages/core/src/memory/decay.ts"() {
     "use strict";
     init_store();
     init_lifecycle();
+    DECAY_SENTINEL_ID = "__decay_sentinel__";
+    DAY = 86400;
+    SWEEP_LIMIT = 1e4;
   }
 });
 
@@ -1354,6 +1601,78 @@ async function collectionSize(collection) {
   } catch {
     return 0;
   }
+}
+function tagsOf(metadata) {
+  if (Array.isArray(metadata.tags)) return metadata.tags;
+  if (typeof metadata.tags === "string") return metadata.tags.split(",").filter(Boolean);
+  return [];
+}
+function intersect(a, b) {
+  const set = new Set(a);
+  return b.filter((t) => set.has(t));
+}
+async function suggestCompaction(collection) {
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true);
+  if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
+  all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
+  const consumed = /* @__PURE__ */ new Set();
+  const groups = [];
+  for (const seed of all) {
+    if (consumed.has(seed.id)) continue;
+    const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
+    const matches = neighbors.filter(
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+    );
+    if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
+    const memberIds = [seed.id, ...matches.map((m) => m.id)];
+    memberIds.forEach((id) => consumed.add(id));
+    const sharedTags = matches.reduce(
+      (acc, m) => intersect(acc, tagsOf(m.metadata)),
+      tagsOf(seed.metadata)
+    );
+    groups.push({
+      seed_id: seed.id,
+      member_ids: memberIds,
+      seed_content: seed.content,
+      similar_content: matches.map((m) => m.content),
+      shared_tags: sharedTags
+    });
+  }
+  return groups;
+}
+async function applyCompaction(input) {
+  const stored = await storeMemory(input.summary, {
+    collection: input.collection,
+    salience: 2,
+    tags: ["compacted", ...input.tags ?? []],
+    sector: "semantic"
+  });
+  const summaryId = stored.ids[0];
+  const archivedIds = [];
+  for (const id of input.member_ids) {
+    try {
+      const existing = await getDocumentsByIds2(input.collection, [id]);
+      if (!existing.length) continue;
+      await updateDocument2(input.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
+      archivedIds.push(id);
+    } catch (e) {
+      process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}
+`);
+    }
+  }
+  try {
+    const summaryDocs = await getDocumentsByIds2(input.collection, [summaryId]);
+    if (summaryDocs.length) {
+      await updateDocument2(input.collection, summaryId, {
+        ...summaryDocs[0].metadata,
+        compacted_from: archivedIds
+      });
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa] compact: failed to set back-reference on summary: ${e}
+`);
+  }
+  return { summary_id: summaryId, archived_ids: archivedIds };
 }
 var init_compact = __esm({
   "packages/core/src/memory/compact.ts"() {
@@ -1367,6 +1686,21 @@ var init_compact = __esm({
 
 // packages/core/src/memory/journal.ts
 import { randomBytes } from "crypto";
+async function journalAppend(entry, collection, sessionId) {
+  const col = collection ?? "global";
+  const sid = sessionId ?? SESSION_ID;
+  await getOrCreateCollection2(col);
+  const now = Math.floor(Date.now() / 1e3);
+  const id = `journal-${getConfig().USERNAME}-${sid}-${now}-${Math.random().toString(36).slice(2, 6)}`;
+  await addDocument2(col, id, entry, {
+    type: DRAFT_TYPE,
+    username: getConfig().USERNAME,
+    session_id: sid,
+    created_at: now,
+    is_synced: false
+  });
+  return id;
+}
 async function listSessionDrafts(collection, sessionId) {
   const col = collection ?? "global";
   const sid = sessionId ?? SESSION_ID;
@@ -1409,6 +1743,19 @@ ${body}`, {
   }
   return { memory_id: stored.ids[0], draft_count: drafts.length };
 }
+async function consolidateSessionEverywhere(sessionId = SESSION_ID) {
+  const out = [];
+  for (const col of await listCollections2().catch(() => [])) {
+    try {
+      const result = await journalConsolidate({ collection: col.name, sessionId });
+      if (result) out.push(result);
+    } catch (e) {
+      process.stderr.write(`[yapa] journal: consolidate failed in ${col.name}: ${e}
+`);
+    }
+  }
+  return out;
+}
 async function consolidateStaleDrafts(maxAgeSeconds = 24 * 3600) {
   const cutoff = Math.floor(Date.now() / 1e3) - maxAgeSeconds;
   const out = [];
@@ -1446,10 +1793,71 @@ var init_journal = __esm({
   }
 });
 
+// packages/core/src/sync/health.ts
+import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+function healthStatusFor(code) {
+  if (typeof code === "string" && SIGNED_OUT.has(code)) return "signed_out";
+  if (code === "unreachable") return "unreachable";
+  return "error";
+}
+function readSyncHealth(path = getConfig().SYNC_HEALTH_FILE) {
+  if (!path) return void 0;
+  try {
+    const h = JSON.parse(readFileSync2(path, "utf-8"));
+    return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function recordSyncHealth(update, now = Date.now(), path = getConfig().SYNC_HEALTH_FILE) {
+  if (!path) return void 0;
+  const prev = readSyncHealth(path);
+  const config = getConfig();
+  const next = { status: update.status, at: now, interval_ms: config.SYNC_INTERVAL_MS, label: config.STATUS_LABEL };
+  if (prev?.last_ok_at) next.last_ok_at = prev.last_ok_at;
+  const unpushed = update.unpushed ?? prev?.unpushed;
+  if (unpushed !== void 0) next.unpushed = unpushed;
+  if (update.status === "ok") {
+    next.last_ok_at = now;
+  } else if (update.status !== "disabled") {
+    const failing = prev && prev.status !== "ok" && prev.status !== "disabled";
+    next.since = failing ? prev.since ?? now : now;
+    if ("code" in update && update.code) next.code = update.code;
+    if ("message" in update && update.message) next.message = update.message.slice(0, 300);
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 448 });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
+    renameSync(tmp, path);
+  } catch {
+  }
+  return next;
+}
+function recordUnpushed(unpushed, path = getConfig().SYNC_HEALTH_FILE) {
+  const prev = readSyncHealth(path);
+  if (!prev || prev.unpushed === unpushed) return;
+  try {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
+    renameSync(tmp, path);
+  } catch {
+  }
+}
+var SIGNED_OUT;
+var init_health = __esm({
+  "packages/core/src/sync/health.ts"() {
+    "use strict";
+    init_config();
+    SIGNED_OUT = /* @__PURE__ */ new Set(["token_command", "unauthenticated", "cloud_run_unauthenticated"]);
+  }
+});
+
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname2 } from "node:path";
 function getDeviceId() {
   const config = getConfig();
   if (config.DEVICE_ID) return config.DEVICE_ID;
@@ -1457,25 +1865,28 @@ function getDeviceId() {
   const path = config.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync2(path, "utf-8").trim();
+    id = readFileSync3(path, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, `${id}
+      mkdirSync2(dirname2(path), { recursive: true });
+      writeFileSync2(path, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync2(path, "utf-8").trim() || id;
+        id = readFileSync3(path, "utf-8").trim() || id;
       } catch {
       }
     }
   }
   cached = { path, id };
   return id;
+}
+function resetDeviceId() {
+  cached = void 0;
 }
 var cached;
 var init_device = __esm({
@@ -1494,8 +1905,8 @@ __export(http_backend_exports, {
   decodeJwtPayload: () => decodeJwtPayload,
   redactTokens: () => redactTokens
 });
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, rmSync, renameSync } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync3, rmSync, renameSync as renameSync2 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 function redactTokens(text) {
@@ -1512,14 +1923,14 @@ function decodeJwtPayload(token) {
   }
 }
 function runTokenCommand(cmd) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const done = (err, stdout, stderr) => {
       if (err) {
         const detail = redactTokens(String(stderr || err.message).trim().split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
         reject(new Error(`could not get a Google ID token from \`${cmd || "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`));
         return;
       }
-      resolve(String(stdout));
+      resolve2(String(stdout));
     };
     const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
     if (cmd) exec(cmd, opts, done);
@@ -1649,7 +2060,7 @@ var init_http_backend = __esm({
       loadCached() {
         if (!this.cachePath) return false;
         try {
-          const token = readFileSync3(this.cachePath, "utf-8").trim();
+          const token = readFileSync4(this.cachePath, "utf-8").trim();
           if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
           const until = this.validity(token, this.now());
           if (this.now() >= until) return false;
@@ -1664,10 +2075,10 @@ var init_http_backend = __esm({
       saveCached(token) {
         if (!this.cachePath) return;
         try {
-          mkdirSync2(dirname2(this.cachePath), { recursive: true, mode: 448 });
+          mkdirSync3(dirname3(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
-          writeFileSync2(tmp, token, { mode: 384 });
-          renameSync(tmp, this.cachePath);
+          writeFileSync3(tmp, token, { mode: 384 });
+          renameSync2(tmp, this.cachePath);
         } catch {
         }
       }
@@ -1718,7 +2129,7 @@ var init_http_backend = __esm({
         this.device = opts.device ?? getDeviceId;
       }
       fail(err, quiet = false) {
-        if (!quiet) noteSyncError(err);
+        if (!quiet || isSignedOutError(err)) noteSyncError(err);
         throw err;
       }
       async request(method, path, opts = {}) {
@@ -1918,7 +2329,7 @@ var init_http_backend = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync4 } from "node:fs";
+import { readFileSync as readFileSync5 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url;
@@ -1930,7 +2341,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -1939,7 +2350,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -2040,7 +2451,7 @@ async function addRemoteRelatedIds(id, newRelatedIds) {
     [newRelatedIds, id]
   );
 }
-function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) {
+function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self2, opts = {}) {
   const values = [collection, sinceTimestamp];
   const param = (v) => {
     values.push(v);
@@ -2052,21 +2463,21 @@ function buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts = {}) 
        AND synced_at > to_timestamp($2)`;
   let userParam;
   if (!opts.includeOwnDevice) {
-    userParam = param(self.user);
-    const deviceParam = param(self.device);
+    userParam = param(self2.user);
+    const deviceParam = param(self2.device);
     text += `
        AND COALESCE(metadata->>'origin_device', '') <> ${deviceParam}
        AND NOT (origin_user = ${userParam} AND metadata->>'origin_device' IS NULL)`;
   }
   if (opts.onlyOwnRows) text += `
-       AND origin_user = ${userParam ?? param(self.user)}`;
+       AND origin_user = ${userParam ?? param(self2.user)}`;
   text += `
      ORDER BY synced_at ASC`;
   return { text, values };
 }
-async function getRemoteDocsSince(collection, sinceTimestamp, self, opts = {}) {
+async function getRemoteDocsSince(collection, sinceTimestamp, self2, opts = {}) {
   const p = getPool();
-  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self, opts);
+  const query = buildRemoteDocsSinceQuery(collection, sinceTimestamp, self2, opts);
   const result = await p.query(query.text, query.values);
   return result.rows.map((r) => ({
     id: r.id,
@@ -2342,13 +2753,42 @@ async function selectBackend() {
   active3 = { key, backend };
   return backend;
 }
+async function requireSyncBackend() {
+  const b = await getSyncBackend();
+  if (!b) throw new Error("sync has no target: set YAPA_SYNC_SERVICE_URL (plugin option sync_service_url)");
+  return b;
+}
+function setSyncBackend(backend) {
+  override = backend;
+  serverUsername = void 0;
+  configuredUsername = void 0;
+}
+async function closeSyncBackend() {
+  const b = active3?.backend;
+  active3 = void 0;
+  serverUsername = void 0;
+  if (b) await b.close();
+}
 function chunk(items, size) {
   const out = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
 function noteSyncError(e) {
-  lastError = { message: e instanceof Error ? e.message : String(e), at: Date.now() };
+  const message = e instanceof Error ? e.message : String(e);
+  lastError = { message, at: Date.now() };
+  const code = e?.code;
+  recordSyncHealth({ status: healthStatusFor(code), code: typeof code === "string" ? code : void 0, message });
+}
+function noteSyncOk(unpushed) {
+  lastError = void 0;
+  recordSyncHealth({ status: "ok", unpushed });
+}
+function isSignedOutError(e) {
+  return healthStatusFor(e?.code) === "signed_out";
+}
+function lastSyncError() {
+  return lastError;
 }
 function isCycleFatal(e) {
   const code = e?.code;
@@ -2390,16 +2830,109 @@ var init_backend = __esm({
   "packages/core/src/sync/backend.ts"() {
     "use strict";
     init_config();
+    init_health();
   }
 });
 
 // packages/core/src/tasks/create.ts
+var create_exports = {};
+__export(create_exports, {
+  createTask: () => createTask,
+  getNextTaskId: () => getNextTaskId
+});
+async function getNextTaskId() {
+  if (isSyncConfigured()) {
+    await Promise.race([
+      resolveSyncUsername(),
+      new Promise((resolve2) => setTimeout(resolve2, 3e3).unref())
+    ]).catch(() => void 0);
+  }
+  const collections = await listCollections2();
+  let maxId = 0;
+  for (const collection of collections) {
+    try {
+      const tasks = await getDocumentsByFilter2(collection.name, { type: "task" }, 1e3);
+      for (const task of tasks) {
+        const match = task.id.match(new RegExp(`^${getConfig().USERNAME}-(\\d+)$`));
+        if (match) {
+          maxId = Math.max(maxId, parseInt(match[1]));
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  if (isSyncConfigured()) {
+    try {
+      const backend = await getSyncBackend();
+      if (backend?.coordination) {
+        const id = await Promise.race([
+          backend.coordination.nextTaskId(maxId),
+          new Promise((resolve2) => setTimeout(() => resolve2(void 0), 3e3).unref())
+        ]);
+        if (id && id.startsWith(`${getConfig().USERNAME}-`)) return id;
+      }
+    } catch {
+    }
+  }
+  if (isSyncConfigured()) {
+    try {
+      const backend = await getSyncBackend();
+      const remote = !backend ? 0 : await Promise.race([
+        backend.maxTaskNumber(),
+        new Promise((resolve2) => setTimeout(() => resolve2(0), 3e3).unref())
+      ]);
+      maxId = Math.max(maxId, remote);
+    } catch {
+    }
+  }
+  return `${getConfig().USERNAME}-${maxId + 1}`;
+}
+async function createTask(title, options = {}, collection = "global") {
+  await getOrCreateCollection2(collection);
+  const id = await getNextTaskId();
+  const now = Math.floor(Date.now() / 1e3);
+  const metadata = {
+    type: "task",
+    id,
+    username: getConfig().USERNAME,
+    title,
+    notes: options.notes ?? "",
+    tags: options.tags ?? [],
+    status: options.status ?? "pending",
+    priority: options.priority ?? "medium",
+    due_date: options.due_date,
+    customer: options.customer,
+    project: options.project,
+    depends_on: options.depends_on ?? [],
+    blocks: options.blocks ?? [],
+    is_recurring: options.is_recurring ?? false,
+    recurrence_pattern: options.recurrence_pattern,
+    created_at: now,
+    updated_at: now,
+    accessed_at: now,
+    completed_at: options.completed_at ?? null,
+    duration_minutes: options.duration_minutes ?? null,
+    salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? "medium"],
+    sector: "semantic"
+  };
+  metadata.is_synced = false;
+  await addDocument2(collection, id, title, metadata);
+  return id;
+}
+var PRIORITY_SALIENCE;
 var init_create = __esm({
   "packages/core/src/tasks/create.ts"() {
     "use strict";
     init_config();
     init_store();
     init_backend();
+    PRIORITY_SALIENCE = {
+      critical: 3,
+      high: 2.5,
+      medium: 2,
+      low: 1.5
+    };
   }
 });
 
@@ -2435,6 +2968,14 @@ async function listTasks(filters = {}) {
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
 }
+async function getDueTasks(includeOverdue = true) {
+  const now = Math.floor(Date.now() / 1e3);
+  const tasks = await listTasks({ includeComplete: false });
+  return tasks.filter((t) => t.metadata.due_date).map((t) => {
+    const daysUntil = Math.ceil((t.metadata.due_date - now) / (24 * 60 * 60));
+    return { ...t, daysUntil };
+  }).filter((t) => includeOverdue || t.daysUntil >= 0).sort((a, b) => a.daysUntil - b.daysUntil);
+}
 var PRIORITY_ORDER;
 var init_list2 = __esm({
   "packages/core/src/tasks/list.ts"() {
@@ -2445,6 +2986,91 @@ var init_list2 = __esm({
 });
 
 // packages/core/src/tasks/update.ts
+async function getTask(id) {
+  const collections = await listCollections2();
+  for (const collection of collections) {
+    try {
+      const results = await getDocumentsByIds2(collection.name, [id]);
+      if (results.length > 0) {
+        return {
+          id: results[0].id,
+          title: results[0].content,
+          metadata: results[0].metadata,
+          collection: collection.name
+        };
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+async function updateTask(id, updates) {
+  const task = await getTask(id);
+  if (!task) throw new Error(`Task ${id} not found`);
+  assertWritable(id, task.metadata);
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes"];
+  const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
+  const updatedMetadata = {
+    ...task.metadata,
+    ...updates,
+    updated_at: Math.floor(Date.now() / 1e3)
+  };
+  if (hasStructuralChange) updatedMetadata.is_synced = false;
+  if (updates.title !== void 0 && updates.title !== task.title) {
+    await addDocument2(task.collection, id, updates.title, updatedMetadata);
+    return;
+  }
+  await updateDocument2(task.collection, id, updatedMetadata);
+}
+async function completeTask(id, durationMinutes) {
+  const task = await getTask(id);
+  if (!task) throw new Error(`Task ${id} not found`);
+  const completionUpdates = {
+    status: "complete",
+    salience: (task.metadata.salience ?? 2) * 0.5
+  };
+  if (task.metadata.completed_at == null) {
+    completionUpdates.completed_at = Math.floor(Date.now() / 1e3);
+  }
+  if (durationMinutes != null) {
+    completionUpdates.duration_minutes = durationMinutes;
+  }
+  await updateTask(id, completionUpdates);
+  if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
+    const nextDue = computeNextDue(
+      task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
+      task.metadata.recurrence_pattern
+    );
+    const newId = await createTask(task.title, {
+      priority: task.metadata.priority,
+      tags: Array.isArray(task.metadata.tags) ? task.metadata.tags : (task.metadata.tags ?? "").split(",").filter(Boolean),
+      notes: task.metadata.notes,
+      customer: task.metadata.customer,
+      project: task.metadata.project,
+      due_date: nextDue,
+      is_recurring: true,
+      recurrence_pattern: task.metadata.recurrence_pattern
+    }, task.collection);
+    return { regeneratedId: newId };
+  }
+  return {};
+}
+function computeNextDue(currentDue, pattern) {
+  const d = new Date(currentDue * 1e3);
+  switch (pattern) {
+    case "daily":
+      d.setDate(d.getDate() + 1);
+      break;
+    case "weekly":
+      d.setDate(d.getDate() + 7);
+      break;
+    case "monthly":
+      d.setMonth(d.getMonth() + 1);
+      break;
+  }
+  return Math.floor(d.getTime() / 1e3);
+}
 var init_update = __esm({
   "packages/core/src/tasks/update.ts"() {
     "use strict";
@@ -2456,6 +3082,32 @@ var init_update = __esm({
 });
 
 // packages/core/src/tasks/search.ts
+async function searchTasks(query, filters = {}) {
+  const collectionNames = filters.collection ? [filters.collection] : (await listCollections2()).map((c) => c.name);
+  const results = [];
+  for (const name of collectionNames) {
+    try {
+      const queryFilter = { type: "task" };
+      if (filters.customer) queryFilter.customer = filters.customer;
+      if (filters.project) queryFilter.project = filters.project;
+      const docs = await queryDocuments2(name, query, 10, queryFilter);
+      for (const doc of docs) {
+        if (doc.metadata.type === "task") {
+          results.push({
+            id: doc.id,
+            title: doc.content,
+            metadata: doc.metadata,
+            similarity: 1 - doc.distance,
+            collection: name
+          });
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  return results.sort((a, b) => b.similarity - a.similarity);
+}
 var init_search = __esm({
   "packages/core/src/tasks/search.ts"() {
     "use strict";
@@ -2464,6 +3116,9 @@ var init_search = __esm({
 });
 
 // packages/core/src/tasks/delete.ts
+async function deleteTask(id) {
+  return deleteDocumentEverywhere(id);
+}
 var init_delete = __esm({
   "packages/core/src/tasks/delete.ts"() {
     "use strict";
@@ -2472,15 +3127,154 @@ var init_delete = __esm({
 });
 
 // packages/core/src/tasks/dependencies.ts
+async function addDependency(taskId, dependsOnId) {
+  const task = await getTask(taskId);
+  const dep = await getTask(dependsOnId);
+  if (!task || !dep) {
+    throw new Error("One or both tasks not found");
+  }
+  assertWritable(taskId, task.metadata);
+  const taskDeps = Array.isArray(task.metadata.depends_on) ? task.metadata.depends_on : (task.metadata.depends_on ?? "").split(",").filter(Boolean);
+  if (!taskDeps.includes(dependsOnId)) {
+    taskDeps.push(dependsOnId);
+    await updateTask(taskId, { depends_on: taskDeps });
+  }
+  if (isReadOnlyDoc(dep.metadata)) return;
+  const depBlocks = Array.isArray(dep.metadata.blocks) ? dep.metadata.blocks : (dep.metadata.blocks ?? "").split(",").filter(Boolean);
+  if (!depBlocks.includes(taskId)) {
+    depBlocks.push(taskId);
+    await updateTask(dependsOnId, { blocks: depBlocks });
+  }
+}
+async function removeDependency(taskId, dependsOnId) {
+  const task = await getTask(taskId);
+  const dep = await getTask(dependsOnId);
+  if (!task && !dep) {
+    throw new Error("Neither task found");
+  }
+  if (task) {
+    const taskDeps = toList(task.metadata.depends_on);
+    if (taskDeps.includes(dependsOnId)) {
+      await updateTask(taskId, { depends_on: taskDeps.filter((id) => id !== dependsOnId) });
+    }
+  }
+  if (dep && !isReadOnlyDoc(dep.metadata)) {
+    const depBlocks = toList(dep.metadata.blocks);
+    if (depBlocks.includes(taskId)) {
+      await updateTask(dependsOnId, { blocks: depBlocks.filter((id) => id !== taskId) });
+    }
+  }
+}
+var toList;
 var init_dependencies = __esm({
   "packages/core/src/tasks/dependencies.ts"() {
     "use strict";
     init_update();
     init_syncable();
+    toList = (x) => Array.isArray(x) ? x : String(x ?? "").split(",").filter(Boolean);
   }
 });
 
 // packages/core/src/tasks/dates.ts
+function parseRelativeDate(phrase) {
+  const now = /* @__PURE__ */ new Date();
+  const lower = phrase.toLowerCase().trim();
+  if (lower === "today") {
+    return endOfDay(now);
+  }
+  if (lower === "tomorrow") {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 1);
+    return endOfDay(d);
+  }
+  const dayMatch = lower.match(/next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
+  if (dayMatch) {
+    const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    const targetDay = days.indexOf(dayMatch[1]);
+    const currentDay = now.getDay();
+    let daysUntil = targetDay - currentDay;
+    if (daysUntil <= 0) daysUntil += 7;
+    const d = new Date(now);
+    d.setDate(d.getDate() + daysUntil);
+    return endOfDay(d);
+  }
+  const inDaysMatch = lower.match(/in\s+(\d+)\s+day/);
+  if (inDaysMatch) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + parseInt(inDaysMatch[1]));
+    return endOfDay(d);
+  }
+  const inWeeksMatch = lower.match(/in\s+(\d+)\s+week/);
+  if (inWeeksMatch) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + parseInt(inWeeksMatch[1]) * 7);
+    return endOfDay(d);
+  }
+  if (lower === "end of week") {
+    const d = new Date(now);
+    const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntilFriday);
+    d.setHours(17, 0, 0, 0);
+    return Math.floor(d.getTime() / 1e3);
+  }
+  const dateMatch = phrase.match(/([A-Za-z]+)\s+(\d{1,2})(?:,\s+(\d{4}))?/);
+  if (dateMatch) {
+    const monthNames = [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december"
+    ];
+    const month = monthNames.indexOf(dateMatch[1].toLowerCase());
+    const day = parseInt(dateMatch[2]);
+    const year = dateMatch[3] ? parseInt(dateMatch[3]) : now.getFullYear();
+    if (month !== -1) {
+      const d = new Date(year, month, day, 23, 59, 59, 999);
+      return Math.floor(d.getTime() / 1e3);
+    }
+  }
+  return null;
+}
+function formatTaskDate(timestamp) {
+  const date = new Date(timestamp * 1e3);
+  return date.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...date.getHours() !== 23 || date.getMinutes() !== 59 ? { hour: "numeric" } : {}
+  });
+}
+function endOfDay(d) {
+  d.setHours(23, 59, 59, 999);
+  return Math.floor(d.getTime() / 1e3);
+}
+function parseDuration(input) {
+  const s = input.toLowerCase().trim();
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+  if (!m) return null;
+  const value = parseFloat(m[1]);
+  if (isNaN(value)) return null;
+  const unit = m[2] ?? "m";
+  let minutes;
+  if (unit.startsWith("h")) minutes = value * 60;
+  else if (unit.startsWith("d")) minutes = value * 60 * 8;
+  else minutes = value;
+  return Math.round(minutes);
+}
+function formatDuration(minutes) {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
 var init_dates = __esm({
   "packages/core/src/tasks/dates.ts"() {
     "use strict";
@@ -2498,6 +3292,13 @@ async function getSyncPullTimestamp() {
   } catch {
     return 0;
   }
+}
+async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
+    type: "sync_pull_sentinel",
+    last_pull: at
+  });
 }
 async function getSyncSubscriptions() {
   try {
@@ -2520,16 +3321,109 @@ async function updateSyncSubscriptions(collections) {
     collections: deduped.join(",")
   });
 }
-var SYNC_SUBSCRIPTIONS_ID;
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID;
 var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
     init_store();
+    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
   }
 });
 
 // packages/core/src/collections/manage.ts
+async function listCollectionsWithCounts() {
+  const collections = await listCollections2();
+  const results = await Promise.all(
+    collections.map(async (c) => {
+      try {
+        const count = await getCollectionCount2(c.name);
+        return { name: c.name, id: c.id, documentCount: count };
+      } catch {
+        return { name: c.name, id: c.id, documentCount: 0 };
+      }
+    })
+  );
+  return results.sort((a, b) => a.name.localeCompare(b.name));
+}
+async function createNewCollection(name) {
+  await createCollection2(name);
+}
+async function removeCollection(name, opts = {}) {
+  if (isSyncable2(name) && !opts.force && opts.confirm !== name) {
+    const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
+    const count = docs.filter((d) => !d.id.startsWith("__")).length;
+    if (count > 0) {
+      const reach = getConfig().SYNC_ENABLED ? "Deleting it permanently deletes the collection for EVERY teammate on the sync service." : "Deleting it is permanent.";
+      throw new CollectionDeleteRefusedError(
+        `Refused: "${name}" is a shared collection with ${count} document${count === 1 ? "" : "s"}. ${reach} This is not a merge: to combine it with another collection, use collection_merge (it keeps every document). To delete it anyway, confirm with the user, then pass confirm: "${name}".`,
+        count
+      );
+    }
+  }
+  if (getConfig().SYNC_ENABLED && isSyncable2(name)) {
+    const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
+    const me = getConfig().USERNAME;
+    const real = docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft");
+    await queueSyncDeletes(real.filter((d) => !d.metadata.origin_user || d.metadata.origin_user === me).map((d) => d.id), name);
+    await addLocalTombstones(real.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).map((d) => d.id));
+    const subs = await getSyncSubscriptions();
+    if (subs.includes(name)) await updateSyncSubscriptions(subs.filter((s) => s !== name));
+  }
+  await deleteCollection2(name);
+}
+async function mergeCollections(from, into, opts = {}) {
+  if (from === into) throw new Error("Source and target are the same collection");
+  const names = new Set((await listCollections2()).map((c) => c.name));
+  if (!names.has(from)) throw new Error(`Collection "${from}" not found`);
+  if (!names.has(into)) {
+    throw new Error(`Target collection "${into}" does not exist. Confirm the name with the user and create it first (collection_create), then merge.`);
+  }
+  if (!isSyncable2(from) && isSyncable2(into)) {
+    throw new Error(
+      `Refused: "${from}" is private (never synced) and "${into}" is shared. Merging would publish every document in "${from}" to all teammates on the sync service. Merge into another private collection, or store the specific documents that should be shared.`
+    );
+  }
+  const docs = await getDocumentsByFilter2(from, {}, 1e5);
+  const total = await getCollectionCount2(from);
+  if (docs.length < total) throw new Error(`Could only read ${docs.length} of ${total} documents in "${from}"; nothing was moved`);
+  const ids = docs.map((d) => d.id);
+  const clash = ids.length > 0 ? (await getDocumentsByIds2(into, ids).catch(() => [])).map((d) => d.id) : [];
+  if (clash.length > 0) {
+    throw new Error(`"${into}" already holds ${clash.length} id(s) from "${from}" (${clash.slice(0, 5).join(", ")}${clash.length > 5 ? ", ..." : ""}); nothing was moved`);
+  }
+  const byType = {};
+  for (const d of docs) {
+    const t = String(d.metadata.type ?? "unknown");
+    byType[t] = (byType[t] ?? 0) + 1;
+  }
+  const me = getConfig().USERNAME;
+  const teammateRowsKept = isSyncable2(from) && !isSyncable2(into) ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
+  const result = { from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept };
+  if (opts.dryRun) return result;
+  if (docs.length > 0) {
+    const before = await getCollectionCount2(into);
+    for (let i = 0; i < docs.length; i += MERGE_BATCH) {
+      await addDocumentsBatch2(into, docs.slice(i, i + MERGE_BATCH).map((d) => {
+        const metadata = { ...d.metadata, is_synced: false };
+        delete metadata.remote_checked_at;
+        return { id: d.id, content: d.content, metadata };
+      }));
+    }
+    const landed = await getDocumentsByIds2(into, ids);
+    const after = await getCollectionCount2(into);
+    if (landed.length !== ids.length || after !== before + ids.length) {
+      throw new Error(`Merge verification failed: "${into}" holds ${landed.length} of ${ids.length} moved docs (count ${before} -> ${after}); "${from}" was left intact`);
+    }
+    for (const id of ids) await deleteDocument2(from, id);
+    const left = await getCollectionCount2(from);
+    if (left !== 0) throw new Error(`"${from}" still holds ${left} document(s) after the move; it was not deleted`);
+  }
+  await removeCollection(from);
+  result.sourceRemoved = true;
+  return result;
+}
+var isSyncable2, CollectionDeleteRefusedError, MERGE_BATCH;
 var init_manage = __esm({
   "packages/core/src/collections/manage.ts"() {
     "use strict";
@@ -2538,11 +3432,24 @@ var init_manage = __esm({
     init_sentinel();
     init_store();
     init_syncable();
+    isSyncable2 = isSyncableCollection;
+    CollectionDeleteRefusedError = class extends Error {
+      constructor(message, documentCount) {
+        super(message);
+        this.documentCount = documentCount;
+        this.name = "CollectionDeleteRefusedError";
+      }
+      documentCount;
+    };
+    MERGE_BATCH = 100;
   }
 });
 
 // packages/core/src/curation/provider.ts
 import { spawn } from "node:child_process";
+function setHostLLMCaller(caller) {
+  hostCaller = caller;
+}
 async function callCurationLLM(options) {
   if (hostCaller) return hostCaller(options);
   const model = getCurationModel();
@@ -2658,14 +3565,14 @@ function buildClaudeCliArgs(model, system) {
 async function callClaudeCli(model, options) {
   const system = options.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
   const prompt = options.messages.filter((m) => m.role !== "system").map((m) => m.role === "assistant" ? `Assistant: ${m.content}` : m.content).join("\n\n");
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const child = spawn("claude", buildClaudeCliArgs(model, system), {
       env: { ...process.env, [HOOK_CHILD_ENV]: "1" },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let out = "";
     let err = "";
-    const timer = setTimeout(() => {
+    const timer2 = setTimeout(() => {
       child.kill("SIGTERM");
       reject(new Error(`claude -p timed out after ${CLAUDE_CLI_TIMEOUT_MS}ms`));
     }, CLAUDE_CLI_TIMEOUT_MS);
@@ -2676,12 +3583,12 @@ async function callClaudeCli(model, options) {
       err += d;
     });
     child.on("error", (e) => {
-      clearTimeout(timer);
+      clearTimeout(timer2);
       reject(e);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(out.trim());
+      clearTimeout(timer2);
+      if (code === 0) resolve2(out.trim());
       else reject(new Error(`claude -p exited ${code}: ${err.trim().slice(0, 300)}`));
     });
     child.stdin.end(prompt);
@@ -2698,13 +3605,125 @@ var init_provider = __esm({
 });
 
 // packages/core/src/curation/prompts.ts
+function buildClassifierUserPrompt(memories) {
+  const lines = [`Classify these ${memories.length} memories:`, ""];
+  for (let i = 0; i < memories.length; i++) {
+    const m = memories[i];
+    lines.push(`[MEMORY ${i + 1}]`);
+    lines.push(`ID: ${m.id}`);
+    lines.push("CONTENT:");
+    lines.push(m.content);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+var CLASSIFIER_PROMPT_VERSION, CLASSIFIER_SYSTEM_PROMPT;
 var init_prompts = __esm({
   "packages/core/src/curation/prompts.ts"() {
     "use strict";
+    CLASSIFIER_PROMPT_VERSION = "v1";
+    CLASSIFIER_SYSTEM_PROMPT = `You are a memory classifier. Given one or more memory entries, score each on three independent dimensions (each 0.0 to 1.0) that determine how the memory should be routed downstream.
+
+DIMENSIONS
+
+trainable (0.0-1.0): Would this memory make good training data for fine-tuning a language model to behave more like the user? Score HIGH for reasoning patterns, writing style, preferences, judgment calls, or reusable technical approaches. Score LOW for one-off facts, current state that will change, specific numbers or counts, or simple configuration data that belongs in a retrieval system instead.
+
+durability (0.0-1.0): How likely is this memory to remain true/relevant over months or years? Score HIGH for timeless conventions, user preferences, patterns, architectural principles, or "how things work" knowledge. Score LOW for current state ("X is on version Y"), in-progress work, project statuses, calendar dates, or counts/numbers that will change.
+
+generalizability (0.0-1.0): Does this memory describe a pattern or principle that applies beyond its specific context, or is it a one-off detail? Score HIGH for principles, rules, and patterns that transfer across situations. Score LOW for specific instances, named entities, or one-off details.
+
+SCORING TIPS
+
+- These three dimensions are INDEPENDENT. A memory can be high on one and low on another.
+- Do not score based on how interesting or important the memory seems. Score based on the dimensions above.
+- If a memory is extremely specific to a named entity (a company, a project, a person), generalizability should be LOW even if the underlying principle is broad.
+- "How to do X" patterns generally score HIGH on all three. "X happened on date Y" generally scores LOW on all three.
+
+OUTPUT FORMAT
+
+Return valid JSON only. No commentary. No markdown fences. The output must be a JSON array with exactly one object per input memory, in the same order the inputs were given:
+
+[
+  {
+    "id": "<the exact id from the input>",
+    "trainable": <number between 0.0 and 1.0>,
+    "durability": <number between 0.0 and 1.0>,
+    "generalizability": <number between 0.0 and 1.0>,
+    "rationale": "<one short sentence explaining the scores>"
+  }
+]
+
+Do not include any fields other than these five. Do not wrap the JSON in \`\`\`. Do not prepend explanations.`;
   }
 });
 
 // packages/core/src/curation/classifier.ts
+async function classifyMemories(memories, options = {}) {
+  if (memories.length === 0) return [];
+  const caller = options.call ?? callCurationLLM;
+  const userPrompt = buildClassifierUserPrompt(memories);
+  const raw = await caller({
+    messages: [
+      { role: "system", content: CLASSIFIER_SYSTEM_PROMPT },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0,
+    max_tokens: 2048,
+    json_mode: true
+  });
+  return parseClassifierResponse(raw, memories);
+}
+function parseClassifierResponse(raw, memories) {
+  const parsed = extractJsonArray(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Classifier response was not a JSON array: ${raw.slice(0, 200)}`);
+  }
+  const byId = new Map(memories.map((m) => [m.id, m]));
+  const seen = /* @__PURE__ */ new Set();
+  const results = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const id = String(entry.id ?? "");
+    if (!byId.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    results.push({
+      id,
+      trainable: clamp01(entry.trainable),
+      durability: clamp01(entry.durability),
+      generalizability: clamp01(entry.generalizability),
+      rationale: typeof entry.rationale === "string" ? entry.rationale : ""
+    });
+  }
+  return results;
+}
+function clamp01(v) {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? 0));
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+function extractJsonArray(raw) {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+  }
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch) {
+    try {
+      return JSON.parse(fenceMatch[1]);
+    } catch {
+    }
+  }
+  const start = trimmed.indexOf("[");
+  const end = trimmed.lastIndexOf("]");
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    } catch {
+    }
+  }
+  throw new Error(`Could not extract JSON array from classifier response: ${raw.slice(0, 200)}`);
+}
 var init_classifier = __esm({
   "packages/core/src/curation/classifier.ts"() {
     "use strict";
@@ -2714,12 +3733,130 @@ var init_classifier = __esm({
 });
 
 // packages/core/src/curation/index.ts
+function getCurationState() {
+  return { lastRunAt, lastError: lastError2, cycleCount, timerActive, totalScored };
+}
+async function collectUnclassified(collection) {
+  const docs = await getDocumentsByFilter2(collection, { type: "memory" }, MAX_PER_COLLECTION);
+  return docs.filter((d) => d.metadata.classified_at == null);
+}
+async function curationCycle() {
+  if (running) {
+    process.stderr.write("[yapa-curation] Skipping cycle \u2014 previous still running\n");
+    return null;
+  }
+  running = true;
+  try {
+    const stats = { scored: 0, pending: 0, batches: 0, errors: 0 };
+    const collections = await listCollections2();
+    for (const c of collections) {
+      let unclassified;
+      try {
+        unclassified = await collectUnclassified(c.name);
+      } catch (e) {
+        process.stderr.write(`[yapa-curation] Collection error ${c.name}: ${e}
+`);
+        stats.errors++;
+        continue;
+      }
+      stats.pending += unclassified.length;
+      for (let i = 0; i < unclassified.length; i += getConfig().CURATION_BATCH_SIZE) {
+        const batch = unclassified.slice(i, i + getConfig().CURATION_BATCH_SIZE);
+        try {
+          const scored = await classifyMemories(
+            batch.map((b) => ({ id: b.id, content: b.content }))
+          );
+          const now = Math.floor(Date.now() / 1e3);
+          for (const result of scored) {
+            const doc = batch.find((b) => b.id === result.id);
+            if (!doc) continue;
+            const updated = {
+              ...doc.metadata,
+              trainable: result.trainable,
+              durability: result.durability,
+              generalizability: result.generalizability,
+              classified_at: now,
+              classifier_prompt_version: CLASSIFIER_PROMPT_VERSION
+            };
+            if (result.rationale) updated.classification_rationale = result.rationale;
+            try {
+              await updateDocument2(c.name, doc.id, updated);
+              stats.scored++;
+            } catch (e) {
+              process.stderr.write(`[yapa-curation] Update error for ${doc.id}: ${e}
+`);
+              stats.errors++;
+            }
+          }
+          stats.batches++;
+        } catch (e) {
+          process.stderr.write(`[yapa-curation] Batch error in ${c.name}: ${e}
+`);
+          stats.errors++;
+        }
+      }
+    }
+    lastRunAt = Date.now();
+    lastError2 = null;
+    cycleCount++;
+    totalScored += stats.scored;
+    if (stats.scored > 0 || stats.errors > 0) {
+      process.stderr.write(
+        `[yapa-curation] Classified ${stats.scored}/${stats.pending} memories in ${stats.batches} batch(es), ${stats.errors} error(s)
+`
+      );
+    }
+    return stats;
+  } catch (e) {
+    const msg = `${e}`;
+    process.stderr.write(`[yapa-curation] Cycle error: ${msg}
+`);
+    lastRunAt = Date.now();
+    lastError2 = msg;
+    cycleCount++;
+    return null;
+  } finally {
+    running = false;
+  }
+}
+async function startCuration() {
+  if (!getConfig().CURATION_ENABLED) return;
+  curationCycle().catch(
+    (e) => process.stderr.write(`[yapa-curation] Initial cycle error: ${e}
+`)
+  );
+  timer = setInterval(() => {
+    curationCycle().catch((e) => process.stderr.write(`[yapa-curation] Cycle error: ${e}
+`));
+  }, getConfig().CURATION_INTERVAL_MS);
+  timerActive = true;
+  process.stderr.write(
+    `[yapa-curation] Background curation started (interval: ${getConfig().CURATION_INTERVAL_MS / 1e3}s)
+`
+  );
+}
+function stopCuration() {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+    timerActive = false;
+  }
+}
+var timer, running, lastRunAt, lastError2, cycleCount, timerActive, totalScored, MAX_PER_COLLECTION;
 var init_curation = __esm({
   "packages/core/src/curation/index.ts"() {
     "use strict";
     init_config();
     init_store();
     init_classifier();
+    timer = null;
+    running = false;
+    lastRunAt = null;
+    lastError2 = null;
+    cycleCount = 0;
+    timerActive = false;
+    totalScored = 0;
+    MAX_PER_COLLECTION = 500;
   }
 });
 
@@ -2753,7 +3890,7 @@ async function extractMemories(input, options = {}) {
   return parsed.slice(0, Math.max(0, max));
 }
 function parseExtractorResponse(raw) {
-  const parsed = extractJsonArray(raw);
+  const parsed = extractJsonArray2(raw);
   if (!Array.isArray(parsed)) {
     throw new Error(`Extractor response was not a JSON array: ${raw.slice(0, 200)}`);
   }
@@ -2779,7 +3916,7 @@ function clampSalience(v) {
   if (!Number.isFinite(n)) return 1;
   return Math.max(1, Math.min(3, n));
 }
-function extractJsonArray(raw) {
+function extractJsonArray2(raw) {
   const trimmed = raw.trim();
   try {
     return JSON.parse(trimmed);
@@ -2947,6 +4084,105 @@ Return valid JSON only. No commentary. No markdown fences:
 });
 
 // packages/core/src/curation/janitor.ts
+async function findDuplicatePairs(collection, distanceThreshold) {
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true);
+  const seen = /* @__PURE__ */ new Set();
+  const pairs = [];
+  for (const doc of all) {
+    const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
+    for (const n of neighbors) {
+      if (n.id === doc.id || n.distance >= distanceThreshold) continue;
+      if (n.metadata?.archived === true) continue;
+      const key = [doc.id, n.id].sort().join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({
+        collection,
+        a: { id: doc.id, content: doc.content, metadata: doc.metadata },
+        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience },
+        distance: n.distance
+      });
+    }
+  }
+  return pairs.sort((x, y) => x.distance - y.distance);
+}
+async function archiveDuplicate(collection, loserId, winnerId) {
+  const existing = await getDocumentsByIds2(collection, [loserId]);
+  if (!existing.length) return;
+  await updateDocument2(collection, loserId, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId }));
+}
+async function janitorSweep(options = {}) {
+  const stats = {
+    collectionsScanned: 0,
+    pairsConsidered: 0,
+    skippedDuplicates: 0,
+    superseded: 0,
+    keptDistinct: 0,
+    errors: 0
+  };
+  const maxPairs = options.maxPairs ?? 20;
+  const threshold = options.distanceThreshold ?? getConfig().CONTRADICTION_DISTANCE_THRESHOLD;
+  const collections = options.collection ? [options.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const collection of collections) {
+    if (stats.pairsConsidered >= maxPairs) break;
+    let pairs;
+    try {
+      pairs = await findDuplicatePairs(collection, threshold);
+      stats.collectionsScanned++;
+    } catch (e) {
+      process.stderr.write(`[yapa-janitor] scan failed for ${collection}: ${e}
+`);
+      stats.errors++;
+      continue;
+    }
+    for (const pair of pairs) {
+      if (stats.pairsConsidered >= maxPairs) break;
+      stats.pairsConsidered++;
+      try {
+        const [candidate, neighbor] = (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1) ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }] : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
+        const decision = await resolveConflict(
+          candidate.content,
+          [neighbor],
+          options.call ? { call: options.call } : {}
+        );
+        if (decision.action === "skip") {
+          await archiveDuplicate(collection, candidate.id, neighbor.id);
+          stats.skippedDuplicates++;
+        } else if (decision.action === "supersede") {
+          const target = decision.targetId === candidate.id ? candidate : neighbor;
+          const other = decision.targetId === candidate.id ? neighbor : candidate;
+          await storeMemory(decision.mergedContent ?? candidate.content, {
+            collection,
+            salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
+            tags: ["janitor-merged"],
+            sector: "semantic",
+            supersedes: target.id,
+            metadata: {
+              source: "janitor",
+              resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+              rationale: decision.rationale,
+              related_to: other.id
+            }
+          });
+          stats.superseded++;
+        } else {
+          stats.keptDistinct++;
+        }
+      } catch (e) {
+        process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}
+`);
+        stats.errors++;
+      }
+    }
+  }
+  if (stats.pairsConsidered > 0) {
+    process.stderr.write(
+      `[yapa-janitor] sweep: ${stats.pairsConsidered} pairs \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.errors} error(s)
+`
+    );
+  }
+  return stats;
+}
 var init_janitor = __esm({
   "packages/core/src/curation/janitor.ts"() {
     "use strict";
@@ -3054,6 +4290,53 @@ var init_capture = __esm({
 });
 
 // packages/core/src/buckets/artifacts.ts
+import { existsSync, mkdirSync as mkdirSync4, readdirSync, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "fs";
+import { join as join3 } from "path";
+function artifactDir(kind) {
+  return join3(getConfig().ARTIFACTS_DIR, kind);
+}
+function ensureArtifactDir(kind) {
+  const dir = artifactDir(kind);
+  if (!existsSync(dir)) mkdirSync4(dir, { recursive: true });
+  return dir;
+}
+function nextVersion(kind) {
+  const dir = ensureArtifactDir(kind);
+  const files = readdirSync(dir);
+  let max = 0;
+  for (const f of files) {
+    const m = f.match(/^v(\d+)\./);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!Number.isNaN(n) && n > max) max = n;
+    }
+  }
+  return max + 1;
+}
+function listVersions(kind) {
+  const dir = artifactDir(kind);
+  if (!existsSync(dir)) return [];
+  const versions = /* @__PURE__ */ new Set();
+  for (const f of readdirSync(dir)) {
+    const m = f.match(/^v(\d+)\./);
+    if (m) versions.add(parseInt(m[1], 10));
+  }
+  return [...versions].sort((a, b) => a - b);
+}
+function writeArtifact(kind, filename, content) {
+  const dir = ensureArtifactDir(kind);
+  const path = join3(dir, filename);
+  writeFileSync4(path, content);
+  return path;
+}
+function readArtifact(kind, filename) {
+  const path = join3(artifactDir(kind), filename);
+  if (!existsSync(path)) return null;
+  return readFileSync6(path, "utf-8");
+}
+function artifactPath(kind, filename) {
+  return join3(artifactDir(kind), filename);
+}
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
     "use strict";
@@ -3062,6 +4345,65 @@ var init_artifacts = __esm({
 });
 
 // packages/core/src/buckets/router.ts
+function systemPromptThresholds() {
+  return {
+    trainable: getConfig().SYSTEM_PROMPT_TRAINABLE_MIN,
+    durability: getConfig().SYSTEM_PROMPT_DURABILITY_MIN,
+    generalizability: getConfig().SYSTEM_PROMPT_GENERALIZABILITY_MIN
+  };
+}
+function trainingThresholds() {
+  return {
+    trainable: getConfig().TRAINING_TRAINABLE_MIN,
+    durability: getConfig().TRAINING_DURABILITY_MIN,
+    generalizability: getConfig().TRAINING_GENERALIZABILITY_MIN
+  };
+}
+function routeMemory(input, custom) {
+  const { metadata } = input;
+  const sp = custom?.systemPrompt ?? systemPromptThresholds();
+  const tr = custom?.training ?? trainingThresholds();
+  const buckets = [];
+  const reasons = {
+    "system-prompt": "",
+    training: ""
+  };
+  if (metadata.classified_at == null) {
+    const r = "not classified yet";
+    reasons["system-prompt"] = r;
+    reasons.training = r;
+    return { buckets, reasons };
+  }
+  const t = Number(metadata.trainable ?? 0);
+  const d = Number(metadata.durability ?? 0);
+  const g = Number(metadata.generalizability ?? 0);
+  const spRecord = metadata.promoted_to?.toString().startsWith("system-prompt") || metadata.selected_for?.toString().startsWith("system-prompt");
+  const trRecord = metadata.promoted_to?.toString().startsWith("training") || metadata.selected_for?.toString().startsWith("training");
+  if (spRecord) {
+    reasons["system-prompt"] = "already routed to system-prompt bucket";
+  } else if (t >= sp.trainable && d >= sp.durability && g >= sp.generalizability) {
+    buckets.push("system-prompt");
+    reasons["system-prompt"] = `scores meet system-prompt thresholds (t=${t.toFixed(2)} d=${d.toFixed(2)} g=${g.toFixed(2)})`;
+  } else {
+    reasons["system-prompt"] = belowReason("system-prompt", sp, t, d, g);
+  }
+  if (trRecord) {
+    reasons.training = "already routed to training bucket";
+  } else if (t >= tr.trainable && d >= tr.durability && g >= tr.generalizability) {
+    buckets.push("training");
+    reasons.training = `scores meet training thresholds (t=${t.toFixed(2)} d=${d.toFixed(2)} g=${g.toFixed(2)})`;
+  } else {
+    reasons.training = belowReason("training", tr, t, d, g);
+  }
+  return { buckets, reasons };
+}
+function belowReason(bucket, th, t, d, g) {
+  const miss = [];
+  if (t < th.trainable) miss.push(`trainable ${t.toFixed(2)} < ${th.trainable}`);
+  if (d < th.durability) miss.push(`durability ${d.toFixed(2)} < ${th.durability}`);
+  if (g < th.generalizability) miss.push(`generalizability ${g.toFixed(2)} < ${th.generalizability}`);
+  return `below ${bucket}: ${miss.join(", ")}`;
+}
 var init_router = __esm({
   "packages/core/src/buckets/router.ts"() {
     "use strict";
@@ -3070,6 +4412,67 @@ var init_router = __esm({
 });
 
 // packages/core/src/buckets/system-prompt.ts
+function writeSystemPromptCompanion(version, memories, thresholds) {
+  const companion = renderCompanion(version, memories);
+  const manifest = renderManifest(version, memories, thresholds);
+  const companionName = `v${version}.md`;
+  const manifestName = `v${version}.manifest.json`;
+  const companionPath = writeArtifact("system-prompt-companion", companionName, companion);
+  const manifestPath = writeArtifact("system-prompt-companion", manifestName, manifest);
+  return {
+    version,
+    companionPath,
+    manifestPath,
+    memoryIds: memories.map((m) => m.id)
+  };
+}
+function renderCompanion(version, memories) {
+  if (memories.length === 0) {
+    return `# System-prompt companion v${version}
+
+_No memories met the routing thresholds for this bucket._
+`;
+  }
+  const byCollection = /* @__PURE__ */ new Map();
+  for (const m of memories) {
+    const arr = byCollection.get(m.collection) ?? [];
+    arr.push(m);
+    byCollection.set(m.collection, arr);
+  }
+  const lines = [
+    `# System-prompt companion v${version}`,
+    "",
+    "_Durable, generalizable knowledge that should be available as persistent context. Generated by YAPA bucket routing._",
+    ""
+  ];
+  const collections = [...byCollection.keys()].sort();
+  for (const coll of collections) {
+    lines.push(`## ${coll}`);
+    lines.push("");
+    for (const m of byCollection.get(coll)) {
+      lines.push(m.content);
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+function renderManifest(version, memories, thresholds) {
+  const payload = {
+    version,
+    kind: "system-prompt-companion",
+    created_at: Math.floor(Date.now() / 1e3),
+    thresholds,
+    memory_ids: memories.map((m) => m.id),
+    memories: memories.map((m) => ({
+      id: m.id,
+      collection: m.collection,
+      trainable: m.metadata.trainable,
+      durability: m.metadata.durability,
+      generalizability: m.metadata.generalizability
+    }))
+  };
+  return JSON.stringify(payload, null, 2) + "\n";
+}
 var init_system_prompt = __esm({
   "packages/core/src/buckets/system-prompt.ts"() {
     "use strict";
@@ -3078,6 +4481,39 @@ var init_system_prompt = __esm({
 });
 
 // packages/core/src/buckets/training-manifest.ts
+function writeTrainingManifest(version, memories, thresholds) {
+  const lines = memories.map((m) => JSON.stringify({
+    id: m.id,
+    collection: m.collection,
+    content: m.content,
+    trainable: m.metadata.trainable,
+    durability: m.metadata.durability,
+    generalizability: m.metadata.generalizability,
+    rationale: m.metadata.classification_rationale
+  }));
+  const manifestName = `v${version}.jsonl`;
+  const sidecarName = `v${version}.manifest.json`;
+  const manifestPath = writeArtifact(
+    "training-manifests",
+    manifestName,
+    lines.join("\n") + (lines.length ? "\n" : "")
+  );
+  const sidecar = JSON.stringify({
+    version,
+    kind: "training-manifest",
+    created_at: Math.floor(Date.now() / 1e3),
+    thresholds,
+    memory_count: memories.length,
+    memory_ids: memories.map((m) => m.id)
+  }, null, 2) + "\n";
+  const sidecarPath = writeArtifact("training-manifests", sidecarName, sidecar);
+  return {
+    version,
+    manifestPath,
+    sidecarPath,
+    memoryIds: memories.map((m) => m.id)
+  };
+}
 var init_training_manifest = __esm({
   "packages/core/src/buckets/training-manifest.ts"() {
     "use strict";
@@ -3086,6 +4522,223 @@ var init_training_manifest = __esm({
 });
 
 // packages/core/src/buckets/index.ts
+async function collectClassifiedMemories() {
+  const collections = await listCollections2();
+  const out = [];
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
+      for (const d of docs) {
+        if (d.metadata.classified_at != null) {
+          out.push({
+            id: d.id,
+            collection: c.name,
+            content: d.content,
+            metadata: d.metadata
+          });
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+function computeRouting(memories) {
+  const sp = systemPromptThresholds();
+  const tr = trainingThresholds();
+  return memories.map((m) => {
+    const decision = routeMemory({ metadata: m.metadata }, { systemPrompt: sp, training: tr });
+    return { ...m, buckets: decision.buckets, reasons: decision.reasons };
+  });
+}
+function collectCurrentThresholds() {
+  return {
+    systemPrompt: {
+      trainable: getConfig().SYSTEM_PROMPT_TRAINABLE_MIN,
+      durability: getConfig().SYSTEM_PROMPT_DURABILITY_MIN,
+      generalizability: getConfig().SYSTEM_PROMPT_GENERALIZABILITY_MIN
+    },
+    training: {
+      trainable: getConfig().TRAINING_TRAINABLE_MIN,
+      durability: getConfig().TRAINING_DURABILITY_MIN,
+      generalizability: getConfig().TRAINING_GENERALIZABILITY_MIN
+    }
+  };
+}
+async function bucketRoutePreview() {
+  const memories = await collectClassifiedMemories();
+  const entries = computeRouting(memories);
+  return {
+    systemPromptVersion: nextVersion("system-prompt-companion"),
+    trainingVersion: nextVersion("training-manifests"),
+    systemPromptCandidates: entries.filter((e) => e.buckets.includes("system-prompt")),
+    trainingCandidates: entries.filter((e) => e.buckets.includes("training")),
+    thresholds: collectCurrentThresholds()
+  };
+}
+async function bucketRouteNow() {
+  const memories = await collectClassifiedMemories();
+  const entries = computeRouting(memories);
+  const spVersion = nextVersion("system-prompt-companion");
+  const trVersion = nextVersion("training-manifests");
+  const spCandidates = entries.filter((e) => e.buckets.includes("system-prompt"));
+  const trCandidates = entries.filter((e) => e.buckets.includes("training"));
+  const thresholds = collectCurrentThresholds();
+  let systemPromptArtifact;
+  if (spCandidates.length > 0) {
+    const result = writeSystemPromptCompanion(spVersion, spCandidates, {
+      trainable: thresholds.systemPrompt.trainable,
+      durability: thresholds.systemPrompt.durability,
+      generalizability: thresholds.systemPrompt.generalizability
+    });
+    systemPromptArtifact = { companionPath: result.companionPath, manifestPath: result.manifestPath };
+  }
+  let trainingArtifact;
+  if (trCandidates.length > 0) {
+    const result = writeTrainingManifest(trVersion, trCandidates, {
+      trainable: thresholds.training.trainable,
+      durability: thresholds.training.durability,
+      generalizability: thresholds.training.generalizability
+    });
+    trainingArtifact = { manifestPath: result.manifestPath, sidecarPath: result.sidecarPath };
+  }
+  const now = Math.floor(Date.now() / 1e3);
+  let tagged = 0;
+  async function tag(entry, bucket, tag2) {
+    const updated = {
+      ...entry.metadata,
+      selected_for: tag2,
+      selected_at: now
+    };
+    try {
+      await updateDocument2(entry.collection, entry.id, updated);
+      tagged++;
+    } catch (e) {
+      process.stderr.write(`[yapa-buckets] Tag error for ${entry.id}: ${e}
+`);
+    }
+  }
+  if (spCandidates.length > 0) {
+    for (const e of spCandidates) await tag(e, "system-prompt", `system-prompt-v${spVersion}`);
+  }
+  if (trCandidates.length > 0) {
+    for (const e of trCandidates) await tag(e, "training", `training-v${trVersion}`);
+  }
+  const decisions = entries.map((e) => ({
+    id: e.id,
+    collection: e.collection,
+    buckets: e.buckets,
+    reasons: e.reasons,
+    scores: {
+      trainable: e.metadata.trainable,
+      durability: e.metadata.durability,
+      generalizability: e.metadata.generalizability
+    }
+  }));
+  const routingDecisions = JSON.stringify({
+    created_at: now,
+    system_prompt_version: spCandidates.length > 0 ? spVersion : null,
+    training_version: trCandidates.length > 0 ? trVersion : null,
+    thresholds,
+    decisions
+  }, null, 2) + "\n";
+  const auditVersion = Math.max(spVersion, trVersion);
+  const routingDecisionsPath = writeArtifact(
+    "routing-decisions",
+    `v${auditVersion}.json`,
+    routingDecisions
+  );
+  if (spCandidates.length > 0 || trCandidates.length > 0) {
+    process.stderr.write(
+      `[yapa-buckets] Routed ${spCandidates.length} to system-prompt-v${spVersion}, ${trCandidates.length} to training-v${trVersion}
+`
+    );
+  } else {
+    process.stderr.write("[yapa-buckets] No memories met routing thresholds\n");
+  }
+  return {
+    systemPromptVersion: spVersion,
+    trainingVersion: trVersion,
+    systemPromptCandidates: spCandidates,
+    trainingCandidates: trCandidates,
+    thresholds,
+    systemPromptArtifact,
+    trainingArtifact,
+    routingDecisionsPath,
+    tagged
+  };
+}
+async function systemPromptActivate(version) {
+  const target = `system-prompt-v${version}`;
+  const collections = await listCollections2();
+  let promoted = 0;
+  const now = Math.floor(Date.now() / 1e3);
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
+      for (const d of docs) {
+        if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
+          await updateDocument2(c.name, d.id, {
+            ...d.metadata,
+            promoted_to: target,
+            promoted_at: now
+          });
+          promoted++;
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-buckets] Activate error in ${c.name}: ${e}
+`);
+    }
+  }
+  return { promoted };
+}
+async function systemPromptDeactivate(version) {
+  const target = `system-prompt-v${version}`;
+  const collections = await listCollections2();
+  let rolledBack = 0;
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
+      for (const d of docs) {
+        if (d.metadata.promoted_to === target) {
+          const updated = { ...d.metadata };
+          delete updated.promoted_to;
+          delete updated.promoted_at;
+          await updateDocument2(c.name, d.id, updated);
+          rolledBack++;
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-buckets] Deactivate error in ${c.name}: ${e}
+`);
+    }
+  }
+  return { rolledBack };
+}
+async function bucketStatus() {
+  const collections = await listCollections2();
+  const bySelection = {};
+  const byPromotion = {};
+  let pendingClassification = 0;
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
+      for (const d of docs) {
+        if (d.metadata.classified_at == null) pendingClassification++;
+        const sel = d.metadata.selected_for;
+        const prom = d.metadata.promoted_to;
+        if (sel) bySelection[sel] = (bySelection[sel] ?? 0) + 1;
+        if (prom) byPromotion[prom] = (byPromotion[prom] ?? 0) + 1;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return { bySelection, byPromotion, pendingClassification };
+}
+var MAX_PER_COLLECTION2;
 var init_buckets = __esm({
   "packages/core/src/buckets/index.ts"() {
     "use strict";
@@ -3095,10 +4748,243 @@ var init_buckets = __esm({
     init_router();
     init_system_prompt();
     init_training_manifest();
+    MAX_PER_COLLECTION2 = 2e3;
   }
 });
 
 // packages/core/src/sync/push.ts
+import { createHash } from "node:crypto";
+function emptyPushStats() {
+  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+}
+function syncFingerprint(doc) {
+  const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
+  const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
+  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+}
+function stripLocalOnly(metadata) {
+  const out = { ...metadata };
+  for (const k of LOCAL_ONLY_KEYS) delete out[k];
+  return out;
+}
+async function pushToRemote() {
+  const stats = emptyPushStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
+  try {
+    const pendingDeletes = await getPendingDeletes();
+    if (pendingDeletes.length > 0) {
+      const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
+      stats.deleted = await backend.delete(docIds, "delete");
+      await clearPendingDeletes(pendingDeletes);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
+`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+  const collections = await listCollections2();
+  for (const collection of collections) {
+    if (isSyncableCollection(collection.name)) continue;
+    try {
+      stats.retracted += await retractSharedCopies(backend, collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
+`);
+      noteSyncError(e);
+      stats.errors++;
+      if (isCycleFatal(e)) return stats;
+    }
+  }
+  const pushedCollections = [];
+  for (const collection of collections) {
+    if (!isSyncableCollection(collection.name)) continue;
+    try {
+      const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
+      const before = stats.pushed + stats.linked;
+      const batch = [];
+      for (const unsynced of unsyncedDocs) {
+        if (unsynced.id.startsWith("__")) continue;
+        if (unsynced.metadata.type === "journal_draft") continue;
+        if (isReadOnlyDoc(unsynced.metadata)) continue;
+        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        try {
+          batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
+        } catch (e) {
+          process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+          stats.errors++;
+        }
+      }
+      await pushBatch(backend, collection.name, batch, stats, true);
+      if (stats.pushed + stats.linked > before) pushedCollections.push(collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}
+`);
+      noteSyncError(e);
+      stats.errors++;
+      if (isCycleFatal(e)) break;
+    }
+  }
+  if (pushedCollections.length > 0) {
+    try {
+      const existing = await getSyncSubscriptions();
+      const existingSet = new Set(existing);
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
+      if (newSubs.length > 0) {
+        await updateSyncSubscriptions([...existing, ...newSubs]);
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
+`);
+    }
+  }
+  return stats;
+}
+async function toUpsert(collection, doc) {
+  const now = Math.floor(Date.now() / 1e3);
+  const embedding = await generateEmbedding(doc.content) ?? [];
+  return {
+    id: doc.id,
+    collection,
+    content: doc.content,
+    embedding,
+    metadata: stripLocalOnly(doc.metadata),
+    origin_user: getConfig().USERNAME,
+    created_at: doc.metadata.created_at ?? now,
+    updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? now
+  };
+}
+async function pushBatch(backend, collection, batch, stats, allowRekey) {
+  if (batch.length === 0) return;
+  let outcomes;
+  try {
+    outcomes = await backend.upsertMany(batch.map((b) => b.upsert));
+  } catch (e) {
+    stats.errors += batch.length - 1;
+    throw e;
+  }
+  const retry = [];
+  for (let i = 0; i < batch.length; i++) {
+    const { doc, upsert } = batch[i];
+    const outcome = outcomes[i];
+    try {
+      if (outcome.ok) {
+        await applyPushed(backend, collection, doc, outcome.similar, stats);
+      } else if (outcome.code === "id_taken" && allowRekey && doc.metadata.type === "task") {
+        const renamed = await rekeyTask(collection, doc, outcome.suggestedId);
+        stats.renamed++;
+        retry.push({ doc: renamed, upsert: { ...upsert, id: renamed.id, metadata: stripLocalOnly(renamed.metadata) } });
+      } else if (outcome.permanent) {
+        await markRejected(collection, doc, outcome.code, outcome.message);
+        stats.rejected++;
+      } else {
+        process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${outcome.code}: ${outcome.message}
+`);
+        noteSyncError(`${doc.id}: ${outcome.code}: ${outcome.message}`);
+        stats.errors++;
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+      stats.errors++;
+    }
+  }
+  await pushBatch(backend, collection, retry, stats, false);
+}
+async function applyPushed(backend, collection, doc, similar, stats) {
+  const match = similar.find((s) => s.id !== doc.id);
+  const metadata = stripLocalOnly(doc.metadata);
+  if (!match) {
+    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
+    stats.pushed++;
+    return;
+  }
+  try {
+    await backend.addRelatedIds(match.id, [doc.id]);
+    await backend.addRelatedIds(doc.id, [match.id]);
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
+`);
+  }
+  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
+  if (!related.includes(match.id)) related.push(match.id);
+  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  stats.linked++;
+}
+async function markRejected(collection, doc, code, message) {
+  await updateDocument2(collection, doc.id, {
+    ...doc.metadata,
+    is_synced: false,
+    sync_rejected: code,
+    sync_rejected_message: message.slice(0, 300),
+    sync_rejected_fp: syncFingerprint(doc)
+  });
+  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
+`);
+}
+async function countUnpushed() {
+  let n = 0;
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
+      n++;
+    }
+  }
+  return n;
+}
+async function listRejectedDocs() {
+  const out = [];
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+        out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
+      }
+    }
+  }
+  return out;
+}
+async function rekeyTask(collection, doc, suggestedId) {
+  const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
+  const me = getConfig().USERNAME;
+  const localNext = Number((await getNextTaskId2()).split("-").pop());
+  const suggested = Number(suggestedId?.split("-").pop());
+  const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
+  const newId = `${me}-${n}`;
+  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
+  await addDocument2(collection, newId, doc.content, metadata);
+  await deleteDocument2(collection, doc.id);
+  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
+`);
+  return { ...doc, id: newId, metadata };
+}
+async function retractSharedCopies(backend, collection) {
+  const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
+  if (unchecked.length === 0) return 0;
+  const me = getConfig().USERNAME;
+  const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
+  const mine = unchecked.filter((d) => {
+    const row = remote.get(d.id);
+    const localCreated = Number(d.metadata.created_at);
+    return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
+  });
+  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
+  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
+`);
+  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  return removed;
+}
+var LOCAL_ONLY_KEYS;
 var init_push = __esm({
   "packages/core/src/sync/push.ts"() {
     "use strict";
@@ -3110,12 +4996,67 @@ var init_push = __esm({
     init_sentinel();
     init_device();
     init_syncable();
+    LOCAL_ONLY_KEYS = ["sync_rejected", "sync_rejected_fp", "sync_rejected_message"];
   }
 });
 
 // packages/core/src/sync/pull.ts
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
+}
+async function pullFromRemote() {
+  const stats = emptyPullStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
+  const cycleStartedAt = Math.floor(Date.now() / 1e3) - getConfig().SYNC_PULL_OVERLAP_SECONDS;
+  const lastPull = await getSyncPullTimestamp();
+  const recovering = lastPull === 0;
+  if (recovering) {
+    try {
+      const mine = (await backend.collectionsForUser()).filter(isSyncableCollection);
+      const subs = await getSyncSubscriptions();
+      const add = mine.filter((c) => !subs.includes(c));
+      if (add.length) await updateSyncSubscriptions([...subs, ...add]);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
+`);
+      noteSyncError(e);
+      if (isCycleFatal(e)) {
+        stats.errors++;
+        return stats;
+      }
+    }
+  }
+  const collections = await listCollections2();
+  const localCollectionNames = new Set(collections.map((c) => c.name));
+  const pullCollectionNames = [];
+  for (const col of collections) {
+    if (isSyncableCollection(col.name)) pullCollectionNames.push(col.name);
+  }
+  const backfill = /* @__PURE__ */ new Set();
+  const subscriptions = await getSyncSubscriptions();
+  for (const sub of subscriptions) {
+    if (!localCollectionNames.has(sub) && isSyncableCollection(sub)) {
+      await getOrCreateCollection2(sub);
+      pullCollectionNames.push(sub);
+      backfill.add(sub);
+    }
+  }
+  const followed = new Set(pullCollectionNames);
+  let fatal = false;
+  for (const collectionName of pullCollectionNames) {
+    await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
+      includeOwnDevice: recovering,
+      followedCollections: followed,
+      onFatal: () => {
+        fatal = true;
+      }
+    });
+    if (fatal) break;
+  }
+  if (!fatal) await updateSyncPullTimestamp(cycleStartedAt);
+  return stats;
 }
 async function pullCollection(collectionName, since, stats = emptyPullStats(), opts = {}) {
   if (!isSyncableCollection(collectionName)) return stats;
@@ -3290,6 +5231,162 @@ var init_pull = __esm({
 });
 
 // packages/core/src/sync/index.ts
+function getSyncState() {
+  return { lastCycleAt, lastCycleError, cycleCount: cycleCount2, timerActive: timerActive2, lastStats, lastError: lastSyncError() ?? null };
+}
+async function syncCycle() {
+  if (syncRunning) {
+    process.stderr.write("[yapa-sync] Skipping cycle \u2014 previous still running\n");
+    return null;
+  }
+  syncRunning = true;
+  try {
+    let pushStats = emptyPushStats();
+    let pullStats = emptyPullStats();
+    try {
+      pushStats = await pushToRemote();
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push phase error: ${e}
+`);
+      pushStats.errors++;
+    }
+    try {
+      pullStats = await pullFromRemote();
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Pull phase error: ${e}
+`);
+      pullStats.errors++;
+    }
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.keptDirty > 0;
+    const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
+    if (hasPushActivity || hasPullActivity || pushStats.rejected > 0) {
+      process.stderr.write(`[yapa-sync] ${formatSyncStats({ push: pushStats, pull: pullStats })}
+`);
+    }
+    if (hasErrors) {
+      process.stderr.write(
+        `[yapa-sync] Errors: ${pushStats.errors} push, ${pullStats.errors} pull
+`
+      );
+    }
+    try {
+      await (await getSyncBackend())?.maintain();
+    } catch {
+    }
+    const unpushed = await countUnpushed().catch(() => void 0);
+    if (!hasErrors) noteSyncOk(unpushed);
+    else if (unpushed !== void 0) recordUnpushed(unpushed);
+    lastCycleAt = Date.now();
+    lastCycleError = null;
+    cycleCount2++;
+    lastStats = { push: pushStats, pull: pullStats };
+    return lastStats;
+  } catch (e) {
+    const msg = `${e}`;
+    process.stderr.write(`[yapa-sync] Cycle error: ${msg}
+`);
+    lastCycleAt = Date.now();
+    lastCycleError = msg;
+    cycleCount2++;
+    return null;
+  } finally {
+    syncRunning = false;
+  }
+}
+function runTracked(work) {
+  const tracked = work.finally(() => {
+    if (inFlight === tracked) inFlight = null;
+  });
+  inFlight = tracked;
+  return tracked;
+}
+function scheduleSyncSoon(delayMs = getConfig().SYNC_PUSH_DEBOUNCE_MS) {
+  if (!isSyncConfigured() || delayMs <= 0) return;
+  if (soonTimer) clearTimeout(soonTimer);
+  soonTimer = setTimeout(() => {
+    soonTimer = null;
+    runTracked(syncCycle()).catch((e) => process.stderr.write(`[yapa-sync] Write-triggered sync error: ${e}
+`));
+  }, delayMs);
+}
+function hasPendingSync() {
+  return soonTimer !== null;
+}
+async function flushPendingSync(timeoutMs = 5e3) {
+  const work = [];
+  if (soonTimer) {
+    clearTimeout(soonTimer);
+    soonTimer = null;
+    work.push(runTracked(pushToRemote()).catch((e) => process.stderr.write(`[yapa-sync] Shutdown push error: ${e}
+`)));
+  } else if (inFlight) {
+    work.push(inFlight.catch(() => void 0));
+  }
+  if (work.length === 0) return;
+  let timer2;
+  const timeout = new Promise((resolve2) => {
+    timer2 = setTimeout(resolve2, timeoutMs);
+  });
+  await Promise.race([Promise.all(work), timeout]);
+  if (timer2) clearTimeout(timer2);
+}
+async function startSync() {
+  if (!getConfig().SYNC_ENABLED) {
+    recordSyncHealth({ status: "disabled" });
+    return;
+  }
+  const kind = syncBackendKind();
+  if (!kind) {
+    process.stderr.write("[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n");
+    recordSyncHealth({ status: "disabled" });
+    return;
+  }
+  if (kind === "service" && getConfig().SYNC_DATABASE_URL) {
+    process.stderr.write("[yapa-sync] Using the sync service; YAPA_SYNC_DATABASE_URL is ignored\n");
+  }
+  if (kind !== "service" && !process.env.YAPA_USERNAME) {
+    process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.
+`);
+  }
+  try {
+    const backend = await getSyncBackend();
+    await backend?.prepare();
+    process.stderr.write(`[yapa-sync] Connected to ${kind === "service" ? "the sync service" : "the remote database"} (${backend?.target})
+`);
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Sync not connected: ${e}
+`);
+    process.stderr.write("[yapa-sync] Sync will retry on next interval\n");
+  }
+  syncCycle().catch((e) => process.stderr.write(`[yapa-sync] Initial sync error: ${e}
+`));
+  syncTimer = setInterval(() => {
+    syncCycle().catch((e) => process.stderr.write(`[yapa-sync] Sync error: ${e}
+`));
+  }, getConfig().SYNC_INTERVAL_MS);
+  timerActive2 = true;
+  process.stderr.write(`[yapa-sync] Background sync started (interval: ${getConfig().SYNC_INTERVAL_MS / 1e3}s)
+`);
+}
+function formatSyncStats({ push, pull }) {
+  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
+  if (push.renamed) line += `, ${push.renamed} renamed`;
+  if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
+  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.skipped} skipped`;
+  if (pull.keptDirty) line += `, ${pull.keptDirty} remote deletions not applied (local edits kept)`;
+  return `${line}, ${pull.errors} errors`;
+}
+async function stopSync() {
+  if (syncTimer) {
+    clearInterval(syncTimer);
+    syncTimer = null;
+    timerActive2 = false;
+  }
+  await closeSyncBackend();
+  process.stderr.write("[yapa-sync] Sync stopped\n");
+}
+var syncTimer, syncRunning, lastCycleAt, lastCycleError, cycleCount2, timerActive2, lastStats, soonTimer, inFlight;
 var init_sync = __esm({
   "packages/core/src/sync/index.ts"() {
     "use strict";
@@ -3297,12 +5394,22 @@ var init_sync = __esm({
     init_push();
     init_pull();
     init_backend();
+    init_health();
+    syncTimer = null;
+    syncRunning = false;
+    lastCycleAt = null;
+    lastCycleError = null;
+    cycleCount2 = 0;
+    timerActive2 = false;
+    lastStats = null;
+    soonTimer = null;
+    inFlight = null;
   }
 });
 
 // packages/core/src/sync/coordination.ts
-import { mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync5, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { join as join4 } from "node:path";
 function currentSession(explicit, env = process.env) {
   for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
     if (v && SESSION_RE.test(v)) return v;
@@ -3310,19 +5417,19 @@ function currentSession(explicit, env = process.env) {
   return void 0;
 }
 function markerPath(session) {
-  return join3(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join4(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function readMarker(session) {
   try {
-    return JSON.parse(readFileSync5(markerPath(session), "utf-8"));
+    return JSON.parse(readFileSync7(markerPath(session), "utf-8"));
   } catch {
     return void 0;
   }
 }
 function writeMarker(m) {
   try {
-    mkdirSync3(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync3(markerPath(m.session), JSON.stringify(m), { mode: 384 });
+    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync5(markerPath(m.session), JSON.stringify(m), { mode: 384 });
   } catch {
   }
 }
@@ -3339,6 +5446,13 @@ function noteRenewed(session, renewed, now) {
     return;
   }
   writeMarker({ session, min_ttl: Math.min(...renewed.map((l) => l.ttl_seconds)), last_beat: now });
+}
+function sessionsHoldingLeases() {
+  try {
+    return readdirSync2(getConfig().LEASE_STATE_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
+  } catch {
+    return [];
+  }
 }
 async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
   if (!isSyncConfigured()) return 0;
@@ -3413,14 +5527,226 @@ var init_coordination = __esm({
 });
 
 // packages/core/src/training/fireworks.ts
+import { spawn as spawn2 } from "child_process";
+function tryJsonParse(raw) {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+  }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    } catch {
+    }
+  }
+  const arrStart = trimmed.indexOf("[");
+  const arrEnd = trimmed.lastIndexOf("]");
+  if (arrStart !== -1 && arrEnd !== -1 && arrEnd > arrStart) {
+    try {
+      return JSON.parse(trimmed.slice(arrStart, arrEnd + 1));
+    } catch {
+    }
+  }
+  return null;
+}
+function mapState(raw) {
+  const s = String(raw ?? "").toLowerCase();
+  if (s.includes("complete") || s === "succeeded" || s === "success") return "completed";
+  if (s.includes("fail") || s === "error") return "failed";
+  if (s.includes("cancel")) return "cancelled";
+  if (s.includes("run") || s === "in_progress") return "running";
+  if (s === "pending" || s === "queued" || s === "created") return "pending";
+  return "unknown";
+}
+function extractJobIdFromText(stdout) {
+  const patterns = [
+    /(?:job\s*id|id)\s*[:=]\s*([A-Za-z0-9_\-]+)/i,
+    /sftj_[A-Za-z0-9]+/
+  ];
+  for (const p of patterns) {
+    const m = stdout.match(p);
+    if (m) return m[1] ?? m[0];
+  }
+  return null;
+}
+var defaultRunner, FireworksBackend;
 var init_fireworks = __esm({
   "packages/core/src/training/fireworks.ts"() {
     "use strict";
     init_config();
+    defaultRunner = {
+      async run(args) {
+        return new Promise((resolve2, reject) => {
+          const child = spawn2(getConfig().TRAINING_FIRECTL_PATH, args, { stdio: ["ignore", "pipe", "pipe"] });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (d) => {
+            stdout += d.toString();
+          });
+          child.stderr.on("data", (d) => {
+            stderr += d.toString();
+          });
+          child.on("error", (err) => {
+            if (err.code === "ENOENT") {
+              reject(new Error(
+                `firectl not found at "${getConfig().TRAINING_FIRECTL_PATH}". Install it from https://docs.fireworks.ai/tools-sdks/firectl or set YAPA_TRAINING_FIRECTL_PATH to its location.`
+              ));
+            } else {
+              reject(err);
+            }
+          });
+          child.on("close", (code) => {
+            resolve2({ stdout, stderr, code: code ?? -1 });
+          });
+        });
+      }
+    };
+    FireworksBackend = class {
+      constructor(runner = defaultRunner) {
+        this.runner = runner;
+      }
+      runner;
+      name = "fireworks";
+      async submit(config) {
+        const datasetId = config.outputModelId.replace(/[^a-z0-9-]/gi, "-").toLowerCase() + "-data";
+        const dsArgs = ["create", "dataset", datasetId, config.datasetPath];
+        const dsResult = await this.runner.run(dsArgs);
+        if (dsResult.code !== 0 && !/already exists/i.test(dsResult.stderr)) {
+          throw new Error(`firectl dataset create failed: ${dsResult.stderr || dsResult.stdout}`);
+        }
+        const jobArgs = [
+          "sftj",
+          "create",
+          "--base-model",
+          config.baseModel,
+          "--dataset",
+          datasetId,
+          "--output-model",
+          config.outputModelId
+        ];
+        if (config.evaluationDatasetPath) {
+          jobArgs.push("--evaluation-dataset", config.evaluationDatasetPath);
+        }
+        const hp = config.hyperparameters ?? {};
+        if (typeof hp.epochs === "number") jobArgs.push("--epochs", String(hp.epochs));
+        if (typeof hp.learningRate === "number") jobArgs.push("--learning-rate", String(hp.learningRate));
+        if (typeof hp.loraRank === "number") jobArgs.push("--lora-rank", String(hp.loraRank));
+        if (hp.earlyStop === true) jobArgs.push("--early-stop");
+        const jobResult = await this.runner.run(jobArgs);
+        if (jobResult.code !== 0) {
+          throw new Error(`firectl sftj create failed: ${jobResult.stderr || jobResult.stdout}`);
+        }
+        const parsed = tryJsonParse(jobResult.stdout);
+        const jobId = parsed?.id ?? parsed?.name ?? extractJobIdFromText(jobResult.stdout);
+        if (!jobId) {
+          throw new Error(`Could not determine job ID from firectl output:
+${jobResult.stdout}`);
+        }
+        return {
+          backend: this.name,
+          jobId: String(jobId),
+          raw: parsed ?? jobResult.stdout
+        };
+      }
+      async poll(handle) {
+        const result = await this.runner.run(["sftj", "get", handle.jobId]);
+        if (result.code !== 0) {
+          return {
+            state: "unknown",
+            error: result.stderr || result.stdout
+          };
+        }
+        const parsed = tryJsonParse(result.stdout);
+        const state = mapState(parsed?.state ?? parsed?.status);
+        return {
+          state,
+          outputModelRef: parsed?.outputModel ?? parsed?.output_model ?? parsed?.output_model_ref,
+          error: state === "failed" ? parsed?.error ?? "failed" : void 0,
+          raw: parsed ?? result.stdout
+        };
+      }
+      async retrieve(handle) {
+        const status = await this.poll(handle);
+        if (status.state !== "completed") {
+          throw new Error(`Cannot retrieve \u2014 job ${handle.jobId} is in state ${status.state}`);
+        }
+        const ref = status.outputModelRef;
+        if (!ref) throw new Error(`Completed job ${handle.jobId} had no outputModelRef`);
+        return {
+          ref,
+          metadata: { raw: status.raw, backend: this.name }
+        };
+      }
+      async cancel(handle) {
+        const result = await this.runner.run(["sftj", "cancel", handle.jobId]);
+        if (result.code !== 0) {
+          throw new Error(`firectl sftj cancel failed: ${result.stderr || result.stdout}`);
+        }
+      }
+    };
   }
 });
 
 // packages/core/src/training/registry.ts
+import { existsSync as existsSync2, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync6 } from "fs";
+import { join as join5 } from "path";
+function registryPath() {
+  return join5(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+}
+function ensureDir() {
+  const dir = join5(getConfig().ARTIFACTS_DIR, "adapters");
+  if (!existsSync2(dir)) mkdirSync6(dir, { recursive: true });
+}
+function load() {
+  ensureDir();
+  const path = registryPath();
+  if (!existsSync2(path)) return { version: 1, adapters: [] };
+  try {
+    const parsed = JSON.parse(readFileSync8(path, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
+      return { version: 1, adapters: [] };
+    }
+    return parsed;
+  } catch {
+    return { version: 1, adapters: [] };
+  }
+}
+function save(file) {
+  ensureDir();
+  writeFileSync6(registryPath(), JSON.stringify(file, null, 2) + "\n");
+}
+function addAdapter(entry) {
+  const file = load();
+  file.adapters.push(entry);
+  save(file);
+  return entry;
+}
+function getAdapter(id) {
+  const file = load();
+  return file.adapters.find((a) => a.id === id) ?? null;
+}
+function listAdapters() {
+  return load().adapters;
+}
+function updateAdapter(id, updates) {
+  const file = load();
+  const idx = file.adapters.findIndex((a) => a.id === id);
+  if (idx === -1) return null;
+  const merged = {
+    ...file.adapters[idx],
+    ...updates,
+    updatedAt: Math.floor(Date.now() / 1e3)
+  };
+  file.adapters[idx] = merged;
+  save(file);
+  return merged;
+}
+function getRegistryPath() {
+  return registryPath();
+}
 var init_registry = __esm({
   "packages/core/src/training/registry.ts"() {
     "use strict";
@@ -3429,15 +5755,321 @@ var init_registry = __esm({
 });
 
 // packages/core/src/training/synthesis.ts
+import { readFileSync as readFileSync9 } from "fs";
+async function synthesizeMemory(memory, options = {}) {
+  const caller = options.call ?? callCurationLLM;
+  const userPrompt = `[MEMORY]
+ID: ${memory.id}${memory.collection ? `
+COLLECTION: ${memory.collection}` : ""}
+CONTENT:
+${memory.content}`;
+  const raw = await caller({
+    messages: [
+      { role: "system", content: SYNTHESIS_SYSTEM_PROMPT },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0.3,
+    max_tokens: 2048,
+    json_mode: true
+  });
+  const examples = parseSynthesisResponse(raw);
+  return { id: memory.id, examples };
+}
+function parseSynthesisResponse(raw) {
+  const parsed = extractJsonArray3(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Synthesis response not a JSON array: ${raw.slice(0, 200)}`);
+  }
+  const results = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const messages = entry.messages;
+    if (!Array.isArray(messages) || messages.length < 2) continue;
+    const cleaned = [];
+    let valid = true;
+    for (const m of messages) {
+      if (!m || typeof m !== "object") {
+        valid = false;
+        break;
+      }
+      const role = m.role;
+      const content = m.content;
+      if (!["system", "user", "assistant"].includes(role) || typeof content !== "string") {
+        valid = false;
+        break;
+      }
+      cleaned.push({ role, content });
+    }
+    if (!valid) continue;
+    if (!cleaned.some((m) => m.role === "assistant")) continue;
+    results.push({ messages: cleaned });
+  }
+  return results;
+}
+function extractJsonArray3(raw) {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+  }
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fence) {
+    try {
+      return JSON.parse(fence[1]);
+    } catch {
+    }
+  }
+  const start = trimmed.indexOf("[");
+  const end = trimmed.lastIndexOf("]");
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    } catch {
+    }
+  }
+  throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
+}
+function readManifestSource(path) {
+  const content = readFileSync9(path, "utf-8");
+  const lines = content.split("\n").filter((l) => l.trim().length > 0);
+  return lines.map((l) => {
+    const entry = JSON.parse(l);
+    return { id: entry.id, collection: entry.collection, content: entry.content };
+  });
+}
+function formatTrainingJsonl(results) {
+  const lines = [];
+  for (const r of results) {
+    for (const ex of r.examples) {
+      lines.push(JSON.stringify(ex));
+    }
+  }
+  return lines.join("\n") + (lines.length ? "\n" : "");
+}
+var SYNTHESIS_PROMPT_VERSION, SYNTHESIS_SYSTEM_PROMPT;
 var init_synthesis = __esm({
   "packages/core/src/training/synthesis.ts"() {
     "use strict";
     init_config();
     init_provider();
+    SYNTHESIS_PROMPT_VERSION = "v1";
+    SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
+
+GOAL
+
+Produce examples that teach a language model the PATTERNS, STYLE, and REASONING in the memory \u2014 not point-in-time facts. Examples must be standalone: a reader with no access to the memory should still get a plausible answer from the user/system turn alone.
+
+FORMAT
+
+Return valid JSON only, no commentary. The output must be a JSON array of one to three training examples, each in OpenAI chat format:
+
+[
+  {
+    "messages": [
+      { "role": "system", "content": "<optional persona or task framing>" },
+      { "role": "user", "content": "<question or prompt a realistic user might ask>" },
+      { "role": "assistant", "content": "<ideal response grounded in the memory's content/reasoning>" }
+    ]
+  }
+]
+
+RULES
+
+- Keep user prompts realistic \u2014 not "Summarize this memory" but rather the kind of question a user would naturally ask.
+- Assistant responses must reflect the reasoning, style, and judgment in the memory. Do not copy the memory verbatim; transform it into a response.
+- If the memory is purely a transient fact ("version X is running on Y"), return an empty array [] \u2014 such memories are not suitable for fine-tuning.
+- Keep examples under 800 tokens total each.
+- Do not wrap the JSON in \`\`\` fences.
+- Do not include fields other than "messages" on each example.`;
   }
 });
 
 // packages/core/src/training/index.ts
+import { createHash as createHash2 } from "crypto";
+import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync10, writeFileSync as writeFileSync7 } from "fs";
+import { join as join6 } from "path";
+function getBackend() {
+  switch (getConfig().TRAINING_BACKEND) {
+    case "fireworks":
+      return new FireworksBackend();
+    default:
+      throw new Error(`Unknown training backend: ${getConfig().TRAINING_BACKEND}`);
+  }
+}
+function previewDir() {
+  const dir = join6(getConfig().ARTIFACTS_DIR, "training-runs");
+  if (!existsSync3(dir)) mkdirSync7(dir, { recursive: true });
+  return dir;
+}
+function sha256(content) {
+  return createHash2("sha256").update(content, "utf-8").digest("hex");
+}
+async function trainingDatasetPreview(manifestVersion) {
+  const manifestName = `v${manifestVersion}.jsonl`;
+  const manifestPath = artifactPath("training-manifests", manifestName);
+  if (!existsSync3(manifestPath)) {
+    throw new Error(`Training manifest not found: ${manifestPath}. Run bucket_route_now first.`);
+  }
+  const sourceMemories = readManifestSource(manifestPath);
+  const results = [];
+  let skipped = 0;
+  for (const mem of sourceMemories) {
+    try {
+      const result = await synthesizeMemory(mem);
+      if (result.examples.length === 0) {
+        skipped++;
+      } else {
+        results.push(result);
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-training] Synthesis error for ${mem.id}: ${e}
+`);
+      skipped++;
+    }
+  }
+  const jsonl = formatTrainingJsonl(results);
+  const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
+  const dir = previewDir();
+  const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
+  const previewPath = join6(dir, filename);
+  writeFileSync7(previewPath, jsonl);
+  return {
+    manifestVersion,
+    previewPath,
+    previewRef: sha256(jsonl),
+    exampleCount,
+    skippedMemories: skipped
+  };
+}
+async function trainingTrigger(args) {
+  if (args.confirm !== true) {
+    throw new Error("Refusing to submit \u2014 confirm must be true.");
+  }
+  if (!existsSync3(args.previewPath)) {
+    throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
+  }
+  const contentOnDisk = readFileSync10(args.previewPath, "utf-8");
+  const diskHash = sha256(contentOnDisk);
+  if (diskHash !== args.previewRef) {
+    throw new Error(
+      `Preview hash mismatch. The preview file has been modified since it was generated, or preview_ref does not match. Run training_dataset_preview again and pass the returned preview_ref.`
+    );
+  }
+  const adapterId = args.adapterId ?? `yapa-adapter-v${args.manifestVersion}-${Date.now()}`;
+  const backend = getBackend();
+  const now = Math.floor(Date.now() / 1e3);
+  const entry = {
+    id: adapterId,
+    manifestVersion: args.manifestVersion,
+    datasetPath: args.previewPath,
+    previewRef: args.previewRef,
+    baseModel: getConfig().TRAINING_BASE_MODEL,
+    backend: backend.name,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now
+  };
+  addAdapter(entry);
+  try {
+    const handle = await backend.submit({
+      datasetPath: args.previewPath,
+      baseModel: getConfig().TRAINING_BASE_MODEL,
+      outputModelId: adapterId,
+      hyperparameters: args.hyperparameters
+    });
+    updateAdapter(adapterId, {
+      backendJobId: handle.jobId,
+      status: "running"
+    });
+    return { adapterId, handle };
+  } catch (e) {
+    updateAdapter(adapterId, {
+      status: "failed",
+      error: String(e)
+    });
+    await clearSelectedForManifest(args.manifestVersion);
+    throw e;
+  }
+}
+async function trainingStatus() {
+  return { adapters: listAdapters() };
+}
+async function trainingGet(adapterId) {
+  const entry = getAdapter(adapterId);
+  if (!entry) return null;
+  if (entry.backendJobId && (entry.status === "running" || entry.status === "pending")) {
+    try {
+      const backend = getBackend();
+      const status = await backend.poll({ backend: entry.backend, jobId: entry.backendJobId });
+      let mappedStatus = entry.status;
+      if (status.state === "completed") mappedStatus = "completed";
+      else if (status.state === "failed") mappedStatus = "failed";
+      else if (status.state === "cancelled") mappedStatus = "cancelled";
+      else if (status.state === "running") mappedStatus = "running";
+      else if (status.state === "pending") mappedStatus = "pending";
+      const updated = updateAdapter(adapterId, {
+        status: mappedStatus,
+        outputModelRef: status.outputModelRef ?? entry.outputModelRef,
+        error: status.error
+      });
+      return {
+        entry: updated ?? entry,
+        remoteStatus: {
+          state: status.state,
+          error: status.error,
+          outputModelRef: status.outputModelRef
+        }
+      };
+    } catch (e) {
+      return {
+        entry,
+        remoteStatus: { state: "unknown", error: String(e) }
+      };
+    }
+  }
+  return { entry };
+}
+async function trainingCancel(adapterId) {
+  const entry = getAdapter(adapterId);
+  if (!entry) return null;
+  if (!entry.backendJobId) {
+    return updateAdapter(adapterId, { status: "cancelled" });
+  }
+  const backend = getBackend();
+  try {
+    await backend.cancel({ backend: entry.backend, jobId: entry.backendJobId });
+  } catch (e) {
+    process.stderr.write(`[yapa-training] Cancel error for ${adapterId}: ${e}
+`);
+  }
+  const result = updateAdapter(adapterId, { status: "cancelled" });
+  await clearSelectedForManifest(entry.manifestVersion);
+  return result;
+}
+async function clearSelectedForManifest(manifestVersion) {
+  const target = `training-v${manifestVersion}`;
+  const collections = await listCollections2();
+  let cleared = 0;
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION3);
+      for (const d of docs) {
+        if (d.metadata.selected_for === target) {
+          const updated = { ...d.metadata };
+          delete updated.selected_for;
+          delete updated.selected_at;
+          await updateDocument2(c.name, d.id, updated);
+          cleared++;
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-training] Clear selected_for error in ${c.name}: ${e}
+`);
+    }
+  }
+  return { cleared };
+}
+var MAX_PER_COLLECTION3;
 var init_training = __esm({
   "packages/core/src/training/index.ts"() {
     "use strict";
@@ -3447,6 +6079,7 @@ var init_training = __esm({
     init_fireworks();
     init_registry();
     init_synthesis();
+    MAX_PER_COLLECTION3 = 2e3;
   }
 });
 
@@ -3458,22 +6091,212 @@ var init_backend2 = __esm({
 });
 
 // packages/core/src/training/inference.ts
+var defaultInferenceCaller;
 var init_inference = __esm({
   "packages/core/src/training/inference.ts"() {
     "use strict";
     init_config();
+    defaultInferenceCaller = async (opts) => {
+      if (!getConfig().FIREWORKS_API_KEY) {
+        throw new Error("YAPA_FIREWORKS_API_KEY not set \u2014 cannot call the adapter inference endpoint.");
+      }
+      const response = await fetch(`${getConfig().INFERENCE_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${getConfig().FIREWORKS_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          messages: opts.messages,
+          temperature: opts.temperature ?? 0,
+          max_tokens: opts.max_tokens ?? 1024
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`Adapter inference error: ${response.status} ${await response.text()}`);
+      }
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content;
+      if (typeof content !== "string") {
+        throw new Error(`Unexpected inference response shape: ${JSON.stringify(data).slice(0, 200)}`);
+      }
+      return content;
+    };
   }
 });
 
 // packages/core/src/training/judge.ts
+async function judgeAggregate(reference, candidate, userPrompt, options = {}) {
+  const caller = options.call ?? callCurationLLM;
+  const raw = await caller({
+    messages: [
+      { role: "system", content: AGGREGATE_JUDGE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `QUESTION:
+${userPrompt}
+
+REFERENCE:
+${reference}
+
+CANDIDATE:
+${candidate}`
+      }
+    ],
+    temperature: 0,
+    max_tokens: 512,
+    json_mode: true
+  });
+  return parseAggregateJudge(raw);
+}
+function parseAggregateJudge(raw) {
+  const parsed = extractObject(raw);
+  const score = clamp012(parsed?.score);
+  const winnerRaw = String(parsed?.winner ?? "").toLowerCase();
+  const winner = winnerRaw === "candidate" || winnerRaw === "reference" || winnerRaw === "tie" ? winnerRaw : score > 0.5 ? "candidate" : score < 0.5 ? "reference" : "tie";
+  const rationale = typeof parsed?.rationale === "string" ? parsed.rationale : "";
+  return { score, winner, rationale };
+}
+async function judgeVerification(memoryContent, adapterAnswer, userPrompt, options = {}) {
+  const caller = options.call ?? callCurationLLM;
+  const raw = await caller({
+    messages: [
+      { role: "system", content: VERIFY_JUDGE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `QUESTION TO THE MODEL:
+${userPrompt}
+
+REFERENCE MEMORY:
+${memoryContent}
+
+MODEL ANSWER:
+${adapterAnswer}`
+      }
+    ],
+    temperature: 0,
+    max_tokens: 400,
+    json_mode: true
+  });
+  return parseVerifyJudge(raw);
+}
+function parseVerifyJudge(raw) {
+  const parsed = extractObject(raw);
+  const passed = parsed?.passed === true || String(parsed?.passed).toLowerCase() === "true";
+  const confidence = clamp012(parsed?.confidence);
+  const rationale = typeof parsed?.rationale === "string" ? parsed.rationale : "";
+  return { passed, confidence, rationale };
+}
+function clamp012(v) {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? 0));
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+function extractObject(raw) {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+  }
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fence) {
+    try {
+      return JSON.parse(fence[1]);
+    } catch {
+    }
+  }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    } catch {
+    }
+  }
+  throw new Error(`Could not extract JSON object from judge response: ${raw.slice(0, 200)}`);
+}
+var AGGREGATE_JUDGE_SYSTEM_PROMPT, VERIFY_JUDGE_SYSTEM_PROMPT;
 var init_judge = __esm({
   "packages/core/src/training/judge.ts"() {
     "use strict";
     init_provider();
+    AGGREGATE_JUDGE_SYSTEM_PROMPT = `You are an impartial grader for language model outputs. Given a REFERENCE answer (the ground-truth, derived from the user's curated memory) and a CANDIDATE answer (produced by a model), decide whether the CANDIDATE is at least as good as the REFERENCE on content, reasoning, and coverage.
+
+Return valid JSON only, no commentary, no fences:
+
+{"score": <0.0-1.0>, "winner": "candidate" | "reference" | "tie", "rationale": "<one short sentence>"}
+
+Scoring:
+- 1.0 = candidate clearly superior or strictly matches the reference
+- 0.75 = candidate matches the reference's key claims, minor gaps
+- 0.5 = partial coverage or mostly correct with notable gaps
+- 0.25 = shallow or partially wrong
+- 0.0 = wrong, contradictory, or empty
+
+Do not invent information. Do not reward fluency over correctness.`;
+    VERIFY_JUDGE_SYSTEM_PROMPT = `You verify whether a model's ANSWER covers the key content of a REFERENCE memory well enough that the memory can safely be removed from retrieval (because the knowledge now lives in the model's weights).
+
+Return valid JSON only:
+
+{"passed": <true|false>, "confidence": <0.0-1.0>, "rationale": "<one short sentence>"}
+
+Pass criteria \u2014 BOTH must hold:
+- The ANSWER states the memory's key claims, reasoning, or guidance.
+- The ANSWER is factually consistent with the memory (no contradictions, no invented details).
+
+Partial coverage is a fail. Being correct on general principles but missing the specific content of the memory is a fail.`;
   }
 });
 
 // packages/core/src/training/holdout.ts
+import { readFileSync as readFileSync11 } from "fs";
+function seededShuffle(items, seed) {
+  const arr = items.slice();
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  let s = h || 2654435769;
+  const rand = () => {
+    s ^= s << 13;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    return (s >>> 0) / 4294967295;
+  };
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+function splitManifest(memories, manifestVersion, fraction = getConfig().EVAL_HOLDOUT_FRACTION, minHoldout = getConfig().EVAL_HOLDOUT_MIN) {
+  if (memories.length === 0) return { train: [], holdout: [] };
+  const shuffled = seededShuffle(memories, `manifest-v${manifestVersion}`);
+  const raw = Math.round(memories.length * fraction);
+  const holdoutSize = Math.min(
+    memories.length - 1,
+    // always keep at least 1 in train
+    Math.max(Math.min(minHoldout, memories.length), raw)
+  );
+  return {
+    train: shuffled.slice(holdoutSize),
+    holdout: shuffled.slice(0, holdoutSize)
+  };
+}
+function loadManifestSplit(manifestPath, manifestVersion) {
+  const memories = readManifestSource(manifestPath);
+  return splitManifest(memories, manifestVersion);
+}
+function readHoldoutFile(path) {
+  const content = readFileSync11(path, "utf-8");
+  const lines = content.split("\n").filter((l) => l.trim().length > 0);
+  return lines.map((l) => {
+    const entry = JSON.parse(l);
+    return { id: entry.id, collection: entry.collection, content: entry.content };
+  });
+}
 var init_holdout = __esm({
   "packages/core/src/training/holdout.ts"() {
     "use strict";
@@ -3483,6 +6306,70 @@ var init_holdout = __esm({
 });
 
 // packages/core/src/training/eval.ts
+async function evalRun(input, options = {}) {
+  const inference = options.inferenceCall ?? defaultInferenceCaller;
+  const manifestName = `v${input.manifestVersion}.jsonl`;
+  const manifestPath = artifactPath("training-manifests", manifestName);
+  const { holdout } = loadManifestSplit(manifestPath, input.manifestVersion);
+  const items = [];
+  for (const mem of holdout) {
+    let userPrompt = "";
+    let candidateAnswer = "";
+    try {
+      const syn = await synthesizeMemory(mem);
+      const example = syn.examples[0];
+      if (!example) continue;
+      const userTurn = example.messages.find((m) => m.role === "user");
+      const assistantTurn = example.messages.find((m) => m.role === "assistant");
+      if (!userTurn || !assistantTurn) continue;
+      userPrompt = userTurn.content;
+      candidateAnswer = await inference({
+        model: input.adapterRef,
+        messages: [
+          ...example.messages.filter((m) => m.role !== "assistant")
+        ],
+        temperature: 0,
+        max_tokens: 1024
+      });
+      const result = await judgeAggregate(
+        assistantTurn.content,
+        candidateAnswer,
+        userPrompt,
+        { call: options.judgeCall }
+      );
+      items.push({
+        memoryId: mem.id,
+        score: result.score,
+        winner: result.winner,
+        rationale: result.rationale,
+        userPrompt
+      });
+    } catch (e) {
+      items.push({
+        memoryId: mem.id,
+        score: 0,
+        winner: "reference",
+        rationale: `error: ${e}`,
+        userPrompt
+      });
+    }
+  }
+  const averageScore = items.length > 0 ? items.reduce((s, i) => s + i.score, 0) / items.length : 0;
+  return {
+    adapterRef: input.adapterRef,
+    manifestVersion: input.manifestVersion,
+    itemCount: items.length,
+    averageScore,
+    items
+  };
+}
+async function evalCompare(adapterRefA, adapterRefB, manifestVersion, options = {}) {
+  const a = await evalRun({ adapterRef: adapterRefA, manifestVersion }, options);
+  const b = await evalRun({ adapterRef: adapterRefB, manifestVersion }, options);
+  const delta = b.averageScore - a.averageScore;
+  const winner = delta > 0.01 ? "B" : delta < -0.01 ? "A" : "tie";
+  return { adapterA: a, adapterB: b, delta, winner };
+}
 var init_eval = __esm({
   "packages/core/src/training/eval.ts"() {
     "use strict";
@@ -3495,15 +6382,180 @@ var init_eval = __esm({
 });
 
 // packages/core/src/training/promotion.ts
+async function adapterPromote(args) {
+  if (args.confirm !== true) {
+    throw new Error("Refusing to promote \u2014 confirm must be true.");
+  }
+  const entry = getAdapter(args.adapterId);
+  if (!entry) throw new Error(`Adapter ${args.adapterId} not found in registry.`);
+  if (entry.status !== "completed") {
+    throw new Error(`Adapter ${args.adapterId} is in status ${entry.status}, not 'completed'. Cannot promote.`);
+  }
+  const target = `training-v${entry.manifestVersion}`;
+  const collections = await listCollections2();
+  const now = Math.floor(Date.now() / 1e3);
+  let promoted = 0;
+  let rolledBackSelections = 0;
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION4);
+      for (const d of docs) {
+        if (d.metadata.selected_for !== target) continue;
+        if (d.metadata.verification_last_result === "passed") {
+          await updateDocument2(c.name, d.id, {
+            ...d.metadata,
+            promoted_to: target,
+            promoted_at: now
+          });
+          promoted++;
+        } else {
+          const updated = { ...d.metadata };
+          delete updated.selected_for;
+          delete updated.selected_at;
+          await updateDocument2(c.name, d.id, updated);
+          rolledBackSelections++;
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-promote] Error in ${c.name}: ${e}
+`);
+    }
+  }
+  updateAdapter(args.adapterId, { status: "promoted", promoted: true });
+  return {
+    adapterId: args.adapterId,
+    manifestVersion: entry.manifestVersion,
+    promoted,
+    rolledBackSelections,
+    outputModelRef: entry.outputModelRef
+  };
+}
+async function adapterDemote(adapterId) {
+  const entry = getAdapter(adapterId);
+  if (!entry) throw new Error(`Adapter ${adapterId} not found in registry.`);
+  const target = `training-v${entry.manifestVersion}`;
+  const collections = await listCollections2();
+  let rolledBack = 0;
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION4);
+      for (const d of docs) {
+        if (d.metadata.promoted_to === target) {
+          const updated = { ...d.metadata };
+          delete updated.promoted_to;
+          delete updated.promoted_at;
+          await updateDocument2(c.name, d.id, updated);
+          rolledBack++;
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-demote] Error in ${c.name}: ${e}
+`);
+    }
+  }
+  updateAdapter(adapterId, { status: "demoted", promoted: false });
+  return { adapterId, rolledBack };
+}
+var MAX_PER_COLLECTION4;
 var init_promotion = __esm({
   "packages/core/src/training/promotion.ts"() {
     "use strict";
     init_store();
     init_registry();
+    MAX_PER_COLLECTION4 = 2e3;
   }
 });
 
 // packages/core/src/training/verification.ts
+async function findDocByManifestId(manifestId) {
+  const collections = await listCollections2();
+  for (const c of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION5);
+      const match = docs.find((d) => d.id === manifestId);
+      if (match) return { collection: c.name, metadata: match.metadata };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options = {}) {
+  if (!getConfig().VERIFICATION_ENABLED && !options.bypassEnabledGate) {
+    throw new Error(
+      "YAPA_VERIFICATION_ENABLED is false. Verification requires inference calls that may incur cost. Set the env var to true to opt in."
+    );
+  }
+  const inference = options.inferenceCall ?? defaultInferenceCaller;
+  const manifestPath = artifactPath("training-manifests", `v${manifestVersion}.jsonl`);
+  const memories = readManifestSource(manifestPath);
+  const items = [];
+  for (const mem of memories) {
+    const item = {
+      memoryId: mem.id,
+      collection: null,
+      passed: false,
+      confidence: 0,
+      rationale: "",
+      userPrompt: "",
+      candidateAnswer: ""
+    };
+    try {
+      const syn = await synthesizeMemory(mem);
+      const example = syn.examples[0];
+      if (!example) {
+        item.rationale = "synthesis returned no examples";
+        items.push(item);
+        continue;
+      }
+      const userTurn = example.messages.find((m) => m.role === "user");
+      if (!userTurn) {
+        item.rationale = "synthesis example had no user turn";
+        items.push(item);
+        continue;
+      }
+      item.userPrompt = userTurn.content;
+      item.candidateAnswer = await inference({
+        model: adapterRef,
+        messages: example.messages.filter((m) => m.role !== "assistant"),
+        temperature: 0,
+        max_tokens: 1024
+      });
+      const judgment = await judgeVerification(
+        mem.content,
+        item.candidateAnswer,
+        item.userPrompt,
+        { call: options.judgeCall }
+      );
+      item.passed = judgment.passed;
+      item.confidence = judgment.confidence;
+      item.rationale = judgment.rationale;
+    } catch (e) {
+      item.rationale = `error: ${e}`;
+    }
+    const found = await findDocByManifestId(mem.id);
+    if (found) {
+      item.collection = found.collection;
+      const attempts = Number(found.metadata.verification_attempts ?? 0) + 1;
+      const updated = {
+        ...found.metadata,
+        verification_attempts: attempts,
+        verification_last_result: item.passed ? "passed" : "failed"
+      };
+      try {
+        await updateDocument2(found.collection, mem.id, updated);
+      } catch (e) {
+        process.stderr.write(`[yapa-verify] Metadata update failed for ${mem.id}: ${e}
+`);
+      }
+    }
+    items.push(item);
+  }
+  const passedCount = items.filter((i) => i.passed).length;
+  const failedCount = items.length - passedCount;
+  return { adapterRef, manifestVersion, passedCount, failedCount, items };
+}
+var MAX_PER_COLLECTION5;
 var init_verification = __esm({
   "packages/core/src/training/verification.ts"() {
     "use strict";
@@ -3513,10 +6565,245 @@ var init_verification = __esm({
     init_inference();
     init_judge();
     init_synthesis();
+    MAX_PER_COLLECTION5 = 2e3;
   }
 });
 
 // packages/core/src/index.ts
+var src_exports = {};
+__export(src_exports, {
+  AGGREGATE_JUDGE_SYSTEM_PROMPT: () => AGGREGATE_JUDGE_SYSTEM_PROMPT,
+  CHUNK_OVERLAP: () => CHUNK_OVERLAP,
+  CHUNK_SIZE: () => CHUNK_SIZE,
+  CLASSIFIER_PROMPT_VERSION: () => CLASSIFIER_PROMPT_VERSION,
+  CLASSIFIER_SYSTEM_PROMPT: () => CLASSIFIER_SYSTEM_PROMPT,
+  CollectionDeleteRefusedError: () => CollectionDeleteRefusedError,
+  CoordinationUnavailableError: () => CoordinationUnavailableError,
+  DECAY_INTERVAL_MS: () => DECAY_INTERVAL_MS,
+  EXTRACTOR_PROMPT_VERSION: () => EXTRACTOR_PROMPT_VERSION,
+  EXTRACTOR_SYSTEM_PROMPT: () => EXTRACTOR_SYSTEM_PROMPT,
+  FireworksBackend: () => FireworksBackend,
+  HEARTBEAT_MAX_INTERVAL_S: () => HEARTBEAT_MAX_INTERVAL_S,
+  HOOK_CHILD_ENV: () => HOOK_CHILD_ENV,
+  HttpBackend: () => HttpBackend,
+  IdTokenProvider: () => IdTokenProvider,
+  MAX_EXTRACT_CHARS: () => MAX_EXTRACT_CHARS,
+  PostgresBackend: () => PostgresBackend,
+  RESOLVER_PROMPT_VERSION: () => RESOLVER_PROMPT_VERSION,
+  RESOLVER_SYSTEM_PROMPT: () => RESOLVER_SYSTEM_PROMPT,
+  SALIENCE_BOOST_ON_ACCESS: () => SALIENCE_BOOST_ON_ACCESS,
+  SALIENCE_FLOOR: () => SALIENCE_FLOOR,
+  SALIENCE_MAX: () => SALIENCE_MAX,
+  SALIENCE_START: () => SALIENCE_START,
+  SESSION_ID: () => SESSION_ID,
+  SYNTHESIS_PROMPT_VERSION: () => SYNTHESIS_PROMPT_VERSION,
+  SYNTHESIS_SYSTEM_PROMPT: () => SYNTHESIS_SYSTEM_PROMPT,
+  ServiceError: () => ServiceError,
+  VERIFY_JUDGE_SYSTEM_PROMPT: () => VERIFY_JUDGE_SYSTEM_PROMPT,
+  adapterDemote: () => adapterDemote,
+  adapterPromote: () => adapterPromote,
+  addAdapter: () => addAdapter,
+  addDependency: () => addDependency,
+  addDocument: () => addDocument2,
+  addDocumentsBatch: () => addDocumentsBatch2,
+  addLocalTombstone: () => addLocalTombstone,
+  addLocalTombstones: () => addLocalTombstones,
+  applyCompaction: () => applyCompaction,
+  applyDecay: () => applyDecay,
+  applyServerUsername: () => applyServerUsername,
+  artifactDir: () => artifactDir,
+  artifactPath: () => artifactPath,
+  assertWritable: () => assertWritable,
+  bucketRouteNow: () => bucketRouteNow,
+  bucketRoutePreview: () => bucketRoutePreview,
+  bucketStatus: () => bucketStatus,
+  buildClassifierUserPrompt: () => buildClassifierUserPrompt,
+  buildClaudeCliArgs: () => buildClaudeCliArgs,
+  buildExtractorUserPrompt: () => buildExtractorUserPrompt,
+  buildResolverUserPrompt: () => buildResolverUserPrompt,
+  callCurationLLM: () => callCurationLLM,
+  captureTurn: () => captureTurn,
+  chromaStore: () => chromaStore,
+  chunk: () => chunk,
+  chunkText: () => chunkText,
+  classifyMemories: () => classifyMemories,
+  clearEmbeddingMemo: () => clearEmbeddingMemo,
+  clearPendingDeletes: () => clearPendingDeletes,
+  clearSelectedForManifest: () => clearSelectedForManifest,
+  closeSyncBackend: () => closeSyncBackend,
+  collectClassifiedMemories: () => collectClassifiedMemories,
+  collectionSize: () => collectionSize,
+  completeTask: () => completeTask,
+  consolidateSessionEverywhere: () => consolidateSessionEverywhere,
+  consolidateStaleDrafts: () => consolidateStaleDrafts,
+  countUnpushed: () => countUnpushed,
+  createCollection: () => createCollection2,
+  createConfig: () => createConfig,
+  createLocalStore: () => createLocalStore,
+  createNewCollection: () => createNewCollection,
+  createTask: () => createTask,
+  curationCycle: () => curationCycle,
+  currentSession: () => currentSession,
+  decayFactor: () => decayFactor,
+  defaultInferenceCaller: () => defaultInferenceCaller,
+  deleteCollection: () => deleteCollection2,
+  deleteDocument: () => deleteDocument2,
+  deleteDocumentEverywhere: () => deleteDocumentEverywhere,
+  deleteTask: () => deleteTask,
+  detectChromaVersion: () => detectChromaVersion,
+  detectCollection: () => detectCollection,
+  detectSector: () => detectSector,
+  emptyPullStats: () => emptyPullStats,
+  emptyPushStats: () => emptyPushStats,
+  ensureArtifactDir: () => ensureArtifactDir,
+  evalCompare: () => evalCompare,
+  evalRun: () => evalRun,
+  extractMemories: () => extractMemories,
+  findAndDeleteDocument: () => findAndDeleteDocument2,
+  findConflicts: () => findConflicts,
+  findDuplicatePairs: () => findDuplicatePairs,
+  flushPendingSync: () => flushPendingSync,
+  forgetMemory: () => forgetMemory,
+  formatDuration: () => formatDuration,
+  formatSyncStats: () => formatSyncStats,
+  formatTaskDate: () => formatTaskDate,
+  formatTrainingJsonl: () => formatTrainingJsonl,
+  fromChroma: () => fromChroma,
+  generateEmbedding: () => generateEmbedding,
+  generateEmbeddingsBatch: () => generateEmbeddingsBatch,
+  getAdapter: () => getAdapter,
+  getCollectionCount: () => getCollectionCount2,
+  getConfig: () => getConfig,
+  getCurationModel: () => getCurationModel,
+  getCurationState: () => getCurationState,
+  getDeviceId: () => getDeviceId,
+  getDocumentsByFilter: () => getDocumentsByFilter2,
+  getDocumentsByIds: () => getDocumentsByIds2,
+  getDueTasks: () => getDueTasks,
+  getEmbeddingModel: () => getEmbeddingModel,
+  getLocalTombstones: () => getLocalTombstones,
+  getNextTaskId: () => getNextTaskId,
+  getOrCreateCollection: () => getOrCreateCollection2,
+  getPendingDeletes: () => getPendingDeletes,
+  getRegistryPath: () => getRegistryPath,
+  getStore: () => getStore,
+  getSyncBackend: () => getSyncBackend,
+  getSyncPullTimestamp: () => getSyncPullTimestamp,
+  getSyncState: () => getSyncState,
+  getSyncSubscriptions: () => getSyncSubscriptions,
+  getSynthesisModel: () => getSynthesisModel,
+  getTask: () => getTask,
+  hasPendingSync: () => hasPendingSync,
+  healthStatusFor: () => healthStatusFor,
+  heartbeatIfDue: () => heartbeatIfDue,
+  isCoordinationUnavailable: () => isCoordinationUnavailable,
+  isCycleFatal: () => isCycleFatal,
+  isReadOnlyDoc: () => isReadOnlyDoc,
+  isSignedOutError: () => isSignedOutError,
+  isSyncConfigured: () => isSyncConfigured,
+  isSyncableCollection: () => isSyncableCollection,
+  janitorSweep: () => janitorSweep,
+  journalAppend: () => journalAppend,
+  journalConsolidate: () => journalConsolidate,
+  judgeAggregate: () => judgeAggregate,
+  judgeVerification: () => judgeVerification,
+  lastSyncError: () => lastSyncError,
+  listAdapters: () => listAdapters,
+  listCollections: () => listCollections2,
+  listCollectionsWithCounts: () => listCollectionsWithCounts,
+  listMemories: () => listMemories,
+  listRejectedDocs: () => listRejectedDocs,
+  listSessionDrafts: () => listSessionDrafts,
+  listTasks: () => listTasks,
+  listVersions: () => listVersions,
+  loadManifestSplit: () => loadManifestSplit,
+  markDecayRun: () => markDecayRun,
+  mergeCollections: () => mergeCollections,
+  nextVersion: () => nextVersion,
+  normalizedSalience: () => normalizedSalience,
+  noteLeaseHeld: () => noteLeaseHeld,
+  noteSyncError: () => noteSyncError,
+  noteSyncOk: () => noteSyncOk,
+  parseAggregateJudge: () => parseAggregateJudge,
+  parseClassifierResponse: () => parseClassifierResponse,
+  parseDuration: () => parseDuration,
+  parseExtractorResponse: () => parseExtractorResponse,
+  parseRelativeDate: () => parseRelativeDate,
+  parseResolverResponse: () => parseResolverResponse,
+  parseSynthesisResponse: () => parseSynthesisResponse,
+  parseVerifyJudge: () => parseVerifyJudge,
+  passesPromotedFilter: () => passesPromotedFilter,
+  passesScoreFilters: () => passesScoreFilters,
+  pullCollection: () => pullCollection,
+  pullFromRemote: () => pullFromRemote,
+  pushToRemote: () => pushToRemote,
+  queryAllCollections: () => queryAllCollections2,
+  queryDocuments: () => queryDocuments2,
+  queueSyncDelete: () => queueSyncDelete,
+  queueSyncDeletes: () => queueSyncDeletes,
+  rankScore: () => rankScore,
+  readArtifact: () => readArtifact,
+  readHoldoutFile: () => readHoldoutFile,
+  readManifestSource: () => readManifestSource,
+  readSyncHealth: () => readSyncHealth,
+  recallMemory: () => recallMemory,
+  recordSyncHealth: () => recordSyncHealth,
+  recordUnpushed: () => recordUnpushed,
+  rekeyTask: () => rekeyTask,
+  removeCollection: () => removeCollection,
+  removeDependency: () => removeDependency,
+  requireCoordination: () => requireCoordination,
+  requireSyncBackend: () => requireSyncBackend,
+  resetConfig: () => resetConfig,
+  resetDeviceId: () => resetDeviceId,
+  resetStore: () => resetStore,
+  resolveConflict: () => resolveConflict,
+  resolveSyncUsername: () => resolveSyncUsername,
+  routeMemory: () => routeMemory,
+  runDecaySweep: () => runDecaySweep,
+  scheduleSyncSoon: () => scheduleSyncSoon,
+  searchTasks: () => searchTasks,
+  sessionsHoldingLeases: () => sessionsHoldingLeases,
+  setConfig: () => setConfig,
+  setHostLLMCaller: () => setHostLLMCaller,
+  setStore: () => setStore,
+  setSyncBackend: () => setSyncBackend,
+  sha256: () => sha256,
+  shouldRunDecay: () => shouldRunDecay,
+  splitManifest: () => splitManifest,
+  startCuration: () => startCuration,
+  startSync: () => startSync,
+  stopCuration: () => stopCuration,
+  stopSync: () => stopSync,
+  storeMemory: () => storeMemory,
+  suggestCompaction: () => suggestCompaction,
+  syncBackendKind: () => syncBackendKind,
+  syncCycle: () => syncCycle,
+  syncFingerprint: () => syncFingerprint,
+  syncUsernameNote: () => syncUsernameNote,
+  synthesizeMemory: () => synthesizeMemory,
+  systemPromptActivate: () => systemPromptActivate,
+  systemPromptDeactivate: () => systemPromptDeactivate,
+  systemPromptThresholds: () => systemPromptThresholds,
+  toChroma: () => toChroma,
+  touchDocument: () => touchDocument,
+  trainingCancel: () => trainingCancel,
+  trainingDatasetPreview: () => trainingDatasetPreview,
+  trainingGet: () => trainingGet,
+  trainingStatus: () => trainingStatus,
+  trainingThresholds: () => trainingThresholds,
+  trainingTrigger: () => trainingTrigger,
+  updateAdapter: () => updateAdapter,
+  updateDocument: () => updateDocument2,
+  updateDocumentsBatch: () => updateDocumentsBatch2,
+  updateSyncPullTimestamp: () => updateSyncPullTimestamp,
+  updateSyncSubscriptions: () => updateSyncSubscriptions,
+  updateTask: () => updateTask,
+  verifyAdapterAgainstManifest: () => verifyAdapterAgainstManifest,
+  writeArtifact: () => writeArtifact,
+  writeSystemPromptCompanion: () => writeSystemPromptCompanion,
+  writeTrainingManifest: () => writeTrainingManifest
+});
 var init_src = __esm({
   "packages/core/src/index.ts"() {
     "use strict";
@@ -3567,6 +6854,7 @@ var init_src = __esm({
     init_push();
     init_deletes();
     init_sentinel();
+    init_health();
     init_device();
     init_training();
     init_backend2();
@@ -3617,23 +6905,254 @@ If a yapa tool fails with a storage or sync error, do not swallow it: tell the u
   }
 });
 
+// packages/mcp/src/cli/statusline.ts
+var statusline_exports = {};
+__export(statusline_exports, {
+  copyScript: () => copyScript,
+  decodeWrapped: () => decodeWrapped,
+  defaultSettingsPath: () => defaultSettingsPath,
+  encodeWrapped: () => encodeWrapped,
+  formatAgo: () => formatAgo,
+  formatSince: () => formatSince,
+  hasStatusLine: () => hasStatusLine,
+  installStatusLine: () => installStatusLine,
+  isYapaStatusLine: () => isYapaStatusLine,
+  main: () => main,
+  mergeStatusLine: () => mergeStatusLine,
+  readHealth: () => readHealth,
+  removeStatusLine: () => removeStatusLine,
+  renderSegment: () => renderSegment,
+  uninstallStatusLine: () => uninstallStatusLine
+});
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync, renameSync as renameSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname4, join as join7, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+function formatAgo(ms) {
+  const s = Math.max(0, Math.round(ms / 1e3));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+function formatSince(at, now) {
+  const d = new Date(at);
+  const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === new Date(now).toDateString()) return hhmm;
+  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()} ${hhmm}`;
+}
+function cleanLabel(label) {
+  if (typeof label !== "string") return void 0;
+  const v = label.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 32);
+  return v || void 0;
+}
+function renderSegment(health, now, opts = {}) {
+  const name = cleanLabel(opts.label) ?? cleanLabel(health?.label) ?? "yapa";
+  const paint = (tone, text) => opts.color ? `${ANSI[tone]}${text}${ANSI.reset}` : text;
+  const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
+  const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
+  if (!health) return paint("dim", `${name} \u25CB sync status unknown`);
+  switch (health.status) {
+    case "disabled":
+      return paint("dim", `${name} \u25CB local only`);
+    case "signed_out":
+      return paint("red", `${name} \u25CF signed out${since}${push} \xB7 run: gcloud auth login`);
+    case "unreachable":
+      return paint("yellow", `${name} \u25CF offline${since}${push}`);
+    case "error": {
+      const why = health.message ? `: ${health.message.replace(/\s+/g, " ").slice(0, 60)}` : "";
+      return paint("yellow", `${name} \u25CF sync error${since}${why}`);
+    }
+    case "ok": {
+      const interval = health.interval_ms && health.interval_ms > 0 ? health.interval_ms : DEFAULT_INTERVAL_MS;
+      if (now - health.at > STALE_INTERVALS * interval) {
+        return paint("dim", `${name} \u25CB sync status unknown (last checked ${formatAgo(now - health.at)})`);
+      }
+      return paint("green", `${name} \u25CF synced ${formatAgo(now - (health.last_ok_at ?? health.at))}${push}`);
+    }
+    default:
+      return paint("dim", `${name} \u25CB sync status unknown`);
+  }
+}
+function readHealth(path) {
+  try {
+    const h = JSON.parse(readFileSync12(path, "utf-8"));
+    return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function encodeWrapped(statusLine) {
+  return Buffer.from(JSON.stringify(statusLine)).toString("base64url");
+}
+function decodeWrapped(b64) {
+  try {
+    const v = JSON.parse(Buffer.from(b64, "base64url").toString("utf-8"));
+    return v && typeof v === "object" ? v : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function isYapaStatusLine(statusLine) {
+  return typeof statusLine?.command === "string" && /yapa[\\/]statusline\.mjs/.test(statusLine.command);
+}
+function wrappedOf(statusLine) {
+  const m = typeof statusLine?.command === "string" ? statusLine.command.match(/--wrap\s+([A-Za-z0-9_-]+)/) : null;
+  return m ? decodeWrapped(m[1]) : void 0;
+}
+function mergeStatusLine(settings, script, refreshInterval = 30) {
+  const next = structuredClone(settings ?? {});
+  const current = next.statusLine;
+  const wrapped = isYapaStatusLine(current) ? wrappedOf(current) : current && typeof current === "object" ? current : void 0;
+  let command = `node "${script}"`;
+  if (wrapped) command += ` --wrap ${encodeWrapped(wrapped)}`;
+  next.statusLine = {
+    ...wrapped ?? {},
+    type: "command",
+    command,
+    refreshInterval: Math.min(Number(wrapped?.refreshInterval) || refreshInterval, refreshInterval)
+  };
+  return next;
+}
+function removeStatusLine(settings) {
+  const next = structuredClone(settings ?? {});
+  if (!isYapaStatusLine(next.statusLine)) return next;
+  const wrapped = wrappedOf(next.statusLine);
+  if (wrapped) next.statusLine = wrapped;
+  else delete next.statusLine;
+  return next;
+}
+function defaultSettingsPath() {
+  return join7(process.env.CLAUDE_CONFIG_DIR ?? join7(homedir3(), ".claude"), "settings.json");
+}
+function readSettings(path) {
+  try {
+    return JSON.parse(readFileSync12(path, "utf-8"));
+  } catch (e) {
+    if (e?.code === "ENOENT") return {};
+    throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);
+  }
+}
+function writeSettings(path, settings) {
+  mkdirSync8(dirname4(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync8(tmp, JSON.stringify(settings, null, 2) + "\n");
+  renameSync3(tmp, path);
+}
+function installStatusLine(script, path = defaultSettingsPath()) {
+  writeSettings(path, mergeStatusLine(readSettings(path), script));
+  return path;
+}
+function uninstallStatusLine(path = defaultSettingsPath()) {
+  writeSettings(path, removeStatusLine(readSettings(path)));
+  return path;
+}
+function hasStatusLine(path = defaultSettingsPath()) {
+  try {
+    return isYapaStatusLine(JSON.parse(readFileSync12(path, "utf-8")).statusLine);
+  } catch {
+    return false;
+  }
+}
+function copyScript(from, to) {
+  let src;
+  try {
+    src = readFileSync12(from);
+  } catch {
+    return false;
+  }
+  try {
+    if (readFileSync12(to).equals(src)) return false;
+  } catch {
+  }
+  mkdirSync8(dirname4(to), { recursive: true, mode: 448 });
+  const tmp = `${to}.${process.pid}.tmp`;
+  copyFileSync(from, tmp);
+  renameSync3(tmp, to);
+  return true;
+}
+function argValue(args, flag2) {
+  const i = args.indexOf(flag2);
+  return i >= 0 ? args[i + 1] : void 0;
+}
+async function readStdin() {
+  if (process.stdin.isTTY) return "";
+  const chunks = [];
+  for await (const chunk2 of process.stdin) chunks.push(chunk2);
+  return Buffer.concat(chunks).toString("utf-8");
+}
+async function main(args, self2) {
+  const settings = argValue(args, "--settings");
+  if (args.includes("--install")) {
+    process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
+`);
+    return;
+  }
+  if (args.includes("--uninstall")) {
+    process.stdout.write(`Status line removed from ${uninstallStatusLine(settings)}
+`);
+    return;
+  }
+  const input = await readStdin();
+  const wrapped = argValue(args, "--wrap");
+  const previous = wrapped ? decodeWrapped(wrapped) : void 0;
+  if (typeof previous?.command === "string") {
+    const r = spawnSync(previous.command, { shell: true, input, encoding: "utf-8", timeout: WRAP_TIMEOUT_MS });
+    const out = (r.stdout ?? "").replace(/\s+$/, "");
+    if (r.status === 0 && out) process.stdout.write(out + "\n");
+  }
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join7(dirname4(self2), "sync-health.json");
+  const color = !process.env.NO_COLOR;
+  process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), { color, label: argValue(args, "--label") }) + "\n");
+}
+function isMain(argv1, self2) {
+  if (!argv1 || !/statusline\.m?js$/.test(self2)) return false;
+  try {
+    return realpathSync(resolve(argv1)) === realpathSync(self2);
+  } catch {
+    return false;
+  }
+}
+var DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_MS, ANSI, self;
+var init_statusline = __esm({
+  "packages/mcp/src/cli/statusline.ts"() {
+    "use strict";
+    DEFAULT_INTERVAL_MS = 3e5;
+    STALE_INTERVALS = 3;
+    WRAP_TIMEOUT_MS = 5e3;
+    ANSI = { green: "\x1B[32m", red: "\x1B[31m", yellow: "\x1B[33m", dim: "\x1B[2m", reset: "\x1B[0m" };
+    self = fileURLToPath(import.meta.url);
+    if (isMain(process.argv[1], self)) {
+      main(process.argv.slice(2), self).catch(() => process.stdout.write("yapa \u25CB sync status unknown\n"));
+    }
+  }
+});
+
 // packages/mcp/src/cli/hooks.ts
 var hooks_exports = {};
 __export(hooks_exports, {
   attribution: () => attribution,
+  bundledStatusLineScript: () => bundledStatusLineScript,
   freshenFromRemote: () => freshenFromRemote,
   postCompact: () => postCompact,
+  prepareStatusLine: () => prepareStatusLine,
   presenceLines: () => presenceLines,
   reloadConfig: () => reloadConfig,
   sessionEnd: () => sessionEnd,
   sessionStart: () => sessionStart,
+  statusLineScriptPath: () => statusLineScriptPath,
   stop: () => stop,
+  syncDownLine: () => syncDownLine,
   userPromptSubmit: () => userPromptSubmit,
   userText: () => userText
 });
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync9, readFileSync as readFileSync13, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join4 } from "node:path";
+import { dirname as dirname5, join as join8 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
 }
@@ -3649,7 +7168,7 @@ function attribution(metadata) {
   return who && who !== getConfig().USERNAME ? `, by ${who}` : "";
 }
 function withTimeout(work, ms) {
-  return Promise.race([work, new Promise((resolve) => setTimeout(() => resolve(void 0), ms).unref())]);
+  return Promise.race([work, new Promise((resolve2) => setTimeout(() => resolve2(void 0), ms).unref())]);
 }
 async function freshenFromRemote(collection) {
   const config = getConfig();
@@ -3664,6 +7183,7 @@ async function freshenFromRemote(collection) {
 `);
       return 0;
     }
+    if (stats.errors === 0) noteSyncOk();
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();
       if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
@@ -3675,18 +7195,61 @@ async function freshenFromRemote(collection) {
     return 0;
   }
 }
+function syncDownLine(health = readSyncHealth()) {
+  if (!health || !isSyncConfigured(getConfig())) return void 0;
+  const since = health.since ? ` since ${new Date(health.since).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
+  switch (health.status) {
+    case "signed_out":
+      return `_YAPA sync is signed out${since}: writes stay on this machine until the user runs \`gcloud auth login\` (sync resumes by itself, no restart)._`;
+    case "unreachable":
+      return `_YAPA sync service is unreachable${since}: writes stay on this machine and push when it is back._`;
+    case "error":
+      return `_YAPA sync is failing${since}${health.message ? ` (${health.message.slice(0, 160)})` : ""}: writes stay on this machine for now._`;
+    default:
+      return void 0;
+  }
+}
+function statusLineScriptPath() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join8(dirname5(health), "statusline.mjs") : void 0;
+}
+function bundledStatusLineScript() {
+  const here = dirname5(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join8(here, f)).find((p) => existsSync4(p));
+}
+function prepareStatusLine(from = bundledStatusLineScript()) {
+  const to = statusLineScriptPath();
+  if (!to) return void 0;
+  try {
+    if (from) copyScript(from, to);
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] status line script copy failed: ${e}
+`);
+  }
+  if (!isSyncConfigured(getConfig()) || hasStatusLine()) return void 0;
+  const marker = join8(dirname5(to), "statusline-hint");
+  if (existsSync4(marker)) return void 0;
+  try {
+    writeFileSync9(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+  } catch {
+    return void 0;
+  }
+  const how = process.env.CLAUDE_PLUGIN_ROOT ? "`/yapa:statusline`" : `\`node "${to}" --install\``;
+  return `_Mention once to the user: they can show YAPA sync health under the prompt with ${how}._`;
+}
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join4(tmpdir(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join4(base, "sessions");
-  mkdirSync4(dir, { recursive: true });
+  const base = process.env.CLAUDE_PLUGIN_DATA || join8(tmpdir(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join8(base, "sessions");
+  mkdirSync9(dir, { recursive: true });
   return dir;
 }
 function stateFile(sessionId, kind) {
-  return join4(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join8(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId) {
   try {
-    return JSON.parse(readFileSync6(stateFile(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync13(stateFile(sessionId, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -3695,7 +7258,7 @@ function recordPrompt(sessionId, prompt) {
   if (!sessionId) return;
   try {
     const turn = (readTurn(sessionId)?.turn ?? 0) + 1;
-    writeFileSync4(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
+    writeFileSync9(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
@@ -3705,7 +7268,7 @@ function takeNotice(sessionId) {
   if (!sessionId) return void 0;
   const file = stateFile(sessionId, "notice");
   try {
-    const notice = readFileSync6(file, "utf-8").trim();
+    const notice = readFileSync13(file, "utf-8").trim();
     rmSync3(file, { force: true });
     return notice || void 0;
   } catch {
@@ -3762,6 +7325,10 @@ async function sessionStart(input) {
   if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, "");
   lines.push("# YAPA Context", "", scopeLine(detection));
   if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
+  const down = syncDownLine();
+  if (down) lines.push(down);
+  const hint = prepareStatusLine();
+  if (hint) lines.push(hint);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
   const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
@@ -3834,9 +7401,11 @@ async function userPromptSubmit(input) {
   const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? "\u2026" : ""}`];
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
+  const down = syncDownLine();
+  if (down) lines.push(down);
   try {
     const recall = await recallMemory(prompt, { collection, nResults: 3, crossCollection: getConfig().CROSS_COLLECTION_RESULTS });
-    if (recall.length === 0 && !notice) {
+    if (recall.length === 0 && !notice && !down) {
       emit({});
       return;
     }
@@ -3874,7 +7443,7 @@ async function stop(input) {
       { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText: userText2, assistantText },
       { maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE }
     );
-    if (result.notice) writeFileSync4(stateFile(input.session_id, "notice"), result.notice);
+    if (result.notice) writeFileSync9(stateFile(input.session_id, "notice"), result.notice);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -3919,6 +7488,7 @@ var init_hooks = __esm({
     "use strict";
     init_src();
     init_rules();
+    init_statusline();
     HOOK_PULL_OVERLAP_SECONDS = 600;
     STALE_JOURNAL_BUDGET_MS = 2e3;
     LEASE_LIST_BUDGET_MS = 1500;
@@ -3931,16 +7501,16 @@ var init_hooks = __esm({
 var install_hooks_exports = {};
 __export(install_hooks_exports, {
   HOOK_EVENTS: () => HOOK_EVENTS,
-  defaultSettingsPath: () => defaultSettingsPath,
+  defaultSettingsPath: () => defaultSettingsPath2,
   installHooks: () => installHooks,
   mergeHooks: () => mergeHooks,
   removeHooks: () => removeHooks,
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync14, writeFileSync as writeFileSync10 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname6, join as join9 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -3966,28 +7536,28 @@ function removeHooks(settings) {
   if (Object.keys(next.hooks).length === 0) delete next.hooks;
   return next;
 }
-function defaultSettingsPath() {
-  return join5(process.env.CLAUDE_CONFIG_DIR ?? join5(homedir3(), ".claude"), "settings.json");
+function defaultSettingsPath2() {
+  return join9(process.env.CLAUDE_CONFIG_DIR ?? join9(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
-function readSettings(path) {
+function readSettings2(path) {
   try {
-    return JSON.parse(readFileSync7(path, "utf-8"));
+    return JSON.parse(readFileSync14(path, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);
   }
 }
-function installHooks(path = defaultSettingsPath(), command = selfCommand()) {
-  const merged = mergeHooks(readSettings(path), command);
-  mkdirSync5(dirname3(path), { recursive: true });
-  writeFileSync5(path, JSON.stringify(merged, null, 2) + "\n");
+function installHooks(path = defaultSettingsPath2(), command = selfCommand()) {
+  const merged = mergeHooks(readSettings2(path), command);
+  mkdirSync10(dirname6(path), { recursive: true });
+  writeFileSync10(path, JSON.stringify(merged, null, 2) + "\n");
   return path;
 }
-function uninstallHooks(path = defaultSettingsPath()) {
-  writeFileSync5(path, JSON.stringify(removeHooks(readSettings(path)), null, 2) + "\n");
+function uninstallHooks(path = defaultSettingsPath2()) {
+  writeFileSync10(path, JSON.stringify(removeHooks(readSettings2(path)), null, 2) + "\n");
   return path;
 }
 var HOOK_EVENTS, MARKER;
@@ -4173,13 +7743,13 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n";
 var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nExit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
   process.exit(2);
 }
-async function readStdin() {
+async function readStdin2() {
   if (process.stdin.isTTY) return "";
   const chunks = [];
   for await (const chunk2 of process.stdin) {
@@ -4188,7 +7758,7 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf-8");
 }
 async function runHook(name) {
-  const raw = await readStdin();
+  const raw = await readStdin2();
   const input = raw.trim() ? JSON.parse(raw) : {};
   if (process.env.YAPA_HOOK_CHILD) {
     process.stdout.write("{}");
@@ -4226,6 +7796,33 @@ async function runHooksCommand(action, args) {
       return;
     case "print":
       process.stdout.write(JSON.stringify(mergeHooks2({}, selfCommand2()), null, 2) + "\n");
+      return;
+    default:
+      usage();
+  }
+}
+async function runStatusLineCommand(action, args) {
+  adoptCliEnv(process.cwd());
+  const sl = await Promise.resolve().then(() => (init_statusline(), statusline_exports));
+  const { statusLineScriptPath: statusLineScriptPath2, bundledStatusLineScript: bundledStatusLineScript2 } = await Promise.resolve().then(() => (init_hooks(), hooks_exports));
+  const { getConfig: getConfig2 } = await Promise.resolve().then(() => (init_src(), src_exports));
+  const path = flag(args, "--settings");
+  const script = statusLineScriptPath2();
+  switch (action) {
+    case "install": {
+      const from = bundledStatusLineScript2();
+      if (!script || !from) throw new Error("no status line script (YAPA_SYNC_HEALTH_FILE is off, or this build has none)");
+      sl.copyScript(from, script);
+      process.stdout.write(`Status line added to ${sl.installStatusLine(script, path)} (runs ${script})
+`);
+      return;
+    }
+    case "uninstall":
+      process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path)}
+`);
+      return;
+    case "show":
+      process.stdout.write(sl.renderSegment(sl.readHealth(getConfig2().SYNC_HEALTH_FILE), Date.now(), { color: !process.env.NO_COLOR }) + "\n");
       return;
     default:
       usage();
@@ -4300,7 +7897,7 @@ async function runCoord(sub, args) {
   process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
   return r.exit;
 }
-async function main() {
+async function main2() {
   const [command, sub, ...rest] = process.argv.slice(2);
   if (command === "coord") {
     process.exit(await runCoord(sub, rest));
@@ -4308,6 +7905,16 @@ async function main() {
   if (command === "hooks") {
     await runHooksCommand(sub, rest);
     return;
+  }
+  if (command === "statusline") {
+    try {
+      await runStatusLineCommand(sub, rest);
+    } catch (e) {
+      process.stderr.write(`yapa statusline ${sub}: ${e instanceof Error ? e.message : e}
+`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
   if (command !== "hook" || !sub) usage();
   try {
@@ -4320,4 +7927,4 @@ async function main() {
     process.exit(0);
   }
 }
-main();
+main2();

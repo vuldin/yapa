@@ -7340,6 +7340,10 @@ function createConfig(env = process.env) {
     SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
     SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
     SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
+    // Not recorded under vitest unless a test names a file: suites that fail
+    // sync on purpose must not paint the developer's own status line red.
+    SYNC_HEALTH_FILE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_HEALTH_FILE", process.env.VITEST ? "" : pathJoin(homedir2(), ".local", "share", "yapa", "sync-health.json"))),
+    STATUS_LABEL: get(env, "STATUS_LABEL", "yapa").trim().slice(0, 32) || "yapa",
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
@@ -8278,10 +8282,71 @@ var init_store = __esm({
   }
 });
 
+// packages/core/src/sync/health.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname } from "node:path";
+function healthStatusFor(code) {
+  if (typeof code === "string" && SIGNED_OUT.has(code)) return "signed_out";
+  if (code === "unreachable") return "unreachable";
+  return "error";
+}
+function readSyncHealth(path = getConfig().SYNC_HEALTH_FILE) {
+  if (!path) return void 0;
+  try {
+    const h = JSON.parse(readFileSync2(path, "utf-8"));
+    return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function recordSyncHealth(update, now = Date.now(), path = getConfig().SYNC_HEALTH_FILE) {
+  if (!path) return void 0;
+  const prev = readSyncHealth(path);
+  const config2 = getConfig();
+  const next = { status: update.status, at: now, interval_ms: config2.SYNC_INTERVAL_MS, label: config2.STATUS_LABEL };
+  if (prev?.last_ok_at) next.last_ok_at = prev.last_ok_at;
+  const unpushed = update.unpushed ?? prev?.unpushed;
+  if (unpushed !== void 0) next.unpushed = unpushed;
+  if (update.status === "ok") {
+    next.last_ok_at = now;
+  } else if (update.status !== "disabled") {
+    const failing = prev && prev.status !== "ok" && prev.status !== "disabled";
+    next.since = failing ? prev.since ?? now : now;
+    if ("code" in update && update.code) next.code = update.code;
+    if ("message" in update && update.message) next.message = update.message.slice(0, 300);
+  }
+  try {
+    mkdirSync2(dirname(path), { recursive: true, mode: 448 });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync2(tmp, JSON.stringify(next) + "\n", { mode: 384 });
+    renameSync(tmp, path);
+  } catch {
+  }
+  return next;
+}
+function recordUnpushed(unpushed, path = getConfig().SYNC_HEALTH_FILE) {
+  const prev = readSyncHealth(path);
+  if (!prev || prev.unpushed === unpushed) return;
+  try {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync2(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
+    renameSync(tmp, path);
+  } catch {
+  }
+}
+var SIGNED_OUT;
+var init_health = __esm({
+  "packages/core/src/sync/health.ts"() {
+    "use strict";
+    init_config();
+    SIGNED_OUT = /* @__PURE__ */ new Set(["token_command", "unauthenticated", "cloud_run_unauthenticated"]);
+  }
+});
+
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname2 } from "node:path";
 function getDeviceId() {
   const config2 = getConfig();
   if (config2.DEVICE_ID) return config2.DEVICE_ID;
@@ -8289,19 +8354,19 @@ function getDeviceId() {
   const path = config2.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync2(path, "utf-8").trim();
+    id = readFileSync3(path, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync2(dirname(path), { recursive: true });
-      writeFileSync2(path, `${id}
+      mkdirSync3(dirname2(path), { recursive: true });
+      writeFileSync3(path, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync2(path, "utf-8").trim() || id;
+        id = readFileSync3(path, "utf-8").trim() || id;
       } catch {
       }
     }
@@ -8326,8 +8391,8 @@ __export(http_backend_exports, {
   decodeJwtPayload: () => decodeJwtPayload,
   redactTokens: () => redactTokens
 });
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync3, rmSync, renameSync } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync4, rmSync, renameSync as renameSync2 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 function redactTokens(text) {
@@ -8481,7 +8546,7 @@ var init_http_backend = __esm({
       loadCached() {
         if (!this.cachePath) return false;
         try {
-          const token = readFileSync3(this.cachePath, "utf-8").trim();
+          const token = readFileSync4(this.cachePath, "utf-8").trim();
           if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
           const until = this.validity(token, this.now());
           if (this.now() >= until) return false;
@@ -8496,10 +8561,10 @@ var init_http_backend = __esm({
       saveCached(token) {
         if (!this.cachePath) return;
         try {
-          mkdirSync3(dirname2(this.cachePath), { recursive: true, mode: 448 });
+          mkdirSync4(dirname3(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
-          writeFileSync3(tmp, token, { mode: 384 });
-          renameSync(tmp, this.cachePath);
+          writeFileSync4(tmp, token, { mode: 384 });
+          renameSync2(tmp, this.cachePath);
         } catch {
         }
       }
@@ -8550,7 +8615,7 @@ var init_http_backend = __esm({
         this.device = opts.device ?? getDeviceId;
       }
       fail(err, quiet = false) {
-        if (!quiet) noteSyncError(err);
+        if (!quiet || isSignedOutError(err)) noteSyncError(err);
         throw err;
       }
       async request(method, path, opts = {}) {
@@ -8750,7 +8815,7 @@ var init_http_backend = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync4 } from "node:fs";
+import { readFileSync as readFileSync5 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url2;
@@ -8762,7 +8827,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -8771,7 +8836,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url2.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync4(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -9186,7 +9251,17 @@ function chunk(items, size) {
   return out;
 }
 function noteSyncError(e) {
-  lastError = { message: e instanceof Error ? e.message : String(e), at: Date.now() };
+  const message = e instanceof Error ? e.message : String(e);
+  lastError = { message, at: Date.now() };
+  const code = e?.code;
+  recordSyncHealth({ status: healthStatusFor(code), code: typeof code === "string" ? code : void 0, message });
+}
+function noteSyncOk(unpushed) {
+  lastError = void 0;
+  recordSyncHealth({ status: "ok", unpushed });
+}
+function isSignedOutError(e) {
+  return healthStatusFor(e?.code) === "signed_out";
 }
 function lastSyncError() {
   return lastError;
@@ -9231,6 +9306,7 @@ var init_backend = __esm({
   "packages/core/src/sync/backend.ts"() {
     "use strict";
     init_config();
+    init_health();
   }
 });
 
@@ -40584,14 +40660,14 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync4, readdirSync, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync5, readdirSync, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "fs";
 import { join as join3 } from "path";
 function artifactDir(kind) {
   return join3(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync2(dir)) mkdirSync4(dir, { recursive: true });
+  if (!existsSync2(dir)) mkdirSync5(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -40610,7 +40686,7 @@ function nextVersion(kind) {
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
   const path = join3(dir, filename);
-  writeFileSync4(path, content);
+  writeFileSync5(path, content);
   return path;
 }
 function artifactPath(kind, filename) {
@@ -41180,6 +41256,19 @@ async function markRejected(collection, doc, code, message) {
   process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
 `);
 }
+async function countUnpushed() {
+  let n = 0;
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
+      n++;
+    }
+  }
+  return n;
+}
 async function listRejectedDocs() {
   const out = [];
   for (const col of await listCollections2()) {
@@ -41448,6 +41537,7 @@ async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
 
 // packages/core/src/sync/index.ts
 init_backend();
+init_health();
 var syncTimer = null;
 var syncRunning = false;
 var lastCycleAt = null;
@@ -41498,6 +41588,9 @@ async function syncCycle() {
       await (await getSyncBackend())?.maintain();
     } catch {
     }
+    const unpushed = await countUnpushed().catch(() => void 0);
+    if (!hasErrors) noteSyncOk(unpushed);
+    else if (unpushed !== void 0) recordUnpushed(unpushed);
     lastCycleAt = Date.now();
     lastCycleError = null;
     cycleCount2++;
@@ -41552,10 +41645,14 @@ async function flushPendingSync(timeoutMs = 5e3) {
   if (timer2) clearTimeout(timer2);
 }
 async function startSync() {
-  if (!getConfig().SYNC_ENABLED) return;
+  if (!getConfig().SYNC_ENABLED) {
+    recordSyncHealth({ status: "disabled" });
+    return;
+  }
   const kind = syncBackendKind();
   if (!kind) {
     process.stderr.write("[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n");
+    recordSyncHealth({ status: "disabled" });
     return;
   }
   if (kind === "service" && getConfig().SYNC_DATABASE_URL) {
@@ -41609,7 +41706,7 @@ init_backend();
 // packages/core/src/sync/coordination.ts
 init_config();
 init_backend();
-import { mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { join as join4 } from "node:path";
 var SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 function currentSession(explicit, env = process.env) {
@@ -41623,15 +41720,15 @@ function markerPath(session) {
 }
 function readMarker(session) {
   try {
-    return JSON.parse(readFileSync6(markerPath(session), "utf-8"));
+    return JSON.parse(readFileSync7(markerPath(session), "utf-8"));
   } catch {
     return void 0;
   }
 }
 function writeMarker(m) {
   try {
-    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync5(markerPath(m.session), JSON.stringify(m), { mode: 384 });
+    mkdirSync6(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync6(markerPath(m.session), JSON.stringify(m), { mode: 384 });
   } catch {
   }
 }
@@ -41687,13 +41784,14 @@ function wrap(c) {
 // packages/core/src/index.ts
 init_http_backend();
 init_postgres_backend();
+init_health();
 init_device();
 
 // packages/core/src/training/index.ts
 init_config();
 init_store();
 import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync7 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync8, readFileSync as readFileSync10, writeFileSync as writeFileSync8 } from "fs";
 import { join as join6 } from "path";
 
 // packages/core/src/training/fireworks.ts
@@ -41856,21 +41954,21 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "fs";
 import { join as join5 } from "path";
 function registryPath() {
   return join5(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
   const dir = join5(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync3(dir)) mkdirSync6(dir, { recursive: true });
+  if (!existsSync3(dir)) mkdirSync7(dir, { recursive: true });
 }
 function load() {
   ensureDir();
   const path = registryPath();
   if (!existsSync3(path)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync7(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync8(path, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -41881,7 +41979,7 @@ function load() {
 }
 function save(file2) {
   ensureDir();
-  writeFileSync6(registryPath(), JSON.stringify(file2, null, 2) + "\n");
+  writeFileSync7(registryPath(), JSON.stringify(file2, null, 2) + "\n");
 }
 function addAdapter(entry) {
   const file2 = load();
@@ -41912,7 +42010,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync8 } from "fs";
+import { readFileSync as readFileSync9 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -42015,7 +42113,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path) {
-  const content = readFileSync8(path, "utf-8");
+  const content = readFileSync9(path, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -42044,7 +42142,7 @@ function getBackend() {
 }
 function previewDir() {
   const dir = join6(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync4(dir)) mkdirSync7(dir, { recursive: true });
+  if (!existsSync4(dir)) mkdirSync8(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
@@ -42078,7 +42176,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
   const previewPath = join6(dir, filename);
-  writeFileSync7(previewPath, jsonl);
+  writeFileSync8(previewPath, jsonl);
   return {
     manifestVersion,
     previewPath,
@@ -42094,7 +42192,7 @@ async function trainingTrigger(args) {
   if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync9(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync10(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -43799,6 +43897,16 @@ ${r.content}`
             lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1e3).toISOString() : "never"}`);
           } catch {
             lines.push("Last pull: unknown");
+          }
+          const health = readSyncHealth();
+          if (health) {
+            const iso = (ms) => ms ? new Date(ms).toISOString() : "never";
+            let line = `Health (status line): ${health.status}`;
+            if (health.since) line += ` since ${iso(health.since)}`;
+            if (health.code) line += ` [${health.code}]`;
+            line += `; last ok ${iso(health.last_ok_at)}; checked ${iso(health.at)}`;
+            if (health.unpushed !== void 0) line += `; ${health.unpushed} to push`;
+            lines.push(line);
           }
           try {
             const pending = await getPendingDeletes();

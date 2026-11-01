@@ -18,6 +18,7 @@ import { setSyncBackend, lastSyncError, getSyncBackend, syncBackendKind, syncUse
 import { getConfig } from '../config.js';
 import { getNextTaskId } from '../tasks/create.js';
 import { pushToRemote, listRejectedDocs } from './push.js';
+import { readSyncHealth } from './health.js';
 import { pullCollection, pullFromRemote } from './pull.js';
 import { queueSyncDelete } from './deletes.js';
 import { forgetMemory } from '../memory/forget.js';
@@ -170,6 +171,24 @@ describe('header contract and auth', () => {
     const broken = new IdTokenProvider(async () => { throw new Error('gcloud: You do not currently have an active account selected.'); });
     const err = await backend({ tokens: broken }).collections().catch(e => e);
     expect(err.code).toBe('token_command');
+  });
+
+  it('quiet calls (leases) still record a sign-out for the status line, but not other failures', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'yapa-health-'));
+    const file = join(dir, 'sync-health.json');
+    const saved = getConfig();
+    setConfig({ ...saved, SYNC_HEALTH_FILE: file });
+    try {
+      handler = () => ({ status: 503, json: { error: { code: 'unavailable', message: 'down' } } });
+      await backend().coordination.leaseHeartbeat('project-x', 's1').catch(() => undefined);
+      expect(readSyncHealth(file)).toBeUndefined();
+      const broken = new IdTokenProvider(async () => { throw new Error('gcloud: Reauthentication required.'); });
+      await backend({ tokens: broken }).coordination.leaseHeartbeat('project-x', 's1').catch(() => undefined);
+      expect(readSyncHealth(file)).toMatchObject({ status: 'signed_out', code: 'token_command' });
+    } finally {
+      setConfig(saved);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('decodes exp without verification and redacts JWT-like text', () => {

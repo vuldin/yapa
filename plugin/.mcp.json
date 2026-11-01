@@ -15,6 +15,7 @@
         "YAPA_SYNC_SERVICE_URL": "${user_config.sync_service_url}",
         "YAPA_SYNC_DATABASE_URL": "${user_config.sync_database_url}",
         "YAPA_SYNC_CA_CERT": "${user_config.sync_ca_cert}",
+        "YAPA_STATUS_LABEL": "${user_config.status_label}",
         "YAPA_RESPONSE_CAPTURE": "${user_config.response_capture}",
         "YAPA_MODEL_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/models"
       }

@@ -28,6 +28,8 @@ await build({
   entryPoints: {
     'yapa-mcp': join(root, 'packages/mcp/src/index.ts'),
     yapa: join(root, 'packages/mcp/src/cli/index.ts'),
+    // Self-contained; hooks copy it to a stable path for settings.json.
+    statusline: join(root, 'packages/mcp/src/cli/statusline.ts'),
   },
   outdir: join(plugin, 'dist'),
   outExtension: { '.js': '.mjs' },

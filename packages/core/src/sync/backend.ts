@@ -12,6 +12,7 @@
  * talk to the remote through `getSyncBackend()`.
  */
 import { getConfig, setConfig, type YapaConfig } from '../config.js';
+import { healthStatusFor, recordSyncHealth } from './health.js';
 
 export interface RemoteDocument {
   id: string;
@@ -262,9 +263,26 @@ export function chunk<T>(items: T[], size: number): T[][] {
 
 let lastError: { message: string; at: number } | undefined;
 
-/** Remember the most recent sync failure for `sync status` (never contains tokens). */
+/**
+ * Remember the most recent sync failure for `sync status` (never contains
+ * tokens), and record it in the health file the status line reads.
+ */
 export function noteSyncError(e: unknown): void {
-  lastError = { message: e instanceof Error ? e.message : String(e), at: Date.now() };
+  const message = e instanceof Error ? e.message : String(e);
+  lastError = { message, at: Date.now() };
+  const code = (e as { code?: unknown })?.code;
+  recordSyncHealth({ status: healthStatusFor(code), code: typeof code === 'string' ? code : undefined, message });
+}
+
+/** A round trip to the remote succeeded: clear the failure. */
+export function noteSyncOk(unpushed?: number): void {
+  lastError = undefined;
+  recordSyncHealth({ status: 'ok', unpushed });
+}
+
+/** Not signed in (or the token command failed): worth recording even for quiet requests. */
+export function isSignedOutError(e: unknown): boolean {
+  return healthStatusFor((e as { code?: unknown })?.code) === 'signed_out';
 }
 
 export function lastSyncError(): { message: string; at: number } | undefined {

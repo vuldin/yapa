@@ -75,6 +75,12 @@
       "description": "Advanced/self-host (direct database only): PEM file with the database server CA; the server certificate is verified against it.",
       "default": ""
     },
+    "status_label": {
+      "type": "string",
+      "title": "Status line name",
+      "description": "What the status line (/yapa:statusline) calls the sync, e.g. the name of your team's remote. Empty = yapa.",
+      "default": ""
+    },
     "response_capture": {
       "type": "boolean",
       "title": "Auto-capture findings",
