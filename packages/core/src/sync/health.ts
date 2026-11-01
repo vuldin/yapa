@@ -29,8 +29,10 @@ export interface SyncHealth {
   unpushed?: number;
   /** The server's sync interval, so readers can tell a stale record. */
   interval_ms: number;
-  /** What the status line calls the sync (STATUS_LABEL). */
+  /** Legacy: what an older status line calls the sync (STATUS_LABEL). */
   label: string;
+  /** What the team's remote is called (REMOTE_NAME): `yapa@vX <-> NAME`. Absent: unnamed. */
+  remote?: string;
 }
 
 const SIGNED_OUT = new Set(['token_command', 'unauthenticated', 'cloud_run_unauthenticated']);
@@ -62,6 +64,7 @@ export function recordSyncHealth(update: SyncHealthUpdate, now: number = Date.no
   const prev = readSyncHealth(path);
   const config = getConfig();
   const next: SyncHealth = { status: update.status, at: now, interval_ms: config.SYNC_INTERVAL_MS, label: config.STATUS_LABEL };
+  if (config.REMOTE_NAME) next.remote = config.REMOTE_NAME;
   if (prev?.last_ok_at) next.last_ok_at = prev.last_ok_at;
   const unpushed = update.unpushed ?? prev?.unpushed;
   if (unpushed !== undefined) next.unpushed = unpushed;
@@ -94,5 +97,33 @@ export function recordUnpushed(unpushed: number, path: string = getConfig().SYNC
     renameSync(tmp, path);
   } catch {
     // Display only.
+  }
+}
+
+/**
+ * Keep the record's names current without a sync (session start): a renamed
+ * remote shows on the next prompt, and with sync off the status line says
+ * local only instead of unknown. `syncConfigured` false and no record yet:
+ * writes the disabled state.
+ */
+export function refreshSyncHealthNames(syncConfigured: boolean, path: string = getConfig().SYNC_HEALTH_FILE): void {
+  if (!path) return;
+  const prev = readSyncHealth(path);
+  if (!prev) {
+    if (!syncConfigured) recordSyncHealth({ status: 'disabled' }, Date.now(), path);
+    return;
+  }
+  const config = getConfig();
+  const remote = config.REMOTE_NAME || undefined;
+  if (prev.remote === remote && prev.label === config.STATUS_LABEL) return;
+  const next: SyncHealth = { ...prev, label: config.STATUS_LABEL };
+  if (remote) next.remote = remote;
+  else delete next.remote;
+  try {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(next) + '\n', { mode: 0o600 });
+    renameSync(tmp, path);
+  } catch {
+    // best effort
   }
 }

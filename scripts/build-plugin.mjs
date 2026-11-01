@@ -39,6 +39,8 @@ await build({
   target: 'node20',
   external: EXTERNAL,
   alias: { '@yapa/core': join(root, 'packages/core/src/index.ts') },
+  // The version every bundle reports (the status line shows it; version.ts reads it).
+  define: { __YAPA_VERSION__: JSON.stringify(version) },
   // CJS deps bundled into ESM still call require(); give them one.
   banner: { js: "import { createRequire as __yapaCreateRequire } from 'node:module'; const require = __yapaCreateRequire(import.meta.url);" },
   legalComments: 'none',

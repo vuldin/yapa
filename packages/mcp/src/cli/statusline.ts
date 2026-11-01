@@ -1,8 +1,15 @@
 #!/usr/bin/env node
-// YAPA's Claude Code status line: one segment saying whether team sync is
-// healthy, read from the sync health file (packages/core sync/health.ts)
-// that the MCP server and hooks keep current. No network, no gcloud: it runs
-// after every assistant message.
+// YAPA's Claude Code status line: one segment with YAPA's version, the team
+// remote's name and whether sync with it is healthy, read from the sync
+// health file (packages/core sync/health.ts) that the MCP server and hooks
+// keep current, plus a note when a newer YAPA is out (update-check.json,
+// packages/core update-check.ts). No network, no gcloud: it runs after every
+// assistant message.
+//
+//   yapa@v1.6.0 (v1.7.0 available) <-> c360 ● synced 2m ago
+//
+// `<->` is printed as is, so a font with programming ligatures draws one
+// arrow; it appears only when the remote has a name (option remote_name).
 //
 // SELF-CONTAINED: node built-ins only, no local imports. It is copied as a
 // single file to a stable path (~/.local/share/yapa/statusline.mjs) because
@@ -15,7 +22,7 @@
 //   node statusline.mjs --uninstall      remove it (restores a wrapped status line)
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +36,35 @@ export interface HealthRecord {
   last_ok_at?: number;
   unpushed?: number;
   interval_ms?: number;
+  /** Legacy: the name an older YAPA wrote (STATUS_LABEL); `yapa` means none. */
   label?: string;
+  /** The team remote's name (REMOTE_NAME). */
+  remote?: string;
+}
+
+/** Set by scripts/build-plugin.mjs; the tsc build reads the version from update-check.json instead. */
+declare const __YAPA_VERSION__: string | undefined;
+export const SCRIPT_VERSION: string | undefined = typeof __YAPA_VERSION__ === 'string' ? __YAPA_VERSION__ : undefined;
+
+export interface UpdateRecord {
+  current?: string;
+  latest?: string;
+}
+
+const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+
+/** >0 when a is newer (the same rule as core's compareVersions; this file stays self-contained). */
+export function newer(a: string | undefined, b: string | undefined): boolean {
+  const pa = SEMVER.exec(String(a ?? '').trim());
+  const pb = SEMVER.exec(String(b ?? '').trim());
+  if (!pa || !pb) return false;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d) return d > 0;
+  }
+  if (pa[4] && !pb[4]) return false;
+  if (!pa[4] && pb[4]) return true;
+  return (pa[4] ?? '') > (pb[4] ?? '');
 }
 
 const DEFAULT_INTERVAL_MS = 300_000;
@@ -64,34 +99,67 @@ function cleanLabel(label: unknown): string | undefined {
   return v || undefined;
 }
 
-/** The segment for `health` (undefined: no record yet). `label` overrides the record's. */
-export function renderSegment(health: HealthRecord | undefined, now: number, opts: { color?: boolean; label?: string } = {}): string {
-  const name = cleanLabel(opts.label) ?? cleanLabel(health?.label) ?? 'yapa';
+/** The remote's name: an explicit one, else the record's (a legacy `label` other than yapa counts). */
+function remoteName(health: HealthRecord | undefined, explicit?: string): string | undefined {
+  const legacy = cleanLabel(health?.label);
+  return cleanLabel(explicit) ?? cleanLabel(health?.remote) ?? (legacy && legacy !== 'yapa' ? legacy : undefined);
+}
+
+export interface RenderOptions {
+  color?: boolean;
+  /** The remote's name (overrides the record's). */
+  remote?: string;
+  /** Legacy alias of `remote`. */
+  label?: string;
+  /** The YAPA version running (default: this script's own). */
+  version?: string;
+  /** What update-check.json says. */
+  update?: UpdateRecord;
+}
+
+/** The segment for `health` (undefined: no record yet). */
+export function renderSegment(health: HealthRecord | undefined, now: number, opts: RenderOptions = {}): string {
   const paint = (tone: Tone, text: string) => (opts.color ? `${ANSI[tone]}${text}${ANSI.reset}` : text);
+  const version = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
+  const latest = opts.update?.latest && version && newer(opts.update.latest, version) ? opts.update.latest : undefined;
+  const remote = remoteName(health, opts.remote ?? opts.label);
+  const head = `yapa${version ? `@v${version}` : ''}`
+    + (latest ? ` ${paint('yellow', `(v${latest} available)`)}` : '')
+    + (remote ? ` <-> ${remote}` : '');
   const push = health?.unpushed ? ` · ${health.unpushed} to push` : '';
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : '';
+  const state = (tone: Tone, text: string) => `${head} ${paint(tone, text)}`;
 
-  if (!health) return paint('dim', `${name} ○ sync status unknown`);
+  if (!health) return state('dim', '○ sync status unknown');
   switch (health.status) {
     case 'disabled':
-      return paint('dim', `${name} ○ local only`);
+      return state('dim', '○ local only');
     case 'signed_out':
-      return paint('red', `${name} ● signed out${since}${push} · run: gcloud auth login`);
+      return state('red', `● signed out${since}${push} · run: gcloud auth login`);
     case 'unreachable':
-      return paint('yellow', `${name} ● offline${since}${push}`);
+      return state('yellow', `● offline${since}${push}`);
     case 'error': {
       const why = health.message ? `: ${health.message.replace(/\s+/g, ' ').slice(0, 60)}` : '';
-      return paint('yellow', `${name} ● sync error${since}${why}`);
+      return state('yellow', `● sync error${since}${why}`);
     }
     case 'ok': {
       const interval = health.interval_ms && health.interval_ms > 0 ? health.interval_ms : DEFAULT_INTERVAL_MS;
       if (now - health.at > STALE_INTERVALS * interval) {
-        return paint('dim', `${name} ○ sync status unknown (last checked ${formatAgo(now - health.at)})`);
+        return state('dim', `○ sync status unknown (last checked ${formatAgo(now - health.at)})`);
       }
-      return paint('green', `${name} ● synced ${formatAgo(now - (health.last_ok_at ?? health.at))}${push}`);
+      return state('green', `● synced ${formatAgo(now - (health.last_ok_at ?? health.at))}${push}`);
     }
     default:
-      return paint('dim', `${name} ○ sync status unknown`);
+      return state('dim', '○ sync status unknown');
+  }
+}
+
+export function readUpdate(path: string): UpdateRecord | undefined {
+  try {
+    const u = JSON.parse(readFileSync(path, 'utf-8'));
+    return u && typeof u === 'object' ? { current: typeof u.current === 'string' ? u.current : undefined, latest: typeof u.latest === 'string' ? u.latest : undefined } : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -120,8 +188,10 @@ export function decodeWrapped(b64: string): Record<string, any> | undefined {
   }
 }
 
-export function isYapaStatusLine(statusLine: any): boolean {
-  return typeof statusLine?.command === 'string' && /yapa[\\/]statusline\.mjs/.test(statusLine.command);
+/** Is this YAPA's status line? `script` also recognizes a copy kept outside a yapa/ folder. */
+export function isYapaStatusLine(statusLine: any, script?: string): boolean {
+  if (typeof statusLine?.command !== 'string') return false;
+  return /yapa[\\/]statusline\.mjs/.test(statusLine.command) || (!!script && statusLine.command.includes(`"${script}"`));
 }
 
 function wrappedOf(statusLine: any): Record<string, any> | undefined {
@@ -133,7 +203,7 @@ function wrappedOf(statusLine: any): Record<string, any> | undefined {
 export function mergeStatusLine(settings: Record<string, any>, script: string, refreshInterval = 30): Record<string, any> {
   const next = structuredClone(settings ?? {});
   const current = next.statusLine;
-  const wrapped = isYapaStatusLine(current) ? wrappedOf(current) : current && typeof current === 'object' ? current : undefined;
+  const wrapped = isYapaStatusLine(current, script) ? wrappedOf(current) : current && typeof current === 'object' ? current : undefined;
   let command = `node "${script}"`;
   if (wrapped) command += ` --wrap ${encodeWrapped(wrapped)}`;
   next.statusLine = {
@@ -146,9 +216,9 @@ export function mergeStatusLine(settings: Record<string, any>, script: string, r
 }
 
 /** `settings` without YAPA's status line: the wrapped one is restored as it was. */
-export function removeStatusLine(settings: Record<string, any>): Record<string, any> {
+export function removeStatusLine(settings: Record<string, any>, script?: string): Record<string, any> {
   const next = structuredClone(settings ?? {});
-  if (!isYapaStatusLine(next.statusLine)) return next;
+  if (!isYapaStatusLine(next.statusLine, script)) return next;
   const wrapped = wrappedOf(next.statusLine);
   if (wrapped) next.statusLine = wrapped;
   else delete next.statusLine;
@@ -180,15 +250,15 @@ export function installStatusLine(script: string, path = defaultSettingsPath()):
   return path;
 }
 
-export function uninstallStatusLine(path = defaultSettingsPath()): string {
-  writeSettings(path, removeStatusLine(readSettings(path)));
+export function uninstallStatusLine(path = defaultSettingsPath(), script?: string): string {
+  writeSettings(path, removeStatusLine(readSettings(path), script));
   return path;
 }
 
 /** Is YAPA's status line configured in `path`? (false when unreadable) */
-export function hasStatusLine(path = defaultSettingsPath()): boolean {
+export function hasStatusLine(path = defaultSettingsPath(), script?: string): boolean {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync(path, 'utf-8')).statusLine);
+    return isYapaStatusLine(JSON.parse(readFileSync(path, 'utf-8')).statusLine, script);
   } catch {
     return false;
   }
@@ -214,6 +284,26 @@ export function copyScript(from: string, to: string): boolean {
   return true;
 }
 
+/**
+ * `statusline-removed` beside the script: the user took YAPA's status line
+ * out, so the session-start hook never adds it back (option statusline).
+ */
+export const REMOVED_MARKER = 'statusline-removed';
+
+export function setRemovedMarker(dir: string, removed: boolean): void {
+  const p = join(dir, REMOVED_MARKER);
+  try {
+    if (removed) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(p, `${new Date().toISOString()}\n`);
+    } else {
+      rmSync(p, { force: true });
+    }
+  } catch {
+    // best effort
+  }
+}
+
 // --- main -----------------------------------------------------------------
 
 function argValue(args: string[], flag: string): string | undefined {
@@ -233,10 +323,13 @@ export async function main(args: string[], self: string): Promise<void> {
   const settings = argValue(args, '--settings');
   if (args.includes('--install')) {
     process.stdout.write(`Status line added to ${installStatusLine(self, settings)}\n`);
+    setRemovedMarker(dirname(self), false);
     return;
   }
   if (args.includes('--uninstall')) {
-    process.stdout.write(`Status line removed from ${uninstallStatusLine(settings)}\n`);
+    process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self)}\n`);
+    // Removed on purpose: the session-start hook must not add it back.
+    setRemovedMarker(dirname(self), true);
     return;
   }
 
@@ -250,8 +343,11 @@ export async function main(args: string[], self: string): Promise<void> {
   }
 
   const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join(dirname(self), 'sync-health.json');
+  const update = readUpdate(join(dirname(healthPath), 'update-check.json'));
   const color = !process.env.NO_COLOR;
-  process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), { color, label: argValue(args, '--label') }) + '\n');
+  process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
+    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update,
+  }) + '\n');
 }
 
 // Run only as the script itself: the CLI bundle imports these functions too.
@@ -268,5 +364,5 @@ function isMain(argv1: string | undefined, self: string): boolean {
 
 const self = fileURLToPath(import.meta.url);
 if (isMain(process.argv[1], self)) {
-  main(process.argv.slice(2), self).catch(() => process.stdout.write('yapa ○ sync status unknown\n'));
+  main(process.argv.slice(2), self).catch(() => process.stdout.write(`yapa${SCRIPT_VERSION ? `@v${SCRIPT_VERSION}` : ''} ○ sync status unknown\n`));
 }

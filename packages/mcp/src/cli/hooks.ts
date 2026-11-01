@@ -36,10 +36,14 @@ import {
   waitingOn,
   waitingLine,
   heldKeys,
+  noteInstalledVersion,
+  markUpdateNotified,
+  refreshSyncHealthNames,
 } from '@yapa/core';
 
 import { CLAUDE_CODE_RULES } from '../rules.js';
-import { copyScript, hasStatusLine } from './statusline.js';
+import { copyScript, defaultSettingsPath, hasStatusLine, installStatusLine, REMOVED_MARKER } from './statusline.js';
+import { YAPA_VERSION } from '../version.js';
 
 interface BaseHookInput {
   session_id?: string;
@@ -173,11 +177,16 @@ export function bundledStatusLineScript(): string | undefined {
 }
 
 /**
- * Keep the stable copy current (plugin updates reach the status line), and
- * the first time on this device with sync on but no status line, return a
- * hint line telling Claude how the user can add one.
+ * Keep the stable copy current (plugin updates reach the status line). With
+ * the option `statusline` on (the default), add YAPA's status line to the
+ * user's Claude Code settings, wrapping one they already have, unless they
+ * removed it before. With it off, the first time on this device with sync on
+ * but no status line, return a hint line telling Claude how to add one.
  */
-export function prepareStatusLine(from: string | undefined = bundledStatusLineScript()): string | undefined {
+export function prepareStatusLine(
+  from: string | undefined = bundledStatusLineScript(),
+  settingsPath: string = defaultSettingsPath(),
+): string | undefined {
   const to = statusLineScriptPath();
   if (!to) return undefined;
   try {
@@ -185,7 +194,27 @@ export function prepareStatusLine(from: string | undefined = bundledStatusLineSc
   } catch (e) {
     process.stderr.write(`[yapa-hook] status line script copy failed: ${e}\n`);
   }
-  if (!isSyncConfigured(getConfig()) || hasStatusLine()) return undefined;
+  refreshSyncHealthNames(isSyncConfigured(getConfig()));
+  if (hasStatusLine(settingsPath, to)) return undefined;
+  if (getConfig().STATUSLINE) {
+    // Added once before and gone now: the user removed it (by hand or with
+    // --uninstall), so leave it removed. /yapa:statusline adds it back.
+    const added = join(dirname(to), 'statusline-added');
+    if (existsSync(join(dirname(to), REMOVED_MARKER)) || existsSync(added) || !existsSync(to)) return undefined;
+    try {
+      installStatusLine(to, settingsPath);
+      try {
+        writeFileSync(added, `${new Date().toISOString()}\n`);
+      } catch {
+        // without the marker a hand removal is undone next session; --uninstall still sticks
+      }
+      return `_YAPA added its status line (version, remote, sync health) under the prompt in ${settingsPath}; mention it once. To remove it: \`node "${to}" --uninstall\`._`;
+    } catch (e) {
+      process.stderr.write(`[yapa-hook] status line install failed: ${e}\n`);
+      return undefined;
+    }
+  }
+  if (!isSyncConfigured(getConfig())) return undefined;
   const marker = join(dirname(to), 'statusline-hint');
   if (existsSync(marker)) return undefined;
   try {
@@ -195,6 +224,21 @@ export function prepareStatusLine(from: string | undefined = bundledStatusLineSc
   }
   const how = process.env.CLAUDE_PLUGIN_ROOT ? '`/yapa:statusline`' : `\`node "${to}" --install\``;
   return `_Mention once to the user: they can show YAPA sync health under the prompt with ${how}._`;
+}
+
+/**
+ * Record the version running now (the status line shows it, and an update
+ * note clears itself once installed), and the first session after a newer
+ * release is seen, tell Claude how the user updates.
+ */
+export function updateLine(): string | undefined {
+  const state = noteInstalledVersion(YAPA_VERSION);
+  if (!state?.latest || state.notified === state.latest) return undefined;
+  markUpdateNotified(state.latest);
+  const how = process.env.CLAUDE_PLUGIN_ROOT
+    ? '`claude plugin marketplace update yapa && claude plugin update yapa@yapa`, then restart Claude Code'
+    : '`git pull && npm install && npm run build` in the YAPA checkout, then restart Claude Code';
+  return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 
 // --- Per-session hook state (turn buffer, capture notices) -----------------
@@ -361,6 +405,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   if (down) lines.push(down);
   const hint = prepareStatusLine();
   if (hint) lines.push(hint);
+  const update = updateLine();
+  if (update) lines.push(update);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
   const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);

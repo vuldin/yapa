@@ -350,6 +350,58 @@ describe('sync health (status line)', () => {
     configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_SYNC_ENABLED: 'false' });
     expect(prepareStatusLine(undefined)).toBeUndefined();
   });
+
+  it('with the statusline option on, adds the status line itself (wrapping one already there), and never re-adds a removed one', async () => {
+    const settings = join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json');
+    mkdirSync(join(settings, '..'), { recursive: true });
+    const theirs = { type: 'command', command: 'echo mine' };
+    writeFileSync(settings, JSON.stringify({ theme: 'dark', statusLine: theirs }));
+    const src = join(dir, 'statusline-src.mjs');
+    writeFileSync(src, 'console.log("v3")\n');
+    const stable = join(health, '..', 'statusline.mjs');
+    rmSync(join(health, '..', 'statusline-removed'), { force: true });
+    rmSync(join(health, '..', 'statusline-added'), { force: true });
+    configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_STATUSLINE: 'true' });
+
+    const line = prepareStatusLine(src, settings);
+    expect(line).toContain('added its status line');
+    const after = JSON.parse(readFileSync(settings, 'utf-8'));
+    expect(after.theme).toBe('dark');
+    expect(after.statusLine.command).toContain(stable);
+    expect(after.statusLine.command).toContain('--wrap');
+    expect(prepareStatusLine(src, settings)).toBeUndefined(); // already there
+
+    // The user removes it by hand: it stays removed.
+    writeFileSync(settings, JSON.stringify({ theme: 'dark', statusLine: theirs }));
+    expect(prepareStatusLine(src, settings)).toBeUndefined();
+    expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine).toEqual(theirs);
+
+    // Or with --uninstall, even on a device that never auto-added it.
+    rmSync(join(health, '..', 'statusline-added'));
+    const { setRemovedMarker, installStatusLine: install, uninstallStatusLine } = await import('./statusline.js');
+    install(stable, settings);
+    uninstallStatusLine(settings, stable);
+    setRemovedMarker(join(health, '..'), true);
+    expect(prepareStatusLine(src, settings)).toBeUndefined();
+    expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine).toEqual(theirs);
+    setRemovedMarker(join(health, '..'), false);
+    rmSync(settings);
+  });
+
+  it('tells Claude about a newer release once, and the note clears after updating', async () => {
+    const { updateLine } = await import('./hooks.js');
+    const { YAPA_VERSION } = await import('../version.js');
+    const state = join(health, '..', 'update-check.json');
+    writeFileSync(state, JSON.stringify({ current: YAPA_VERSION, latest: '99.0.0', checked_at: Date.now() }));
+    configure({ YAPA_SYNC_HEALTH_FILE: health });
+    expect(updateLine()).toMatch(/^_YAPA 99\.0\.0 is out \(running .+\)\. Tell the user once; to update: `git pull/);
+    expect(updateLine()).toBeUndefined();
+    writeFileSync(state, JSON.stringify({ current: '0.0.1', latest: YAPA_VERSION, checked_at: Date.now() }));
+    expect(updateLine()).toBeUndefined(); // running it now: nothing to say
+    expect(JSON.parse(readFileSync(state, 'utf-8'))).toMatchObject({ current: YAPA_VERSION });
+    expect(JSON.parse(readFileSync(state, 'utf-8')).latest).toBeUndefined();
+    rmSync(state);
+  });
 });
 
 describe('task claims in hook context', () => {

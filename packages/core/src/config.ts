@@ -128,7 +128,16 @@ export interface YapaConfig {
   /** File recording sync health for status lines and hooks (0600); '' = not recorded. */
   SYNC_HEALTH_FILE: string;
   /** Name the status line shows for the sync (e.g. the remote's name); default `yapa`. */
+  /** Legacy name for REMOTE_NAME (the old status line name option). */
   STATUS_LABEL: string;
+  /** What the team's sync remote is called: the status line shows `yapa@vX <-> NAME`. Empty: none. */
+  REMOTE_NAME: string;
+  /** Add YAPA's status line to Claude Code settings at session start (until the user removes it). */
+  STATUSLINE: boolean;
+  /** Check daily for a newer YAPA release. */
+  UPDATE_CHECK: boolean;
+  /** Where the newest release's manifest is read from. */
+  UPDATE_SOURCE: string;
   /** Per-request timeout for the sync service. */
   SYNC_HTTP_TIMEOUT_MS: number;
   /** Advanced/self-host: direct PostgreSQL URL (ignored when SYNC_SERVICE_URL is set). */
@@ -272,6 +281,12 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     // sync on purpose must not paint the developer's own status line red.
     SYNC_HEALTH_FILE: ((v: string) => (v === 'off' ? '' : v))(get(env, 'SYNC_HEALTH_FILE', process.env.VITEST ? '' : pathJoin(homedir(), '.local', 'share', 'yapa', 'sync-health.json'))),
     STATUS_LABEL: get(env, 'STATUS_LABEL', 'yapa').trim().slice(0, 32) || 'yapa',
+    // The old option replaced the word yapa; any name it set other than yapa is the remote's.
+    REMOTE_NAME: (get(env, 'REMOTE_NAME', '').trim()
+      || ((l: string) => (l && l !== 'yapa' ? l : ''))(get(env, 'STATUS_LABEL', '').trim())).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 32),
+    STATUSLINE: get(env, 'STATUSLINE', process.env.VITEST ? 'false' : 'true') !== 'false',
+    UPDATE_CHECK: get(env, 'UPDATE_CHECK', process.env.VITEST ? 'false' : 'true') !== 'false',
+    UPDATE_SOURCE: get(env, 'UPDATE_SOURCE', 'https://raw.githubusercontent.com/vuldin/yapa/main/plugin/.claude-plugin/plugin.json'),
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, 'SYNC_HTTP_TIMEOUT_MS', '15000'), 10),
     SYNC_DATABASE_URL: get(env, 'SYNC_DATABASE_URL', ''),
     SYNC_INTERVAL_MS: parseInt(get(env, 'SYNC_INTERVAL_MS', '300000'), 10), // 5 minutes
