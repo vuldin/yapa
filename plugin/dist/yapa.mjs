@@ -3141,7 +3141,7 @@ async function listTasks(filters = {}) {
     if (filters.customer) where.customer = filters.customer;
     if (filters.project) where.project = filters.project;
     try {
-      const tasks = await getDocumentsByFilter2(name, where, 100);
+      const tasks = await getDocumentsByFilter2(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
         allTasks.push({
@@ -3155,12 +3155,13 @@ async function listTasks(filters = {}) {
       continue;
     }
   }
-  return allTasks.sort((a, b) => {
+  const sorted = allTasks.sort((a, b) => {
     const pA = PRIORITY_ORDER[a.metadata.priority] ?? 0;
     const pB = PRIORITY_ORDER[b.metadata.priority] ?? 0;
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
+  return filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted;
 }
 async function getDueTasks(includeOverdue = true) {
   const now = Math.floor(Date.now() / 1e3);
@@ -3170,12 +3171,13 @@ async function getDueTasks(includeOverdue = true) {
     return { ...t, daysUntil };
   }).filter((t) => includeOverdue || t.daysUntil >= 0).sort((a, b) => a.daysUntil - b.daysUntil);
 }
-var PRIORITY_ORDER;
+var PRIORITY_ORDER, READ_LIMIT;
 var init_list2 = __esm({
   "packages/core/src/tasks/list.ts"() {
     "use strict";
     init_store();
     PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
+    READ_LIMIT = 1e4;
   }
 });
 
@@ -9496,6 +9498,11 @@ async function readStdin3() {
   }
   return Buffer.concat(chunks).toString("utf-8");
 }
+function exitAfterFlush(code) {
+  return new Promise(() => {
+    process.stdout.write("", () => process.exit(code));
+  });
+}
 async function runHook(name) {
   const raw = await readStdin3();
   const input2 = raw.trim() ? JSON.parse(raw) : {};
@@ -9640,7 +9647,7 @@ async function runCoord(sub, args) {
 async function main2() {
   const [command, sub, ...rest] = process.argv.slice(2);
   if (command === "coord") {
-    process.exit(await runCoord(sub, rest));
+    await exitAfterFlush(await runCoord(sub, rest));
   }
   if (command === "task") {
     if (!sub || sub === "help" || rest.includes("--help")) {
@@ -9652,7 +9659,7 @@ async function main2() {
     const { runTask: runTask2 } = await Promise.resolve().then(() => (init_task(), task_exports));
     const r = await runTask2(sub, rest);
     process.stdout.write((rest.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
-    process.exit(r.exit);
+    await exitAfterFlush(r.exit);
   }
   if (command === "memory" || command === "waiting") {
     if (command === "memory" && (!sub || sub === "help" || rest.includes("--help"))) {
@@ -9665,7 +9672,7 @@ async function main2() {
     const args = command === "waiting" ? [sub, ...rest].filter((a) => a !== void 0) : rest;
     const r = command === "waiting" ? await m.runWaiting(args) : await m.runMemory(sub, rest);
     process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
-    process.exit(r.exit);
+    await exitAfterFlush(r.exit);
   }
   if (command === "hooks") {
     await runHooksCommand(sub, rest);
@@ -9684,12 +9691,12 @@ async function main2() {
   if (command !== "hook" || !sub) usage();
   try {
     await runHook(sub);
-    process.exit(0);
+    await exitAfterFlush(0);
   } catch (e) {
     process.stderr.write(`[yapa] hook ${sub} failed: ${e}
 `);
     process.stdout.write("{}");
-    process.exit(0);
+    await exitAfterFlush(0);
   }
 }
 main2();

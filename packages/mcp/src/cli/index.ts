@@ -41,6 +41,16 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
+/**
+ * Exit once stdout has drained. On a pipe Node writes stdout asynchronously,
+ * so a bare process.exit after a large write cut the JSON off at 64 KiB.
+ */
+function exitAfterFlush(code: number): Promise<never> {
+  return new Promise<never>(() => {
+    process.stdout.write('', () => process.exit(code));
+  });
+}
+
 async function runHook(name: string): Promise<void> {
   const raw = await readStdin();
   const input = raw.trim() ? JSON.parse(raw) : {};
@@ -189,7 +199,7 @@ async function main(): Promise<void> {
   const [command, sub, ...rest] = process.argv.slice(2);
   if (command === 'coord') {
     // Exit explicitly: an idle keep-alive socket or timer must not hold the process.
-    process.exit(await runCoord(sub, rest));
+    await exitAfterFlush(await runCoord(sub, rest));
   }
   if (command === 'task') {
     if (!sub || sub === 'help' || rest.includes('--help')) {
@@ -201,7 +211,7 @@ async function main(): Promise<void> {
     const { runTask } = await import('./task.js');
     const r = await runTask(sub, rest);
     process.stdout.write((rest.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
-    process.exit(r.exit);
+    await exitAfterFlush(r.exit);
   }
   if (command === 'memory' || command === 'waiting') {
     if (command === 'memory' && (!sub || sub === 'help' || rest.includes('--help'))) {
@@ -214,7 +224,7 @@ async function main(): Promise<void> {
     const args = command === 'waiting' ? [sub, ...rest].filter((a): a is string => a !== undefined) : rest;
     const r = command === 'waiting' ? await m.runWaiting(args) : await m.runMemory(sub, rest);
     process.stdout.write((args.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
-    process.exit(r.exit);
+    await exitAfterFlush(r.exit);
   }
   if (command === 'hooks') {
     await runHooksCommand(sub, rest);
@@ -235,11 +245,11 @@ async function main(): Promise<void> {
     await runHook(sub);
     // An abandoned (timed-out) remote pull would otherwise keep the pg pool
     // and the hook process alive past Claude Code's hook budget.
-    process.exit(0);
+    await exitAfterFlush(0);
   } catch (e) {
     process.stderr.write(`[yapa] hook ${sub} failed: ${e}\n`);
     process.stdout.write('{}');
-    process.exit(0);
+    await exitAfterFlush(0);
   }
 }
 

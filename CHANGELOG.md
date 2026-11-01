@@ -16,6 +16,8 @@ Working in YAPA now leaves findings, decisions, questions and follow-ups behind 
 - Reference remote: `yapa-mcp-remote` labels typed memories, shows task triage and waits, and adds `waiting`; the service and conformance suites check that typed metadata round-trips and a status-only update is served.
 
 ### Fixes
+- `task_list`, `yapa task list` and the open tasks at session start missed most open tasks in a busy collection: only the first 100 task documents per collection were read, completed ones included. Every task is read now; `task_list` shows the first 100 and says how many more there are.
+- `yapa task`, `yapa memory`, `yapa waiting`, `yapa coord` and the hooks could cut their output off at 64 KiB when stdout was a pipe; they now exit only after stdout drains.
 - A task's blocked reason now syncs on its own and is cleared when the task leaves blocked.
 - `memory_list` with a tag filter no longer misses matches past the first `limit` memories.
 - Typed memories are never folded into a compaction summary or merged by the janitor, and response capture never replaces one.

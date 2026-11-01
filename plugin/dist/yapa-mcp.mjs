@@ -40505,6 +40505,7 @@ init_create();
 // packages/core/src/tasks/list.ts
 init_store();
 var PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
+var READ_LIMIT = 1e4;
 async function listTasks(filters = {}) {
   const collectionNames = filters.collection ? [filters.collection] : (await listCollections2()).map((c) => c.name);
   const allTasks = [];
@@ -40515,7 +40516,7 @@ async function listTasks(filters = {}) {
     if (filters.customer) where.customer = filters.customer;
     if (filters.project) where.project = filters.project;
     try {
-      const tasks = await getDocumentsByFilter2(name, where, 100);
+      const tasks = await getDocumentsByFilter2(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
         allTasks.push({
@@ -40529,12 +40530,13 @@ async function listTasks(filters = {}) {
       continue;
     }
   }
-  return allTasks.sort((a, b) => {
+  const sorted = allTasks.sort((a, b) => {
     const pA = PRIORITY_ORDER[a.metadata.priority] ?? 0;
     const pB = PRIORITY_ORDER[b.metadata.priority] ?? 0;
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
+  return filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted;
 }
 async function getDueTasks(includeOverdue = true) {
   const now = Math.floor(Date.now() / 1e3);
@@ -44691,25 +44693,25 @@ ${r.content}`
           return { content: [{ type: "text", text: `Task ${id} not found.` }] };
         }
         const norm2 = (x) => Array.isArray(x) ? x : (x ?? "").toString().split(",").filter(Boolean);
-        const lines = [
+        const lines2 = [
           `**${task.id}**: ${task.title}`,
           `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
           `Collection: ${task.collection}`
         ];
-        if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
-        if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
-        if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
-        if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines.push(`Owner: ${task.metadata.origin_user}`);
+        if (task.metadata.due_date) lines2.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
+        if (task.metadata.completed_at) lines2.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
+        if (task.metadata.duration_minutes != null) lines2.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
+        if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines2.push(`Owner: ${task.metadata.origin_user}`);
         const held = claimNote(task, await claimsFor(task.collection));
-        if (held) lines.push(`Claim: ${held}`);
-        if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
+        if (held) lines2.push(`Claim: ${held}`);
+        if (task.metadata.notes) lines2.push(`Notes: ${task.metadata.notes}`);
         const tags = norm2(task.metadata.tags);
-        if (tags.length) lines.push(`Tags: ${tags.join(", ")}`);
+        if (tags.length) lines2.push(`Tags: ${tags.join(", ")}`);
         const deps = norm2(task.metadata.depends_on);
-        if (deps.length) lines.push(`Depends on: ${deps.join(", ")}`);
+        if (deps.length) lines2.push(`Depends on: ${deps.join(", ")}`);
         const blocks = norm2(task.metadata.blocks);
-        if (blocks.length) lines.push(`Blocks: ${blocks.join(", ")}`);
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+        if (blocks.length) lines2.push(`Blocks: ${blocks.join(", ")}`);
+        return { content: [{ type: "text", text: lines2.join("\n") }] };
       }
       const tasks = await listTasks({
         status,
@@ -44722,8 +44724,10 @@ ${r.content}`
       if (tasks.length === 0) {
         return { content: [{ type: "text", text: "No tasks found." }] };
       }
-      const claims = await claimsByCollection(tasks.filter((t) => t.metadata.status !== "complete").map((t) => t.collection));
-      const text = tasks.map((t) => {
+      const SHOWN = 100;
+      const shown = tasks.slice(0, SHOWN);
+      const claims = await claimsByCollection(shown.filter((t) => t.metadata.status !== "complete").map((t) => t.collection));
+      const lines = shown.map((t) => {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
         const held = t.metadata.status === "complete" ? "" : claimNote(t, claims.get(t.collection));
         if (held) line += ` (${held})`;
@@ -44732,8 +44736,9 @@ ${r.content}`
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
         line += ` [${t.collection}]`;
         return line;
-      }).join("\n");
-      return { content: [{ type: "text", text }] };
+      });
+      if (tasks.length > SHOWN) lines.push(`- _\u2026${tasks.length - SHOWN} more: narrow with status, priority or collection, or use task_next_`);
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
   server2.tool(

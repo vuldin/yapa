@@ -17,7 +17,12 @@ export interface TaskListFilters {
   project?: string;
   collection?: string;
   includeComplete?: boolean;
+  /** Return at most this many (after sorting). Default: all of them. */
+  limit?: number;
 }
+
+/** Task documents read per collection: all of them, in practice. */
+const READ_LIMIT = 10_000;
 
 /** List tasks with optional filtering. Sorted by priority desc, then salience desc. */
 export async function listTasks(filters: TaskListFilters = {}): Promise<TaskListResult[]> {
@@ -35,7 +40,9 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
     if (filters.project) where.project = filters.project;
 
     try {
-      const tasks = await getDocumentsByFilter(name, where, 100);
+      // Read every task: completed ones count against a read limit too, and a
+      // limit of 100 here hid most open tasks in a busy collection.
+      const tasks = await getDocumentsByFilter(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === 'complete') continue;
         allTasks.push({
@@ -50,12 +57,13 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
     }
   }
 
-  return allTasks.sort((a, b) => {
+  const sorted = allTasks.sort((a, b) => {
     const pA = PRIORITY_ORDER[a.metadata.priority] ?? 0;
     const pB = PRIORITY_ORDER[b.metadata.priority] ?? 0;
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
+  return filters.limit !== undefined ? sorted.slice(0, filters.limit) : sorted;
 }
 
 /** Get tasks that are due today or overdue. */

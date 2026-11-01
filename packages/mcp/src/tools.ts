@@ -1085,8 +1085,10 @@ export function registerTools(server: McpServer): void {
       if (tasks.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No tasks found.' }] };
       }
-      const claims = await claimsByCollection(tasks.filter(t => t.metadata.status !== 'complete').map(t => t.collection));
-      const text = tasks.map(t => {
+      const SHOWN = 100;
+      const shown = tasks.slice(0, SHOWN);
+      const claims = await claimsByCollection(shown.filter(t => t.metadata.status !== 'complete').map(t => t.collection));
+      const lines = shown.map(t => {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
         const held = t.metadata.status === 'complete' ? '' : claimNote(t, claims.get(t.collection));
         if (held) line += ` (${held})`;
@@ -1095,8 +1097,9 @@ export function registerTools(server: McpServer): void {
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
         line += ` [${t.collection}]`;
         return line;
-      }).join('\n');
-      return { content: [{ type: 'text' as const, text }] };
+      });
+      if (tasks.length > SHOWN) lines.push(`- _…${tasks.length - SHOWN} more: narrow with status, priority or collection, or use task_next_`);
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
     },
   );
 
