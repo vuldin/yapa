@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 (2026-11-01)
 
 The status line now says which YAPA you run, what your team's remote is called, and when a newer YAPA is out, and it sets itself up from the install command.
 
