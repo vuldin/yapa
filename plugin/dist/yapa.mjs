@@ -109,7 +109,7 @@ function createConfig(env = process.env) {
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
     HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
-    RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "false") === "true",
+    RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "true") !== "false",
     CAPTURE_MIN_CHARS: parseInt(get(env, "CAPTURE_MIN_CHARS", "280"), 10),
     CAPTURE_MAX_MEMORIES: parseInt(get(env, "CAPTURE_MAX_MEMORIES", "3"), 10),
     CAPTURE_MAX_SALIENCE: parseFloat(get(env, "CAPTURE_MAX_SALIENCE", "2.0")),
@@ -185,7 +185,7 @@ function toChroma(metadata) {
     if (value === null || value === void 0) {
       continue;
     } else if (Array.isArray(value)) {
-      result[key] = value.join(",");
+      result[key] = value.some((v) => typeof v !== "string" || v.includes(",") || v.startsWith("[")) ? JSON.stringify(value) : value.join(",");
     } else if (typeof value === "object") {
       result[key] = JSON.stringify(value);
     } else {
@@ -196,7 +196,7 @@ function toChroma(metadata) {
 }
 function fromChroma(metadata) {
   const result = {};
-  const arrayFields = ["tags", "depends_on", "blocks", "related_ids"];
+  const arrayFields = ["tags", "depends_on", "blocks", "related_ids", "claim_scope", "task_ids", "memory_ids", "waits_on", "options", "disposition_ids"];
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === "string") {
       if (value.startsWith("{") || value.startsWith("[")) {
@@ -326,14 +326,14 @@ async function callEmbeddingAPI(texts) {
       throw new Error(`Unknown embedding provider: ${getConfig().EMBEDDING_PROVIDER}`);
   }
 }
-async function fetchOpenAICompatible(url, apiKey, model, input) {
+async function fetchOpenAICompatible(url, apiKey, model, input2) {
   const response = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ model, input })
+    body: JSON.stringify({ model, input: input2 })
   });
   if (!response.ok) {
     throw new Error(`Embedding API error: ${response.status} ${await response.text()}`);
@@ -341,14 +341,14 @@ async function fetchOpenAICompatible(url, apiKey, model, input) {
   const data = await response.json();
   return data.data.map((d) => d.embedding);
 }
-async function fetchVoyage(model, input) {
+async function fetchVoyage(model, input2) {
   const response = await fetch("https://api.voyageai.com/v1/embeddings", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${getConfig().VOYAGE_API_KEY}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ model, input })
+    body: JSON.stringify({ model, input: input2 })
   });
   if (!response.ok) {
     throw new Error(`Voyage API error: ${response.status} ${await response.text()}`);
@@ -1163,6 +1163,175 @@ var init_syncable = __esm({
   }
 });
 
+// packages/core/src/memory/kinds.ts
+function isMemoryKind(k) {
+  return typeof k === "string" && MEMORY_KINDS.includes(k);
+}
+function normalizeTyped(fields, current = {}) {
+  const out = {};
+  for (const k of TYPED_KEYS) {
+    const v = fields[k];
+    if (v === void 0) continue;
+    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list2(v) : typeof v === "string" ? v.trim() : v;
+  }
+  if (!Object.keys(out).length) return out;
+  const curKind = isMemoryKind(current.kind) ? current.kind : void 0;
+  if (out.kind !== void 0 && !isMemoryKind(out.kind)) {
+    throw new TypedMemoryError(`kind must be one of ${MEMORY_KINDS.join(", ")}`);
+  }
+  if (out.kind && curKind && out.kind !== curKind) {
+    throw new TypedMemoryError(`this memory is a ${curKind}; store a new ${out.kind} instead of changing its kind`);
+  }
+  const kind = out.kind ?? curKind;
+  const kindSpecific = Object.keys(out).filter((k) => k !== "task_ids" && k !== "external_ref" && k !== "owner");
+  if (!kind && kindSpecific.length) {
+    throw new TypedMemoryError(`${kindSpecific.join(", ")} need a kind (${MEMORY_KINDS.join(", ")})`);
+  }
+  if (kind) {
+    for (const k of Object.keys(out)) {
+      const only = KIND_ONLY[k];
+      if (only && only !== kind) throw new TypedMemoryError(`${k} applies to a ${only}, not a ${kind}`);
+    }
+    if (out.kind && out.status === void 0 && current.status === void 0) out.status = DEFAULT_STATUS[kind];
+    const status = out.status ?? current.status;
+    if (!KIND_STATUSES[kind].includes(status)) {
+      throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(", ")}`);
+    }
+    const merged = { ...current, ...out };
+    if (kind === "decision" && status === "needed" && list2(merged.options).length < 2) {
+      throw new TypedMemoryError("a decision that is needed lists at least two options (and ideally a recommendation)");
+    }
+    if (kind === "finding" && status === "resolved") {
+      const d = merged.disposition;
+      if (!DISPOSITIONS.includes(d)) {
+        throw new TypedMemoryError(`a resolved finding says what became of it: disposition ${DISPOSITIONS.join(", ")}`);
+      }
+      if (d === "no-action" && !String(merged.disposition_reason ?? "").trim()) {
+        throw new TypedMemoryError("a no-action disposition gives disposition_reason");
+      }
+      if (d !== "no-action" && !list2(merged.disposition_ids).length) {
+        throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
+      }
+    }
+  }
+  return out;
+}
+function isOpenTyped(meta) {
+  if (!meta || !isMemoryKind(meta.kind)) return false;
+  return OPEN_STATUSES[meta.kind].includes(meta.status ?? DEFAULT_STATUS[meta.kind]);
+}
+function carryTyped(meta) {
+  const out = {};
+  if (!meta) return out;
+  for (const k of TYPED_KEYS) if (meta[k] !== void 0 && meta[k] !== "") out[k] = meta[k];
+  return out;
+}
+function waitsOnPeople(meta) {
+  return meta.owner ? [String(meta.owner)] : [];
+}
+function typedLabel(meta) {
+  if (!meta || !isMemoryKind(meta.kind)) return "";
+  const parts = [meta.kind, meta.status ?? DEFAULT_STATUS[meta.kind]];
+  if (meta.owner && (meta.kind === "decision" || meta.kind === "question")) parts.push(`for ${meta.owner}`);
+  return `[${parts.join(", ")}]`;
+}
+var MEMORY_KINDS, KIND_STATUSES, DEFAULT_STATUS, OPEN_STATUSES, DISPOSITIONS, TYPED_KEYS, KIND_ONLY, TypedMemoryError, list2;
+var init_kinds = __esm({
+  "packages/core/src/memory/kinds.ts"() {
+    "use strict";
+    MEMORY_KINDS = ["finding", "decision", "limitation", "question", "idea"];
+    KIND_STATUSES = {
+      finding: ["open", "resolved"],
+      decision: ["needed", "proposed", "accepted", "superseded", "rejected"],
+      limitation: ["open", "mitigated", "accepted", "closed"],
+      question: ["open", "answered"],
+      idea: ["proposed", "adopted", "dropped"]
+    };
+    DEFAULT_STATUS = {
+      finding: "open",
+      decision: "proposed",
+      limitation: "open",
+      question: "open",
+      idea: "proposed"
+    };
+    OPEN_STATUSES = {
+      finding: ["open"],
+      decision: ["needed", "proposed"],
+      limitation: ["open"],
+      question: ["open"],
+      idea: ["proposed"]
+    };
+    DISPOSITIONS = ["decision", "task", "limitation", "no-action"];
+    TYPED_KEYS = [
+      "kind",
+      "status",
+      "owner",
+      "task_ids",
+      "options",
+      "recommendation",
+      "disposition",
+      "disposition_ids",
+      "disposition_reason",
+      "exit_criteria",
+      "external_ref"
+    ];
+    KIND_ONLY = {
+      options: "decision",
+      recommendation: "decision",
+      disposition: "finding",
+      disposition_ids: "finding",
+      disposition_reason: "finding",
+      exit_criteria: "limitation"
+    };
+    TypedMemoryError = class extends Error {
+      code = "typed_memory_invalid";
+      constructor(message) {
+        super(message);
+        this.name = "TypedMemoryError";
+      }
+    };
+    list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+  }
+});
+
+// packages/core/src/memory/links.ts
+async function findDoc(id) {
+  for (const c of await listCollections2().catch(() => [])) {
+    const [d] = await getDocumentsByIds2(c.name, [id]).catch(() => []);
+    if (d) return { collection: c.name, metadata: d.metadata };
+  }
+  return null;
+}
+async function linkMemoryToTasks(memoryId, taskIds) {
+  const out = { linked: [], missing: [] };
+  for (const tid of [...new Set(taskIds)]) {
+    const t = await findDoc(tid);
+    if (!t || t.metadata.type !== "task" || t.metadata.read_only === true) {
+      out.missing.push(tid);
+      continue;
+    }
+    const cur = list3(t.metadata.memory_ids);
+    if (!cur.includes(memoryId)) {
+      await updateDocument2(t.collection, tid, {
+        ...t.metadata,
+        memory_ids: [...cur, memoryId],
+        updated_at: Math.floor(Date.now() / 1e3),
+        is_synced: false
+      });
+    }
+    out.linked.push(tid);
+  }
+  return out;
+}
+var list3;
+var init_links = __esm({
+  "packages/core/src/memory/links.ts"() {
+    "use strict";
+    init_store();
+    list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+  }
+});
+
 // packages/core/src/memory/store.ts
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
@@ -1201,6 +1370,7 @@ async function archiveSuperseded(collection, oldId, newId) {
 }
 async function storeMemory(content, options = {}) {
   const collection = options.collection ?? "global";
+  const typed = options.typed ? normalizeTyped(options.typed) : {};
   await getOrCreateCollection2(collection);
   if (options.supersedes) {
     const [old] = await getDocumentsByIds2(collection, [options.supersedes]).catch(() => []);
@@ -1219,6 +1389,7 @@ async function storeMemory(content, options = {}) {
     const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
     const metadata = {
       ...options.metadata ?? {},
+      ...typed,
       type: "memory",
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -1231,12 +1402,14 @@ async function storeMemory(content, options = {}) {
     metadata.is_synced = false;
     await addDocument2(collection, id, content, metadata);
     if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
+    if (typed.task_ids?.length) await linkMemoryToTasks(id, typed.task_ids);
     return { ids: [id], potential_conflicts };
   }
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
   const docs = chunks.map((chunk2) => {
     const chunkMeta = {
       ...options.metadata ?? {},
+      ...typed,
       type: "memory",
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -1258,6 +1431,7 @@ async function storeMemory(content, options = {}) {
   });
   await addDocumentsBatch2(collection, docs);
   if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
+  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
   return { ids: docs.map((d) => d.id), potential_conflicts };
 }
 var init_store2 = __esm({
@@ -1269,6 +1443,8 @@ var init_store2 = __esm({
     init_chunking();
     init_config();
     init_syncable();
+    init_kinds();
+    init_links();
   }
 });
 
@@ -1314,6 +1490,8 @@ async function recallMemory(query, options = {}) {
   const nResults = options.nResults ?? 5;
   const includePromoted = options.include_promoted ?? false;
   const filter = { type: "memory" };
+  if (options.kind) filter.kind = options.kind;
+  if (options.status) filter.status = options.status;
   let results;
   if (options.collection) {
     const docs = await queryDocuments2(options.collection, query, nResults, filter);
@@ -1494,11 +1672,15 @@ async function listMemories(options = {}) {
   const includePromoted = options.include_promoted ?? false;
   const filter = { type: "memory" };
   if (options.sector) filter.sector = options.sector;
+  if (options.kind) filter.kind = options.kind;
+  if (options.status) filter.status = options.status;
+  if (options.owner) filter.owner = options.owner;
+  const fetchLimit = options.tags?.length ? Math.max(limit, 5e3) : limit;
   const collectionNames = options.collection ? [options.collection] : (await listCollections2()).map((c) => c.name);
   const allResults = [];
   for (const name of collectionNames) {
     try {
-      const docs = await getDocumentsByFilter2(name, filter, limit);
+      const docs = await getDocumentsByFilter2(name, filter, fetchLimit);
       for (const doc of docs) {
         allResults.push({ ...doc, collection: name });
       }
@@ -1613,7 +1795,7 @@ function intersect(a, b) {
   return b.filter((t) => set.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true);
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -1622,7 +1804,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -1641,20 +1823,20 @@ async function suggestCompaction(collection) {
   }
   return groups;
 }
-async function applyCompaction(input) {
-  const stored = await storeMemory(input.summary, {
-    collection: input.collection,
+async function applyCompaction(input2) {
+  const stored = await storeMemory(input2.summary, {
+    collection: input2.collection,
     salience: 2,
-    tags: ["compacted", ...input.tags ?? []],
+    tags: ["compacted", ...input2.tags ?? []],
     sector: "semantic"
   });
   const summaryId = stored.ids[0];
   const archivedIds = [];
-  for (const id of input.member_ids) {
+  for (const id of input2.member_ids) {
     try {
-      const existing = await getDocumentsByIds2(input.collection, [id]);
+      const existing = await getDocumentsByIds2(input2.collection, [id]);
       if (!existing.length) continue;
-      await updateDocument2(input.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
+      await updateDocument2(input2.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
       archivedIds.push(id);
     } catch (e) {
       process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}
@@ -1662,9 +1844,9 @@ async function applyCompaction(input) {
     }
   }
   try {
-    const summaryDocs = await getDocumentsByIds2(input.collection, [summaryId]);
+    const summaryDocs = await getDocumentsByIds2(input2.collection, [summaryId]);
     if (summaryDocs.length) {
-      await updateDocument2(input.collection, summaryId, {
+      await updateDocument2(input2.collection, summaryId, {
         ...summaryDocs[0].metadata,
         compacted_from: archivedIds
       });
@@ -1682,6 +1864,7 @@ var init_compact = __esm({
     init_archive();
     init_store();
     init_store2();
+    init_kinds();
   }
 });
 
@@ -1720,12 +1903,12 @@ async function listSessionDrafts(collection, sessionId) {
     return [];
   }
 }
-async function journalConsolidate(input = {}) {
-  const col = input.collection ?? "global";
-  const sid = input.sessionId ?? SESSION_ID;
+async function journalConsolidate(input2 = {}) {
+  const col = input2.collection ?? "global";
+  const sid = input2.sessionId ?? SESSION_ID;
   const drafts = await listSessionDrafts(col, sid);
   if (drafts.length === 0) return null;
-  const body = input.summary ? input.summary : drafts.map((d) => `- ${d.entry}`).join("\n");
+  const body = input2.summary ? input2.summary : drafts.map((d) => `- ${d.entry}`).join("\n");
   const stored = await storeMemory(`# Session journal (${sid})
 
 ${body}`, {
@@ -2958,7 +3141,7 @@ async function listTasks(filters = {}) {
     if (filters.customer) where.customer = filters.customer;
     if (filters.project) where.project = filters.project;
     try {
-      const tasks = await getDocumentsByFilter2(name, where, 100);
+      const tasks = await getDocumentsByFilter2(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
         allTasks.push({
@@ -2972,12 +3155,13 @@ async function listTasks(filters = {}) {
       continue;
     }
   }
-  return allTasks.sort((a, b) => {
+  const sorted = allTasks.sort((a, b) => {
     const pA = PRIORITY_ORDER[a.metadata.priority] ?? 0;
     const pB = PRIORITY_ORDER[b.metadata.priority] ?? 0;
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
+  return filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted;
 }
 async function getDueTasks(includeOverdue = true) {
   const now = Math.floor(Date.now() / 1e3);
@@ -2987,12 +3171,102 @@ async function getDueTasks(includeOverdue = true) {
     return { ...t, daysUntil };
   }).filter((t) => includeOverdue || t.daysUntil >= 0).sort((a, b) => a.daysUntil - b.daysUntil);
 }
-var PRIORITY_ORDER;
+var PRIORITY_ORDER, READ_LIMIT;
 var init_list2 = __esm({
   "packages/core/src/tasks/list.ts"() {
     "use strict";
     init_store();
     PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
+    READ_LIMIT = 1e4;
+  }
+});
+
+// packages/core/src/tasks/close.ts
+function validateLearned(items = []) {
+  for (const it of items) {
+    if (!it.content?.trim()) throw new Error("each learned item needs content");
+    const { content: _c, tags: _t, ...typed } = it;
+    normalizeTyped(typed);
+  }
+}
+async function recordForTask(task, input2) {
+  const out = { memories: [], follow_ups: [] };
+  for (const it of input2.learned ?? []) {
+    const { content, tags, ...typed } = it;
+    const r = await storeMemory(content, {
+      collection: task.collection,
+      tags,
+      typed: { ...typed, task_ids: [.../* @__PURE__ */ new Set([task.id, ...typed.task_ids ?? []])] }
+    });
+    out.memories.push(r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0]);
+  }
+  for (const f of input2.follow_ups ?? []) {
+    if (!f.title?.trim()) continue;
+    const notes = [f.notes?.trim(), `From ${task.id}.`].filter(Boolean).join("\n");
+    out.follow_ups.push(await createTask(f.title.trim(), { priority: f.priority, tags: f.tags, notes }, f.collection ?? task.collection));
+  }
+  return out;
+}
+async function requestDecision(taskId, d, ctx = {}, extra = {}) {
+  const task = await getTask(taskId);
+  if (!task) throw new Error(`Task ${taskId} not found`);
+  if (!d.question?.trim()) throw new Error("decision_needed needs a question");
+  const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join("\n\n");
+  const typed = normalizeTyped({
+    kind: "decision",
+    status: "needed",
+    options: d.options,
+    task_ids: [task.id],
+    ...d.recommendation ? { recommendation: d.recommendation } : {},
+    ...d.owner ? { owner: d.owner } : {}
+  });
+  const r = await storeMemory(content, { collection: task.collection, typed });
+  const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
+  const waits = [.../* @__PURE__ */ new Set([...list4(task.metadata.waits_on), decision])];
+  const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
+  return { ...u, decision };
+}
+async function findMemory(id, prefer) {
+  const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  const order = prefer ? [prefer, ...names.filter((n) => n !== prefer)] : names;
+  for (const name of order) {
+    const [d] = await getDocumentsByIds2(name, [id]).catch(() => []);
+    if (d) return { collection: name, metadata: d.metadata };
+    const [chunk2] = await getDocumentsByIds2(name, [`${id}-0`]).catch(() => []);
+    if (chunk2) return { collection: name, metadata: chunk2.metadata };
+  }
+  return null;
+}
+async function openWaits(metadata, collection) {
+  const out = [];
+  for (const start of list4(metadata.waits_on)) {
+    let id = start;
+    let found = await findMemory(id, collection);
+    for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
+      id = String(found.metadata.superseded_by);
+      found = await findMemory(id, found.collection);
+    }
+    if (found && isOpenTyped(found.metadata)) {
+      out.push({ id, kind: found.metadata.kind, status: found.metadata.status, ...found.metadata.owner ? { owner: String(found.metadata.owner) } : {} });
+    }
+  }
+  return out;
+}
+function captureNudge(taskId, metadata, recorded) {
+  if (recorded?.memories.length || list4(metadata.memory_ids).length) return void 0;
+  return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
+}
+var list4, describeWaits;
+var init_close = __esm({
+  "packages/core/src/tasks/close.ts"() {
+    "use strict";
+    init_store();
+    init_kinds();
+    init_store2();
+    init_create();
+    init_update();
+    list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+    describeWaits = (w) => `waiting on ${w.map((x) => `${x.kind} ${x.id} (${x.status}${x.owner ? `, for ${x.owner}` : ""})`).join(", ")}`;
   }
 });
 
@@ -3021,6 +3295,10 @@ function writeMarker(m) {
     writeFileSync4(markerPath(m.session), JSON.stringify(m), { mode: 384 });
   } catch {
   }
+}
+function heldKeys(session, collection) {
+  const prefix = heldKey(collection, "");
+  return (readMarker(session)?.keys ?? []).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
 }
 function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
   const prev = readMarker(session);
@@ -3063,24 +3341,24 @@ function noticesPath() {
   return join3(getConfig().LEASE_STATE_DIR, "notices.state");
 }
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
-  let list4 = [];
+  let list9 = [];
   try {
-    list4 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
+    list9 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
   } catch {
   }
-  if (!Array.isArray(list4)) list4 = [];
-  if (list4.some((n) => n.text === text)) return;
-  list4.push({ at: now, text });
+  if (!Array.isArray(list9)) list9 = [];
+  if (list9.some((n) => n.text === text)) return;
+  list9.push({ at: now, text });
   try {
     mkdirSync4(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync4(noticesPath(), JSON.stringify(list4.slice(-20)), { mode: 384 });
+    writeFileSync4(noticesPath(), JSON.stringify(list9.slice(-20)), { mode: 384 });
   } catch {
   }
 }
 function takeClaimNotices() {
-  let list4 = [];
+  let list9 = [];
   try {
-    list4 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
+    list9 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
   } catch {
     return [];
   }
@@ -3088,7 +3366,7 @@ function takeClaimNotices() {
     rmSync2(noticesPath(), { force: true });
   } catch {
   }
-  return Array.isArray(list4) ? list4.map((n) => n.text) : [];
+  return Array.isArray(list9) ? list9.map((n) => n.text) : [];
 }
 async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
   if (!isSyncConfigured()) return 0;
@@ -3513,6 +3791,7 @@ var init_push = __esm({
 var claim_exports = {};
 __export(claim_exports, {
   TaskClaimedError: () => TaskClaimedError,
+  claimKey: () => claimKey,
   claimNote: () => claimNote,
   claimSession: () => claimSession,
   claimTask: () => claimTask,
@@ -3537,8 +3816,8 @@ function utc(t, now = Math.floor(Date.now() / 1e3)) {
   return day === new Date(now * 1e3).toISOString().slice(0, 10) ? `${hm} UTC` : `${day} ${hm} UTC`;
 }
 function describeHolder(l, me = getConfig().USERNAME, mySession, now = Math.floor(Date.now() / 1e3)) {
-  const who = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
-  return `${who} since ${utc(l.acquired_at, now)}`;
+  const who2 = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
+  return `${who2} since ${utc(l.acquired_at, now)}`;
 }
 function describeRefusal(r) {
   const holders = r.conflicts.map((c) => {
@@ -3577,6 +3856,28 @@ async function claimTask(id, collection, metadata, opts = {}) {
     } catch {
     }
   }
+  try {
+    const c = await requireCoordination();
+    const r = await c.leaseAcquire({
+      collection,
+      key,
+      session,
+      ...opts.scope ? { scope: opts.scope } : {},
+      ...opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {},
+      ...opts.title ? { title: opts.title } : {},
+      ...opts.reclaim ? { reclaim: true } : {}
+    });
+    if (!r.granted) return { kind: "refused", id: key, collection, session, conflicts: r.conflicts };
+    noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
+    return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    throw e;
+  }
+}
+async function claimKey(collection, key, opts = {}) {
+  if (!claimsApply(collection)) return { kind: "local", id: key };
+  const session = claimSession(opts.session);
   try {
     const c = await requireCoordination();
     const r = await c.leaseAcquire({
@@ -3735,7 +4036,7 @@ async function updateTask(id, updates, ctx = {}) {
       result.id = task.id;
     }
   }
-  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope"];
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const updatedMetadata = {
     ...task.metadata,
@@ -3743,6 +4044,9 @@ async function updateTask(id, updates, ctx = {}) {
     updated_at: Math.floor(Date.now() / 1e3)
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && task.metadata.blockedReason) {
+    updatedMetadata.blockedReason = "";
+  }
   if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
   else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
   if (updates.title !== void 0 && updates.title !== task.title) {
@@ -3759,9 +4063,10 @@ async function updateTask(id, updates, ctx = {}) {
   }
   return result;
 }
-async function completeTask(id, durationMinutes, ctx = {}) {
+async function completeTask(id, durationMinutes, ctx = {}, record = {}) {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
+  validateLearned(record.learned);
   const completionUpdates = {
     status: "complete",
     salience: (task.metadata.salience ?? 2) * 0.5
@@ -3773,6 +4078,9 @@ async function completeTask(id, durationMinutes, ctx = {}) {
     completionUpdates.duration_minutes = durationMinutes;
   }
   const { release } = await updateTask(id, completionUpdates, ctx);
+  const recorded = record.learned?.length || record.follow_ups?.length ? await recordForTask({ id: task.id, collection: task.collection }, record) : void 0;
+  const nudge = captureNudge(task.id, task.metadata, recorded);
+  const extras = { ...release ? { release } : {}, ...recorded ? { recorded } : {}, ...nudge ? { nudge } : {} };
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
@@ -3788,9 +4096,9 @@ async function completeTask(id, durationMinutes, ctx = {}) {
       is_recurring: true,
       recurrence_pattern: task.metadata.recurrence_pattern
     }, task.collection);
-    return { regeneratedId: newId, ...release ? { release } : {} };
+    return { regeneratedId: newId, ...extras };
   }
-  return release ? { release } : {};
+  return extras;
 }
 function computeNextDue(currentDue, pattern) {
   const d = new Date(currentDue * 1e3);
@@ -3812,12 +4120,141 @@ var init_update = __esm({
   "packages/core/src/tasks/update.ts"() {
     "use strict";
     init_config();
+    init_close();
     init_store();
     init_syncable();
     init_create();
     init_claim();
     init_push();
     RELEASE_OUTCOME = { complete: "done", blocked: "blocked", pending: "pending" };
+  }
+});
+
+// packages/core/src/tasks/waiting.ts
+function taskNeedsPeople(tags) {
+  const named = tags.filter((t) => t.startsWith("needs:")).map((t) => t.slice("needs:".length)).filter(Boolean);
+  if (named.length) return named;
+  return tags.includes("needs-human") ? [] : void 0;
+}
+async function waitingOn(opts = {}) {
+  const names = opts.collection ? [opts.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const out = { decisions: [], questions: [], actions: [], blocked: [] };
+  await Promise.all(names.map(async (collection) => {
+    const [decisions, questions, tasks] = await Promise.all([
+      getDocumentsByFilter2(collection, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
+    ]);
+    const open = tasks.filter((t) => t.metadata.status !== "complete");
+    const waitingOnIt = /* @__PURE__ */ new Map();
+    for (const t of open) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    const seen = /* @__PURE__ */ new Set();
+    for (const d of [...decisions, ...questions]) {
+      const m = d.metadata;
+      if (m.archived === true || !isOpenTyped(m)) continue;
+      const id = m.parent_id ?? d.id;
+      if (seen.has(id) || m.parent_id && (m.chunk_index ?? 0) !== 0) continue;
+      seen.add(id);
+      const item = {
+        id,
+        collection,
+        what: m.kind,
+        title: firstLine(d.content),
+        for: m.owner ? [String(m.owner)] : [],
+        by: m.origin_user ?? m.username ?? "",
+        since: Number(m.updated_at ?? m.created_at ?? 0),
+        status: m.status ?? DEFAULT_STATUS[m.kind],
+        ...list5(m.options).length ? { options: list5(m.options) } : {},
+        ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
+        ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
+      };
+      (m.kind === "decision" ? out.decisions : out.questions).push(item);
+    }
+    for (const t of open) {
+      const m = t.metadata;
+      const owner = m.origin_user ?? m.username ?? "";
+      const people = taskNeedsPeople(list5(m.tags));
+      if (people) {
+        out.actions.push({
+          id: t.id,
+          collection,
+          what: "action",
+          title: t.content,
+          for: people,
+          by: owner,
+          since: Number(m.updated_at ?? m.created_at ?? 0),
+          status: m.status,
+          ...m.notes ? { reason: String(m.notes).slice(0, 300) } : {}
+        });
+      } else if (m.status === "blocked") {
+        out.blocked.push({
+          id: t.id,
+          collection,
+          what: "blocked",
+          title: t.content,
+          for: owner ? [owner] : [],
+          by: owner,
+          since: Number(m.updated_at ?? m.created_at ?? 0),
+          status: "blocked",
+          ...m.blockedReason || m.blocked_reason ? { reason: String(m.blockedReason ?? m.blocked_reason) } : {}
+        });
+      }
+    }
+  }));
+  const forUser = (i) => !opts.user || i.for.length === 0 || i.for.includes(opts.user);
+  const oldest = (a, b) => a.since - b.since;
+  return {
+    decisions: out.decisions.filter(forUser).sort(oldest),
+    questions: out.questions.filter(forUser).sort(oldest),
+    actions: out.actions.filter(forUser).sort(oldest),
+    // Blocked tasks belong to whoever owns them.
+    blocked: out.blocked.filter((i) => !opts.user || i.for.includes(opts.user)).sort(oldest)
+  };
+}
+function age(since, now = Math.floor(Date.now() / 1e3)) {
+  if (!since) return "";
+  const d = Math.floor((now - since) / 86400);
+  if (d >= 1) return `${d}d`;
+  const h = Math.floor((now - since) / 3600);
+  return h >= 1 ? `${h}h` : "new";
+}
+function waitingLine(i, opts = {}) {
+  const where = opts.collection ? ` (${i.collection})` : "";
+  const tag = i.what === "decision" ? `decision ${i.status}` : i.what === "question" ? "question" : i.what === "action" ? "needs a person" : "blocked";
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since)}] ${i.title}`;
+  const extra = [];
+  if (i.options?.length) extra.push(`options: ${i.options.join(" | ")}`);
+  if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);
+  if (i.waiting_tasks?.length) extra.push(`waiting: ${i.waiting_tasks.join(", ")}`);
+  if (i.reason && i.what === "blocked") extra.push(`reason: ${i.reason}`);
+  return extra.length ? `${head}
+  ${extra.join("; ")}` : head;
+}
+function formatWaiting(w, opts = {}) {
+  const sections = [
+    ["Decisions", w.decisions],
+    ["Questions", w.questions],
+    ["Steps only a person can take", w.actions],
+    ["Blocked", w.blocked]
+  ];
+  const parts = sections.filter(([, items]) => items.length).map(([title, items]) => `## ${title} (${items.length})
+${items.map((i) => waitingLine(i, opts)).join("\n")}`);
+  return parts.length ? parts.join("\n\n") : "Nothing is waiting on anyone.";
+}
+var list5, firstLine, waitingCount, who;
+var init_waiting = __esm({
+  "packages/core/src/tasks/waiting.ts"() {
+    "use strict";
+    init_store();
+    init_kinds();
+    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    firstLine = (s) => {
+      const line = s.split("\n").find((l) => l.trim()) ?? "";
+      const t = line.replace(/^#+\s*/, "").trim();
+      return t.length > 160 ? `${t.slice(0, 159)}\u2026` : t;
+    };
+    waitingCount = (w) => w.decisions.length + w.questions.length + w.actions.length + w.blocked.length;
+    who = (i) => i.for.length ? i.for.join(", ") : "anyone";
   }
 });
 
@@ -3849,6 +4286,15 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter((t) => tags.includes(t)).join(", ")}` });
       continue;
     }
+    const people = taskNeedsPeople(tags);
+    if (people) {
+      skipped.push({ id: d.id, reason: `needs a person (${people.length ? people.join(", ") : "anyone"})` });
+      continue;
+    }
+    if (opts.autoOnly && !tags.includes("auto")) {
+      skipped.push({ id: d.id, reason: "not tagged auto" });
+      continue;
+    }
     const status = d.metadata.status ?? "pending";
     if (status === "blocked") {
       skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ""}` });
@@ -3876,6 +4322,11 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `waiting on ${waiting.join(", ")}` });
       continue;
     }
+    const waits = norm(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
+    if (waits.length) {
+      skipped.push({ id: d.id, reason: describeWaits(waits) });
+      continue;
+    }
     const near = [...new Set(norm(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
     ready.push({
       id: d.id,
@@ -3891,9 +4342,10 @@ async function nextTasks(opts) {
   }
   const created = (id) => Number(byId.get(id)?.metadata.created_at ?? 0);
   ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
-  const result = { ready, skipped, claimsKnown: claims !== void 0 };
+  const result = { ready, skipped, claimsKnown: claims !== void 0, cleanup: [] };
+  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open, claims);
   if (!opts.claim) return result;
-  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, ...claimOpts } = opts;
+  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a, includeCleanup: _i, ...claimOpts } = opts;
   for (const r of ready) {
     try {
       const u = await updateTask(r.id, { status: "in_progress" }, claimOpts);
@@ -3908,17 +4360,46 @@ async function nextTasks(opts) {
       throw e;
     }
   }
+  for (const c of result.cleanup.filter((x) => !x.held_by)) {
+    const r = await claimKey(opts.collection, c.key, claimOpts);
+    result.claimed = r;
+    if (r.kind !== "refused") return result;
+    c.held_by = r.conflicts.map((x) => describeHolder(x.lease)).join("; ");
+  }
   return result;
 }
-var PRIORITY_RANK, norm;
+async function cleanupItems(collection, open, claims) {
+  const items = [];
+  const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
+  if (open.some((d) => triageTag(norm(d.metadata.tags)))) {
+    const untriaged = open.filter((d) => !triageTag(norm(d.metadata.tags))).length;
+    if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
+  }
+  const now = Math.floor(Date.now() / 1e3);
+  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY2 && (f.metadata.chunk_index ?? 0) === 0);
+  if (findings.length) items.push({ key: "cleanup:findings", title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
+  const size = await collectionSize(collection).catch(() => 0);
+  if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: "cleanup:compaction", title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
+  for (const it of items) {
+    const l = claims?.get(it.key);
+    if (l) it.held_by = describeHolder(l);
+  }
+  return items;
+}
+var PRIORITY_RANK, norm, DAY2;
 var init_next = __esm({
   "packages/core/src/tasks/next.ts"() {
     "use strict";
     init_store();
+    init_config();
+    init_compact();
     init_claim();
     init_update();
+    init_close();
+    init_waiting();
     PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
     norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
+    DAY2 = 86400;
   }
 });
 
@@ -4104,8 +4585,8 @@ function endOfDay(d) {
   d.setHours(23, 59, 59, 999);
   return Math.floor(d.getTime() / 1e3);
 }
-function parseDuration(input) {
-  const s = input.toLowerCase().trim();
+function parseDuration(input2) {
+  const s = input2.toLowerCase().trim();
   const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
   if (!m) return null;
   const value = parseFloat(m[1]);
@@ -4659,25 +5140,25 @@ var init_curation = __esm({
 });
 
 // packages/core/src/curation/extractor.ts
-function buildExtractorUserPrompt(input) {
+function buildExtractorUserPrompt(input2) {
   const lines = [
-    `Scope/collection: ${input.collection}`,
+    `Scope/collection: ${input2.collection}`,
     "",
     "[USER MESSAGE]",
-    input.userText.trim() || "(none \u2014 injected or continuation turn)",
+    input2.userText.trim() || "(none \u2014 injected or continuation turn)",
     "",
     "[ASSISTANT RESPONSE]",
-    input.assistantText.trim()
+    input2.assistantText.trim()
   ];
   return lines.join("\n");
 }
-async function extractMemories(input, options = {}) {
-  if (!input.assistantText.trim()) return [];
+async function extractMemories(input2, options = {}) {
+  if (!input2.assistantText.trim()) return [];
   const caller = options.call ?? callCurationLLM;
   const raw = await caller({
     messages: [
       { role: "system", content: EXTRACTOR_SYSTEM_PROMPT },
-      { role: "user", content: buildExtractorUserPrompt(input) }
+      { role: "user", content: buildExtractorUserPrompt(input2) }
     ],
     temperature: 0,
     max_tokens: 1536,
@@ -4699,12 +5180,16 @@ function parseExtractorResponse(raw) {
     if (typeof content !== "string" || !content.trim()) continue;
     const tagsRaw = entry.tags;
     const tags = Array.isArray(tagsRaw) ? tagsRaw.filter((t) => typeof t === "string" && !!t.trim()).map((t) => t.trim().toLowerCase()).slice(0, 4) : [];
+    const kind = EXTRACTED_KINDS.includes(entry.kind) ? entry.kind : void 0;
+    const owner = kind === "question" && typeof entry.owner === "string" && entry.owner.trim() ? entry.owner.trim() : void 0;
     results.push({
       content: content.trim(),
       tags,
       sector: entry.sector === "episodic" ? "episodic" : "semantic",
       salience: clampSalience(entry.salience),
-      rationale: typeof entry.rationale === "string" ? entry.rationale : ""
+      rationale: typeof entry.rationale === "string" ? entry.rationale : "",
+      ...kind ? { kind } : {},
+      ...owner ? { owner } : {}
     });
   }
   return results;
@@ -4737,12 +5222,12 @@ function extractJsonArray2(raw) {
   }
   throw new Error(`Could not extract JSON array from extractor response: ${raw.slice(0, 200)}`);
 }
-var EXTRACTOR_PROMPT_VERSION, EXTRACTOR_SYSTEM_PROMPT;
+var EXTRACTOR_PROMPT_VERSION, EXTRACTOR_SYSTEM_PROMPT, EXTRACTED_KINDS;
 var init_extractor = __esm({
   "packages/core/src/curation/extractor.ts"() {
     "use strict";
     init_provider();
-    EXTRACTOR_PROMPT_VERSION = "v1";
+    EXTRACTOR_PROMPT_VERSION = "v2";
     EXTRACTOR_SYSTEM_PROMPT = `You are a memory extractor for a long-term memory system. Given ONE conversation turn \u2014 the user's message and the assistant's response \u2014 decide whether anything said is worth storing in long-term memory, and extract it.
 
 STORE a candidate when the turn contains:
@@ -4768,6 +5253,14 @@ RULES
 - Assign salience 1.0-3.0: 1.0 minor/contextual, 2.0 clearly useful, 3.0 critical hard-won knowledge. The caller may clamp this.
 - sector is "semantic" for durable facts/patterns, "episodic" for events, decisions, and things tied to a moment in time.
 - tags: 1-4 short lowercase tags for categorization.
+- kind (optional; omit for an ordinary fact or preference):
+  - "finding": a result, a root cause, a retraction of something believed before, or a methodology trap
+  - "decision": a choice that WAS MADE in this turn (by the user, or agreed with them)
+  - "limitation": something the system cannot do yet, and what would change that
+  - "question": an open question that someone outside this conversation (a person or another team) has to answer
+  - "idea": a proposed capability or change nobody has committed to
+  Never mark a choice that is still open as a decision: an open choice is not stored by you.
+- owner (only for a question): the person or team who has to answer, if named.
 
 OUTPUT FORMAT
 Return valid JSON only. No commentary. No markdown fences. A JSON array of candidates:
@@ -4777,10 +5270,13 @@ Return valid JSON only. No commentary. No markdown fences. A JSON array of candi
     "tags": ["<tag>"],
     "sector": "semantic" | "episodic",
     "salience": <number 1.0-3.0>,
+    "kind": "finding" | "decision" | "limitation" | "question" | "idea" (optional),
+    "owner": "<name>" (optional, questions only),
     "rationale": "<one short sentence: why this is durable>"
   }
 ]
 If nothing qualifies, return exactly: []`;
+    EXTRACTED_KINDS = ["finding", "decision", "limitation", "question", "idea"];
   }
 });
 
@@ -4883,14 +5379,14 @@ Return valid JSON only. No commentary. No markdown fences:
 
 // packages/core/src/curation/janitor.ts
 async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true);
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
       const key = [doc.id, n.id].sort().join("|");
       if (seen.has(key)) continue;
       seen.add(key);
@@ -4984,6 +5480,7 @@ async function janitorSweep(options = {}) {
 var init_janitor = __esm({
   "packages/core/src/curation/janitor.ts"() {
     "use strict";
+    init_kinds();
     init_archive();
     init_config();
     init_store();
@@ -4992,19 +5489,234 @@ var init_janitor = __esm({
   }
 });
 
+// packages/core/src/memory/update.ts
+async function locate(id, collection) {
+  const names = collection ? [collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const name of names) {
+    const [doc] = await getDocumentsByIds2(name, [id]).catch(() => []);
+    if (doc) return { collection: name, doc };
+    const chunks = await getDocumentsByFilter2(name, { parent_id: id }, 1).catch(() => []);
+    if (chunks.length) return { collection: name, doc: chunks[0] };
+  }
+  return null;
+}
+async function updateMemory(id, patch, collection) {
+  const found = await locate(id, collection);
+  if (!found || found.doc.metadata.type !== "memory") throw new MemoryNotFoundError(id);
+  assertWritable(id, found.doc.metadata);
+  const { note, tags, content, ...typedPatch } = patch;
+  if (content !== void 0 && found.doc.metadata.parent_id) {
+    throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
+  }
+  const typed = normalizeTyped(typedPatch, found.doc.metadata);
+  const now = Math.floor(Date.now() / 1e3);
+  const baseId = found.doc.metadata.parent_id ?? found.doc.id;
+  const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : [found.doc];
+  let metadata = found.doc.metadata;
+  for (const [i, d] of docs.entries()) {
+    metadata = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+    const last = i === docs.length - 1;
+    if ((note?.trim() || content !== void 0) && last) {
+      const day = new Date(now * 1e3).toISOString().slice(0, 10);
+      const text = content ?? d.content;
+      await addDocument2(found.collection, d.id, note?.trim() ? `${text}
+
+${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata);
+    } else {
+      await updateDocument2(found.collection, d.id, metadata);
+    }
+  }
+  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
+  return { id: baseId, collection: found.collection, metadata };
+}
+var MemoryNotFoundError;
+var init_update2 = __esm({
+  "packages/core/src/memory/update.ts"() {
+    "use strict";
+    init_store();
+    init_config();
+    init_syncable();
+    init_kinds();
+    init_links();
+    MemoryNotFoundError = class extends Error {
+      constructor(id) {
+        super(`memory ${id} not found`);
+        this.name = "MemoryNotFoundError";
+      }
+    };
+  }
+});
+
+// packages/core/src/curation/follow-through.ts
+function toItem(collection, d) {
+  const m = d.metadata;
+  return {
+    id: m.parent_id ?? d.id,
+    collection,
+    kind: m.kind,
+    status: m.status,
+    content: d.content.slice(0, 600),
+    ...m.owner ? { owner: String(m.owner) } : {},
+    ...list6(m.options).length ? { options: list6(m.options) } : {},
+    ...m.recommendation ? { recommendation: String(m.recommendation) } : {}
+  };
+}
+async function findOpenItems(collection, text, taskIds = []) {
+  const out = /* @__PURE__ */ new Map();
+  const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const tid of taskIds) {
+    const [t] = await getDocumentsByIds2(collection, [tid]).catch(() => []);
+    for (const mid of [...list6(t?.metadata.waits_on), ...list6(t?.metadata.memory_ids)]) {
+      for (const name of [collection, ...names.filter((n) => n !== collection)]) {
+        const direct = await getDocumentsByIds2(name, [mid]).catch(() => []);
+        const [doc] = direct.length ? direct : await getDocumentsByIds2(name, [`${mid}-0`]).catch(() => []);
+        if (doc) {
+          if (isOpenTyped(doc.metadata) && doc.metadata.archived !== true) out.set(mid, toItem(name, doc));
+          break;
+        }
+      }
+    }
+  }
+  if (text.trim()) {
+    const near = await queryDocuments2(collection, text.slice(0, 4e3), 20, { type: "memory" }).catch(() => []);
+    for (const n of near) {
+      if (out.size >= MAX_ITEMS) break;
+      if (n.distance >= FOLLOW_THROUGH_MAX_DISTANCE || n.metadata.archived === true || !isOpenTyped(n.metadata)) continue;
+      const item = toItem(collection, n);
+      if (!out.has(item.id)) out.set(item.id, item);
+    }
+  }
+  return [...out.values()].slice(0, MAX_ITEMS);
+}
+function buildFollowThroughPrompt(items, turn) {
+  const lines = ["[OPEN ITEMS]"];
+  for (const i of items) {
+    lines.push(`- id: ${i.id}`, `  kind: ${i.kind} (${i.status})${i.owner ? `, for ${i.owner}` : ""}`, `  text: ${i.content.replace(/\s+/g, " ")}`);
+    if (i.options?.length) lines.push(`  options: ${i.options.join(" | ")}`);
+    if (i.recommendation) lines.push(`  recommended: ${i.recommendation}`);
+  }
+  lines.push("", `[PERSON: ${turn.user}]`, turn.userText.trim() || "(none)", "", "[ASSISTANT]", turn.assistantText.trim() || "(none)");
+  return lines.join("\n");
+}
+function parseFollowThrough(raw, items, user) {
+  const s = raw.replace(/```(?:json)?/g, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  let parsed;
+  try {
+    parsed = JSON.parse(start >= 0 && end > start ? s.slice(start, end + 1) : s);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const out = [];
+  for (const e of parsed) {
+    if (!e || typeof e !== "object") continue;
+    const item = byId.get(String(e.id));
+    if (!item) continue;
+    if (item.kind === "decision" && item.owner && item.owner !== user) continue;
+    const change = {
+      id: item.id,
+      status: String(e.status ?? ""),
+      note: String(e.note ?? "").trim(),
+      ...item.kind === "finding" && e.disposition ? { disposition: String(e.disposition) } : {},
+      ...item.kind === "finding" && Array.isArray(e.disposition_ids) ? { disposition_ids: e.disposition_ids.map(String) } : {},
+      ...item.kind === "finding" && e.disposition_reason ? { disposition_reason: String(e.disposition_reason) } : {}
+    };
+    if (change.status === item.status) continue;
+    try {
+      const { note: _n, id: _i, ...typed } = change;
+      normalizeTyped(typed, { kind: item.kind, status: item.status, ...item.options ? { options: item.options } : {} });
+    } catch {
+      continue;
+    }
+    if (isOpenTyped({ kind: item.kind, status: change.status })) continue;
+    out.push(change);
+  }
+  return out;
+}
+async function followThrough(turn, deps = {}) {
+  const d = { findOpenItems, call: callCurationLLM, updateMemory, ...deps };
+  const user = turn.user ?? getConfig().USERNAME;
+  const items = await d.findOpenItems(turn.collection, `${turn.userText}
+${turn.assistantText}`, turn.taskIds ?? []);
+  if (!items.length || !(turn.userText.trim() || turn.assistantText.trim())) return { judged: 0, changes: [] };
+  const raw = await d.call({
+    messages: [
+      { role: "system", content: FOLLOW_THROUGH_SYSTEM_PROMPT },
+      { role: "user", content: buildFollowThroughPrompt(items, { user, userText: turn.userText.slice(0, 6e3), assistantText: turn.assistantText.slice(0, 6e3) }) }
+    ],
+    temperature: 0,
+    max_tokens: 800,
+    json_mode: true
+  });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const changes = [];
+  for (const c of parseFollowThrough(raw, items, user)) {
+    const item = byId.get(c.id);
+    const { id, note, ...typed } = c;
+    try {
+      await d.updateMemory(id, { ...typed, ...note ? { note } : {} }, item.collection);
+      changes.push({ ...c, kind: item.kind, collection: item.collection });
+    } catch {
+    }
+  }
+  return { judged: items.length, changes };
+}
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list6;
+var init_follow_through = __esm({
+  "packages/core/src/curation/follow-through.ts"() {
+    "use strict";
+    init_store();
+    init_config();
+    init_kinds();
+    init_update2();
+    init_provider();
+    FOLLOW_THROUGH_PROMPT_VERSION = "v1";
+    FOLLOW_THROUGH_MAX_DISTANCE = 0.75;
+    MAX_ITEMS = 8;
+    FOLLOW_THROUGH_SYSTEM_PROMPT = `You keep a team's open items current. You get a list of OPEN items (decisions waiting on a choice, open questions, open findings, open limitations, proposed ideas) and ONE conversation turn between a person and their assistant. Report only the items this turn settles. Most turns settle nothing: [] is the common, correct answer.
+
+Settle an item only on clear evidence in the turn:
+- decision -> "accepted" when the PERSON states the choice or explicitly approves one option (or the recommendation); "rejected" when the person rules the decision out entirely. Never settle a decision on the assistant's word alone. note: the choice, in a short sentence.
+- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). note: the answer.
+- finding -> "resolved" when the turn decides what becomes of it. Give "disposition": "no-action" with "disposition_reason", or "task" / "decision" / "limitation" with "disposition_ids" naming ids that appear in the turn.
+- limitation -> "mitigated" (worked around) or "closed" (no longer true), when the turn shows it. note: how.
+- idea -> "adopted" (the person commits to it) or "dropped". note: why.
+Do not settle an item the turn merely mentions, discusses or plans to address.
+
+OUTPUT: valid JSON only, no commentary, no fences. An array:
+[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
+Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
+    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+  }
+});
+
 // packages/core/src/curation/capture.ts
-async function captureTurn(input, options, deps = {}) {
+async function captureTurn(input2, options, deps = {}) {
   const d = { ...defaultDeps, ...deps };
-  const { collection, sessionId, turn } = input;
+  const { collection, sessionId, turn } = input2;
+  let settled = [];
+  try {
+    const f = await d.followThrough({ collection, userText: input2.userText, assistantText: input2.assistantText, taskIds: options.taskIds });
+    settled = f.changes.map((c) => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
+  } catch (e) {
+    d.log(`Follow-through failed in ${collection}: ${e}`);
+  }
+  const settledNotice = settled.length ? `Recorded from last turn: ${settled.map((c) => `${c.kind} ${c.id} ${c.status}${c.note ? ` (${c.note})` : ""}`).join("; ")}` : void 0;
   const candidates = await d.extractMemories(
     {
       collection,
-      userText: input.userText.slice(0, MAX_EXTRACT_CHARS),
-      assistantText: input.assistantText.slice(0, MAX_EXTRACT_CHARS)
+      userText: input2.userText.slice(0, MAX_EXTRACT_CHARS),
+      assistantText: input2.assistantText.slice(0, MAX_EXTRACT_CHARS)
     },
     { maxMemories: options.maxMemories }
   );
-  if (!candidates.length) return { stored: 0, skipped: 0, superseded: 0 };
+  if (!candidates.length) {
+    if (settledNotice) d.log(`${settledNotice} [session ${sessionId}, turn ${turn}]`);
+    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice } : {} };
+  }
   let stored = 0;
   let skipped = 0;
   let superseded = 0;
@@ -5033,14 +5745,20 @@ async function captureTurn(input, options, deps = {}) {
         skipped++;
         continue;
       }
+      if (decision.action === "supersede" && decision.targetId && isMemoryKind(neighbors.find((n) => n.id === decision.targetId)?.metadata?.kind)) {
+        skipped++;
+        continue;
+      }
       if (decision.action === "supersede" && decision.targetId) {
         supersedes = decision.targetId;
         content = decision.mergedContent ?? candidate.content;
         resolverRationale = decision.rationale;
       }
     }
+    const typed = candidate.kind ? { kind: candidate.kind, ...candidate.kind === "decision" ? { status: "accepted" } : {}, ...candidate.owner ? { owner: candidate.owner } : {}, ...options.taskIds?.length ? { task_ids: options.taskIds } : {} } : void 0;
     await d.storeMemory(content, {
       collection,
+      ...typed ? { typed } : {},
       tags: [.../* @__PURE__ */ new Set([...candidate.tags, "auto-capture"])],
       salience: Math.min(candidate.salience, options.maxSalience),
       sector: candidate.sector,
@@ -5065,7 +5783,8 @@ async function captureTurn(input, options, deps = {}) {
     notice = `Auto-captured ${stored} ${stored === 1 ? "memory" : "memories"} from last turn` + (superseded ? `, ${superseded} superseding stale ${superseded === 1 ? "memory" : "memories"}` : "") + (skipped ? ` (${skipped} skipped as already known)` : "") + ` \u2192 \`${collection}\``;
     d.log(`${notice} [session ${sessionId}, turn ${turn}]`);
   }
-  return { stored, skipped, superseded, notice };
+  if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
+  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice };
 }
 var MAX_EXTRACT_CHARS, defaultDeps;
 var init_capture = __esm({
@@ -5073,10 +5792,13 @@ var init_capture = __esm({
     "use strict";
     init_store();
     init_store2();
+    init_kinds();
+    init_follow_through();
     init_extractor();
     init_resolver();
     MAX_EXTRACT_CHARS = 12e3;
     defaultDeps = {
+      followThrough,
       extractMemories,
       queryDocuments: queryDocuments2,
       resolveConflict,
@@ -5157,8 +5879,8 @@ function trainingThresholds() {
     generalizability: getConfig().TRAINING_GENERALIZABILITY_MIN
   };
 }
-function routeMemory(input, custom) {
-  const { metadata } = input;
+function routeMemory(input2, custom) {
+  const { metadata } = input2;
   const sp = custom?.systemPrompt ?? systemPromptThresholds();
   const tr = custom?.training ?? trainingThresholds();
   const buckets = [];
@@ -6746,11 +7468,11 @@ var init_holdout = __esm({
 });
 
 // packages/core/src/training/eval.ts
-async function evalRun(input, options = {}) {
+async function evalRun(input2, options = {}) {
   const inference = options.inferenceCall ?? defaultInferenceCaller;
-  const manifestName = `v${input.manifestVersion}.jsonl`;
+  const manifestName = `v${input2.manifestVersion}.jsonl`;
   const manifestPath = artifactPath("training-manifests", manifestName);
-  const { holdout } = loadManifestSplit(manifestPath, input.manifestVersion);
+  const { holdout } = loadManifestSplit(manifestPath, input2.manifestVersion);
   const items = [];
   for (const mem of holdout) {
     let userPrompt = "";
@@ -6764,7 +7486,7 @@ async function evalRun(input, options = {}) {
       if (!userTurn || !assistantTurn) continue;
       userPrompt = userTurn.content;
       candidateAnswer = await inference({
-        model: input.adapterRef,
+        model: input2.adapterRef,
         messages: [
           ...example.messages.filter((m) => m.role !== "assistant")
         ],
@@ -6796,8 +7518,8 @@ async function evalRun(input, options = {}) {
   }
   const averageScore = items.length > 0 ? items.reduce((s, i) => s + i.score, 0) / items.length : 0;
   return {
-    adapterRef: input.adapterRef,
-    manifestVersion: input.manifestVersion,
+    adapterRef: input2.adapterRef,
+    manifestVersion: input2.manifestVersion,
     itemCount: items.length,
     averageScore,
     items
@@ -7009,6 +7731,50 @@ var init_verification = __esm({
   }
 });
 
+// packages/core/src/memory/external.ts
+async function findExternal(collection, ref) {
+  const docs = await getDocumentsByFilter2(collection, { type: "memory", external_ref: ref }, 50).catch(() => []);
+  return docs.find((d) => d.metadata.archived !== true) ?? null;
+}
+async function putExternal(collection, ref, put) {
+  if (!ref.trim()) throw new Error("external_ref is required");
+  const typed = normalizeTyped({ ...put.typed, external_ref: ref });
+  await getOrCreateCollection2(collection);
+  const existing = await findExternal(collection, ref);
+  if (!existing) {
+    const r = await storeMemory(put.content, { collection, tags: put.tags, typed });
+    return { id: r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0], action: "created" };
+  }
+  const id = existing.metadata.parent_id ?? existing.id;
+  const cur = carryTyped(existing.metadata);
+  const typedChanged = Object.keys(typed).some((k) => !same(typed[k], cur[k]));
+  const tagsChanged = put.tags !== void 0 && !same(put.tags, existing.metadata.tags);
+  const contentChanged = existing.metadata.parent_id ? !put.content.startsWith(existing.content) : put.content !== existing.content;
+  if (contentChanged && !existing.metadata.parent_id && chunkText(put.content).length === 1) {
+    await updateMemory(id, { ...typed, content: put.content, ...tagsChanged ? { tags: put.tags } : {} }, collection);
+    return { id, action: "updated" };
+  }
+  if (contentChanged) {
+    const r = await storeMemory(put.content, { collection, tags: put.tags ?? existing.metadata.tags, typed: { ...cur, ...typed }, supersedes: id });
+    return { id: r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0], action: "updated" };
+  }
+  if (!typedChanged && !tagsChanged) return { id, action: "unchanged" };
+  await updateMemory(id, { ...typed, ...tagsChanged ? { tags: put.tags } : {} }, collection);
+  return { id, action: "updated" };
+}
+var same;
+var init_external = __esm({
+  "packages/core/src/memory/external.ts"() {
+    "use strict";
+    init_store();
+    init_kinds();
+    init_store2();
+    init_chunking();
+    init_update2();
+    same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  }
+});
+
 // packages/core/src/index.ts
 var src_exports = {};
 __export(src_exports, {
@@ -7020,14 +7786,23 @@ __export(src_exports, {
   CollectionDeleteRefusedError: () => CollectionDeleteRefusedError,
   CoordinationUnavailableError: () => CoordinationUnavailableError,
   DECAY_INTERVAL_MS: () => DECAY_INTERVAL_MS,
+  DEFAULT_STATUS: () => DEFAULT_STATUS,
+  DISPOSITIONS: () => DISPOSITIONS,
   EXTRACTOR_PROMPT_VERSION: () => EXTRACTOR_PROMPT_VERSION,
   EXTRACTOR_SYSTEM_PROMPT: () => EXTRACTOR_SYSTEM_PROMPT,
+  FOLLOW_THROUGH_MAX_DISTANCE: () => FOLLOW_THROUGH_MAX_DISTANCE,
+  FOLLOW_THROUGH_PROMPT_VERSION: () => FOLLOW_THROUGH_PROMPT_VERSION,
+  FOLLOW_THROUGH_SYSTEM_PROMPT: () => FOLLOW_THROUGH_SYSTEM_PROMPT,
   FireworksBackend: () => FireworksBackend,
   HEARTBEAT_MAX_INTERVAL_S: () => HEARTBEAT_MAX_INTERVAL_S,
   HOOK_CHILD_ENV: () => HOOK_CHILD_ENV,
   HttpBackend: () => HttpBackend,
   IdTokenProvider: () => IdTokenProvider,
+  KIND_STATUSES: () => KIND_STATUSES,
   MAX_EXTRACT_CHARS: () => MAX_EXTRACT_CHARS,
+  MEMORY_KINDS: () => MEMORY_KINDS,
+  MemoryNotFoundError: () => MemoryNotFoundError,
+  OPEN_STATUSES: () => OPEN_STATUSES,
   PostgresBackend: () => PostgresBackend,
   RESOLVER_PROMPT_VERSION: () => RESOLVER_PROMPT_VERSION,
   RESOLVER_SYSTEM_PROMPT: () => RESOLVER_SYSTEM_PROMPT,
@@ -7039,7 +7814,9 @@ __export(src_exports, {
   SYNTHESIS_PROMPT_VERSION: () => SYNTHESIS_PROMPT_VERSION,
   SYNTHESIS_SYSTEM_PROMPT: () => SYNTHESIS_SYSTEM_PROMPT,
   ServiceError: () => ServiceError,
+  TYPED_KEYS: () => TYPED_KEYS,
   TaskClaimedError: () => TaskClaimedError,
+  TypedMemoryError: () => TypedMemoryError,
   VERIFY_JUDGE_SYSTEM_PROMPT: () => VERIFY_JUDGE_SYSTEM_PROMPT,
   adapterDemote: () => adapterDemote,
   adapterPromote: () => adapterPromote,
@@ -7062,12 +7839,16 @@ __export(src_exports, {
   buildClassifierUserPrompt: () => buildClassifierUserPrompt,
   buildClaudeCliArgs: () => buildClaudeCliArgs,
   buildExtractorUserPrompt: () => buildExtractorUserPrompt,
+  buildFollowThroughPrompt: () => buildFollowThroughPrompt,
   buildResolverUserPrompt: () => buildResolverUserPrompt,
   callCurationLLM: () => callCurationLLM,
+  captureNudge: () => captureNudge,
   captureTurn: () => captureTurn,
+  carryTyped: () => carryTyped,
   chromaStore: () => chromaStore,
   chunk: () => chunk,
   chunkText: () => chunkText,
+  claimKey: () => claimKey,
   claimNote: () => claimNote,
   claimSession: () => claimSession,
   claimTask: () => claimTask,
@@ -7100,6 +7881,7 @@ __export(src_exports, {
   describeClaim: () => describeClaim,
   describeHolder: () => describeHolder,
   describeRefusal: () => describeRefusal,
+  describeWaits: () => describeWaits,
   detectChromaVersion: () => detectChromaVersion,
   detectCollection: () => detectCollection,
   detectSector: () => detectSector,
@@ -7112,12 +7894,16 @@ __export(src_exports, {
   findAndDeleteDocument: () => findAndDeleteDocument2,
   findConflicts: () => findConflicts,
   findDuplicatePairs: () => findDuplicatePairs,
+  findExternal: () => findExternal,
+  findOpenItems: () => findOpenItems,
   flushPendingSync: () => flushPendingSync,
+  followThrough: () => followThrough,
   forgetMemory: () => forgetMemory,
   formatDuration: () => formatDuration,
   formatSyncStats: () => formatSyncStats,
   formatTaskDate: () => formatTaskDate,
   formatTrainingJsonl: () => formatTrainingJsonl,
+  formatWaiting: () => formatWaiting,
   fromChroma: () => fromChroma,
   generateEmbedding: () => generateEmbedding,
   generateEmbeddingsBatch: () => generateEmbeddingsBatch,
@@ -7146,8 +7932,11 @@ __export(src_exports, {
   hasPendingSync: () => hasPendingSync,
   healthStatusFor: () => healthStatusFor,
   heartbeatIfDue: () => heartbeatIfDue,
+  heldKeys: () => heldKeys,
   isCoordinationUnavailable: () => isCoordinationUnavailable,
   isCycleFatal: () => isCycleFatal,
+  isMemoryKind: () => isMemoryKind,
+  isOpenTyped: () => isOpenTyped,
   isReadOnlyDoc: () => isReadOnlyDoc,
   isSignedOutError: () => isSignedOutError,
   isSyncConfigured: () => isSyncConfigured,
@@ -7158,6 +7947,7 @@ __export(src_exports, {
   judgeAggregate: () => judgeAggregate,
   judgeVerification: () => judgeVerification,
   lastSyncError: () => lastSyncError,
+  linkMemoryToTasks: () => linkMemoryToTasks,
   listAdapters: () => listAdapters,
   listCollections: () => listCollections2,
   listCollectionsWithCounts: () => listCollectionsWithCounts,
@@ -7171,15 +7961,18 @@ __export(src_exports, {
   mergeCollections: () => mergeCollections,
   nextTasks: () => nextTasks,
   nextVersion: () => nextVersion,
+  normalizeTyped: () => normalizeTyped,
   normalizedSalience: () => normalizedSalience,
   noteLeaseHeld: () => noteLeaseHeld,
   noteLeaseReleased: () => noteLeaseReleased,
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
+  openWaits: () => openWaits,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
   parseDuration: () => parseDuration,
   parseExtractorResponse: () => parseExtractorResponse,
+  parseFollowThrough: () => parseFollowThrough,
   parseRelativeDate: () => parseRelativeDate,
   parseResolverResponse: () => parseResolverResponse,
   parseSynthesisResponse: () => parseSynthesisResponse,
@@ -7190,6 +7983,7 @@ __export(src_exports, {
   pullFromRemote: () => pullFromRemote,
   pushDocsNow: () => pushDocsNow,
   pushToRemote: () => pushToRemote,
+  putExternal: () => putExternal,
   queryAllCollections: () => queryAllCollections2,
   queryDocuments: () => queryDocuments2,
   queueSyncDelete: () => queueSyncDelete,
@@ -7200,12 +7994,14 @@ __export(src_exports, {
   readManifestSource: () => readManifestSource,
   readSyncHealth: () => readSyncHealth,
   recallMemory: () => recallMemory,
+  recordForTask: () => recordForTask,
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
   rekeyTask: () => rekeyTask,
   releaseTaskClaim: () => releaseTaskClaim,
   removeCollection: () => removeCollection,
   removeDependency: () => removeDependency,
+  requestDecision: () => requestDecision,
   requireCoordination: () => requireCoordination,
   requireSyncBackend: () => requireSyncBackend,
   resetConfig: () => resetConfig,
@@ -7241,6 +8037,7 @@ __export(src_exports, {
   systemPromptDeactivate: () => systemPromptDeactivate,
   systemPromptThresholds: () => systemPromptThresholds,
   takeClaimNotices: () => takeClaimNotices,
+  taskNeedsPeople: () => taskNeedsPeople,
   toChroma: () => toChroma,
   touchDocument: () => touchDocument,
   trainingCancel: () => trainingCancel,
@@ -7249,13 +8046,20 @@ __export(src_exports, {
   trainingStatus: () => trainingStatus,
   trainingThresholds: () => trainingThresholds,
   trainingTrigger: () => trainingTrigger,
+  typedLabel: () => typedLabel,
   updateAdapter: () => updateAdapter,
   updateDocument: () => updateDocument2,
   updateDocumentsBatch: () => updateDocumentsBatch2,
+  updateMemory: () => updateMemory,
   updateSyncPullTimestamp: () => updateSyncPullTimestamp,
   updateSyncSubscriptions: () => updateSyncSubscriptions,
   updateTask: () => updateTask,
+  validateLearned: () => validateLearned,
   verifyAdapterAgainstManifest: () => verifyAdapterAgainstManifest,
+  waitingCount: () => waitingCount,
+  waitingLine: () => waitingLine,
+  waitingOn: () => waitingOn,
+  waitsOnPeople: () => waitsOnPeople,
   writeArtifact: () => writeArtifact,
   writeSystemPromptCompanion: () => writeSystemPromptCompanion,
   writeTrainingManifest: () => writeTrainingManifest
@@ -7325,6 +8129,13 @@ var init_src = __esm({
     init_registry();
     init_synthesis();
     init_verification();
+    init_kinds();
+    init_update2();
+    init_external();
+    init_links();
+    init_waiting();
+    init_close();
+    init_follow_through();
   }
 });
 
@@ -7345,8 +8156,19 @@ Call \`memory_store\` (salience >= 2.0) when: a bug's root cause is identified; 
 \`memory_store\` returns \`potential_conflicts\`: decide supersede (re-store with \`supersedes: "<old id>"\`) or coexist before moving on. Reserve \`memory_forget\` for memories that should never have existed (forgetting a teammate's memory only removes it for you).
 Do not store ephemeral conversation state, obvious code patterns, or anything already in git history or an existing memory.
 
+### Where what you learn goes
+Give a memory a \`kind\` when it is one of these, so it can be listed and waited on:
+- a result, root cause, retraction or methodology trap: \`kind: finding\` (status open; resolve it later with a \`disposition\`: decision, task, limitation, or no-action with a reason)
+- a choice that was made: \`kind: decision\`, status \`accepted\`
+- a choice only a person can make: \`kind: decision\`, status \`needed\`, with \`options\`, a \`recommendation\` and the \`owner\` who decides. Never leave such a choice only in chat. When it is for the task you are on, use \`task_update\` with \`decision_needed\` instead: it records the decision and the task waits on it.
+- something that can't be done yet: \`kind: limitation\`, with \`exit_criteria\`
+- a question for a person or another team: \`kind: question\`, with the \`owner\` who must answer
+- an idea nobody has committed to: \`kind: idea\`
+- follow-up work: a task
+A project's own instructions win where they keep these records elsewhere. Record a person's answer with \`memory_update\` (a decision: status accepted or rejected, the choice as \`note\`; a question: status answered). Session start lists what waits on you under "Waiting on you"; \`waiting\` lists everything: tell the user about items that are theirs.
+
 ### Tasks
-Call \`task_create\` in the active collection BEFORE starting multi-step or long-lived work, when a follow-up is identified, or when something can't finish this turn. On completion \`task_complete\` (pass \`duration\` for hands-on effort when known); on a blocker \`task_update\` with status \`blocked\` and a reason; on scope change amend the task instead of duplicating it. Items marked "by <user>" were written by a teammate (for their tasks, coordinate before changing them); "from <collection>" marks a hit from another customer or project.
+Call \`task_create\` in the active collection BEFORE starting multi-step or long-lived work, when a follow-up is identified, or when something can't finish this turn. On completion \`task_complete\` (pass \`duration\` for hands-on effort when known), and record what the task produced in the same call: \`learned\` (typed memories, linked to the task) and \`follow_ups\` (new tasks). If the reply says nothing was recorded, consider whether something should have been. On a blocker \`task_update\` with status \`blocked\` and a reason; when the blocker is a person's choice, \`decision_needed\` instead (then take other work: the task comes back once the decision is recorded). On scope change amend the task instead of duplicating it. Tags \`auto\` (an unattended session may do all of it), \`needs-human\` (a step only a person takes) and \`needs:<user>\` (one person must take it) triage a task; \`task_next\` never offers a \`needs-human\` task and, with \`auto_only\`, only offers \`auto\` ones. Items marked "by <user>" were written by a teammate (for their tasks, coordinate before changing them); "from <collection>" marks a hit from another customer or project.
 
 ### Journal
 Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.
@@ -7535,8 +8357,8 @@ function copyScript(from, to) {
   renameSync3(tmp, to);
   return true;
 }
-function argValue(args, flag3) {
-  const i = args.indexOf(flag3);
+function argValue(args, flag4) {
+  const i = args.indexOf(flag4);
   return i >= 0 ? args[i + 1] : void 0;
 }
 async function readStdin() {
@@ -7557,11 +8379,11 @@ async function main(args, self2) {
 `);
     return;
   }
-  const input = await readStdin();
+  const input2 = await readStdin();
   const wrapped = argValue(args, "--wrap");
   const previous = wrapped ? decodeWrapped(wrapped) : void 0;
   if (typeof previous?.command === "string") {
-    const r = spawnSync(previous.command, { shell: true, input, encoding: "utf-8", timeout: WRAP_TIMEOUT_MS });
+    const r = spawnSync(previous.command, { shell: true, input: input2, encoding: "utf-8", timeout: WRAP_TIMEOUT_MS });
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
@@ -7608,7 +8430,8 @@ __export(hooks_exports, {
   stop: () => stop,
   syncDownLine: () => syncDownLine,
   userPromptSubmit: () => userPromptSubmit,
-  userText: () => userText
+  userText: () => userText,
+  waitingLines: () => waitingLines
 });
 import { existsSync as existsSync4, mkdirSync as mkdirSync9, readFileSync as readFileSync13, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
@@ -7625,8 +8448,8 @@ function scopeLine(d) {
   return `**Scope:** AMBIGUOUS \u2014 both \`${d.ambiguous[0]}\` and \`${d.ambiguous[1]}\` exist for this folder. Ask the user which collection to use BEFORE storing anything. (Reads here default to \`${d.collection}\`.)`;
 }
 function attribution(metadata) {
-  const who = metadata?.origin_user;
-  return who && who !== getConfig().USERNAME ? `, by ${who}` : "";
+  const who2 = metadata?.origin_user;
+  return who2 && who2 !== getConfig().USERNAME ? `, by ${who2}` : "";
 }
 function withTimeout(work, ms) {
   return Promise.race([work, new Promise((resolve2) => setTimeout(() => resolve2(void 0), ms).unref())]);
@@ -7736,12 +8559,12 @@ function takeNotice(sessionId) {
     return void 0;
   }
 }
-function leaseSessions(input) {
-  return [input.session_id, currentSession()];
+function leaseSessions(input2) {
+  return [input2.session_id, currentSession()];
 }
-async function keepLeasesAlive(input) {
+async function keepLeasesAlive(input2) {
   try {
-    await withTimeout(heartbeatIfDue(leaseSessions(input)), HEARTBEAT_BUDGET_MS);
+    await withTimeout(heartbeatIfDue(leaseSessions(input2)), HEARTBEAT_BUDGET_MS);
   } catch (e) {
     process.stderr.write(`[yapa-hook] lease heartbeat failed (non-fatal): ${e}
 `);
@@ -7752,20 +8575,20 @@ function presenceLines(leases, now, mySessions, me) {
   const mine = new Set(mySessions.filter(Boolean));
   const out = ["", "## Work in progress (leases)"];
   for (const l of leases.slice(0, 10)) {
-    const who = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
+    const who2 = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
     const title = l.title ? ` ${l.title}` : "";
-    out.push(`- **${l.key}**${title}: ${who}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
+    out.push(`- **${l.key}**${title}: ${who2}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
   }
   if (leases.length > 10) out.push(`- _\u2026${leases.length - 10} more (\`lease\` action \`list\`)_`);
   return out;
 }
-async function presence(collection, input) {
+async function presence(collection, input2) {
   if (!isSyncConfigured() || !isSyncableCollection(collection)) return { lines: [] };
   try {
     const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
     if (!r) return { lines: [] };
     const live = r.leases.filter((l) => !l.expired);
-    return { lines: presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME), claims: new Map(live.map((l) => [l.key, l])) };
+    return { lines: presenceLines(r.leases, r.now, leaseSessions(input2), getConfig().USERNAME), claims: new Map(live.map((l) => [l.key, l])) };
   } catch {
     return { lines: [] };
   }
@@ -7782,8 +8605,31 @@ async function findCompactionCandidates() {
   }
   return out;
 }
-async function sessionStart(input) {
-  const detection = await detectCollection(input.cwd);
+async function waitingLines(user, budgetMs = 2e3) {
+  try {
+    const w = await Promise.race([
+      waitingOn({ user }),
+      new Promise((res) => setTimeout(() => res(void 0), budgetMs).unref())
+    ]);
+    if (!w) return [];
+    const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
+    const mine = items.filter((i) => i.for.includes(user));
+    const anyone = items.filter((i) => i.for.length === 0).length;
+    if (!mine.length && !anyone) return [];
+    const out = ["", "## Waiting on you"];
+    for (const i of mine.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
+    if (mine.length > 8) out.push(`- _\u2026${mine.length - 8} more (call \`waiting\`)_`);
+    if (anyone) out.push(`- _${anyone} item(s) wait on anyone with the role (call \`waiting\`)_`);
+    out.push("Tell the user about these when relevant; record a choice with `memory_update` (status accepted), never only in chat.");
+    return out;
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] waiting failed: ${e}
+`);
+    return [];
+  }
+}
+async function sessionStart(input2) {
+  const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
   const pulled = await freshenFromRemote(collection);
   const lines = [];
@@ -7794,9 +8640,9 @@ async function sessionStart(input) {
   if (down) lines.push(down);
   const hint = prepareStatusLine();
   if (hint) lines.push(hint);
-  const notice = takeNotice(input.session_id);
+  const notice = takeNotice(input2.session_id);
   if (notice) lines.push(`_${notice}_`);
-  const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
+  const [held] = await Promise.all([presence(collection, input2), keepLeasesAlive(input2)]);
   lines.push(...claimNoticeLines());
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
@@ -7805,7 +8651,7 @@ async function sessionStart(input) {
       for (const t of tasks.slice(0, 10)) {
         const status = t.metadata.status ?? "open";
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : "";
-        const claim = claimNote(t, held.claims, leaseSessions(input));
+        const claim = claimNote(t, held.claims, leaseSessions(input2));
         lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${t.title}`);
       }
       if (tasks.length > 10) lines.push(`- _\u2026${tasks.length - 10} more (call \`task_list\` for the full list)_`);
@@ -7814,6 +8660,7 @@ async function sessionStart(input) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}
 `);
   }
+  lines.push(...await waitingLines(getConfig().USERNAME));
   lines.push(...held.lines);
   try {
     const memories = await listMemories({ collection, limit: 5 });
@@ -7840,7 +8687,7 @@ async function sessionStart(input) {
     process.stderr.write(`[yapa-hook] compaction check failed: ${e}
 `);
   }
-  if (input.source !== "compact") {
+  if (input2.source !== "compact") {
     await withTimeout(consolidateStaleDrafts().catch(() => []), STALE_JOURNAL_BUDGET_MS);
   }
   lines.push(
@@ -7853,20 +8700,20 @@ function userText(prompt) {
   if (!prompt.includes("<task-notification") && !prompt.includes("[SYSTEM NOTIFICATION")) return prompt.trim();
   return prompt.replace(/<task-notification>[\s\S]*?(<\/task-notification>|$)/g, "").replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\][\s\S]*?(\n\s*\n|$)/g, "").replace(/<system-reminder>\s*<\/system-reminder>/g, "").trim();
 }
-async function userPromptSubmit(input) {
-  const raw = (input.prompt ?? "").trim();
+async function userPromptSubmit(input2) {
+  const raw = (input2.prompt ?? "").trim();
   const prompt = userText(raw);
   if (!prompt) {
     emit({});
-    if (raw) await keepLeasesAlive(input);
+    if (raw) await keepLeasesAlive(input2);
     return;
   }
-  const detection = await detectCollection(input.cwd);
+  const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
-  recordPrompt(input.session_id, prompt);
-  await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input)]);
+  recordPrompt(input2.session_id, prompt);
+  await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input2)]);
   const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? "\u2026" : ""}`];
-  const notice = takeNotice(input.session_id);
+  const notice = takeNotice(input2.session_id);
   if (notice) lines.push(`_${notice}_`);
   const down = syncDownLine();
   if (down) lines.push(down);
@@ -7894,36 +8741,42 @@ async function userPromptSubmit(input) {
   }
   context("UserPromptSubmit", lines);
 }
-async function stop(input) {
+async function stop(input2) {
   emit({});
-  await keepLeasesAlive(input);
+  await keepLeasesAlive(input2);
   const config = getConfig();
-  if (!config.RESPONSE_CAPTURE || input.stop_hook_active || !input.session_id) return;
-  const assistantText = (input.last_assistant_message ?? "").trim();
-  const turn = readTurn(input.session_id);
+  if (!config.RESPONSE_CAPTURE || input2.stop_hook_active || !input2.session_id) return;
+  const assistantText = (input2.last_assistant_message ?? "").trim();
+  const turn = readTurn(input2.session_id);
   const userText2 = turn?.prompt ?? "";
   if (!assistantText || userText2.length + assistantText.length < config.CAPTURE_MIN_CHARS) return;
   if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
     setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
   }
   try {
-    const { collection } = await detectCollection(input.cwd);
+    const { collection } = await detectCollection(input2.cwd);
     const result = await captureTurn(
-      { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText: userText2, assistantText },
-      { maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE }
+      { collection, sessionId: input2.session_id, turn: turn?.turn ?? 0, userText: userText2, assistantText },
+      {
+        maxMemories: config.CAPTURE_MAX_MEMORIES,
+        maxSalience: config.CAPTURE_MAX_SALIENCE,
+        dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE,
+        // Typed captures belong to the task this session is on.
+        taskIds: heldKeys(currentSession(input2.session_id) ?? input2.session_id, collection).filter((k) => !k.startsWith("cleanup:"))
+      }
     );
-    if (result.notice) writeFileSync9(stateFile(input.session_id, "notice"), result.notice);
+    if (result.notice) writeFileSync9(stateFile(input2.session_id, "notice"), result.notice);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
   }
 }
-async function postCompact(input) {
+async function postCompact(input2) {
   emit({});
-  const summary = (input.compact_summary ?? "").trim();
+  const summary = (input2.compact_summary ?? "").trim();
   if (!getConfig().CAPTURE_COMPACTION || !summary) return;
   try {
-    const { collection } = await detectCollection(input.cwd);
+    const { collection } = await detectCollection(input2.cwd);
     await storeMemory(`# Conversation compaction summary
 
 ${summary}`, {
@@ -7931,19 +8784,19 @@ ${summary}`, {
       tags: ["compaction", "journal"],
       salience: 1.5,
       sector: "episodic",
-      metadata: { source: "compaction", session_id: input.session_id, trigger: input.trigger }
+      metadata: { source: "compaction", session_id: input2.session_id, trigger: input2.trigger }
     });
   } catch (e) {
     process.stderr.write(`[yapa-hook] compaction capture failed (non-fatal): ${e}
 `);
   }
 }
-async function sessionEnd(input) {
+async function sessionEnd(input2) {
   emit({});
-  if (!input.session_id) return;
+  if (!input2.session_id) return;
   for (const kind of ["turn", "notice"]) {
     try {
-      rmSync3(stateFile(input.session_id, kind), { force: true });
+      rmSync3(stateFile(input2.session_id, kind), { force: true });
     } catch {
     }
   }
@@ -8152,6 +9005,7 @@ __export(task_exports, {
   TASK_USAGE: () => TASK_USAGE,
   runTask: () => runTask
 });
+import { readFileSync as readFileSync15 } from "node:fs";
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -8174,7 +9028,10 @@ function taskJson(t, claims) {
     tags: Array.isArray(m.tags) ? m.tags : String(m.tags ?? "").split(",").filter(Boolean),
     depends_on: Array.isArray(m.depends_on) ? m.depends_on : String(m.depends_on ?? "").split(",").filter(Boolean),
     blocks: Array.isArray(m.blocks) ? m.blocks : String(m.blocks ?? "").split(",").filter(Boolean),
-    claim_scope: Array.isArray(m.claim_scope) ? m.claim_scope : [],
+    claim_scope: Array.isArray(m.claim_scope) ? m.claim_scope : String(m.claim_scope ?? "").split(",").filter(Boolean),
+    waits_on: Array.isArray(m.waits_on) ? m.waits_on : String(m.waits_on ?? "").split(",").filter(Boolean),
+    memory_ids: Array.isArray(m.memory_ids) ? m.memory_ids : String(m.memory_ids ?? "").split(",").filter(Boolean),
+    blocked_reason: m.blockedReason || m.blocked_reason || null,
     notes: m.notes ?? "",
     due_date: m.due_date || null,
     owner: m.origin_user ?? null,
@@ -8210,17 +9067,17 @@ async function runTask(sub, args) {
     if (e instanceof TaskClaimedError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
     }
-    const usage2 = e instanceof UsageError;
+    const usage2 = e instanceof UsageError || e instanceof TypedMemoryError;
     const message = e instanceof Error ? e.message : String(e);
     return { exit: usage2 ? EXIT.usage : EXIT.error, json: { ok: false, error: message }, text: `yapa task ${sub ?? ""}: ${message}` };
   }
 }
 async function dispatch(sub, args) {
-  const positional = args.find((a) => !a.startsWith("--") && !isFlagValue(args, a));
+  const positional2 = args.find((a) => !a.startsWith("--") && !isFlagValue(args, a));
   const session = flag(args, "--session");
   const claimOpts = {
     session,
-    scope: list2(flag(args, "--scope")),
+    scope: list7(flag(args, "--scope")),
     ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
     title: flag(args, "--title"),
     reclaim: args.includes("--reclaim") || void 0
@@ -8230,21 +9087,34 @@ async function dispatch(sub, args) {
       const status = flag(args, "--status");
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(", ")}`);
       const collection = flag(args, "--collection");
-      const tasks = await listTasks({ collection, status, includeComplete: args.includes("--include-complete") });
+      const wantTags = list7(flag(args, "--tag")) ?? [];
+      const tasks = (await listTasks({ collection, status, includeComplete: args.includes("--include-complete") })).filter((t) => {
+        if (!wantTags.length) return true;
+        const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",");
+        return wantTags.every((x) => tags.includes(x));
+      });
       const claims = collection ? await claimsFor(collection) : void 0;
       return { exit: EXIT.ok, json: { ok: true, tasks: tasks.map((t) => taskJson(t, claims)) }, text: `${tasks.length} task(s)` };
     }
     case "show": {
-      if (!positional) throw new UsageError("task id required");
-      const t = await getTask(positional);
-      if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional} not found` };
+      if (!positional2) throw new UsageError("task id required");
+      const t = await getTask(positional2);
+      if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       return { exit: EXIT.ok, json: { ok: true, task: taskJson(t, await claimsFor(t.collection)) }, text: `${t.id} [${t.metadata.status}] ${t.title}` };
     }
     case "next": {
       const collection = flag(args, "--collection");
       if (!collection) throw new UsageError("--collection is required");
-      const r = await nextTasks({ collection, tags: list2(flag(args, "--tag")), excludeTags: list2(flag(args, "--exclude-tag")), claim: args.includes("--claim"), ...claimOpts });
-      const json = { ok: true, claims_known: r.claimsKnown, ready: r.ready, skipped: r.skipped, claimed: claimJson(r.claimed) };
+      const r = await nextTasks({
+        collection,
+        tags: list7(flag(args, "--tag")),
+        excludeTags: list7(flag(args, "--exclude-tag")),
+        claim: args.includes("--claim"),
+        autoOnly: args.includes("--auto-only"),
+        includeCleanup: args.includes("--include-cleanup"),
+        ...claimOpts
+      });
+      const json = { ok: true, claims_known: r.claimsKnown, ready: r.ready, skipped: r.skipped, cleanup: r.cleanup, claimed: claimJson(r.claimed) };
       if (!args.includes("--claim")) {
         return { exit: EXIT.ok, json, text: r.ready.length ? `next: ${r.ready[0].id} ${r.ready[0].title} (${r.ready.length} ready)` : "nothing ready" };
       }
@@ -8252,8 +9122,14 @@ async function dispatch(sub, args) {
       return { exit: claimExit(r.claimed), json, text: describeClaim(r.claimed) || `started ${r.claimed.id}` };
     }
     case "claim": {
-      if (!positional) throw new UsageError("task id required");
-      const r = await updateTask(positional, { status: "in_progress" }, claimOpts);
+      if (!positional2) throw new UsageError("task id required");
+      if (positional2.startsWith("cleanup:")) {
+        const collection = flag(args, "--collection");
+        if (!collection) throw new UsageError("--collection is required for a cleanup key");
+        const c = await claimKey(collection, positional2, claimOpts);
+        return { exit: claimExit(c), json: { ok: c.kind !== "refused", id: positional2, session: claimSession(session), claim: claimJson(c) }, text: describeClaim(c) || `claimed ${positional2}` };
+      }
+      const r = await updateTask(positional2, { status: "in_progress" }, claimOpts);
       return {
         exit: claimExit(r.claim),
         json: { ok: true, id: r.id, session: claimSession(session), claim: claimJson(r.claim) },
@@ -8261,13 +9137,19 @@ async function dispatch(sub, args) {
       };
     }
     case "release": {
-      if (!positional) throw new UsageError("task id required");
+      if (!positional2) throw new UsageError("task id required");
+      if (positional2.startsWith("cleanup:")) {
+        const collection = flag(args, "--collection");
+        if (!collection) throw new UsageError("--collection is required for a cleanup key");
+        const rel = await releaseTaskClaim(positional2, collection, "done", session);
+        return { exit: rel.kind === "unshared" ? EXIT.unavailable : EXIT.ok, json: { ok: true, id: positional2, release: rel }, text: `${positional2} released` };
+      }
       const status = flag(args, "--status");
       if (!status || !["pending", "blocked", "complete"].includes(status)) throw new UsageError("--status must be pending, blocked or complete");
-      const t = await getTask(positional);
-      if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional} not found` };
+      const t = await getTask(positional2);
+      if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
-      const addTags = list2(flag(args, "--tag")) ?? [];
+      const addTags = list7(flag(args, "--tag")) ?? [];
       const extra = {};
       if (note) extra.notes = t.metadata.notes ? `${t.metadata.notes}
 ${note}` : note;
@@ -8275,39 +9157,264 @@ ${note}` : note;
         const cur = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",").filter(Boolean);
         extra.tags = [.../* @__PURE__ */ new Set([...cur, ...addTags])];
       }
+      const learned = jsonFile(flag(args, "--learned-file"), "array");
+      const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
+      const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
+      const waitsOn = list7(flag(args, "--waits-on"));
+      if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
+      if (waitsOn?.length) {
+        const cur = Array.isArray(t.metadata.waits_on) ? t.metadata.waits_on : String(t.metadata.waits_on ?? "").split(",").filter(Boolean);
+        extra.waits_on = [.../* @__PURE__ */ new Set([...cur, ...waitsOn])];
+      }
+      validateLearned(learned);
       let release;
+      let recorded;
+      let nudge;
+      let decision;
       if (status === "complete") {
         if (Object.keys(extra).length) await updateTask(t.id, extra, { session });
-        release = (await completeTask(t.id, int(flag(args, "--duration"), "--duration"), { session })).release;
+        const c = await completeTask(t.id, int(flag(args, "--duration"), "--duration"), { session }, { learned, follow_ups: followUps });
+        release = c.release;
+        recorded = c.recorded;
+        nudge = c.nudge;
       } else {
         const reason = flag(args, "--reason");
-        release = (await updateTask(t.id, { status, ...reason ? { blockedReason: reason } : {}, ...extra }, { session })).release;
+        const fields = { ...reason ? { blockedReason: reason } : {}, ...extra };
+        if (decisionNeeded) {
+          const d = await requestDecision(t.id, decisionNeeded, { session }, fields);
+          release = d.release;
+          decision = d.decision;
+        } else {
+          release = (await updateTask(t.id, { status, ...fields }, { session })).release;
+        }
+        if (learned?.length || followUps?.length) recorded = await recordForTask({ id: t.id, collection: t.collection }, { learned, follow_ups: followUps });
       }
       const pushed = await pushDocsNow(t.collection, [t.id]).catch(() => void 0);
       const exit = release?.kind === "unshared" || pushed && pushed.errors > 0 ? EXIT.unavailable : EXIT.ok;
       const text = release?.kind === "released" ? `${t.id} -> ${status}; claim released` : release?.kind === "held_by_other" ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it` : release?.kind === "unshared" ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own` : `${t.id} -> ${status}`;
-      return { exit, json: { ok: true, id: t.id, status, release: release ?? null }, text };
+      const more = [
+        decision ? `decision ${decision} recorded; the task waits on it` : "",
+        recorded?.memories.length ? `recorded ${recorded.memories.join(", ")}` : "",
+        recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(", ")}` : "",
+        nudge ?? ""
+      ].filter(Boolean);
+      return {
+        exit,
+        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null },
+        text: more.length ? `${text}
+${more.join("\n")}` : text
+      };
     }
     default:
       throw new UsageError(`unknown command
 ${TASK_USAGE}`);
   }
 }
+function jsonFile(path, shape) {
+  if (path === void 0) return void 0;
+  let v;
+  try {
+    v = JSON.parse(readFileSync15(path === "-" ? 0 : path, "utf8"));
+  } catch (e) {
+    throw new UsageError(`${path}: ${e instanceof Error ? e.message : e}`);
+  }
+  if (shape === "array" ? !Array.isArray(v) : !v || typeof v !== "object" || Array.isArray(v)) {
+    throw new UsageError(`${path}: expected a JSON ${shape}`);
+  }
+  return v;
+}
 function isFlagValue(args, a) {
   const i = args.indexOf(a);
-  return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text"].includes(args[i - 1]);
+  return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text", "--auto-only", "--include-cleanup"].includes(args[i - 1]);
 }
-var TASK_USAGE, list2, UsageError, STATUSES;
+var TASK_USAGE, list7, UsageError, STATUSES;
 var init_task = __esm({
   "packages/mcp/src/cli/task.ts"() {
     "use strict";
     init_src();
     init_coord();
-    TASK_USAGE = "Usage: yapa task list    [--collection C] [--status S] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--claim [claim options]]\n       yapa task claim   ID [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN] [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n";
-    list2 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    TASK_USAGE = 'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n                         [--waits-on MEM,..] [--learned-file F] [--follow-ups-file F] [--decision-needed-file F] [--session S]\n       yapa task release cleanup:KIND --collection C [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\nhold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\non it, pending). "-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
+    list7 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
     UsageError = class extends Error {
     };
     STATUSES = ["pending", "in_progress", "blocked", "complete"];
+  }
+});
+
+// packages/mcp/src/cli/memory.ts
+var memory_exports = {};
+__export(memory_exports, {
+  MEMORY_USAGE: () => MEMORY_USAGE,
+  runMemory: () => runMemory,
+  runWaiting: () => runWaiting
+});
+function flag2(args, name) {
+  const i = args.indexOf(name);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
+}
+function flags(args, name) {
+  const out = [];
+  args.forEach((a, i) => {
+    if (a === name && i + 1 < args.length) out.push(args[i + 1]);
+  });
+  return out;
+}
+function positional(args) {
+  return args.find((a, i) => !a.startsWith("--") && !(i > 0 && VALUE_FLAGS.has(args[i - 1])));
+}
+async function readStdin2() {
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function input(args) {
+  if (args.includes("--stdin-json")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(await readStdin2());
+    } catch (e) {
+      throw new UsageError2(`--stdin-json: ${e instanceof Error ? e.message : e}`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new UsageError2("--stdin-json expects one JSON object");
+    return parsed;
+  }
+  const out = {};
+  const set = (k, v) => {
+    if (v !== void 0 && !(Array.isArray(v) && !v.length)) out[k] = v;
+  };
+  set("kind", flag2(args, "--kind"));
+  set("status", flag2(args, "--status"));
+  set("owner", flag2(args, "--owner"));
+  set("task_ids", csv(flag2(args, "--task-ids")));
+  set("options", flags(args, "--option"));
+  set("recommendation", flag2(args, "--recommendation"));
+  set("disposition", flag2(args, "--disposition"));
+  set("disposition_ids", csv(flag2(args, "--disposition-ids")));
+  set("disposition_reason", flag2(args, "--disposition-reason"));
+  set("exit_criteria", flag2(args, "--exit-criteria"));
+  set("tags", csv(flag2(args, "--tags")));
+  set("content", flag2(args, "--content"));
+  set("note", flag2(args, "--note"));
+  return out;
+}
+function split(i) {
+  const { content, note, tags, ...typed } = i;
+  return { content, note, tags, typed };
+}
+async function listWhole(args) {
+  const collection = flag2(args, "--collection");
+  const limitRaw = flag2(args, "--limit");
+  const limit = limitRaw === void 0 ? 1e3 : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit <= 0) throw new UsageError2("--limit must be a positive integer");
+  const rows = await listMemories({
+    collection,
+    kind: flag2(args, "--kind"),
+    status: flag2(args, "--status"),
+    owner: flag2(args, "--owner"),
+    tags: csv(flag2(args, "--tag")),
+    include_archived: args.includes("--include-archived"),
+    limit: 1e5
+  });
+  const groups = /* @__PURE__ */ new Map();
+  for (const r of rows) {
+    const key = `${r.collection}\0${r.metadata.parent_id ?? r.id}`;
+    groups.set(key, [...groups.get(key) ?? [], r]);
+  }
+  const out = [];
+  for (const parts of groups.values()) {
+    const first = parts[0];
+    let chunks = parts;
+    if (first.metadata.parent_id) {
+      chunks = (await getDocumentsByFilter2(first.collection, { parent_id: first.metadata.parent_id }, 1e3).catch(() => parts)).map((d) => ({ ...d, collection: first.collection }));
+      chunks.sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0));
+    }
+    const { chunk_index: _i, chunk_total: _t, parent_id: _p, ...metadata } = chunks[0].metadata;
+    out.push({
+      id: first.metadata.parent_id ?? first.id,
+      collection: first.collection,
+      content: chunks.map((c) => c.content).join(""),
+      metadata
+    });
+  }
+  out.sort((a, b) => Number(b.metadata.created_at ?? 0) - Number(a.metadata.created_at ?? 0));
+  return out.slice(0, limit);
+}
+async function runMemory(sub, args) {
+  try {
+    switch (sub) {
+      case "list": {
+        const memories = await listWhole(args);
+        return { exit: 0, json: { ok: true, memories }, text: `${memories.length} memor${memories.length === 1 ? "y" : "ies"}` };
+      }
+      case "put": {
+        const collection = flag2(args, "--collection");
+        const ref = flag2(args, "--ref");
+        if (!collection || !ref) throw new UsageError2("--collection and --ref are required");
+        const { content, tags, typed } = split(await input(args));
+        if (!content?.trim()) throw new UsageError2('content is required (--content or "content" in --stdin-json)');
+        const r = await putExternal(collection, ref, { content, typed, tags });
+        return { exit: 0, json: { ok: true, ...r, ref }, text: `${r.id} ${r.action}` };
+      }
+      case "update": {
+        const id = positional(args);
+        if (!id) throw new UsageError2("memory id required");
+        const { content, note, tags, typed } = split(await input(args));
+        const r = await updateMemory(id, { ...typed, ...content !== void 0 ? { content } : {}, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, flag2(args, "--collection"));
+        return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
+      }
+      default:
+        throw new UsageError2(`unknown command
+${MEMORY_USAGE}`);
+    }
+  } catch (e) {
+    return fail(`yapa memory ${sub ?? ""}`, e);
+  }
+}
+async function runWaiting(args) {
+  try {
+    const collection = flag2(args, "--collection");
+    const user = args.includes("--everyone") ? void 0 : flag2(args, "--for") ?? getConfig().USERNAME;
+    const w = await waitingOn({ collection, user });
+    return { exit: 0, json: { ok: true, user: user ?? null, ...w }, text: formatWaiting(w, { collection: !collection }) };
+  } catch (e) {
+    return fail("yapa waiting", e);
+  }
+}
+function fail(what, e) {
+  const usage2 = e instanceof UsageError2 || e instanceof TypedMemoryError;
+  const message = e instanceof Error ? e.message : String(e);
+  const code = e instanceof MemoryNotFoundError ? "not_found" : void 0;
+  return { exit: usage2 ? 2 : 1, json: { ok: false, error: message, ...code ? { code } : {} }, text: `${what}: ${message}` };
+}
+var MEMORY_USAGE, UsageError2, csv, VALUE_FLAGS;
+var init_memory = __esm({
+  "packages/mcp/src/cli/memory.ts"() {
+    "use strict";
+    init_src();
+    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
+    UsageError2 = class extends Error {
+    };
+    csv = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    VALUE_FLAGS = /* @__PURE__ */ new Set([
+      "--collection",
+      "--kind",
+      "--status",
+      "--owner",
+      "--tag",
+      "--limit",
+      "--ref",
+      "--content",
+      "--note",
+      "--task-ids",
+      "--option",
+      "--recommendation",
+      "--disposition",
+      "--disposition-ids",
+      "--disposition-reason",
+      "--exit-criteria",
+      "--tags",
+      "--for"
+    ]);
   }
 });
 
@@ -8377,13 +9484,13 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n";
 var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nExit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
   process.exit(2);
 }
-async function readStdin2() {
+async function readStdin3() {
   if (process.stdin.isTTY) return "";
   const chunks = [];
   for await (const chunk2 of process.stdin) {
@@ -8391,26 +9498,31 @@ async function readStdin2() {
   }
   return Buffer.concat(chunks).toString("utf-8");
 }
+function exitAfterFlush(code) {
+  return new Promise(() => {
+    process.stdout.write("", () => process.exit(code));
+  });
+}
 async function runHook(name) {
-  const raw = await readStdin2();
-  const input = raw.trim() ? JSON.parse(raw) : {};
+  const raw = await readStdin3();
+  const input2 = raw.trim() ? JSON.parse(raw) : {};
   if (process.env.YAPA_HOOK_CHILD) {
     process.stdout.write("{}");
     return;
   }
-  adoptHostEnv(input.cwd);
+  adoptHostEnv(input2.cwd);
   const hooks = await Promise.resolve().then(() => (init_hooks(), hooks_exports));
   switch (name) {
     case "session-start":
-      return hooks.sessionStart(input);
+      return hooks.sessionStart(input2);
     case "user-prompt-submit":
-      return hooks.userPromptSubmit(input);
+      return hooks.userPromptSubmit(input2);
     case "stop":
-      return hooks.stop(input);
+      return hooks.stop(input2);
     case "post-compact":
-      return hooks.postCompact(input);
+      return hooks.postCompact(input2);
     case "session-end":
-      return hooks.sessionEnd(input);
+      return hooks.sessionEnd(input2);
     default:
       usage();
   }
@@ -8440,7 +9552,7 @@ async function runStatusLineCommand(action, args) {
   const sl = await Promise.resolve().then(() => (init_statusline(), statusline_exports));
   const { statusLineScriptPath: statusLineScriptPath2, bundledStatusLineScript: bundledStatusLineScript2 } = await Promise.resolve().then(() => (init_hooks(), hooks_exports));
   const { getConfig: getConfig2 } = await Promise.resolve().then(() => (init_src(), src_exports));
-  const path = flag2(args, "--settings");
+  const path = flag3(args, "--settings");
   const script = statusLineScriptPath2();
   switch (action) {
     case "install": {
@@ -8462,11 +9574,11 @@ async function runStatusLineCommand(action, args) {
       usage();
   }
 }
-function flag2(args, name) {
+function flag3(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
 }
-function list3(v) {
+function list8(v) {
   return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 function int2(v, name) {
@@ -8482,14 +9594,14 @@ async function runCoord(sub, args) {
   }
   adoptCliEnv(process.cwd());
   const coord = await Promise.resolve().then(() => (init_coord(), coord_exports));
-  const collection = flag2(args, "--collection");
+  const collection = flag3(args, "--collection");
   const need = (v, name) => {
     if (!v) throw new Error(`${name} is required`);
     return v;
   };
   let r;
   try {
-    const session = coord.currentSession(flag2(args, "--session"));
+    const session = coord.currentSession(flag3(args, "--session"));
     if (!session && ["acquire", "heartbeat", "release"].includes(sub)) {
       throw new Error("--session is required outside Claude Code (or set YAPA_SESSION)");
     }
@@ -8497,28 +9609,28 @@ async function runCoord(sub, args) {
       case "acquire":
         r = await coord.leaseAcquire({
           collection: need(collection, "--collection"),
-          key: need(flag2(args, "--key"), "--key"),
+          key: need(flag3(args, "--key"), "--key"),
           session,
-          scope: list3(flag2(args, "--scope")),
-          ttlSeconds: int2(flag2(args, "--ttl"), "--ttl"),
-          title: flag2(args, "--title"),
+          scope: list8(flag3(args, "--scope")),
+          ttlSeconds: int2(flag3(args, "--ttl"), "--ttl"),
+          title: flag3(args, "--title"),
           ...args.includes("--reclaim") ? { reclaim: true } : {}
         });
         break;
       case "heartbeat":
-        r = await coord.leaseHeartbeat(collection, session, list3(flag2(args, "--keys")));
+        r = await coord.leaseHeartbeat(collection, session, list8(flag3(args, "--keys")));
         break;
       case "release":
-        r = await coord.leaseRelease(need(collection, "--collection"), need(flag2(args, "--key"), "--key"), session, flag2(args, "--outcome"));
+        r = await coord.leaseRelease(need(collection, "--collection"), need(flag3(args, "--key"), "--key"), session, flag3(args, "--outcome"));
         break;
       case "list":
         r = await coord.leaseList(need(collection, "--collection"), args.includes("--include-expired"));
         break;
       case "counter-next":
-        r = await coord.counterNext(need(collection, "--collection"), need(flag2(args, "--name"), "--name"), int2(flag2(args, "--floor"), "--floor"));
+        r = await coord.counterNext(need(collection, "--collection"), need(flag3(args, "--name"), "--name"), int2(flag3(args, "--floor"), "--floor"));
         break;
       case "task-id":
-        r = await coord.nextTaskId(int2(flag2(args, "--floor"), "--floor"));
+        r = await coord.nextTaskId(int2(flag3(args, "--floor"), "--floor"));
         break;
       default:
         process.stderr.write(COORD_USAGE);
@@ -8535,7 +9647,7 @@ async function runCoord(sub, args) {
 async function main2() {
   const [command, sub, ...rest] = process.argv.slice(2);
   if (command === "coord") {
-    process.exit(await runCoord(sub, rest));
+    await exitAfterFlush(await runCoord(sub, rest));
   }
   if (command === "task") {
     if (!sub || sub === "help" || rest.includes("--help")) {
@@ -8547,7 +9659,20 @@ async function main2() {
     const { runTask: runTask2 } = await Promise.resolve().then(() => (init_task(), task_exports));
     const r = await runTask2(sub, rest);
     process.stdout.write((rest.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
-    process.exit(r.exit);
+    await exitAfterFlush(r.exit);
+  }
+  if (command === "memory" || command === "waiting") {
+    if (command === "memory" && (!sub || sub === "help" || rest.includes("--help"))) {
+      const { MEMORY_USAGE: MEMORY_USAGE2 } = await Promise.resolve().then(() => (init_memory(), memory_exports));
+      process.stderr.write(MEMORY_USAGE2);
+      process.exit(sub ? 0 : 2);
+    }
+    adoptCliEnv(process.cwd());
+    const m = await Promise.resolve().then(() => (init_memory(), memory_exports));
+    const args = command === "waiting" ? [sub, ...rest].filter((a) => a !== void 0) : rest;
+    const r = command === "waiting" ? await m.runWaiting(args) : await m.runMemory(sub, rest);
+    process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
+    await exitAfterFlush(r.exit);
   }
   if (command === "hooks") {
     await runHooksCommand(sub, rest);
@@ -8566,12 +9691,12 @@ async function main2() {
   if (command !== "hook" || !sub) usage();
   try {
     await runHook(sub);
-    process.exit(0);
+    await exitAfterFlush(0);
   } catch (e) {
     process.stderr.write(`[yapa] hook ${sub} failed: ${e}
 `);
     process.stdout.write("{}");
-    process.exit(0);
+    await exitAfterFlush(0);
   }
 }
 main2();

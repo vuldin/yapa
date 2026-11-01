@@ -18,6 +18,8 @@
  */
 import { queryDocuments } from '../store/index.js';
 import { storeMemory } from '../memory/store.js';
+import { isMemoryKind } from '../memory/kinds.js';
+import { followThrough } from './follow-through.js';
 import { extractMemories, EXTRACTOR_PROMPT_VERSION } from './extractor.js';
 import { resolveConflict, RESOLVER_PROMPT_VERSION } from './resolver.js';
 
@@ -37,10 +39,14 @@ export interface CaptureTurnOptions {
   maxSalience: number;
   /** Cosine distance under which an existing memory counts as a neighbor. */
   dedupeDistance: number;
+  /** Tasks this session holds a claim on: typed captures are linked to them. */
+  taskIds?: string[];
 }
 
 /** Collaborators, injectable so hosts can test their plumbing in isolation. */
 export interface CaptureDeps {
+  /** Settles open decisions, questions and findings the turn answers (follow-through.ts). */
+  followThrough: typeof followThrough;
   extractMemories: typeof extractMemories;
   queryDocuments: typeof queryDocuments;
   resolveConflict: typeof resolveConflict;
@@ -52,11 +58,14 @@ export interface CaptureTurnResult {
   stored: number;
   skipped: number;
   superseded: number;
+  /** Open items the turn settled (a decision recorded, a question answered, ...). */
+  settled?: Array<{ id: string; kind: string; status: string; note: string }>;
   /** One-line visibility notice for the next injection, or undefined if nothing happened. */
   notice?: string;
 }
 
 const defaultDeps: CaptureDeps = {
+  followThrough,
   extractMemories,
   queryDocuments,
   resolveConflict,
@@ -72,6 +81,19 @@ export async function captureTurn(
   const d = { ...defaultDeps, ...deps };
   const { collection, sessionId, turn } = input;
 
+  // First: does this turn settle something already open? (a person's choice,
+  // an answer). Failure never blocks capture.
+  let settled: NonNullable<CaptureTurnResult['settled']> = [];
+  try {
+    const f = await d.followThrough({ collection, userText: input.userText, assistantText: input.assistantText, taskIds: options.taskIds });
+    settled = f.changes.map(c => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
+  } catch (e) {
+    d.log(`Follow-through failed in ${collection}: ${e}`);
+  }
+  const settledNotice = settled.length
+    ? `Recorded from last turn: ${settled.map(c => `${c.kind} ${c.id} ${c.status}${c.note ? ` (${c.note})` : ''}`).join('; ')}`
+    : undefined;
+
   const candidates = await d.extractMemories(
     {
       collection,
@@ -80,7 +102,10 @@ export async function captureTurn(
     },
     { maxMemories: options.maxMemories },
   );
-  if (!candidates.length) return { stored: 0, skipped: 0, superseded: 0 };
+  if (!candidates.length) {
+    if (settledNotice) d.log(`${settledNotice} [session ${sessionId}, turn ${turn}]`);
+    return { stored: 0, skipped: 0, superseded: 0, ...(settled.length ? { settled, notice: settledNotice } : {}) };
+  }
 
   let stored = 0;
   let skipped = 0;
@@ -117,6 +142,13 @@ export async function captureTurn(
         skipped++;
         continue;
       }
+      // A typed memory (a finding, a decision, ...) was recorded on purpose
+      // and may be waited on: a restatement of it is a duplicate, never a
+      // replacement.
+      if (decision.action === 'supersede' && decision.targetId && isMemoryKind(neighbors.find(n => n.id === decision.targetId)?.metadata?.kind)) {
+        skipped++;
+        continue;
+      }
       if (decision.action === 'supersede' && decision.targetId) {
         supersedes = decision.targetId;
         content = decision.mergedContent ?? candidate.content;
@@ -124,8 +156,14 @@ export async function captureTurn(
       }
     }
 
+    // A decision the extractor sees was made (never one still needed: that
+    // puts a person on the hook, so only an explicit call records it).
+    const typed = candidate.kind
+      ? { kind: candidate.kind, ...(candidate.kind === 'decision' ? { status: 'accepted' } : {}), ...(candidate.owner ? { owner: candidate.owner } : {}), ...(options.taskIds?.length ? { task_ids: options.taskIds } : {}) }
+      : undefined;
     await d.storeMemory(content, {
       collection,
+      ...(typed ? { typed } : {}),
       tags: [...new Set([...candidate.tags, 'auto-capture'])],
       salience: Math.min(candidate.salience, options.maxSalience),
       sector: candidate.sector,
@@ -154,5 +192,6 @@ export async function captureTurn(
       + ` → \`${collection}\``;
     d.log(`${notice} [session ${sessionId}, turn ${turn}]`);
   }
-  return { stored, skipped, superseded, notice };
+  if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
+  return { stored, skipped, superseded, ...(settled.length ? { settled } : {}), notice };
 }

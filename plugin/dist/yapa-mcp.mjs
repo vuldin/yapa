@@ -7238,8 +7238,8 @@ var require_dist = __commonJS({
         return ajv;
       }
       const [formats, exportName] = opts.mode === "fast" ? [formats_1.fastFormats, fastName] : [formats_1.fullFormats, fullName];
-      const list2 = opts.formats || formats_1.formatNames;
-      addFormats(ajv, list2, formats, exportName);
+      const list6 = opts.formats || formats_1.formatNames;
+      addFormats(ajv, list6, formats, exportName);
       if (opts.keywords)
         (0, limit_1.default)(ajv);
       return ajv;
@@ -7251,11 +7251,11 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list2, fs, exportName) {
+    function addFormats(ajv, list6, fs, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
-      for (const f of list2)
+      for (const f of list6)
         ajv.addFormat(f, fs[f]);
     }
     module.exports = exports = formatsPlugin;
@@ -7358,7 +7358,7 @@ function createConfig(env = process.env) {
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
     HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
-    RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "false") === "true",
+    RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "true") !== "false",
     CAPTURE_MIN_CHARS: parseInt(get(env, "CAPTURE_MIN_CHARS", "280"), 10),
     CAPTURE_MAX_MEMORIES: parseInt(get(env, "CAPTURE_MAX_MEMORIES", "3"), 10),
     CAPTURE_MAX_SALIENCE: parseFloat(get(env, "CAPTURE_MAX_SALIENCE", "2.0")),
@@ -7427,7 +7427,7 @@ function toChroma(metadata) {
     if (value === null || value === void 0) {
       continue;
     } else if (Array.isArray(value)) {
-      result[key] = value.join(",");
+      result[key] = value.some((v) => typeof v !== "string" || v.includes(",") || v.startsWith("[")) ? JSON.stringify(value) : value.join(",");
     } else if (typeof value === "object") {
       result[key] = JSON.stringify(value);
     } else {
@@ -7438,7 +7438,7 @@ function toChroma(metadata) {
 }
 function fromChroma(metadata) {
   const result = {};
-  const arrayFields = ["tags", "depends_on", "blocks", "related_ids"];
+  const arrayFields = ["tags", "depends_on", "blocks", "related_ids", "claim_scope", "task_ids", "memory_ids", "waits_on", "options", "disposition_ids"];
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === "string") {
       if (value.startsWith("{") || value.startsWith("[")) {
@@ -9561,17 +9561,17 @@ function noticesPath() {
   return join3(getConfig().LEASE_STATE_DIR, "notices.state");
 }
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
-  let list2 = [];
+  let list6 = [];
   try {
-    list2 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
+    list6 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
   } catch {
   }
-  if (!Array.isArray(list2)) list2 = [];
-  if (list2.some((n) => n.text === text)) return;
-  list2.push({ at: now, text });
+  if (!Array.isArray(list6)) list6 = [];
+  if (list6.some((n) => n.text === text)) return;
+  list6.push({ at: now, text });
   try {
     mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync5(noticesPath(), JSON.stringify(list2.slice(-20)), { mode: 384 });
+    writeFileSync5(noticesPath(), JSON.stringify(list6.slice(-20)), { mode: 384 });
   } catch {
   }
 }
@@ -9978,6 +9978,7 @@ var init_push = __esm({
 var claim_exports = {};
 __export(claim_exports, {
   TaskClaimedError: () => TaskClaimedError,
+  claimKey: () => claimKey,
   claimNote: () => claimNote,
   claimSession: () => claimSession,
   claimTask: () => claimTask,
@@ -10002,8 +10003,8 @@ function utc(t, now = Math.floor(Date.now() / 1e3)) {
   return day === new Date(now * 1e3).toISOString().slice(0, 10) ? `${hm} UTC` : `${day} ${hm} UTC`;
 }
 function describeHolder(l, me = getConfig().USERNAME, mySession, now = Math.floor(Date.now() / 1e3)) {
-  const who = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
-  return `${who} since ${utc(l.acquired_at, now)}`;
+  const who2 = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
+  return `${who2} since ${utc(l.acquired_at, now)}`;
 }
 function describeRefusal(r) {
   const holders = r.conflicts.map((c) => {
@@ -10042,6 +10043,28 @@ async function claimTask(id, collection, metadata, opts = {}) {
     } catch {
     }
   }
+  try {
+    const c = await requireCoordination();
+    const r = await c.leaseAcquire({
+      collection,
+      key,
+      session,
+      ...opts.scope ? { scope: opts.scope } : {},
+      ...opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {},
+      ...opts.title ? { title: opts.title } : {},
+      ...opts.reclaim ? { reclaim: true } : {}
+    });
+    if (!r.granted) return { kind: "refused", id: key, collection, session, conflicts: r.conflicts };
+    noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
+    return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    throw e;
+  }
+}
+async function claimKey(collection, key, opts = {}) {
+  if (!claimsApply(collection)) return { kind: "local", id: key };
+  const session = claimSession(opts.session);
   try {
     const c = await requireCoordination();
     const r = await c.leaseAcquire({
@@ -30001,8 +30024,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list2 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list2)
+  const list6 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list6)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -39651,11 +39674,29 @@ already captured in git history or in an existing memory.
   session's recall will surface it.
 
 ### Task Management Lifecycle
-- On completion: \`task_complete\`
-- On blocker: \`task_update\` with status \`blocked\` and a note explaining the block
+- On completion: \`task_complete\`, recording what the task produced in the same
+  call: \`learned\` (typed memories linked to it) and \`follow_ups\` (new tasks)
+- On blocker: \`task_update\` with status \`blocked\` and a note explaining the block;
+  when the blocker is a person's choice, \`decision_needed\` instead (the task
+  waits on the decision and comes back once it is recorded)
 - On scope change: \`task_update\` to amend the description rather than creating
   a duplicate
+- Triage tags: \`auto\` (an unattended session may do all of it), \`needs-human\`
+  (a step only a person takes), \`needs:<user>\` (one person must take it)
 - Session start: covered by Per-Prompt Routine step 3
+
+### Where What You Learn Goes
+- Give a memory a \`kind\` so it can be listed and waited on: \`finding\` (a
+  result, root cause, retraction or trap), \`decision\` (\`accepted\` when made;
+  \`needed\`, with \`options\`, a \`recommendation\` and the \`owner\`, when only a
+  person can make it), \`limitation\` (with \`exit_criteria\`), \`question\` (with
+  the \`owner\` who must answer), \`idea\`. Follow-up work is a task.
+- Never leave a choice only a person can make in chat: record it.
+- Record a person's answer with \`memory_update\` (decision: status accepted or
+  rejected, the choice as \`note\`; question: status answered).
+- \`waiting\` lists everything waiting on people; session start lists what
+  waits on you.
+- A project's own instructions win where they keep these records elsewhere.
 
 ### Task Claims
 - In a shared collection, setting a task to \`in_progress\` claims it for
@@ -39825,6 +39866,156 @@ function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
 // packages/core/src/memory/store.ts
 init_config();
 init_syncable();
+
+// packages/core/src/memory/kinds.ts
+var MEMORY_KINDS = ["finding", "decision", "limitation", "question", "idea"];
+var KIND_STATUSES = {
+  finding: ["open", "resolved"],
+  decision: ["needed", "proposed", "accepted", "superseded", "rejected"],
+  limitation: ["open", "mitigated", "accepted", "closed"],
+  question: ["open", "answered"],
+  idea: ["proposed", "adopted", "dropped"]
+};
+var DEFAULT_STATUS = {
+  finding: "open",
+  decision: "proposed",
+  limitation: "open",
+  question: "open",
+  idea: "proposed"
+};
+var OPEN_STATUSES = {
+  finding: ["open"],
+  decision: ["needed", "proposed"],
+  limitation: ["open"],
+  question: ["open"],
+  idea: ["proposed"]
+};
+var DISPOSITIONS = ["decision", "task", "limitation", "no-action"];
+var TYPED_KEYS = [
+  "kind",
+  "status",
+  "owner",
+  "task_ids",
+  "options",
+  "recommendation",
+  "disposition",
+  "disposition_ids",
+  "disposition_reason",
+  "exit_criteria",
+  "external_ref"
+];
+var KIND_ONLY = {
+  options: "decision",
+  recommendation: "decision",
+  disposition: "finding",
+  disposition_ids: "finding",
+  disposition_reason: "finding",
+  exit_criteria: "limitation"
+};
+var TypedMemoryError = class extends Error {
+  code = "typed_memory_invalid";
+  constructor(message) {
+    super(message);
+    this.name = "TypedMemoryError";
+  }
+};
+function isMemoryKind(k) {
+  return typeof k === "string" && MEMORY_KINDS.includes(k);
+}
+var list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+function normalizeTyped(fields, current = {}) {
+  const out = {};
+  for (const k of TYPED_KEYS) {
+    const v = fields[k];
+    if (v === void 0) continue;
+    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list2(v) : typeof v === "string" ? v.trim() : v;
+  }
+  if (!Object.keys(out).length) return out;
+  const curKind = isMemoryKind(current.kind) ? current.kind : void 0;
+  if (out.kind !== void 0 && !isMemoryKind(out.kind)) {
+    throw new TypedMemoryError(`kind must be one of ${MEMORY_KINDS.join(", ")}`);
+  }
+  if (out.kind && curKind && out.kind !== curKind) {
+    throw new TypedMemoryError(`this memory is a ${curKind}; store a new ${out.kind} instead of changing its kind`);
+  }
+  const kind = out.kind ?? curKind;
+  const kindSpecific = Object.keys(out).filter((k) => k !== "task_ids" && k !== "external_ref" && k !== "owner");
+  if (!kind && kindSpecific.length) {
+    throw new TypedMemoryError(`${kindSpecific.join(", ")} need a kind (${MEMORY_KINDS.join(", ")})`);
+  }
+  if (kind) {
+    for (const k of Object.keys(out)) {
+      const only = KIND_ONLY[k];
+      if (only && only !== kind) throw new TypedMemoryError(`${k} applies to a ${only}, not a ${kind}`);
+    }
+    if (out.kind && out.status === void 0 && current.status === void 0) out.status = DEFAULT_STATUS[kind];
+    const status = out.status ?? current.status;
+    if (!KIND_STATUSES[kind].includes(status)) {
+      throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(", ")}`);
+    }
+    const merged = { ...current, ...out };
+    if (kind === "decision" && status === "needed" && list2(merged.options).length < 2) {
+      throw new TypedMemoryError("a decision that is needed lists at least two options (and ideally a recommendation)");
+    }
+    if (kind === "finding" && status === "resolved") {
+      const d = merged.disposition;
+      if (!DISPOSITIONS.includes(d)) {
+        throw new TypedMemoryError(`a resolved finding says what became of it: disposition ${DISPOSITIONS.join(", ")}`);
+      }
+      if (d === "no-action" && !String(merged.disposition_reason ?? "").trim()) {
+        throw new TypedMemoryError("a no-action disposition gives disposition_reason");
+      }
+      if (d !== "no-action" && !list2(merged.disposition_ids).length) {
+        throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
+      }
+    }
+  }
+  return out;
+}
+function isOpenTyped(meta3) {
+  if (!meta3 || !isMemoryKind(meta3.kind)) return false;
+  return OPEN_STATUSES[meta3.kind].includes(meta3.status ?? DEFAULT_STATUS[meta3.kind]);
+}
+function typedLabel(meta3) {
+  if (!meta3 || !isMemoryKind(meta3.kind)) return "";
+  const parts = [meta3.kind, meta3.status ?? DEFAULT_STATUS[meta3.kind]];
+  if (meta3.owner && (meta3.kind === "decision" || meta3.kind === "question")) parts.push(`for ${meta3.owner}`);
+  return `[${parts.join(", ")}]`;
+}
+
+// packages/core/src/memory/links.ts
+init_store();
+var list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+async function findDoc(id) {
+  for (const c of await listCollections2().catch(() => [])) {
+    const [d] = await getDocumentsByIds2(c.name, [id]).catch(() => []);
+    if (d) return { collection: c.name, metadata: d.metadata };
+  }
+  return null;
+}
+async function linkMemoryToTasks(memoryId, taskIds) {
+  const out = { linked: [], missing: [] };
+  for (const tid of [...new Set(taskIds)]) {
+    const t = await findDoc(tid);
+    if (!t || t.metadata.type !== "task" || t.metadata.read_only === true) {
+      out.missing.push(tid);
+      continue;
+    }
+    const cur = list3(t.metadata.memory_ids);
+    if (!cur.includes(memoryId)) {
+      await updateDocument2(t.collection, tid, {
+        ...t.metadata,
+        memory_ids: [...cur, memoryId],
+        updated_at: Math.floor(Date.now() / 1e3),
+        is_synced: false
+      });
+    }
+    out.linked.push(tid);
+  }
+  return out;
+}
+
+// packages/core/src/memory/store.ts
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
     id: c.id,
@@ -39862,6 +40053,7 @@ async function archiveSuperseded(collection, oldId, newId) {
 }
 async function storeMemory(content, options = {}) {
   const collection = options.collection ?? "global";
+  const typed = options.typed ? normalizeTyped(options.typed) : {};
   await getOrCreateCollection2(collection);
   if (options.supersedes) {
     const [old] = await getDocumentsByIds2(collection, [options.supersedes]).catch(() => []);
@@ -39880,6 +40072,7 @@ async function storeMemory(content, options = {}) {
     const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
     const metadata = {
       ...options.metadata ?? {},
+      ...typed,
       type: "memory",
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -39892,12 +40085,14 @@ async function storeMemory(content, options = {}) {
     metadata.is_synced = false;
     await addDocument2(collection, id, content, metadata);
     if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
+    if (typed.task_ids?.length) await linkMemoryToTasks(id, typed.task_ids);
     return { ids: [id], potential_conflicts };
   }
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
   const docs = chunks.map((chunk2) => {
     const chunkMeta = {
       ...options.metadata ?? {},
+      ...typed,
       type: "memory",
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -39919,6 +40114,7 @@ async function storeMemory(content, options = {}) {
   });
   await addDocumentsBatch2(collection, docs);
   if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
+  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
   return { ids: docs.map((d) => d.id), potential_conflicts };
 }
 
@@ -39963,6 +40159,8 @@ async function recallMemory(query, options = {}) {
   const nResults = options.nResults ?? 5;
   const includePromoted = options.include_promoted ?? false;
   const filter = { type: "memory" };
+  if (options.kind) filter.kind = options.kind;
+  if (options.status) filter.status = options.status;
   let results;
   if (options.collection) {
     const docs = await queryDocuments2(options.collection, query, nResults, filter);
@@ -40050,11 +40248,15 @@ async function listMemories(options = {}) {
   const includePromoted = options.include_promoted ?? false;
   const filter = { type: "memory" };
   if (options.sector) filter.sector = options.sector;
+  if (options.kind) filter.kind = options.kind;
+  if (options.status) filter.status = options.status;
+  if (options.owner) filter.owner = options.owner;
+  const fetchLimit = options.tags?.length ? Math.max(limit, 5e3) : limit;
   const collectionNames = options.collection ? [options.collection] : (await listCollections2()).map((c) => c.name);
   const allResults = [];
   for (const name of collectionNames) {
     try {
-      const docs = await getDocumentsByFilter2(name, filter, limit);
+      const docs = await getDocumentsByFilter2(name, filter, fetchLimit);
       for (const doc of docs) {
         allResults.push({ ...doc, collection: name });
       }
@@ -40139,6 +40341,14 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
 // packages/core/src/memory/compact.ts
 init_config();
 init_store();
+async function collectionSize(collection) {
+  try {
+    const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e4);
+    return docs.filter((d) => d.metadata.archived !== true).length;
+  } catch {
+    return 0;
+  }
+}
 function tagsOf(metadata) {
   if (Array.isArray(metadata.tags)) return metadata.tags;
   if (typeof metadata.tags === "string") return metadata.tags.split(",").filter(Boolean);
@@ -40149,7 +40359,7 @@ function intersect(a, b) {
   return b.filter((t) => set2.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true);
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -40158,7 +40368,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -40295,6 +40505,7 @@ init_create();
 // packages/core/src/tasks/list.ts
 init_store();
 var PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
+var READ_LIMIT = 1e4;
 async function listTasks(filters = {}) {
   const collectionNames = filters.collection ? [filters.collection] : (await listCollections2()).map((c) => c.name);
   const allTasks = [];
@@ -40305,7 +40516,7 @@ async function listTasks(filters = {}) {
     if (filters.customer) where.customer = filters.customer;
     if (filters.project) where.project = filters.project;
     try {
-      const tasks = await getDocumentsByFilter2(name, where, 100);
+      const tasks = await getDocumentsByFilter2(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
         allTasks.push({
@@ -40319,12 +40530,13 @@ async function listTasks(filters = {}) {
       continue;
     }
   }
-  return allTasks.sort((a, b) => {
+  const sorted = allTasks.sort((a, b) => {
     const pA = PRIORITY_ORDER[a.metadata.priority] ?? 0;
     const pB = PRIORITY_ORDER[b.metadata.priority] ?? 0;
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
+  return filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted;
 }
 async function getDueTasks(includeOverdue = true) {
   const now = Math.floor(Date.now() / 1e3);
@@ -40337,6 +40549,88 @@ async function getDueTasks(includeOverdue = true) {
 
 // packages/core/src/tasks/update.ts
 init_config();
+
+// packages/core/src/tasks/close.ts
+init_store();
+init_create();
+var list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+function validateLearned(items = []) {
+  for (const it of items) {
+    if (!it.content?.trim()) throw new Error("each learned item needs content");
+    const { content: _c, tags: _t, ...typed } = it;
+    normalizeTyped(typed);
+  }
+}
+async function recordForTask(task, input2) {
+  const out = { memories: [], follow_ups: [] };
+  for (const it of input2.learned ?? []) {
+    const { content, tags, ...typed } = it;
+    const r = await storeMemory(content, {
+      collection: task.collection,
+      tags,
+      typed: { ...typed, task_ids: [.../* @__PURE__ */ new Set([task.id, ...typed.task_ids ?? []])] }
+    });
+    out.memories.push(r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0]);
+  }
+  for (const f of input2.follow_ups ?? []) {
+    if (!f.title?.trim()) continue;
+    const notes = [f.notes?.trim(), `From ${task.id}.`].filter(Boolean).join("\n");
+    out.follow_ups.push(await createTask(f.title.trim(), { priority: f.priority, tags: f.tags, notes }, f.collection ?? task.collection));
+  }
+  return out;
+}
+async function requestDecision(taskId, d, ctx = {}, extra = {}) {
+  const task = await getTask(taskId);
+  if (!task) throw new Error(`Task ${taskId} not found`);
+  if (!d.question?.trim()) throw new Error("decision_needed needs a question");
+  const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join("\n\n");
+  const typed = normalizeTyped({
+    kind: "decision",
+    status: "needed",
+    options: d.options,
+    task_ids: [task.id],
+    ...d.recommendation ? { recommendation: d.recommendation } : {},
+    ...d.owner ? { owner: d.owner } : {}
+  });
+  const r = await storeMemory(content, { collection: task.collection, typed });
+  const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
+  const waits = [.../* @__PURE__ */ new Set([...list4(task.metadata.waits_on), decision])];
+  const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
+  return { ...u, decision };
+}
+async function findMemory(id, prefer) {
+  const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  const order = prefer ? [prefer, ...names.filter((n) => n !== prefer)] : names;
+  for (const name of order) {
+    const [d] = await getDocumentsByIds2(name, [id]).catch(() => []);
+    if (d) return { collection: name, metadata: d.metadata };
+    const [chunk2] = await getDocumentsByIds2(name, [`${id}-0`]).catch(() => []);
+    if (chunk2) return { collection: name, metadata: chunk2.metadata };
+  }
+  return null;
+}
+async function openWaits(metadata, collection) {
+  const out = [];
+  for (const start of list4(metadata.waits_on)) {
+    let id = start;
+    let found = await findMemory(id, collection);
+    for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
+      id = String(found.metadata.superseded_by);
+      found = await findMemory(id, found.collection);
+    }
+    if (found && isOpenTyped(found.metadata)) {
+      out.push({ id, kind: found.metadata.kind, status: found.metadata.status, ...found.metadata.owner ? { owner: String(found.metadata.owner) } : {} });
+    }
+  }
+  return out;
+}
+var describeWaits = (w) => `waiting on ${w.map((x) => `${x.kind} ${x.id} (${x.status}${x.owner ? `, for ${x.owner}` : ""})`).join(", ")}`;
+function captureNudge(taskId, metadata, recorded) {
+  if (recorded?.memories.length || list4(metadata.memory_ids).length) return void 0;
+  return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
+}
+
+// packages/core/src/tasks/update.ts
 init_store();
 init_syncable();
 init_create();
@@ -40378,7 +40672,7 @@ async function updateTask(id, updates, ctx = {}) {
       result.id = task.id;
     }
   }
-  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope"];
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const updatedMetadata = {
     ...task.metadata,
@@ -40386,6 +40680,9 @@ async function updateTask(id, updates, ctx = {}) {
     updated_at: Math.floor(Date.now() / 1e3)
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && task.metadata.blockedReason) {
+    updatedMetadata.blockedReason = "";
+  }
   if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
   else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
   if (updates.title !== void 0 && updates.title !== task.title) {
@@ -40402,9 +40699,10 @@ async function updateTask(id, updates, ctx = {}) {
   }
   return result;
 }
-async function completeTask(id, durationMinutes, ctx = {}) {
+async function completeTask(id, durationMinutes, ctx = {}, record2 = {}) {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
+  validateLearned(record2.learned);
   const completionUpdates = {
     status: "complete",
     salience: (task.metadata.salience ?? 2) * 0.5
@@ -40416,6 +40714,9 @@ async function completeTask(id, durationMinutes, ctx = {}) {
     completionUpdates.duration_minutes = durationMinutes;
   }
   const { release } = await updateTask(id, completionUpdates, ctx);
+  const recorded = record2.learned?.length || record2.follow_ups?.length ? await recordForTask({ id: task.id, collection: task.collection }, record2) : void 0;
+  const nudge = captureNudge(task.id, task.metadata, recorded);
+  const extras = { ...release ? { release } : {}, ...recorded ? { recorded } : {}, ...nudge ? { nudge } : {} };
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
@@ -40431,9 +40732,9 @@ async function completeTask(id, durationMinutes, ctx = {}) {
       is_recurring: true,
       recurrence_pattern: task.metadata.recurrence_pattern
     }, task.collection);
-    return { regeneratedId: newId, ...release ? { release } : {} };
+    return { regeneratedId: newId, ...extras };
   }
-  return release ? { release } : {};
+  return extras;
 }
 function computeNextDue(currentDue, pattern) {
   const d = new Date(currentDue * 1e3);
@@ -40456,7 +40757,130 @@ init_claim();
 
 // packages/core/src/tasks/next.ts
 init_store();
+init_config();
 init_claim();
+
+// packages/core/src/tasks/waiting.ts
+init_store();
+var list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+var firstLine = (s) => {
+  const line = s.split("\n").find((l) => l.trim()) ?? "";
+  const t = line.replace(/^#+\s*/, "").trim();
+  return t.length > 160 ? `${t.slice(0, 159)}\u2026` : t;
+};
+function taskNeedsPeople(tags) {
+  const named = tags.filter((t) => t.startsWith("needs:")).map((t) => t.slice("needs:".length)).filter(Boolean);
+  if (named.length) return named;
+  return tags.includes("needs-human") ? [] : void 0;
+}
+async function waitingOn(opts = {}) {
+  const names = opts.collection ? [opts.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const out = { decisions: [], questions: [], actions: [], blocked: [] };
+  await Promise.all(names.map(async (collection) => {
+    const [decisions, questions, tasks] = await Promise.all([
+      getDocumentsByFilter2(collection, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
+    ]);
+    const open2 = tasks.filter((t) => t.metadata.status !== "complete");
+    const waitingOnIt = /* @__PURE__ */ new Map();
+    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    const seen = /* @__PURE__ */ new Set();
+    for (const d of [...decisions, ...questions]) {
+      const m = d.metadata;
+      if (m.archived === true || !isOpenTyped(m)) continue;
+      const id = m.parent_id ?? d.id;
+      if (seen.has(id) || m.parent_id && (m.chunk_index ?? 0) !== 0) continue;
+      seen.add(id);
+      const item = {
+        id,
+        collection,
+        what: m.kind,
+        title: firstLine(d.content),
+        for: m.owner ? [String(m.owner)] : [],
+        by: m.origin_user ?? m.username ?? "",
+        since: Number(m.updated_at ?? m.created_at ?? 0),
+        status: m.status ?? DEFAULT_STATUS[m.kind],
+        ...list5(m.options).length ? { options: list5(m.options) } : {},
+        ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
+        ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
+      };
+      (m.kind === "decision" ? out.decisions : out.questions).push(item);
+    }
+    for (const t of open2) {
+      const m = t.metadata;
+      const owner = m.origin_user ?? m.username ?? "";
+      const people = taskNeedsPeople(list5(m.tags));
+      if (people) {
+        out.actions.push({
+          id: t.id,
+          collection,
+          what: "action",
+          title: t.content,
+          for: people,
+          by: owner,
+          since: Number(m.updated_at ?? m.created_at ?? 0),
+          status: m.status,
+          ...m.notes ? { reason: String(m.notes).slice(0, 300) } : {}
+        });
+      } else if (m.status === "blocked") {
+        out.blocked.push({
+          id: t.id,
+          collection,
+          what: "blocked",
+          title: t.content,
+          for: owner ? [owner] : [],
+          by: owner,
+          since: Number(m.updated_at ?? m.created_at ?? 0),
+          status: "blocked",
+          ...m.blockedReason || m.blocked_reason ? { reason: String(m.blockedReason ?? m.blocked_reason) } : {}
+        });
+      }
+    }
+  }));
+  const forUser = (i) => !opts.user || i.for.length === 0 || i.for.includes(opts.user);
+  const oldest = (a, b) => a.since - b.since;
+  return {
+    decisions: out.decisions.filter(forUser).sort(oldest),
+    questions: out.questions.filter(forUser).sort(oldest),
+    actions: out.actions.filter(forUser).sort(oldest),
+    // Blocked tasks belong to whoever owns them.
+    blocked: out.blocked.filter((i) => !opts.user || i.for.includes(opts.user)).sort(oldest)
+  };
+}
+function age(since, now = Math.floor(Date.now() / 1e3)) {
+  if (!since) return "";
+  const d = Math.floor((now - since) / 86400);
+  if (d >= 1) return `${d}d`;
+  const h = Math.floor((now - since) / 3600);
+  return h >= 1 ? `${h}h` : "new";
+}
+var who = (i) => i.for.length ? i.for.join(", ") : "anyone";
+function waitingLine(i, opts = {}) {
+  const where = opts.collection ? ` (${i.collection})` : "";
+  const tag = i.what === "decision" ? `decision ${i.status}` : i.what === "question" ? "question" : i.what === "action" ? "needs a person" : "blocked";
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since)}] ${i.title}`;
+  const extra = [];
+  if (i.options?.length) extra.push(`options: ${i.options.join(" | ")}`);
+  if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);
+  if (i.waiting_tasks?.length) extra.push(`waiting: ${i.waiting_tasks.join(", ")}`);
+  if (i.reason && i.what === "blocked") extra.push(`reason: ${i.reason}`);
+  return extra.length ? `${head}
+  ${extra.join("; ")}` : head;
+}
+function formatWaiting(w, opts = {}) {
+  const sections = [
+    ["Decisions", w.decisions],
+    ["Questions", w.questions],
+    ["Steps only a person can take", w.actions],
+    ["Blocked", w.blocked]
+  ];
+  const parts = sections.filter(([, items]) => items.length).map(([title, items]) => `## ${title} (${items.length})
+${items.map((i) => waitingLine(i, opts)).join("\n")}`);
+  return parts.length ? parts.join("\n\n") : "Nothing is waiting on anyone.";
+}
+
+// packages/core/src/tasks/next.ts
 var PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 var norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
 async function nextTasks(opts) {
@@ -40486,6 +40910,15 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter((t) => tags.includes(t)).join(", ")}` });
       continue;
     }
+    const people = taskNeedsPeople(tags);
+    if (people) {
+      skipped.push({ id: d.id, reason: `needs a person (${people.length ? people.join(", ") : "anyone"})` });
+      continue;
+    }
+    if (opts.autoOnly && !tags.includes("auto")) {
+      skipped.push({ id: d.id, reason: "not tagged auto" });
+      continue;
+    }
     const status = d.metadata.status ?? "pending";
     if (status === "blocked") {
       skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ""}` });
@@ -40513,6 +40946,11 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `waiting on ${waiting.join(", ")}` });
       continue;
     }
+    const waits = norm(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
+    if (waits.length) {
+      skipped.push({ id: d.id, reason: describeWaits(waits) });
+      continue;
+    }
     const near = [...new Set(norm(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
     ready.push({
       id: d.id,
@@ -40528,9 +40966,10 @@ async function nextTasks(opts) {
   }
   const created = (id) => Number(byId.get(id)?.metadata.created_at ?? 0);
   ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
-  const result = { ready, skipped, claimsKnown: claims !== void 0 };
+  const result = { ready, skipped, claimsKnown: claims !== void 0, cleanup: [] };
+  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open2, claims);
   if (!opts.claim) return result;
-  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, ...claimOpts } = opts;
+  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a3, includeCleanup: _i, ...claimOpts } = opts;
   for (const r of ready) {
     try {
       const u = await updateTask(r.id, { status: "in_progress" }, claimOpts);
@@ -40545,7 +40984,32 @@ async function nextTasks(opts) {
       throw e;
     }
   }
+  for (const c of result.cleanup.filter((x) => !x.held_by)) {
+    const r = await claimKey(opts.collection, c.key, claimOpts);
+    result.claimed = r;
+    if (r.kind !== "refused") return result;
+    c.held_by = r.conflicts.map((x) => describeHolder(x.lease)).join("; ");
+  }
   return result;
+}
+var DAY2 = 86400;
+async function cleanupItems(collection, open2, claims) {
+  const items = [];
+  const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
+  if (open2.some((d) => triageTag(norm(d.metadata.tags)))) {
+    const untriaged = open2.filter((d) => !triageTag(norm(d.metadata.tags))).length;
+    if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
+  }
+  const now = Math.floor(Date.now() / 1e3);
+  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY2 && (f.metadata.chunk_index ?? 0) === 0);
+  if (findings.length) items.push({ key: "cleanup:findings", title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
+  const size = await collectionSize(collection).catch(() => 0);
+  if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: "cleanup:compaction", title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
+  for (const it of items) {
+    const l = claims?.get(it.key);
+    if (l) it.held_by = describeHolder(l);
+  }
+  return items;
 }
 
 // packages/core/src/tasks/search.ts
@@ -41315,14 +41779,14 @@ function extractJsonObject(raw) {
 init_config();
 init_store();
 async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true);
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
       const key = [doc.id, n.id].sort().join("|");
       if (seen.has(key)) continue;
       seen.add(key);
@@ -41416,6 +41880,60 @@ async function janitorSweep(options = {}) {
 
 // packages/core/src/curation/capture.ts
 init_store();
+
+// packages/core/src/curation/follow-through.ts
+init_store();
+init_config();
+
+// packages/core/src/memory/update.ts
+init_store();
+init_config();
+init_syncable();
+var MemoryNotFoundError = class extends Error {
+  constructor(id) {
+    super(`memory ${id} not found`);
+    this.name = "MemoryNotFoundError";
+  }
+};
+async function locate(id, collection) {
+  const names = collection ? [collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const name of names) {
+    const [doc] = await getDocumentsByIds2(name, [id]).catch(() => []);
+    if (doc) return { collection: name, doc };
+    const chunks = await getDocumentsByFilter2(name, { parent_id: id }, 1).catch(() => []);
+    if (chunks.length) return { collection: name, doc: chunks[0] };
+  }
+  return null;
+}
+async function updateMemory(id, patch, collection) {
+  const found = await locate(id, collection);
+  if (!found || found.doc.metadata.type !== "memory") throw new MemoryNotFoundError(id);
+  assertWritable(id, found.doc.metadata);
+  const { note, tags, content, ...typedPatch } = patch;
+  if (content !== void 0 && found.doc.metadata.parent_id) {
+    throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
+  }
+  const typed = normalizeTyped(typedPatch, found.doc.metadata);
+  const now = Math.floor(Date.now() / 1e3);
+  const baseId = found.doc.metadata.parent_id ?? found.doc.id;
+  const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : [found.doc];
+  let metadata = found.doc.metadata;
+  for (const [i, d] of docs.entries()) {
+    metadata = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+    const last = i === docs.length - 1;
+    if ((note?.trim() || content !== void 0) && last) {
+      const day = new Date(now * 1e3).toISOString().slice(0, 10);
+      const text = content ?? d.content;
+      await addDocument2(found.collection, d.id, note?.trim() ? `${text}
+
+${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata);
+    } else {
+      await updateDocument2(found.collection, d.id, metadata);
+    }
+  }
+  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
+  return { id: baseId, collection: found.collection, metadata };
+}
 
 // packages/core/src/buckets/index.ts
 init_config();
@@ -43200,6 +43718,9 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
   return { adapterRef, manifestVersion, passedCount, failedCount, items };
 }
 
+// packages/core/src/memory/external.ts
+init_store();
+
 // packages/mcp/src/coord.ts
 var EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
 function defaultSession() {
@@ -43278,6 +43799,7 @@ function counterNext(collection, name, floor) {
 // packages/mcp/src/tools.ts
 var SYNC_ON_WRITE_TOOLS = /* @__PURE__ */ new Set([
   "memory_store",
+  "memory_update",
   "memory_forget",
   "compaction_apply",
   "journal_consolidate",
@@ -43320,6 +43842,46 @@ function releaseNote(r) {
   if (r.kind === "unshared") return `Claim release not shared (${r.reason}); it lapses on its own.`;
   return "";
 }
+var TYPED_PARAMS = {
+  kind: external_exports.enum(MEMORY_KINDS).optional().describe("What kind of knowledge this is: finding (a result, root cause, retraction or trap), decision (a choice made, or one a person must make), limitation (something that cannot be done yet), question (for a person or another team), idea. Omit for an ordinary note."),
+  status: external_exports.string().optional().describe(`Where it stands. ${Object.entries(KIND_STATUSES).map(([k, v]) => `${k}: ${v.join("|")}`).join("; ")}. Default: finding open, decision proposed, question open. Use decision "needed" for a choice only a person can make: never leave that only in chat.`),
+  owner: external_exports.string().optional().describe("Who decides (decision) or is asked (question), as a YAPA user name. Omit for anyone."),
+  task_ids: external_exports.array(external_exports.string()).optional().describe("Tasks this came from or belongs to; each task lists it back."),
+  options: external_exports.array(external_exports.string()).optional().describe("decision: the options (at least two when status is needed)"),
+  recommendation: external_exports.string().optional().describe("decision: what you recommend, and why"),
+  disposition: external_exports.enum(DISPOSITIONS).optional().describe("finding: what became of it (required to resolve it)"),
+  disposition_ids: external_exports.array(external_exports.string()).optional().describe("finding: the decision, task or limitation it led to"),
+  disposition_reason: external_exports.string().optional().describe("finding: why no action"),
+  exit_criteria: external_exports.string().optional().describe("limitation: what would close it")
+};
+var LEARNED_ITEM = external_exports.object({
+  content: external_exports.string().min(1).describe("What was learned, in a few sentences"),
+  tags: external_exports.array(external_exports.string()).optional(),
+  ...TYPED_PARAMS
+});
+var CLOSE_PARAMS = {
+  learned: external_exports.array(LEARNED_ITEM).optional().describe("What this task produced, stored as typed memories linked to it: findings (results, root causes, traps), decisions made, limitations, questions for others, ideas. Record these when closing work; do not leave them only in chat."),
+  follow_ups: external_exports.array(external_exports.object({
+    title: external_exports.string().min(1),
+    priority: external_exports.enum(["critical", "high", "medium", "low"]).optional(),
+    tags: external_exports.array(external_exports.string()).optional(),
+    notes: external_exports.string().optional(),
+    collection: external_exports.string().optional().describe("Default: the task's collection")
+  })).optional().describe("Follow-up work, created as new tasks that say where they came from")
+};
+function closeText(r) {
+  const parts = [];
+  if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(", ")}.`);
+  if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(", ")}.`);
+  if (r.nudge) parts.push(r.nudge);
+  return parts.join("\n");
+}
+function typedError(e) {
+  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {
+    return { content: [{ type: "text", text: e.message }], isError: true };
+  }
+  throw e;
+}
 function registerTools(server2) {
   withSyncOnWrite(server2);
   server2.tool(
@@ -43351,11 +43913,19 @@ ${result.instructions}`
       salience: external_exports.number().optional().describe("Importance score (0.0-5.0, default 1.0)"),
       sector: external_exports.enum(["semantic", "episodic"]).optional().describe("Memory type (auto-detected if omitted)"),
       supersedes: external_exports.string().optional().describe("ID of an existing memory this one corrects/replaces \u2014 the old memory is archived (filtered from recall, recoverable), never hard-deleted"),
-      collection: external_exports.string().optional().describe("Collection name (default: global)")
+      collection: external_exports.string().optional().describe("Collection name (default: global)"),
+      ...TYPED_PARAMS
     },
-    async ({ content, tags, salience, sector, collection, supersedes }) => {
-      const result = await storeMemory(content, { tags, salience, sector, collection, supersedes });
-      const lines = [`Stored memory: ${result.ids.join(", ")}`];
+    async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
+      const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
+      let result;
+      try {
+        result = await storeMemory(content, { tags, salience, sector, collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
+      } catch (e) {
+        return typedError(e);
+      }
+      const label = typed.kind ? ` ${typedLabel({ status: void 0, ...typed })}` : "";
+      const lines = [`Stored memory: ${result.ids.join(", ")}${label}`];
       if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
         lines.push("", `\u26A0 Potential conflicts (${result.potential_conflicts.length}):`);
@@ -43378,6 +43948,8 @@ ${result.instructions}`
       other_collections: external_exports.number().optional().describe("With `collection`: max extra strongly-relevant hits from other collections (default from YAPA_CROSS_COLLECTION_RESULTS, 2; 0 = scope only)"),
       n_results: external_exports.number().optional().describe("Max results (default 5)"),
       tags: external_exports.array(external_exports.string()).optional().describe("Filter by tags"),
+      kind: external_exports.enum(MEMORY_KINDS).optional().describe("Only typed memories of this kind"),
+      status: external_exports.string().optional().describe("Only typed memories with this status"),
       include_promoted: external_exports.boolean().optional().describe("Include memories already promoted to system-prompt or training buckets. Default: false."),
       filters: external_exports.object({
         trainable_min: external_exports.number().min(0).max(1).optional().describe("Minimum trainable score (0-1)"),
@@ -43386,12 +43958,14 @@ ${result.instructions}`
         classified: external_exports.boolean().optional().describe("If true, only classified memories. If false, only unclassified.")
       }).optional().describe("Optional range filters on classifier scores")
     },
-    async ({ query, collection, other_collections, n_results, tags, include_promoted, filters }) => {
+    async ({ query, collection, other_collections, n_results, tags, kind, status, include_promoted, filters }) => {
       const results = await recallMemory(query, {
         collection,
         crossCollection: other_collections ?? getConfig().CROSS_COLLECTION_RESULTS,
         nResults: n_results,
         tags,
+        kind,
+        status,
         include_promoted,
         filters
       });
@@ -43399,7 +43973,7 @@ ${result.instructions}`
         return { content: [{ type: "text", text: "No memories found." }] };
       }
       const text = results.map(
-        (r) => `**${r.id}** (${r.collection ?? "unknown"}, salience: ${r.metadata.salience?.toFixed(2) ?? "?"}, distance: ${r.distance.toFixed(3)})
+        (r) => `**${r.id}**${typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : ""} (${r.collection ?? "unknown"}, salience: ${r.metadata.salience?.toFixed(2) ?? "?"}, distance: ${r.distance.toFixed(3)})
 ${r.content}`
       ).join("\n\n---\n\n");
       return { content: [{ type: "text", text }] };
@@ -43425,6 +43999,9 @@ ${r.content}`
       collection: external_exports.string().optional().describe("Filter by collection"),
       tags: external_exports.array(external_exports.string()).optional().describe("Filter by tags"),
       sector: external_exports.enum(["semantic", "episodic"]).optional().describe("Filter by sector"),
+      kind: external_exports.enum(MEMORY_KINDS).optional().describe("Only typed memories of this kind"),
+      status: external_exports.string().optional().describe("Only typed memories with this status"),
+      owner: external_exports.string().optional().describe("Only typed memories for this owner"),
       limit: external_exports.number().optional().describe("Max results (default 50)"),
       include_promoted: external_exports.boolean().optional().describe("Include memories already promoted to system-prompt or training buckets. Default: false."),
       filters: external_exports.object({
@@ -43434,11 +44011,14 @@ ${r.content}`
         classified: external_exports.boolean().optional().describe("If true, only classified memories. If false, only unclassified.")
       }).optional().describe("Optional range filters on classifier scores")
     },
-    async ({ collection, tags, sector, limit, include_promoted, filters }) => {
+    async ({ collection, tags, sector, kind, status, owner, limit, include_promoted, filters }) => {
       const results = await listMemories({
         collection,
         tags,
         sector,
+        kind,
+        status,
+        owner,
         limit,
         include_promoted,
         filters
@@ -43449,9 +44029,44 @@ ${r.content}`
       const text = results.map((r) => {
         const promoted = r.metadata.promoted_to ? ` promoted: ${r.metadata.promoted_to}` : "";
         const selected = r.metadata.selected_for ? ` selected: ${r.metadata.selected_for}` : "";
-        return `- **${r.id}** [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? "?"}, sector: ${r.metadata.sector ?? "?"}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? "..." : ""}`;
+        const label = typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : "";
+        return `- **${r.id}**${label} [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? "?"}, sector: ${r.metadata.sector ?? "?"}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? "..." : ""}`;
       }).join("\n");
       return { content: [{ type: "text", text }] };
+    }
+  );
+  server2.tool(
+    "memory_update",
+    'Change a memory in place: its status, owner, links or other typed fields, and optionally a dated note appended to its text. Record a decision that was needed with status "accepted" (or "rejected") and the choice as the note; tasks waiting on it become ready again. Answer a question with status "answered". Resolve a finding with a disposition. The id stays the same, unlike supersedes.',
+    {
+      id: external_exports.string().describe("Memory ID"),
+      collection: external_exports.string().optional().describe("Collection (default: searched)"),
+      note: external_exports.string().optional().describe('Appended as "<date> <user>: <note>", e.g. the choice made'),
+      tags: external_exports.array(external_exports.string()).optional().describe("Replace the tags"),
+      ...TYPED_PARAMS
+    },
+    async ({ id, collection, note, tags, ...typedArgs }) => {
+      const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
+      try {
+        const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, collection);
+        const label = typedLabel(r.metadata);
+        return { content: [{ type: "text", text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ""}` }] };
+      } catch (e) {
+        return typedError(e);
+      }
+    }
+  );
+  server2.tool(
+    "waiting",
+    "Everything waiting on a person: decisions to make, questions to answer, task steps only a person can take (tags needs-human, needs:<user>), and blocked tasks. Defaults to what waits on you (or on anyone) across every collection.",
+    {
+      collection: external_exports.string().optional().describe("One collection (default: all)"),
+      user: external_exports.string().optional().describe('Whose items (default: you). Use "*" for everyone.')
+    },
+    async ({ collection, user }) => {
+      const who2 = user === "*" ? void 0 : user ?? getConfig().USERNAME;
+      const w = await waitingOn({ collection, user: who2 });
+      return { content: [{ type: "text", text: formatWaiting(w, { collection: !collection }) }] };
     }
   );
   server2.tool(
@@ -44078,25 +44693,25 @@ ${r.content}`
           return { content: [{ type: "text", text: `Task ${id} not found.` }] };
         }
         const norm2 = (x) => Array.isArray(x) ? x : (x ?? "").toString().split(",").filter(Boolean);
-        const lines = [
+        const lines2 = [
           `**${task.id}**: ${task.title}`,
           `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
           `Collection: ${task.collection}`
         ];
-        if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
-        if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
-        if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
-        if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines.push(`Owner: ${task.metadata.origin_user}`);
+        if (task.metadata.due_date) lines2.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
+        if (task.metadata.completed_at) lines2.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
+        if (task.metadata.duration_minutes != null) lines2.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
+        if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines2.push(`Owner: ${task.metadata.origin_user}`);
         const held = claimNote(task, await claimsFor(task.collection));
-        if (held) lines.push(`Claim: ${held}`);
-        if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
+        if (held) lines2.push(`Claim: ${held}`);
+        if (task.metadata.notes) lines2.push(`Notes: ${task.metadata.notes}`);
         const tags = norm2(task.metadata.tags);
-        if (tags.length) lines.push(`Tags: ${tags.join(", ")}`);
+        if (tags.length) lines2.push(`Tags: ${tags.join(", ")}`);
         const deps = norm2(task.metadata.depends_on);
-        if (deps.length) lines.push(`Depends on: ${deps.join(", ")}`);
+        if (deps.length) lines2.push(`Depends on: ${deps.join(", ")}`);
         const blocks = norm2(task.metadata.blocks);
-        if (blocks.length) lines.push(`Blocks: ${blocks.join(", ")}`);
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+        if (blocks.length) lines2.push(`Blocks: ${blocks.join(", ")}`);
+        return { content: [{ type: "text", text: lines2.join("\n") }] };
       }
       const tasks = await listTasks({
         status,
@@ -44109,8 +44724,10 @@ ${r.content}`
       if (tasks.length === 0) {
         return { content: [{ type: "text", text: "No tasks found." }] };
       }
-      const claims = await claimsByCollection(tasks.filter((t) => t.metadata.status !== "complete").map((t) => t.collection));
-      const text = tasks.map((t) => {
+      const SHOWN = 100;
+      const shown = tasks.slice(0, SHOWN);
+      const claims = await claimsByCollection(shown.filter((t) => t.metadata.status !== "complete").map((t) => t.collection));
+      const lines = shown.map((t) => {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
         const held = t.metadata.status === "complete" ? "" : claimNote(t, claims.get(t.collection));
         if (held) line += ` (${held})`;
@@ -44119,8 +44736,9 @@ ${r.content}`
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
         line += ` [${t.collection}]`;
         return line;
-      }).join("\n");
-      return { content: [{ type: "text", text }] };
+      });
+      if (tasks.length > SHOWN) lines.push(`- _\u2026${tasks.length - SHOWN} more: narrow with status, priority or collection, or use task_next_`);
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
   server2.tool(
@@ -44137,9 +44755,20 @@ ${r.content}`
       blocked_reason: external_exports.string().optional(),
       duration: external_exports.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
       reclaim: external_exports.boolean().optional().describe("With status in_progress: take over a claim held by another session of your own user (e.g. after --resume). Confirm with the user first."),
-      claim_scope: external_exports.array(external_exports.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra", "res:staging-cluster"); task_next ranks tasks near live claims last')
+      claim_scope: external_exports.array(external_exports.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra", "res:staging-cluster"); task_next ranks tasks near live claims last'),
+      decision_needed: external_exports.object({
+        question: external_exports.string().min(1).describe("The question, in a line the person can answer"),
+        options: external_exports.array(external_exports.string()).min(2).describe("The options"),
+        recommendation: external_exports.string().optional().describe("What you recommend, and why"),
+        owner: external_exports.string().optional().describe("Who decides (YAPA user name); omit for anyone"),
+        context: external_exports.string().optional().describe("Background the person needs")
+      }).optional().describe("A choice only a person can make: records it as a decision that is needed, and the task waits on it (pending; task_next skips it until the decision is recorded with memory_update). Then take other work. Do not combine with a status other than pending."),
+      ...CLOSE_PARAMS
     },
-    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration: duration3, reclaim, claim_scope }) => {
+    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration: duration3, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+      if (decision_needed && status && status !== "pending") {
+        return { content: [{ type: "text", text: "decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending." }], isError: true };
+      }
       const updates = {};
       if (claim_scope) updates.claim_scope = claim_scope;
       if (title) updates.title = title;
@@ -44165,29 +44794,46 @@ ${r.content}`
         updates.duration_minutes = parsed;
       }
       try {
-        const r = await updateTask(id, updates, { reclaim });
+        validateLearned(learned);
+        let decision;
+        let r;
+        if (decision_needed) {
+          const { status: _s, ...rest } = updates;
+          const d = await requestDecision(id, decision_needed, { reclaim }, rest);
+          decision = d.decision;
+          r = d;
+        } else {
+          r = await updateTask(id, updates, { reclaim });
+        }
+        const recorded = learned?.length || follow_ups?.length ? await recordForTask({ id: r.id, collection: (await getTask(r.id)).collection }, { learned, follow_ups }) : void 0;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
+        if (decision) text += `
+Recorded decision ${decision} (needed${decision_needed.owner ? `, for ${decision_needed.owner}` : ""}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim2 = r.claim ? describeClaim(r.claim) : "";
         if (claim2) text += `
 ${claim2}`;
         const release = releaseNote(r.release);
         if (release) text += `
 ${release}`;
+        const rec = closeText({ recorded });
+        if (rec) text += `
+${rec}`;
         return { content: [{ type: "text", text }] };
       } catch (e) {
         if (e instanceof TaskClaimedError) return { content: [{ type: "text", text: e.message }], isError: true };
-        throw e;
+        return typedError(e);
       }
     }
   );
   server2.tool(
     "task_complete",
-    "Mark a task as done. Handles recurring task regeneration.",
+    "Mark a task as done, and record what it produced in the same call: learned (findings, decisions made, limitations, questions, ideas, stored as typed memories linked to the task) and follow_ups (new tasks). Handles recurring task regeneration.",
     {
       id: external_exports.string().describe("Task ID to complete"),
-      duration: external_exports.string().optional().describe('Hands-on effort to complete, e.g. "90m", "2h", "1.5d"')
+      duration: external_exports.string().optional().describe('Hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
+      ...CLOSE_PARAMS
     },
-    async ({ id, duration: duration3 }) => {
+    async ({ id, duration: duration3, learned, follow_ups }) => {
       let durationMinutes;
       if (duration3) {
         const parsed = parseDuration(duration3);
@@ -44196,7 +44842,12 @@ ${release}`;
         }
         durationMinutes = parsed;
       }
-      const result = await completeTask(id, durationMinutes);
+      let result;
+      try {
+        result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
+      } catch (e) {
+        return typedError(e);
+      }
       let text = `Completed task ${id}`;
       if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
       const release = releaseNote(result.release);
@@ -44205,21 +44856,26 @@ ${release}`;
       if (result.regeneratedId) {
         text += ` \u2192 regenerated as ${result.regeneratedId} (recurring)`;
       }
+      const rec = closeText(result);
+      if (rec) text += `
+${rec}`;
       return { content: [{ type: "text", text }] };
     }
   );
   server2.tool(
     "task_next",
-    "The ready queue for a collection: pending tasks whose dependencies are complete and that nobody has claimed, best first (priority, due date, how many tasks each unblocks, age; tasks near live claims last), with the reason each other open task was skipped. claim: true also claims the first ready task (moves it to in_progress), trying the next one if someone else got it first.",
+    "The ready queue for a collection: pending tasks whose dependencies are complete, that wait on no open decision, need no person (needs-human) and that nobody has claimed, best first (priority, due date, how many tasks each unblocks, age; tasks near live claims last), with the reason each other open task was skipped. claim: true also claims the first ready task (moves it to in_progress), trying the next one if someone else got it first.",
     {
       collection: external_exports.string().describe("Collection to pick from"),
       tags: external_exports.array(external_exports.string()).optional().describe("Only tasks carrying all of these tags"),
       exclude_tags: external_exports.array(external_exports.string()).optional().describe("Skip tasks carrying any of these tags"),
-      claim: external_exports.boolean().optional().describe("Claim the first ready task"),
+      claim: external_exports.boolean().optional().describe("Claim the first ready task (or, with none ready, the first cleanup item)"),
+      auto_only: external_exports.boolean().optional().describe("Only tasks tagged auto (for unattended work)"),
+      include_cleanup: external_exports.boolean().optional().describe("List cleanup items even when tasks are ready"),
       limit: external_exports.number().int().min(1).max(50).optional().describe("Ready tasks to show (default 5)")
     },
-    async ({ collection, tags, exclude_tags, claim: claim2, limit }) => {
-      const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim: claim2 });
+    async ({ collection, tags, exclude_tags, claim: claim2, auto_only, include_cleanup, limit }) => {
+      const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim: claim2, autoOnly: auto_only, includeCleanup: include_cleanup });
       const lines = [];
       if (!r.claimsKnown) lines.push("_Claims could not be read (offline or signed out): teammates may already be on some of these._");
       if (claim2) {
@@ -44240,6 +44896,10 @@ ${release}`;
         if (r.ready.length > shown.length) lines.push(`- _\u2026${r.ready.length - shown.length} more_`);
       } else if (!claim2) {
         lines.push("No ready tasks.");
+      }
+      if (r.cleanup.length) {
+        lines.push("", `**Cleanup** (claimed as a lease on its key; when done: lease action release, key <key>, collection ${collection}):`);
+        for (const c of r.cleanup) lines.push(`- **${c.key}** ${c.title}${c.held_by ? ` (held by ${c.held_by})` : ""}`);
       }
       if (r.skipped.length) {
         lines.push("", "**Skipped:**");

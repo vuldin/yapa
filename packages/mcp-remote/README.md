@@ -53,6 +53,10 @@ Rejections log `{"event":"auth_failure","reason":...}` (no tokens, no emails).
 | `task_search` | `query`, `collection?` | top 10 by similarity |
 | `collection_list` | | shared collections with counts |
 | `collection_changes` | `collection`, `since` (ISO or Unix seconds) or `cursor` | the sync pull feed (own device included, no embeddings): compact items + deletions + next cursor, for status digests |
+| `waiting` | `collection?`, `user?` (default: the caller; `*` = everyone) | what waits on a person, in the same sections and lines as the local `waiting` tool: decisions needed/proposed and open questions (for their owner or anyone), open tasks tagged `needs-human` / `needs:<user>`, blocked tasks (for their owner) |
+
+Typed memories show their label after the id (`[decision, needed, for alice]`),
+and task lines add `needs a person (<names>|anyone)` and `waits on <ids>`.
 
 `global`, `private-*` and `local-*` never exist on the service and are
 refused. Results name the collection and author (`by alice, edited by bob`);

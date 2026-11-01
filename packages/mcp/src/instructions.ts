@@ -95,11 +95,29 @@ already captured in git history or in an existing memory.
   session's recall will surface it.
 
 ### Task Management Lifecycle
-- On completion: \`task_complete\`
-- On blocker: \`task_update\` with status \`blocked\` and a note explaining the block
+- On completion: \`task_complete\`, recording what the task produced in the same
+  call: \`learned\` (typed memories linked to it) and \`follow_ups\` (new tasks)
+- On blocker: \`task_update\` with status \`blocked\` and a note explaining the block;
+  when the blocker is a person's choice, \`decision_needed\` instead (the task
+  waits on the decision and comes back once it is recorded)
 - On scope change: \`task_update\` to amend the description rather than creating
   a duplicate
+- Triage tags: \`auto\` (an unattended session may do all of it), \`needs-human\`
+  (a step only a person takes), \`needs:<user>\` (one person must take it)
 - Session start: covered by Per-Prompt Routine step 3
+
+### Where What You Learn Goes
+- Give a memory a \`kind\` so it can be listed and waited on: \`finding\` (a
+  result, root cause, retraction or trap), \`decision\` (\`accepted\` when made;
+  \`needed\`, with \`options\`, a \`recommendation\` and the \`owner\`, when only a
+  person can make it), \`limitation\` (with \`exit_criteria\`), \`question\` (with
+  the \`owner\` who must answer), \`idea\`. Follow-up work is a task.
+- Never leave a choice only a person can make in chat: record it.
+- Record a person's answer with \`memory_update\` (decision: status accepted or
+  rejected, the choice as \`note\`; question: status answered).
+- \`waiting\` lists everything waiting on people; session start lists what
+  waits on you.
+- A project's own instructions win where they keep these records elsewhere.
 
 ### Task Claims
 - In a shared collection, setting a task to \`in_progress\` claims it for

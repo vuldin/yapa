@@ -122,4 +122,13 @@ describe('extractMemories', () => {
     const results = await extractMemories(input, { call: async () => many, maxMemories: 2 });
     expect(results).toHaveLength(2);
   });
+
+  it('v2: keeps a known kind, an owner on questions only, and drops unknown kinds', () => {
+    const r = parseExtractorResponse(JSON.stringify([
+      { content: 'Ask the vendor about limits', kind: 'question', owner: 'alex' },
+      { content: 'A finding', kind: 'finding', owner: 'ignored' },
+      { content: 'Strange kind', kind: 'banana' },
+    ]));
+    expect(r.map(x => [x.kind, x.owner])).toEqual([['question', 'alex'], ['finding', undefined], [undefined, undefined]]);
+  });
 });

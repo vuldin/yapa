@@ -15,7 +15,7 @@
 
 import { callCurationLLM } from './provider.js';
 
-export const EXTRACTOR_PROMPT_VERSION = 'v1';
+export const EXTRACTOR_PROMPT_VERSION = 'v2';
 
 export const EXTRACTOR_SYSTEM_PROMPT = `You are a memory extractor for a long-term memory system. Given ONE conversation turn — the user's message and the assistant's response — decide whether anything said is worth storing in long-term memory, and extract it.
 
@@ -42,6 +42,14 @@ RULES
 - Assign salience 1.0-3.0: 1.0 minor/contextual, 2.0 clearly useful, 3.0 critical hard-won knowledge. The caller may clamp this.
 - sector is "semantic" for durable facts/patterns, "episodic" for events, decisions, and things tied to a moment in time.
 - tags: 1-4 short lowercase tags for categorization.
+- kind (optional; omit for an ordinary fact or preference):
+  - "finding": a result, a root cause, a retraction of something believed before, or a methodology trap
+  - "decision": a choice that WAS MADE in this turn (by the user, or agreed with them)
+  - "limitation": something the system cannot do yet, and what would change that
+  - "question": an open question that someone outside this conversation (a person or another team) has to answer
+  - "idea": a proposed capability or change nobody has committed to
+  Never mark a choice that is still open as a decision: an open choice is not stored by you.
+- owner (only for a question): the person or team who has to answer, if named.
 
 OUTPUT FORMAT
 Return valid JSON only. No commentary. No markdown fences. A JSON array of candidates:
@@ -51,6 +59,8 @@ Return valid JSON only. No commentary. No markdown fences. A JSON array of candi
     "tags": ["<tag>"],
     "sector": "semantic" | "episodic",
     "salience": <number 1.0-3.0>,
+    "kind": "finding" | "decision" | "limitation" | "question" | "idea" (optional),
+    "owner": "<name>" (optional, questions only),
     "rationale": "<one short sentence: why this is durable>"
   }
 ]
@@ -71,7 +81,13 @@ export interface ExtractedMemory {
   sector: 'semantic' | 'episodic';
   salience: number;
   rationale: string;
+  /** v2: what kind of knowledge (memory/kinds.ts). A decision is always one that was made. */
+  kind?: 'finding' | 'decision' | 'limitation' | 'question' | 'idea';
+  /** v2: who must answer a question. */
+  owner?: string;
 }
+
+const EXTRACTED_KINDS = ['finding', 'decision', 'limitation', 'question', 'idea'] as const;
 
 export interface ExtractOptions {
   /** Optional injected LLM call for testing. */
@@ -143,12 +159,17 @@ export function parseExtractorResponse(raw: string): ExtractedMemory[] {
       ? tagsRaw.filter((t): t is string => typeof t === 'string' && !!t.trim()).map(t => t.trim().toLowerCase()).slice(0, 4)
       : [];
 
+    const kind = (EXTRACTED_KINDS as readonly string[]).includes((entry as any).kind) ? (entry as any).kind as ExtractedMemory['kind'] : undefined;
+    const owner = kind === 'question' && typeof (entry as any).owner === 'string' && (entry as any).owner.trim() ? (entry as any).owner.trim() : undefined;
+
     results.push({
       content: content.trim(),
       tags,
       sector: (entry as any).sector === 'episodic' ? 'episodic' : 'semantic',
       salience: clampSalience((entry as any).salience),
       rationale: typeof (entry as any).rationale === 'string' ? (entry as any).rationale : '',
+      ...(kind ? { kind } : {}),
+      ...(owner ? { owner } : {}),
     });
   }
   return results;

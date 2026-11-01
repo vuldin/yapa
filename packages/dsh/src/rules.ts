@@ -49,12 +49,16 @@ Capture as soon as the trigger fires — do NOT batch to the end of the session.
 
 **Do not store:** ephemeral conversation state, obvious code patterns, anything already captured in git history or an existing memory.
 
+### Where what you learn goes
+Give a memory a \`kind\` when it is one of these, so it can be listed and waited on: a result, root cause, retraction or trap is a \`finding\` (resolve it later with a \`disposition\`); a choice made is a \`decision\` with status \`accepted\`; a choice only a person can make is a \`decision\` with status \`needed\`, \`options\`, a \`recommendation\` and the \`owner\` (never leave it only in chat; for the task you are on, use \`yapa_task_update\` with \`decision_needed\` and take other work); something that can't be done yet is a \`limitation\` with \`exit_criteria\`; a question for someone else is a \`question\` with its \`owner\`; an uncommitted idea is an \`idea\`; follow-up work is a task. A project's own instructions win where they keep these records elsewhere. The background capture also types what it stores and records a person's answer to an open decision or question it sees in the turn; record one yourself with \`yapa_memory_update\` when it matters now. \`yapa_waiting\` lists what waits on people; the context lists what waits on you.
+
 ### Journal
 - Call \`yapa_journal_append\` with a one-line note when a meaningful step completes.
 - Journal drafts consolidate automatically when the session ends; you may call \`yapa_journal_consolidate\` earlier if the session's work reaches a natural close.
 
 ### Task lifecycle
-- On completion: \`yapa_task_complete\`. On blocker: \`yapa_task_update\` with status \`blocked\` and a reason. On scope change: amend the task rather than duplicating it.
+- On completion: \`yapa_task_complete\`, with \`learned\` (typed memories linked to the task) and \`follow_ups\` (new tasks) in the same call. On blocker: \`yapa_task_update\` with status \`blocked\` and a reason, or \`decision_needed\` when the blocker is a person's choice. On scope change: amend the task rather than duplicating it.
+- Triage tags: \`auto\` (an unattended session may do all of it), \`needs-human\` (a step only a person takes), \`needs:<user>\`. \`yapa_task_next\` never offers \`needs-human\` tasks.
 - Claims: in a shared collection, setting a task to \`in_progress\` claims it (a lease on its id) and leaving \`in_progress\` releases it. If the update is refused, nothing changed: tell the user who holds the task and offer other work. If the claim is NOT shared (offline), tell the user others may start it too. Pass on any "**YAPA claim:**" line in the context.
 
 ### Memory compaction (not context compaction)

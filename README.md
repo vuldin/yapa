@@ -94,7 +94,7 @@ Configure options, or `claude plugin configure yapa`):
 | `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
 | `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
 | `status_label` | `yapa` | The name the sync status line shows (see [Sync health in the status line](#sync-health-in-the-status-line)) |
-| `response_capture` | off | Auto-capture durable findings after each turn (see hooks below) |
+| `response_capture` | on | After each turn: capture durable findings (typed: finding, decision made, limitation, question, idea) and record what the turn settles in open decisions, questions and findings (see hooks below) |
 
 For a whole team, add the marketplace and enable the plugin in managed or
 repo settings (`extraKnownMarketplaces` + `enabledPlugins: {"yapa@yapa": true}`).
@@ -137,7 +137,7 @@ capabilities with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`),
 plus `yapa_status` and `yapa_storage_import`. `setup_instructions` and
 `uninstall` are MCP-only (the plugin has nothing to write into config files).
 
-**Tool surface, kept lean:** the 28 tools below are visible by default. The
+**Tool surface, kept lean:** the 30 tools below are visible by default. The
 ML-ops subsystem (curation classifier, bucket routing, system-prompt
 companion, training, eval, adapter promotion — 18 more) is operator workflow,
 not daily agent surface: it appears only when `trainingPipeline: true` (DSH
@@ -148,10 +148,12 @@ walkthrough and its tools.
 | Tool | Description |
 |------|-------------|
 | `setup_instructions` | Generate behavioral instructions for CLAUDE.md / AGENTS.md |
-| `memory_store` | Store memory with content, tags, salience, sector, collection |
+| `memory_store` | Store memory with content, tags, salience, sector, collection; optionally typed (`kind`: finding, decision, limitation, question, idea, with status, owner, options, links; see [Findings, decisions and what waits on people](#findings-decisions-and-what-waits-on-people)) |
+| `memory_update` | Change a memory in place: status, owner, links, a dated note (records a decision, answers a question, resolves a finding) |
 | `memory_recall` | Semantic search ranked by distance + salience, with optional collection/tag/score filters |
 | `memory_forget` | Delete memory by ID |
-| `memory_list` | List memories with metadata filters (tag, sector, classifier scores) |
+| `memory_list` | List memories with metadata filters (tag, sector, kind, status, owner, classifier scores) |
+| `waiting` | Everything waiting on a person: decisions to make, questions to answer, steps only a person can take, blocked tasks (default: what waits on you) |
 | `compaction_suggest` | Group similar non-archived memories for rolling-summary consolidation |
 | `compaction_apply` | Replace a group with a summary memory and archive the originals |
 | `journal_append` | Append a one-line draft entry to the current session's journal |
@@ -159,9 +161,9 @@ walkthrough and its tools.
 | `janitor_now` | Run the contradiction janitor: resolve near-duplicate pairs (archive duplicates, supersede stale memories, keep distinct facts) |
 | `task_create` | Create task with title, priority, due date, tags, collection |
 | `task_list` | List tasks with filters; pass `id` for a single task with full detail (notes, dependencies) |
-| `task_update` | Update task fields (including renaming via `title`); `status: in_progress` claims a task in a shared collection (see [Task claims](#task-claims)) |
-| `task_next` | The ready queue for a collection: what to start next, why other tasks were skipped; `claim: true` claims the first ready task |
-| `task_complete` | Mark done + handle recurring regeneration |
+| `task_update` | Update task fields (including renaming via `title`); `status: in_progress` claims a task in a shared collection (see [Task claims](#task-claims)); `decision_needed` records a person's choice the task then waits on; `learned` / `follow_ups` record what it produced |
+| `task_next` | The ready queue for a collection: what to start next (skipping tasks that wait on an open decision or need a person), why other tasks were skipped, cleanup items when nothing is ready; `claim: true` claims the first; `auto_only` for unattended work |
+| `task_complete` | Mark done + handle recurring regeneration; `learned` (typed memories linked to the task) and `follow_ups` (new tasks) record what it produced in the same call |
 | `task_delete` | Remove a task |
 | `task_search` | Semantic search across tasks |
 | `task_add_dependency` | Add depends-on/blocks relationship |
@@ -188,9 +190,9 @@ implements YAPA's Claude Code hooks. The plugin registers them automatically;
 
 | Hook | What it does |
 |------|--------------|
-| `SessionStart` | Detects scope from `cwd` and `YAPA_PROJECT_ROOTS`, pulls teammates' latest writes for that collection, injects open tasks + top memories + compaction candidates (plus the standing rules under the plugin). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
+| `SessionStart` | Detects scope from `cwd` and `YAPA_PROJECT_ROOTS`, pulls teammates' latest writes for that collection, injects open tasks + what waits on you (decisions, questions, person-only steps, across collections) + top memories + compaction candidates (plus the standing rules under the plugin). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
 | `UserPromptSubmit` | Pulls the active collection from the shared DB (bounded by `YAPA_HOOK_PULL_TIMEOUT_MS`, fail-open), then injects the top 3 recall matches for the prompt. Teammates' items are marked `by <user>`; hits from other collections `from <collection>`. |
-| `Stop` (async) | With `YAPA_RESPONSE_CAPTURE=true`: judges the finished turn (the buffered prompt + Claude Code's `last_assistant_message`) with an aux model and stores durable findings as `auto-capture` memories (salience ≤ 2.0, deduplicated; a changed fact supersedes the stale memory). Uses `claude -p --model haiku` when no curation API key is configured, so subscription users need no key. The result shows as a one-line notice on the next prompt. |
+| `Stop` (async) | Unless `YAPA_RESPONSE_CAPTURE=false`: judges the finished turn (the buffered prompt + Claude Code's `last_assistant_message`) with an aux model: it stores durable findings as `auto-capture` memories (salience ≤ 2.0, deduplicated, typed when they are a finding, a decision made, a limitation, a question or an idea, and linked to the task the session holds), and it records what the turn settles in the open items it touches (a person's choice on a needed decision, an answer to a question, a finding's disposition), so a task waiting on a decision comes back by itself. Uses `claude -p --model haiku` when no curation API key is configured, so subscription users need no key. The result shows as a one-line notice on the next prompt. |
 | `PostCompact` (async) | Stores Claude Code's compaction summary as an episodic `compaction` memory, so it outlives the context window. |
 | `SessionEnd` | Cleans up the session's hook state. Journal consolidation and the final sync push happen in the MCP server's own shutdown (it owns the journal session). |
 
@@ -312,7 +314,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_SYNC_PULL_OVERLAP_SECONDS` | Re-read window on each pull so mid-pull pushes are never skipped | `120` |
 | `YAPA_DEVICE_ID` | Stable id for this machine (else generated once at `YAPA_DEVICE_ID_PATH`) | _(generated)_ |
 | `YAPA_HOOK_PULL_TIMEOUT_MS` | Cap on the hooks' pre-recall pull | `4000` |
-| `YAPA_RESPONSE_CAPTURE` | Auto-capture durable findings after each turn (Stop hook) | `false` |
+| `YAPA_RESPONSE_CAPTURE` | After each turn (Stop hook): capture typed findings and record what the turn settles in open decisions and questions | `true` |
 | `YAPA_CURATION_LLM_PROVIDER` | Aux model for capture/curation: `anthropic` \| `openai` \| `fireworks` \| `ollama` \| `claude-cli` | `anthropic` (hooks fall back to `claude-cli` without a key) |
 | `YAPA_MODEL_CACHE_DIR` | Where the in-process embedder caches model weights | library default |
 
@@ -391,6 +393,27 @@ Writes reach the remote seconds after they happen, but a status change is still 
 Completing, blocking, resetting to pending or deleting the task releases the claim. The hooks renew this session's claims while it is active, and a claim lapses one TTL (2 h by default) after the session goes quiet. Its task then shows `no live claim` and is offered again by `task_next`. If another session takes a claim over, the next prompt says so.
 
 `task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
+
+### Findings, decisions and what waits on people
+
+A memory can say what kind of knowledge it holds, so it can be listed, waited on and kept current:
+
+| `kind` | statuses | for |
+|---|---|---|
+| `finding` | open, resolved (with a `disposition`: decision, task, limitation, or no-action and a reason) | a result, root cause, retraction or trap |
+| `decision` | needed, proposed, accepted, superseded, rejected | a choice; `needed` (with `options`, a `recommendation` and the `owner` who decides) is one only a person can make |
+| `limitation` | open, mitigated, accepted, closed (with `exit_criteria`) | something that can't be done yet |
+| `question` | open, answered (with the `owner` who must answer) | a question for a person or another team |
+| `idea` | proposed, adopted, dropped | a change nobody has committed to |
+
+They are created and kept current in the normal course of work:
+- **When work closes.** `task_complete` takes `learned` (typed memories linked to the task) and `follow_ups` (new tasks); the reply says when nothing was recorded. `task_update` with `decision_needed` records a choice only a person can make, and the task waits on it (pending, `waits_on`): `task_next` skips it until the decision is recorded, then offers it again by itself.
+- **After each turn** (`response_capture`, on by default; always on in DSH). The aux model types what it captures, and it judges the open decisions, questions and findings the turn touches (those the session's task waits on or recorded, and those near the turn). When the person chose, answered or settled one, it is updated with a dated note. Only an item's owner settles a decision that names one; a move the rules don't allow (a finding resolved without a disposition, reopening an item) is dropped.
+- **By hand.** `memory_update` records a decision (`status: accepted`, the choice as `note`) or an answer.
+
+`waiting` (and `yapa waiting`) lists everything waiting on people; session start lists what waits on you. Triage tags on tasks: `auto` (an unattended session may do all of it), `needs-human` (a step only a person takes), `needs:<user>`; `task_next` never offers `needs-human` tasks, and `auto_only` offers only `auto` ones. When nothing is ready it offers cleanup items (`cleanup:triage`, `cleanup:findings`, `cleanup:compaction`), each claimable like a task. The `/yapa:work` skill runs the loop: take the next task, do it, record what it produced, complete it, repeat.
+
+Projects that keep their records elsewhere can publish the ones that matter to these views with `yapa memory put --ref <key>` (created once, updated in place afterwards); `yapa memory list` reads them back as JSON.
 
 ### Deduplication
 

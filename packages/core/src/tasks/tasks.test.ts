@@ -81,3 +81,15 @@ describe('removeDependency', () => {
     await expect(removeDependency('nope-1', 'nope-2')).rejects.toThrow(/Neither task/);
   });
 });
+
+describe('listTasks', () => {
+  it('finds open tasks however many completed tasks the collection holds', async () => {
+    const C = 'project-busy';
+    for (let i = 0; i < 120; i++) await createTask(`done ${i}`, { status: 'complete' }, C);
+    const open = await createTask('still open', {}, C);
+    const { listTasks } = await import('./list.js');
+    expect((await listTasks({ collection: C })).map(t => t.id)).toEqual([open]);
+    expect(await listTasks({ collection: C, includeComplete: true })).toHaveLength(121);
+    expect(await listTasks({ collection: C, includeComplete: true, limit: 5 })).toHaveLength(5);
+  });
+});

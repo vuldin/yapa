@@ -16,13 +16,17 @@ import {
 import type { Caller } from './auth.js';
 import type { QueryEmbedder } from './embedder.js';
 import {
-  author, dueDate, isoDate, isoMinute, itemContent, joinBounded, list, salience, truncateBytes,
+  author, buildWaiting, dueDate, formatWaiting, isoDate, isoMinute, itemContent, joinBounded, list, MAX_RESULT_BYTES,
+  needsPersonText, salience, truncateBytes, typedSuffix, waitingCount, waitsOnText,
 } from './format.js';
-import { getTask, listMemories, listTasks, memoryChunks, recentMemories, vectorSearch, type DocRow } from './queries.js';
+import {
+  getTask, listMemories, listTasks, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
+  type DocRow,
+} from './queries.js';
 import { inferCollection, resolveCollection } from './resolve.js';
 
 export const READ_TOOLS = [
-  'memory_recall', 'memory_list', 'task_list', 'task_search', 'collection_list', 'collection_changes',
+  'memory_recall', 'memory_list', 'task_list', 'task_search', 'collection_list', 'collection_changes', 'waiting',
 ] as const;
 
 /** Exposed unless YAPA_MCP_TOOLS says otherwise: one obvious tool for ADP users. */
@@ -199,12 +203,17 @@ export function isTemporal(query: string): boolean {
 }
 
 function memoryBlock(r: DocRow, extra = ''): string {
-  return `**${r.id}** (${r.collection}${extra}, ${author(r)}, salience: ${salience(r.metadata)}, distance: ${(r.distance ?? 0).toFixed(3)}, updated ${isoDate(r.updated_at)})\n${itemContent(r.content)}`;
+  return `**${r.id}**${typedSuffix(r.metadata)} (${r.collection}${extra}, ${author(r)}, salience: ${salience(r.metadata)}, distance: ${(r.distance ?? 0).toFixed(3)}, updated ${isoDate(r.updated_at)})\n${itemContent(r.content)}`;
+}
+
+/** " | needs a person (alex) | waits on m-1" (empty when neither applies). */
+function taskFlags(m: Record<string, any>): string {
+  return [needsPersonText(m), waitsOnText(m)].filter(Boolean).map(f => ` | ${f}`).join('');
 }
 
 function taskLine(t: DocRow): string {
   const m = t.metadata;
-  let line = `- **${t.id}** [${m.status ?? '?'}] ${m.priority ?? '?'} | ${truncateBytes(t.content, 512)}`;
+  let line = `- **${t.id}** [${m.status ?? '?'}] ${m.priority ?? '?'} | ${truncateBytes(t.content, 512)}${taskFlags(m)}`;
   const due = dueDate(m);
   if (due) line += ` (due: ${due})`;
   line += ` (${author(t)}, updated ${isoDate(t.updated_at)}) [${t.collection}]`;
@@ -337,7 +346,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       const next_cursor = page.next_cursor;
       if (rows.length === 0) return { text: 'No memories found.', count: 0, collections: [coll] };
       const blocks = rows.map(r =>
-        `- **${r.id}** [${r.collection}] (${author(r)}, salience: ${salience(r.metadata)}, sector: ${r.metadata.sector ?? '?'}, updated ${isoDate(r.updated_at)}): ${itemContent(r.content)}`);
+        `- **${r.id}**${typedSuffix(r.metadata)} [${r.collection}] (${author(r)}, salience: ${salience(r.metadata)}, sector: ${r.metadata.sector ?? '?'}, updated ${isoDate(r.updated_at)}): ${itemContent(r.content)}`);
       const footer = next_cursor ? [`More memories: call memory_list again with cursor "${next_cursor}".`] : [];
       return { text: joinBounded(blocks, '\n', footer), count: rows.length, collections: [coll] };
     }),
@@ -379,6 +388,12 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         if (deps.length) lines.push(`Depends on: ${deps.join(', ')}`);
         const blocks = list(m.blocks);
         if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
+        const needs = needsPersonText(m);
+        if (needs) lines.push(`Waiting: ${needs}`);
+        const waits = waitsOnText(m);
+        if (waits) lines.push(`Waiting: ${waits} (not ready while they are open)`);
+        const memories = list(m.memory_ids);
+        if (memories.length) lines.push(`Memories: ${memories.join(', ')}`);
         return { text: truncateBytes(lines.join('\n'), 16 * 1024), count: 1, collections: [t.collection] };
       }
       const coll = await pickCollection(collection);
@@ -415,7 +430,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         : await vectorSearch(pool, me, { embedding, type: 'task', collection: coll, limit: 10 });
       if (rows.length === 0) return { text: 'No matching tasks found.', count: 0, collections: coll ? [coll] : [] };
       const lines = rows.map(r =>
-        `- **${r.id}** [${r.metadata.status ?? '?'}] ${truncateBytes(r.content, 512)} (similarity: ${(1 - (r.distance ?? 1)).toFixed(3)}) (${author(r)}) [${r.collection}]`);
+        `- **${r.id}** [${r.metadata.status ?? '?'}] ${truncateBytes(r.content, 512)}${taskFlags(r.metadata)} (similarity: ${(1 - (r.distance ?? 1)).toFixed(3)}) (${author(r)}) [${r.collection}]`);
       return { text: joinBounded(lines, '\n'), count: rows.length, collections: [...new Set(rows.map(r => r.collection))] };
     }),
   );
@@ -467,7 +482,8 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
           type === 'task' ? `${m.status ?? '?'}/${m.priority ?? '?'}` : '',
           m.archived === true || m.archived === 'true' ? 'archived' : '',
         ].filter(Boolean).join(', ');
-        return `- ${isoMinute(d.updated_at)} ${type} **${d.id}** (${author(d)}${flags ? `, ${flags}` : ''}): ${truncateBytes(d.content, 1024)}`;
+        const label = type === 'memory' ? typedSuffix(m) : '';
+        return `- ${isoMinute(d.updated_at)} ${type} **${d.id}**${label} (${author(d)}${flags ? `, ${flags}` : ''}): ${truncateBytes(d.content, 1024)}`;
       });
       const dels = page.deletions.map(x => `- ${isoMinute(x.deleted_at)} deleted **${x.id}** by ${x.deleted_by}`);
       const header = `Changes in ${coll}: ${page.documents.length} document(s), ${page.deletions.length} deletion(s)${page.has_more ? ' (more available)' : ''}`;
@@ -478,6 +494,34 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         text: joinBounded([header, ...items, ...dels], '\n', footer),
         count: page.documents.length + page.deletions.length,
         collections: [coll],
+      };
+    }),
+  );
+
+  tool(
+    'waiting',
+    {
+      description: 'Everything waiting on a person: decisions to make, questions to answer, task steps only a person can take (tags needs-human, needs:<user>), and blocked tasks. Defaults to what waits on you (or on anyone) across every shared collection.',
+      inputSchema: {
+        collection: optString(z.string().max(200)).describe('Optional customer or project, by name or id; leave empty for all'),
+        user: optString(z.string().max(64)).describe('Whose items (default: you). Use "*" for everyone.'),
+      },
+      annotations: { title: 'Waiting on people', ...READ_ONLY },
+    },
+    instrument(ctx, 'waiting', async ({ collection, user }) => {
+      const coll = await pickCollection(collection);
+      const who = user === '*' ? undefined : (user?.trim() || me);
+      const [memories, tasks] = await Promise.all([
+        typedMemoriesForWaiting(pool, me, coll),
+        listTasks(pool, me, { collection: coll, includeComplete: false, limit: WAITING_MAX_ROWS }),
+      ]);
+      const w = buildWaiting(memories, tasks, who);
+      const now = ctx.nowSecs?.() ?? Date.now() / 1000;
+      const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
+      return {
+        text: truncateBytes(formatWaiting(w, { collection: !coll, now: Math.floor(now) }), MAX_RESULT_BYTES),
+        count: waitingCount(w),
+        collections: coll ? [coll] : [...new Set(items.map(i => i.collection))],
       };
     }),
   );

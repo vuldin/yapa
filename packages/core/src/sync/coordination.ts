@@ -73,6 +73,12 @@ function writeMarker(m: HeldMarker): void {
   }
 }
 
+/** The keys `session` holds in `collection` through YAPA (its claimed tasks, cleanup items). */
+export function heldKeys(session: string, collection: string): string[] {
+  const prefix = heldKey(collection, '');
+  return (readMarker(session)?.keys ?? []).filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length));
+}
+
 /**
  * Record that `session` holds a lease with this TTL (call after a grant).
  * With `held`, the lease is also watched: losing it to another holder leaves

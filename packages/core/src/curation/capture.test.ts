@@ -6,6 +6,7 @@ const input = { collection: 'project-acme', sessionId: 's1', turn: 4, userText: 
 
 function deps(overrides: Partial<CaptureDeps> = {}): CaptureDeps {
   return {
+    followThrough: vi.fn(async () => ({ judged: 0, changes: [] })) as any,
     extractMemories: vi.fn(async () => [{ content: 'acme API listens on port 9000', tags: ['ports'], salience: 4, sector: 'semantic', rationale: 'config' }]) as any,
     queryDocuments: vi.fn(async () => []) as any,
     resolveConflict: vi.fn() as any,
@@ -53,5 +54,22 @@ describe('captureTurn', () => {
   it('ignores archived neighbors and does nothing when extraction finds nothing', async () => {
     const empty = deps({ extractMemories: vi.fn(async () => []) as any });
     expect(await captureTurn(input, options, empty)).toEqual({ stored: 0, skipped: 0, superseded: 0 });
+  });
+
+  it('stores a typed candidate (a decision as made) linked to the session\'s task, and never replaces a typed memory', async () => {
+    const d = deps({
+      extractMemories: vi.fn(async () => [{ content: 'We use a shared cache', tags: [], salience: 2, sector: 'episodic', rationale: 'decided', kind: 'decision' }]) as any,
+    });
+    await captureTurn(input, { ...options, taskIds: ['t-7'] }, d);
+    const [, opts] = vi.mocked(d.storeMemory).mock.calls[0] as any;
+    expect(opts.typed).toEqual({ kind: 'decision', status: 'accepted', task_ids: ['t-7'] });
+
+    const typedNeighbor = deps({
+      queryDocuments: vi.fn(async () => [{ id: 'dec', content: 'shared cache', distance: 0.1, metadata: { kind: 'decision', status: 'needed' } }]) as any,
+      resolveConflict: vi.fn(async () => ({ action: 'supersede', targetId: 'dec', mergedContent: 'x', rationale: 'r' })) as any,
+    });
+    const r = await captureTurn(input, options, typedNeighbor);
+    expect(r).toMatchObject({ stored: 0, skipped: 1, superseded: 0 });
+    expect(typedNeighbor.storeMemory).not.toHaveBeenCalled();
   });
 });

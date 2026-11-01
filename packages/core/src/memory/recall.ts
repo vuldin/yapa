@@ -12,6 +12,9 @@ export interface RecallOptions {
   collection?: string;
   nResults?: number;
   tags?: string[];
+  /** Typed memories only: kind and/or status (memory/kinds.ts). */
+  kind?: string;
+  status?: string;
   include_promoted?: boolean;
   include_archived?: boolean;
   filters?: RecallFilters;
@@ -52,6 +55,8 @@ export async function recallMemory(
   const nResults = options.nResults ?? 5;
   const includePromoted = options.include_promoted ?? false;
   const filter: Record<string, any> = { type: 'memory' };
+  if (options.kind) filter.kind = options.kind;
+  if (options.status) filter.status = options.status;
 
   let results: RecallResult[];
 

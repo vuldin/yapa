@@ -1,4 +1,5 @@
 import { getConfig } from '../config.js';
+import { captureNudge, recordForTask, validateLearned, type FollowUp, type LearnedItem, type Recorded } from './close.js';
 import { updateDocument, getDocumentsByIds, listCollections, addDocument } from '../store/index.js';
 import { fromChroma } from '../metadata-adapter.js';
 import { assertWritable } from '../sync/syncable.js';
@@ -59,7 +60,7 @@ const RELEASE_OUTCOME: Record<string, string> = { complete: 'done', blocked: 'bl
  */
 export async function updateTask(
   id: string,
-  updates: Partial<TaskOptions> & { title?: string; blockedReason?: string },
+  updates: Partial<TaskOptions> & { title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[] },
   ctx: TaskUpdateContext = {},
 ): Promise<TaskUpdateResult> {
   let task = await getTask(id);
@@ -81,7 +82,7 @@ export async function updateTask(
   }
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes', 'claim_scope'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   const updatedMetadata: Record<string, any> = {
@@ -90,6 +91,10 @@ export async function updateTask(
     updated_at: Math.floor(Date.now() / 1000),
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  // A reason belongs to the block: leaving blocked clears it ('' because a store update merges keys).
+  if (updates.status !== undefined && updates.status !== 'blocked' && updates.blockedReason === undefined && task.metadata.blockedReason) {
+    updatedMetadata.blockedReason = '';
+  }
   // Local-only marker: an offline claim to retry once sync is back.
   if (result.claim?.kind === 'unshared') updatedMetadata.claim_unshared = result.claim.session;
   // Cleared with '' rather than deleted: a store update merges metadata keys.
@@ -116,9 +121,15 @@ export async function updateTask(
 }
 
 /** Mark task as complete. Handles recurring regeneration. */
-export async function completeTask(id: string, durationMinutes?: number, ctx: TaskUpdateContext = {}): Promise<{ regeneratedId?: string; release?: ReleaseResult }> {
+export async function completeTask(
+  id: string,
+  durationMinutes?: number,
+  ctx: TaskUpdateContext = {},
+  record: { learned?: LearnedItem[]; follow_ups?: FollowUp[] } = {},
+): Promise<{ regeneratedId?: string; release?: ReleaseResult; recorded?: Recorded; nudge?: string }> {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
+  validateLearned(record.learned);
 
   const completionUpdates: Partial<TaskOptions> = {
     status: 'complete',
@@ -134,6 +145,11 @@ export async function completeTask(id: string, durationMinutes?: number, ctx: Ta
   }
 
   const { release } = await updateTask(id, completionUpdates, ctx);
+  const recorded = record.learned?.length || record.follow_ups?.length
+    ? await recordForTask({ id: task.id, collection: task.collection }, record)
+    : undefined;
+  const nudge = captureNudge(task.id, task.metadata, recorded);
+  const extras = { ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
 
   // Handle recurring tasks
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
@@ -156,10 +172,10 @@ export async function completeTask(id: string, durationMinutes?: number, ctx: Ta
       recurrence_pattern: task.metadata.recurrence_pattern,
     }, task.collection);
 
-    return { regeneratedId: newId, ...(release ? { release } : {}) };
+    return { regeneratedId: newId, ...extras };
   }
 
-  return release ? { release } : {};
+  return extras;
 }
 
 function computeNextDue(currentDue: number, pattern: string): number {

@@ -15,7 +15,8 @@
  * by the signed-in user, and deletes every row it created afterwards (the
  * remote keeps its audit/deletions entries). Coordination cases release their
  * leases; the per-run counter row stays (no API removes counters), and the
- * task-id case consumes one of your task numbers (a gap in your ids).
+ * task-id and typed-metadata cases each consume one of your task numbers (a
+ * gap in your ids).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -119,6 +120,64 @@ describe.skipIf(!URL_)('live sync remote (opt-in conformance)', () => {
     const after = await pullCollection(COL, 0);
     expect(after.deleted).toBe(1);
     expect(await getDocumentsByIds(COL, [id])).toEqual([]);
+  }, 120_000);
+
+  // Typed memories (YAPA 1.6.0) live in metadata, which a remote stores and
+  // serves as given (docs/sync-api.md sections 7 and 8).
+  it('typed memory and task-link metadata round-trip; a status-only update is served', async () => {
+    const memId = `it-typed-${RUN}`;
+    let taskId: string;
+    try {
+      taskId = await backend.coordination.nextTaskId(0);
+    } catch (e) {
+      if (!notImplemented(e)) throw e;
+      taskId = `${getConfig().USERNAME}-${(await backend.maxTaskNumber()) + 1}`;
+    }
+    created.push(memId, taskId);
+    const typed = {
+      kind: 'decision', status: 'needed', owner: getConfig().USERNAME, task_ids: [taskId],
+      options: ['keep it at 1, which is simplest', 'raise it to 64'], recommendation: 'raise it to 64',
+      disposition: 'task', disposition_ids: [taskId, `${taskId}-x`], disposition_reason: 'tracked as a task',
+      exit_criteria: 'p99 under 5 ms', external_ref: `records/it-${RUN}.md`,
+    };
+    const links = { memory_ids: [memId], waits_on: [memId], tags: ['needs-human', 'needs:alex'] };
+
+    as('a');
+    await getStore().getOrCreateCollection(COL);
+    await getStore().addDocument(COL, memId, `yapa live typed decision ${RUN}`, { type: 'memory', ...typed, created_at: NOW, updated_at: NOW, is_synced: false });
+    await getStore().addDocument(COL, taskId, `yapa live typed task ${RUN}`, { type: 'task', status: 'pending', priority: 'low', ...links, created_at: NOW, updated_at: NOW, is_synced: false });
+    const pushed = await pushToRemote();
+    expect(pushed.errors).toBe(0);
+    expect(pushed.rejected).toBe(0);
+
+    // What the remote serves: the keys as pushed (arrays stay arrays, a comma stays inside its option).
+    const served = new Map((await backend.pull(COL, { since: 0, includeOwnDevice: true })).documents.map(d => [d.id, d]));
+    expect(served.get(memId)?.metadata).toMatchObject(typed);
+    expect(served.get(taskId)?.metadata).toMatchObject(links);
+
+    // And what a second device stores after pulling.
+    as('b');
+    expect((await pullCollection(COL, 0)).errors).toBe(0);
+    const [mem] = await getDocumentsByIds(COL, [memId]);
+    const [task] = await getDocumentsByIds(COL, [taskId]);
+    expect(mem?.metadata).toMatchObject(typed);
+    expect(task?.metadata).toMatchObject(links);
+
+    // A status-only update from device a (the decision was made).
+    as('a');
+    const [mine] = await getDocumentsByIds(COL, [memId]);
+    await getStore().updateDocument(COL, memId, { ...mine!.metadata, status: 'accepted', updated_at: NOW + 1, is_synced: false });
+    const again = await pushToRemote();
+    expect(again.errors).toBe(0);
+    expect(again.rejected).toBe(0);
+    const page = await backend.pull(COL, { since: 0, includeOwnDevice: true });
+    expect(page.documents.find(d => d.id === memId)?.metadata).toMatchObject({ ...typed, status: 'accepted' });
+
+    as('b');
+    const after = await pullCollection(COL, 0);
+    expect(after.errors).toBe(0);
+    const [updated] = await getDocumentsByIds(COL, [memId]);
+    expect(updated?.metadata).toMatchObject({ ...typed, status: 'accepted' });
   }, 120_000);
 
   it('leases: grant, conflict for a second session, held_by_other, release', async ctx => {

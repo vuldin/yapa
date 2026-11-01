@@ -16,6 +16,7 @@
  *
  * @module yapa/curation/janitor
  */
+import { isMemoryKind } from '../memory/kinds.js';
 import { archivedMetadata } from '../memory/archive.js';
 import { getConfig } from '../config.js';
 import { getDocumentsByFilter, getDocumentsByIds, listCollections, queryDocuments, updateDocument } from '../store/index.js';
@@ -60,8 +61,10 @@ export async function findDuplicatePairs(
   collection: string,
   distanceThreshold: number,
 ): Promise<Pair[]> {
+  // Typed memories (findings, decisions, ...) are never merged: a merge
+  // would change the id tasks wait on and drop the status.
   const all = (await getDocumentsByFilter(collection, { type: 'memory' }, 10000))
-    .filter(d => d.metadata.archived !== true);
+    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
 
   const seen = new Set<string>();
   const pairs: Pair[] = [];
@@ -70,7 +73,7 @@ export async function findDuplicatePairs(
       .catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
       const key = [doc.id, n.id].sort().join('|');
       if (seen.has(key)) continue;
       seen.add(key);

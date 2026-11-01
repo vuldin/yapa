@@ -287,7 +287,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, 'HOOK_PULL_TIMEOUT_MS', '4000'), 10),
     HOOK_INJECT_RULES: get(env, 'HOOK_INJECT_RULES', 'false') === 'true',
 
-    RESPONSE_CAPTURE: get(env, 'RESPONSE_CAPTURE', 'false') === 'true',
+    RESPONSE_CAPTURE: get(env, 'RESPONSE_CAPTURE', 'true') !== 'false',
     CAPTURE_MIN_CHARS: parseInt(get(env, 'CAPTURE_MIN_CHARS', '280'), 10),
     CAPTURE_MAX_MEMORIES: parseInt(get(env, 'CAPTURE_MAX_MEMORIES', '3'), 10),
     CAPTURE_MAX_SALIENCE: parseFloat(get(env, 'CAPTURE_MAX_SALIENCE', '2.0')),

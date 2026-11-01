@@ -84,8 +84,8 @@
     "response_capture": {
       "type": "boolean",
       "title": "Auto-capture findings",
-      "description": "After each turn, a small model (claude -p haiku, or your configured curation provider) stores durable findings as 'auto-capture' memories.",
-      "default": false
+      "description": "After each turn, a small model (claude -p haiku, or your configured curation provider) stores durable findings, typed as findings, decisions, questions and so on, and records what the turn settles in open decisions and questions. Off: only what the agent stores itself.",
+      "default": true
     }
   }
 }
