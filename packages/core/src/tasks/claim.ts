@@ -136,6 +136,31 @@ export async function claimTask(id: string, collection: string, metadata: Record
   }
 }
 
+/**
+ * Claim a key that is not a task (a cleanup item such as `cleanup:triage`):
+ * the same lease, with no task status to write.
+ */
+export async function claimKey(collection: string, key: string, opts: ClaimOptions = {}): Promise<ClaimResult> {
+  if (!claimsApply(collection)) return { kind: 'local', id: key };
+  const session = claimSession(opts.session);
+  try {
+    const c = await requireCoordination();
+    const r = await c.leaseAcquire({
+      collection, key, session,
+      ...(opts.scope ? { scope: opts.scope } : {}),
+      ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}),
+      ...(opts.title ? { title: opts.title } : {}),
+      ...(opts.reclaim ? { reclaim: true } : {}),
+    });
+    if (!r.granted) return { kind: 'refused', id: key, collection, session, conflicts: r.conflicts };
+    noteLeaseHeld(session, r.lease.ttl_seconds, undefined, { collection, key });
+    return { kind: 'granted', id: key, collection, session, lease: r.lease, renewed: r.renewed, ...(r.took_over_from ? { tookOverFrom: r.took_over_from } : {}) };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+    throw e;
+  }
+}
+
 /** Release this session's claim on a task. Never throws for an unreachable service. */
 export async function releaseTaskClaim(id: string, collection: string, outcome: string, session?: string): Promise<ReleaseResult> {
   if (!claimsApply(collection)) return { kind: 'local' };

@@ -35,7 +35,7 @@ describe('withSyncOnWrite', () => {
   });
 
   it('covers every tool that mutates syncable state', () => {
-    for (const name of ['memory_store', 'memory_forget', 'task_create', 'task_update', 'task_complete', 'task_delete', 'task_remove_dependency', 'collection_merge', 'journal_consolidate', 'compaction_apply']) {
+    for (const name of ['memory_store', 'memory_update', 'memory_forget', 'task_create', 'task_update', 'task_complete', 'task_delete', 'task_remove_dependency', 'collection_merge', 'journal_consolidate', 'compaction_apply']) {
       expect(SYNC_ON_WRITE_TOOLS.has(name)).toBe(true);
     }
   });
@@ -82,6 +82,30 @@ describe('registered tools over the local store', () => {
     const res = await call('task_remove_dependency', { task_id: a, depends_on_id: b });
     expect(res.content[0].text).toBe(`${a} no longer depends on ${b}`);
     expect((await getTask(a))?.metadata.depends_on ?? []).toEqual([]);
+  });
+
+  it('memory_store records a typed memory; memory_update records the choice; waiting lists it until then', async () => {
+    const stored = await call('memory_store', {
+      content: 'Retry forever or give up after a minute?', collection: 'project-typed',
+      kind: 'decision', status: 'needed', owner: 'tester', options: ['retry forever', 'give up after 60 s'], recommendation: 'give up after 60 s',
+    });
+    expect(stored.content[0].text).toMatch(/^Stored memory: (mem-\S+) \[decision, needed, for tester\]/);
+    const id = stored.content[0].text.match(/(mem-\S+)/)[1];
+
+    const bad = await call('memory_store', { content: 'x', collection: 'project-typed', kind: 'decision', status: 'needed', options: ['one'] });
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0].text).toMatch(/two options/);
+
+    const waiting = await call('waiting', {});
+    expect(waiting.content[0].text).toContain(`**${id}** (project-typed) [decision needed, for tester`);
+
+    const listed = await call('memory_list', { collection: 'project-typed', kind: 'decision', status: 'needed' });
+    expect(listed.content[0].text).toContain('[decision, needed, for tester]');
+
+    const upd = await call('memory_update', { id, status: 'accepted', note: 'give up after 60 s' });
+    expect(upd.content[0].text).toBe(`Updated ${id} in project-typed [decision, accepted, for tester]`);
+    expect((await call('waiting', {})).content[0].text).toBe('Nothing is waiting on anyone.');
+    expect((await call('memory_update', { id: 'mem-nope', status: 'accepted' })).isError).toBe(true);
   });
 
   it('collection_delete refuses a non-empty shared collection until confirmed', async () => {

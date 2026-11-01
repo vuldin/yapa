@@ -213,3 +213,33 @@ export async function getTask(pool: pg.Pool, username: string, id: string): Prom
     return r.rows[0] ? toRow(r.rows[0]) : undefined;
   });
 }
+
+// ---------------------------------------------------------------- waiting
+
+/** Upper bound on rows read per kind for the `waiting` tool. */
+export const WAITING_MAX_ROWS = 5000;
+
+/**
+ * Decision and question memories (not archived) for the `waiting` tool. A
+ * memory's `status` is its kind's status, not a task status, so it is not
+ * filtered here: buildWaiting applies the per-kind open statuses (and the
+ * kind defaults when status is absent), as core does.
+ */
+export async function typedMemoriesForWaiting(pool: pg.Pool, username: string, collection?: string): Promise<DocRow[]> {
+  return withUserTx(pool, username, async c => {
+    const values: unknown[] = [WAITING_MAX_ROWS];
+    let where = `metadata->>'type' = 'memory' AND metadata->>'kind' IN ('decision', 'question')
+      AND COALESCE(metadata->>'archived', '') <> 'true' AND ${LOCAL_ONLY_SQL}`;
+    if (collection !== undefined) {
+      values.push(collection);
+      where += ' AND collection = $2';
+    }
+    const r = await c.query(
+      `SELECT ${COLUMNS} FROM documents WHERE ${where}
+        ORDER BY updated_at, id
+        LIMIT $1`,
+      values,
+    );
+    return r.rows.map(toRow);
+  });
+}

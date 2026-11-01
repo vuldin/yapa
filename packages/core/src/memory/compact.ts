@@ -8,6 +8,7 @@ import {
 } from '../store/index.js';
 
 import { storeMemory } from './store.js';
+import { isMemoryKind } from './kinds.js';
 
 export interface CompactionGroup {
   seed_id: string;
@@ -48,8 +49,10 @@ function intersect(a: string[], b: string[]): string[] {
  * repeat. Groups smaller than `getConfig().COMPACTION_MIN_GROUP_SIZE` are skipped.
  */
 export async function suggestCompaction(collection: string): Promise<CompactionGroup[]> {
+  // Typed memories (findings, decisions, ...) keep their own identity and
+  // status: a decision folded into a summary could no longer be waited on.
   const all = (await getDocumentsByFilter(collection, { type: 'memory' }, 10000))
-    .filter(d => d.metadata.archived !== true);
+    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
 
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
 
@@ -66,6 +69,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
       n.id !== seed.id &&
       !consumed.has(n.id) &&
       n.metadata.archived !== true &&
+      !isMemoryKind(n.metadata.kind) &&
       n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE,
     );
 

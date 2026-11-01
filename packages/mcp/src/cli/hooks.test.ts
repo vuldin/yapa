@@ -224,8 +224,9 @@ describe('stop (response capture)', () => {
   });
 
   it('skips when disabled, re-entrant, or the turn is trivial', async () => {
+    configure({ YAPA_RESPONSE_CAPTURE: 'false' });
     await stop({ session_id: 's3', last_assistant_message: longAnswer });
-    configure({ YAPA_RESPONSE_CAPTURE: 'true' });
+    configure();
     await stop({ session_id: 's3', stop_hook_active: true, last_assistant_message: longAnswer });
     await stop({ session_id: 's3', last_assistant_message: 'ok' });
     expect(captureTurn).not.toHaveBeenCalled();
@@ -362,5 +363,25 @@ describe('task claims in hook context', () => {
     capture();
     await userPromptSubmit({ session_id: 'h1', cwd: join(dir, 'proj', 'empty-project'), prompt: 'zzqx unrelated words' });
     expect(JSON.stringify(restore())).not.toContain('YAPA claim');
+  });
+});
+
+describe('waiting on you', () => {
+  it('session start lists decisions and steps that name you, and counts those for anyone', async () => {
+    const { createTask } = await import('@yapa/core');
+    await storeMemory('Keep the old API for one more release?', {
+      collection: 'project-acme', typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['keep it', 'drop it'], recommendation: 'keep it' },
+    });
+    await storeMemory('Ask the vendor about rate limits', { collection: 'project-acme', typed: { kind: 'question', owner: 'alex' } });
+    await createTask('Approve the cloud spend', { tags: ['needs-human'] }, 'project-other');
+    capture();
+    await sessionStart({ session_id: 'w1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('## Waiting on you');
+    expect(ctx).toMatch(/\(project-acme\) \[decision needed, for josh, new\] Keep the old API/);
+    expect(ctx).toContain('options: keep it | drop it; recommended: keep it');
+    const section = ctx.slice(ctx.indexOf('## Waiting on you')).split('\n## ')[0];
+    expect(section).not.toContain('Ask the vendor');
+    expect(section).toContain('1 item(s) wait on anyone');
   });
 });

@@ -6,6 +6,18 @@ import { counterNext, EXIT, leaseAcquire, leaseHeartbeat, leaseList, leaseReleas
 
 import {
   getConfig,
+  DISPOSITIONS,
+  KIND_STATUSES,
+  MEMORY_KINDS,
+  MemoryNotFoundError,
+  TypedMemoryError,
+  typedLabel,
+  updateMemory,
+  waitingOn,
+  formatWaiting,
+  recordForTask,
+  requestDecision,
+  validateLearned,
   claimNote,
   claimsFor,
   describeClaim,
@@ -83,7 +95,7 @@ import {
 // Tools whose writes should reach the shared remote within seconds instead of
 // on the next sync interval tick.
 export const SYNC_ON_WRITE_TOOLS = new Set([
-  'memory_store', 'memory_forget', 'compaction_apply', 'journal_consolidate', 'janitor_now',
+  'memory_store', 'memory_update', 'memory_forget', 'compaction_apply', 'journal_consolidate', 'janitor_now',
   'task_create', 'task_update', 'task_complete', 'task_delete', 'task_add_dependency', 'task_next',
   'task_remove_dependency', 'collection_merge',
 ]);
@@ -124,6 +136,52 @@ function releaseNote(r: Awaited<ReturnType<typeof completeTask>>['release']): st
   return '';
 }
 
+/** Typed-memory fields (core memory/kinds.ts), shared by memory_store and memory_update. */
+const TYPED_PARAMS = {
+  kind: z.enum(MEMORY_KINDS).optional().describe('What kind of knowledge this is: finding (a result, root cause, retraction or trap), decision (a choice made, or one a person must make), limitation (something that cannot be done yet), question (for a person or another team), idea. Omit for an ordinary note.'),
+  status: z.string().optional().describe(`Where it stands. ${Object.entries(KIND_STATUSES).map(([k, v]) => `${k}: ${v.join('|')}`).join('; ')}. Default: finding open, decision proposed, question open. Use decision "needed" for a choice only a person can make: never leave that only in chat.`),
+  owner: z.string().optional().describe('Who decides (decision) or is asked (question), as a YAPA user name. Omit for anyone.'),
+  task_ids: z.array(z.string()).optional().describe('Tasks this came from or belongs to; each task lists it back.'),
+  options: z.array(z.string()).optional().describe('decision: the options (at least two when status is needed)'),
+  recommendation: z.string().optional().describe('decision: what you recommend, and why'),
+  disposition: z.enum(DISPOSITIONS).optional().describe('finding: what became of it (required to resolve it)'),
+  disposition_ids: z.array(z.string()).optional().describe('finding: the decision, task or limitation it led to'),
+  disposition_reason: z.string().optional().describe('finding: why no action'),
+  exit_criteria: z.string().optional().describe('limitation: what would close it'),
+};
+
+/** Capture-at-close parameters (core tasks/close.ts), shared by task_update and task_complete. */
+const LEARNED_ITEM = z.object({
+  content: z.string().min(1).describe('What was learned, in a few sentences'),
+  tags: z.array(z.string()).optional(),
+  ...TYPED_PARAMS,
+});
+const CLOSE_PARAMS = {
+  learned: z.array(LEARNED_ITEM).optional().describe('What this task produced, stored as typed memories linked to it: findings (results, root causes, traps), decisions made, limitations, questions for others, ideas. Record these when closing work; do not leave them only in chat.'),
+  follow_ups: z.array(z.object({
+    title: z.string().min(1),
+    priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
+    tags: z.array(z.string()).optional(),
+    notes: z.string().optional(),
+    collection: z.string().optional().describe('Default: the task\'s collection'),
+  })).optional().describe('Follow-up work, created as new tasks that say where they came from'),
+};
+
+function closeText(r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }): string {
+  const parts: string[] = [];
+  if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(', ')}.`);
+  if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(', ')}.`);
+  if (r.nudge) parts.push(r.nudge);
+  return parts.join('\n');
+}
+
+function typedError(e: unknown) {
+  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {
+    return { content: [{ type: 'text' as const, text: e.message }], isError: true };
+  }
+  throw e;
+}
+
 export function registerTools(server: McpServer): void {
   withSyncOnWrite(server);
 
@@ -158,10 +216,18 @@ export function registerTools(server: McpServer): void {
       sector: z.enum(['semantic', 'episodic']).optional().describe('Memory type (auto-detected if omitted)'),
       supersedes: z.string().optional().describe('ID of an existing memory this one corrects/replaces — the old memory is archived (filtered from recall, recoverable), never hard-deleted'),
       collection: z.string().optional().describe('Collection name (default: global)'),
+      ...TYPED_PARAMS,
     },
-    async ({ content, tags, salience, sector, collection, supersedes }) => {
-      const result = await storeMemory(content, { tags, salience, sector, collection, supersedes });
-      const lines = [`Stored memory: ${result.ids.join(', ')}`];
+    async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
+      const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
+      let result;
+      try {
+        result = await storeMemory(content, { tags, salience, sector, collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
+      } catch (e) {
+        return typedError(e);
+      }
+      const label = typed.kind ? ` ${typedLabel({ status: undefined, ...typed })}` : '';
+      const lines = [`Stored memory: ${result.ids.join(', ')}${label}`];
       if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
         lines.push('', `⚠ Potential conflicts (${result.potential_conflicts.length}):`);
@@ -185,6 +251,8 @@ export function registerTools(server: McpServer): void {
       other_collections: z.number().optional().describe('With `collection`: max extra strongly-relevant hits from other collections (default from YAPA_CROSS_COLLECTION_RESULTS, 2; 0 = scope only)'),
       n_results: z.number().optional().describe('Max results (default 5)'),
       tags: z.array(z.string()).optional().describe('Filter by tags'),
+      kind: z.enum(MEMORY_KINDS).optional().describe('Only typed memories of this kind'),
+      status: z.string().optional().describe('Only typed memories with this status'),
       include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
       filters: z.object({
         trainable_min: z.number().min(0).max(1).optional().describe('Minimum trainable score (0-1)'),
@@ -193,12 +261,14 @@ export function registerTools(server: McpServer): void {
         classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
       }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ query, collection, other_collections, n_results, tags, include_promoted, filters }) => {
+    async ({ query, collection, other_collections, n_results, tags, kind, status, include_promoted, filters }) => {
       const results = await recallMemory(query, {
         collection,
         crossCollection: other_collections ?? getConfig().CROSS_COLLECTION_RESULTS,
         nResults: n_results,
         tags,
+        kind,
+        status,
         include_promoted,
         filters,
       });
@@ -206,7 +276,7 @@ export function registerTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: 'No memories found.' }] };
       }
       const text = results.map(r =>
-        `**${r.id}** (${r.collection ?? 'unknown'}, salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, distance: ${r.distance.toFixed(3)})\n${r.content}`
+        `**${r.id}**${typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : ''} (${r.collection ?? 'unknown'}, salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, distance: ${r.distance.toFixed(3)})\n${r.content}`
       ).join('\n\n---\n\n');
       return { content: [{ type: 'text' as const, text }] };
     },
@@ -233,6 +303,9 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional().describe('Filter by collection'),
       tags: z.array(z.string()).optional().describe('Filter by tags'),
       sector: z.enum(['semantic', 'episodic']).optional().describe('Filter by sector'),
+      kind: z.enum(MEMORY_KINDS).optional().describe('Only typed memories of this kind'),
+      status: z.string().optional().describe('Only typed memories with this status'),
+      owner: z.string().optional().describe('Only typed memories for this owner'),
       limit: z.number().optional().describe('Max results (default 50)'),
       include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
       filters: z.object({
@@ -242,11 +315,14 @@ export function registerTools(server: McpServer): void {
         classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
       }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ collection, tags, sector, limit, include_promoted, filters }) => {
+    async ({ collection, tags, sector, kind, status, owner, limit, include_promoted, filters }) => {
       const results = await listMemories({
         collection,
         tags,
         sector,
+        kind,
+        status,
+        owner,
         limit,
         include_promoted,
         filters,
@@ -257,9 +333,46 @@ export function registerTools(server: McpServer): void {
       const text = results.map(r => {
         const promoted = r.metadata.promoted_to ? ` promoted: ${r.metadata.promoted_to}` : '';
         const selected = r.metadata.selected_for ? ` selected: ${r.metadata.selected_for}` : '';
-        return `- **${r.id}** [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, sector: ${r.metadata.sector ?? '?'}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`;
+        const label = typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : '';
+        return `- **${r.id}**${label} [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, sector: ${r.metadata.sector ?? '?'}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`;
       }).join('\n');
       return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  server.tool(
+    'memory_update',
+    'Change a memory in place: its status, owner, links or other typed fields, and optionally a dated note appended to its text. Record a decision that was needed with status "accepted" (or "rejected") and the choice as the note; tasks waiting on it become ready again. Answer a question with status "answered". Resolve a finding with a disposition. The id stays the same, unlike supersedes.',
+    {
+      id: z.string().describe('Memory ID'),
+      collection: z.string().optional().describe('Collection (default: searched)'),
+      note: z.string().optional().describe('Appended as "<date> <user>: <note>", e.g. the choice made'),
+      tags: z.array(z.string()).optional().describe('Replace the tags'),
+      ...TYPED_PARAMS,
+    },
+    async ({ id, collection, note, tags, ...typedArgs }) => {
+      const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
+      try {
+        const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, collection);
+        const label = typedLabel(r.metadata);
+        return { content: [{ type: 'text' as const, text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ''}` }] };
+      } catch (e) {
+        return typedError(e);
+      }
+    },
+  );
+
+  server.tool(
+    'waiting',
+    'Everything waiting on a person: decisions to make, questions to answer, task steps only a person can take (tags needs-human, needs:<user>), and blocked tasks. Defaults to what waits on you (or on anyone) across every collection.',
+    {
+      collection: z.string().optional().describe('One collection (default: all)'),
+      user: z.string().optional().describe('Whose items (default: you). Use "*" for everyone.'),
+    },
+    async ({ collection, user }) => {
+      const who = user === '*' ? undefined : user ?? getConfig().USERNAME;
+      const w = await waitingOn({ collection, user: who });
+      return { content: [{ type: 'text' as const, text: formatWaiting(w, { collection: !collection }) }] };
     },
   );
 
@@ -1003,8 +1116,19 @@ export function registerTools(server: McpServer): void {
       duration: z.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
       reclaim: z.boolean().optional().describe('With status in_progress: take over a claim held by another session of your own user (e.g. after --resume). Confirm with the user first.'),
       claim_scope: z.array(z.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra", "res:staging-cluster"); task_next ranks tasks near live claims last'),
+      decision_needed: z.object({
+        question: z.string().min(1).describe('The question, in a line the person can answer'),
+        options: z.array(z.string()).min(2).describe('The options'),
+        recommendation: z.string().optional().describe('What you recommend, and why'),
+        owner: z.string().optional().describe('Who decides (YAPA user name); omit for anyone'),
+        context: z.string().optional().describe('Background the person needs'),
+      }).optional().describe('A choice only a person can make: records it as a decision that is needed, and the task waits on it (pending; task_next skips it until the decision is recorded with memory_update). Then take other work. Do not combine with a status other than pending.'),
+      ...CLOSE_PARAMS,
     },
-    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration, reclaim, claim_scope }) => {
+    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+      if (decision_needed && status && status !== 'pending') {
+        return { content: [{ type: 'text' as const, text: 'decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending.' }], isError: true };
+      }
       const updates: Record<string, any> = {};
       if (claim_scope) updates.claim_scope = claim_scope;
       if (title) updates.title = title;
@@ -1031,28 +1155,45 @@ export function registerTools(server: McpServer): void {
       }
 
       try {
-        const r = await updateTask(id, updates, { reclaim });
+        validateLearned(learned);
+        let decision: string | undefined;
+        let r;
+        if (decision_needed) {
+          const { status: _s, ...rest } = updates;
+          const d = await requestDecision(id, decision_needed, { reclaim }, rest);
+          decision = d.decision;
+          r = d;
+        } else {
+          r = await updateTask(id, updates, { reclaim });
+        }
+        const recorded = learned?.length || follow_ups?.length
+          ? await recordForTask({ id: r.id, collection: (await getTask(r.id))!.collection }, { learned, follow_ups })
+          : undefined;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
+        if (decision) text += `\nRecorded decision ${decision} (needed${decision_needed!.owner ? `, for ${decision_needed!.owner}` : ''}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim = r.claim ? describeClaim(r.claim) : '';
         if (claim) text += `\n${claim}`;
         const release = releaseNote(r.release);
         if (release) text += `\n${release}`;
+        const rec = closeText({ recorded });
+        if (rec) text += `\n${rec}`;
         return { content: [{ type: 'text' as const, text }] };
       } catch (e) {
         if (e instanceof TaskClaimedError) return { content: [{ type: 'text' as const, text: e.message }], isError: true };
-        throw e;
+        return typedError(e);
       }
     },
   );
 
   server.tool(
     'task_complete',
-    'Mark a task as done. Handles recurring task regeneration.',
+    'Mark a task as done, and record what it produced in the same call: learned (findings, decisions made, limitations, questions, ideas, stored as typed memories linked to the task) and follow_ups (new tasks). Handles recurring task regeneration.',
     {
       id: z.string().describe('Task ID to complete'),
       duration: z.string().optional().describe('Hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
+      ...CLOSE_PARAMS,
     },
-    async ({ id, duration }) => {
+    async ({ id, duration, learned, follow_ups }) => {
       let durationMinutes: number | undefined;
       if (duration) {
         const parsed = parseDuration(duration);
@@ -1061,7 +1202,12 @@ export function registerTools(server: McpServer): void {
         }
         durationMinutes = parsed;
       }
-      const result = await completeTask(id, durationMinutes);
+      let result;
+      try {
+        result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
+      } catch (e) {
+        return typedError(e);
+      }
       let text = `Completed task ${id}`;
       if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
       const release = releaseNote(result.release);
@@ -1069,22 +1215,26 @@ export function registerTools(server: McpServer): void {
       if (result.regeneratedId) {
         text += ` → regenerated as ${result.regeneratedId} (recurring)`;
       }
+      const rec = closeText(result);
+      if (rec) text += `\n${rec}`;
       return { content: [{ type: 'text' as const, text }] };
     },
   );
 
   server.tool(
     'task_next',
-    'The ready queue for a collection: pending tasks whose dependencies are complete and that nobody has claimed, best first (priority, due date, how many tasks each unblocks, age; tasks near live claims last), with the reason each other open task was skipped. claim: true also claims the first ready task (moves it to in_progress), trying the next one if someone else got it first.',
+    'The ready queue for a collection: pending tasks whose dependencies are complete, that wait on no open decision, need no person (needs-human) and that nobody has claimed, best first (priority, due date, how many tasks each unblocks, age; tasks near live claims last), with the reason each other open task was skipped. claim: true also claims the first ready task (moves it to in_progress), trying the next one if someone else got it first.',
     {
       collection: z.string().describe('Collection to pick from'),
       tags: z.array(z.string()).optional().describe('Only tasks carrying all of these tags'),
       exclude_tags: z.array(z.string()).optional().describe('Skip tasks carrying any of these tags'),
-      claim: z.boolean().optional().describe('Claim the first ready task'),
+      claim: z.boolean().optional().describe('Claim the first ready task (or, with none ready, the first cleanup item)'),
+      auto_only: z.boolean().optional().describe('Only tasks tagged auto (for unattended work)'),
+      include_cleanup: z.boolean().optional().describe('List cleanup items even when tasks are ready'),
       limit: z.number().int().min(1).max(50).optional().describe('Ready tasks to show (default 5)'),
     },
-    async ({ collection, tags, exclude_tags, claim, limit }) => {
-      const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim });
+    async ({ collection, tags, exclude_tags, claim, auto_only, include_cleanup, limit }) => {
+      const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim, autoOnly: auto_only, includeCleanup: include_cleanup });
       const lines: string[] = [];
       if (!r.claimsKnown) lines.push('_Claims could not be read (offline or signed out): teammates may already be on some of these._');
       if (claim) {
@@ -1105,6 +1255,10 @@ export function registerTools(server: McpServer): void {
         if (r.ready.length > shown.length) lines.push(`- _…${r.ready.length - shown.length} more_`);
       } else if (!claim) {
         lines.push('No ready tasks.');
+      }
+      if (r.cleanup.length) {
+        lines.push('', `**Cleanup** (claimed as a lease on its key; when done: lease action release, key <key>, collection ${collection}):`);
+        for (const c of r.cleanup) lines.push(`- **${c.key}** ${c.title}${c.held_by ? ` (held by ${c.held_by})` : ''}`);
       }
       if (r.skipped.length) {
         lines.push('', '**Skipped:**');

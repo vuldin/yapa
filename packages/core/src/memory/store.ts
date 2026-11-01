@@ -4,6 +4,8 @@ import { detectSector } from '../lifecycle.js';
 import { chunkText } from '../chunking.js';
 import { getConfig, SALIENCE_START } from '../config.js';
 import { assertWritable } from '../sync/syncable.js';
+import { normalizeTyped, type TypedFields } from './kinds.js';
+import { linkMemoryToTasks } from './links.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -24,6 +26,12 @@ export interface StoreOptions {
    * never hard-deleted. The new memory gets a `supersedes` forward reference.
    */
   supersedes?: string;
+  /**
+   * What kind of knowledge this is and where it stands (memory/kinds.ts):
+   * kind, status, owner, task_ids, options, ... Validated; throws
+   * TypedMemoryError before anything is stored.
+   */
+  typed?: TypedFields;
 }
 
 export interface ConflictRecord {
@@ -110,6 +118,7 @@ export async function storeMemory(
   options: StoreOptions = {},
 ): Promise<StoreMemoryResult> {
   const collection = options.collection ?? 'global';
+  const typed = options.typed ? normalizeTyped(options.typed) : {};
   await getOrCreateCollection(collection);
   // Superseding archives the old doc: refuse before storing anything when
   // the remote owns it. `read_only` itself is set only by the remote.
@@ -134,6 +143,7 @@ export async function storeMemory(
     const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
     const metadata: Record<string, any> = {
       ...(options.metadata ?? {}),
+      ...typed,
       type: 'memory',
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -146,6 +156,7 @@ export async function storeMemory(
     metadata.is_synced = false;
     await addDocument(collection, id, content, metadata);
     if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
+    if (typed.task_ids?.length) await linkMemoryToTasks(id, typed.task_ids);
     return { ids: [id], potential_conflicts };
   }
 
@@ -154,6 +165,7 @@ export async function storeMemory(
   const docs = chunks.map((chunk) => {
     const chunkMeta: Record<string, any> = {
       ...(options.metadata ?? {}),
+      ...typed,
       type: 'memory',
       username: getConfig().USERNAME,
       tags: options.tags ?? [],
@@ -176,5 +188,6 @@ export async function storeMemory(
 
   await addDocumentsBatch(collection, docs);
   if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
+  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
   return { ids: docs.map(d => d.id), potential_conflicts };
 }

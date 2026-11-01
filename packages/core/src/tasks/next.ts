@@ -10,9 +10,13 @@
  * none last), then how many open tasks each one unblocks, then age.
  */
 import { getDocumentsByFilter } from '../store/index.js';
+import { getConfig } from '../config.js';
+import { collectionSize } from '../memory/compact.js';
 import type { Lease } from '../sync/backend.js';
-import { claimsFor, describeHolder, TaskClaimedError, type ClaimOptions, type ClaimResult } from './claim.js';
+import { claimKey, claimsFor, describeHolder, TaskClaimedError, type ClaimOptions, type ClaimResult } from './claim.js';
 import { getTask, updateTask } from './update.js';
+import { describeWaits, openWaits } from './close.js';
+import { taskNeedsPeople } from './waiting.js';
 
 const PRIORITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -24,6 +28,25 @@ export interface NextOptions extends ClaimOptions {
   excludeTags?: string[];
   /** Claim the first ready task (trying the next one if a claim is refused). */
   claim?: boolean;
+  /** Only tasks tagged `auto` (an unattended session may do all of it). */
+  autoOnly?: boolean;
+  /** Offer cleanup items even when tasks are ready (default: only when none is). */
+  includeCleanup?: boolean;
+}
+
+/**
+ * Upkeep offered when no task is ready, each claimable as a lease on its key:
+ *   cleanup:triage      open tasks not yet tagged auto or needs-human (only in
+ *                       a collection that already uses those tags)
+ *   cleanup:findings    open findings older than two days with no disposition
+ *   cleanup:compaction  the collection is over the compaction threshold
+ */
+export interface CleanupItem {
+  key: string;
+  title: string;
+  count: number;
+  /** Set when another session holds this item. */
+  held_by?: string;
 }
 
 export interface ReadyTask {
@@ -48,6 +71,8 @@ export interface NextResult {
   claimsKnown: boolean;
   /** With `claim`: what happened to the task that was claimed (or the last refusal). */
   claimed?: ClaimResult;
+  /** Upkeep when nothing is ready (or with includeCleanup). */
+  cleanup: CleanupItem[];
 }
 
 const norm = (x: unknown): string[] => (Array.isArray(x) ? x : (x ?? '').toString().split(',')).map(String).map(s => s.trim()).filter(Boolean);
@@ -84,6 +109,15 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
       skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter(t => tags.includes(t)).join(', ')}` });
       continue;
     }
+    const people = taskNeedsPeople(tags);
+    if (people) {
+      skipped.push({ id: d.id, reason: `needs a person (${people.length ? people.join(', ') : 'anyone'})` });
+      continue;
+    }
+    if (opts.autoOnly && !tags.includes('auto')) {
+      skipped.push({ id: d.id, reason: 'not tagged auto' });
+      continue;
+    }
     const status = d.metadata.status ?? 'pending';
     if (status === 'blocked') {
       skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ''}` });
@@ -111,6 +145,11 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
       skipped.push({ id: d.id, reason: `waiting on ${waiting.join(', ')}` });
       continue;
     }
+    const waits = norm(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
+    if (waits.length) {
+      skipped.push({ id: d.id, reason: describeWaits(waits) });
+      continue;
+    }
     const near = [...new Set(norm(d.metadata.claim_scope).filter(s => liveScope.has(s)).map(s => liveScope.get(s)!))];
     ready.push({
       id: d.id,
@@ -133,10 +172,11 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
     || b.unblocks - a.unblocks
     || created(a.id) - created(b.id));
 
-  const result: NextResult = { ready, skipped, claimsKnown: claims !== undefined };
+  const result: NextResult = { ready, skipped, claimsKnown: claims !== undefined, cleanup: [] };
+  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open, claims);
   if (!opts.claim) return result;
 
-  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, ...claimOpts } = opts;
+  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a, includeCleanup: _i, ...claimOpts } = opts;
   for (const r of ready) {
     try {
       const u = await updateTask(r.id, { status: 'in_progress' }, claimOpts);
@@ -152,5 +192,35 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
       throw e;
     }
   }
+  // Nothing to start: take the first cleanup item nobody holds.
+  for (const c of result.cleanup.filter(x => !x.held_by)) {
+    const r = await claimKey(opts.collection, c.key, claimOpts);
+    result.claimed = r;
+    if (r.kind !== 'refused') return result;
+    c.held_by = r.conflicts.map(x => describeHolder(x.lease)).join('; ');
+  }
   return result;
+}
+
+const DAY = 86400;
+
+async function cleanupItems(collection: string, open: Array<{ id: string; metadata: Record<string, any> }>, claims: Map<string, Lease> | undefined): Promise<CleanupItem[]> {
+  const items: CleanupItem[] = [];
+  const triageTag = (tags: string[]) => tags.includes('auto') || tags.includes('needs-human') || tags.some(t => t.startsWith('needs:'));
+  if (open.some(d => triageTag(norm(d.metadata.tags)))) {
+    const untriaged = open.filter(d => !triageTag(norm(d.metadata.tags))).length;
+    if (untriaged) items.push({ key: 'cleanup:triage', title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const findings = (await getDocumentsByFilter(collection, { type: 'memory', kind: 'finding' }, 2000).catch(() => []))
+    .filter(f => f.metadata.archived !== true && (f.metadata.status ?? 'open') === 'open' && !f.metadata.disposition
+      && Number(f.metadata.created_at ?? now) < now - 2 * DAY && (f.metadata.chunk_index ?? 0) === 0);
+  if (findings.length) items.push({ key: 'cleanup:findings', title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
+  const size = await collectionSize(collection).catch(() => 0);
+  if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: 'cleanup:compaction', title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
+  for (const it of items) {
+    const l = claims?.get(it.key);
+    if (l) it.held_by = describeHolder(l);
+  }
+  return items;
 }

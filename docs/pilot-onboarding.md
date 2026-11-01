@@ -56,7 +56,7 @@ from a shell: `claude plugin configure yapa@yapa`). Set:
 | `project_roots` | folders whose subfolders are customers/projects, e.g. `~/work/projects` |
 | `customers` | subfolder names under those roots that are customers, e.g. `acme,globex` |
 | `username` | leave as is; with the sync service your name comes from your Google account |
-| `response_capture` | optional; `true` auto-saves durable findings after each turn |
+| `response_capture` | on by default: after each turn, saves typed findings and records answers to open decisions and questions; `false` turns it off |
 
 How scope works: with `project_roots=~/work/projects` and `customers=acme`,
 starting Claude Code in `~/work/projects/acme/...` uses collection

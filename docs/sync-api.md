@@ -472,7 +472,22 @@ writes (all optional unless noted):
   `in_progress` | `blocked` | `complete`), `priority` (`critical` | `high` |
   `medium` | `low`), `due_date` (0 = none), `customer`, `project`,
   `depends_on`, `blocks`, `is_recurring`, `recurrence_pattern`,
-  `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from`.
+  `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from`,
+  `claim_scope` (array), `memory_ids` (array: typed memories recorded for the
+  task), `waits_on` (array: memory ids the task waits on; it is not ready
+  while any of them is open). Triage lives in `tags`: `auto`, `needs-human`,
+  `needs:<user>`.
+- Typed memories: `kind` (`finding` | `decision` | `limitation` | `question`
+  | `idea`), `status` (finding `open` | `resolved`; decision `needed` |
+  `proposed` | `accepted` | `superseded` | `rejected`; limitation `open` |
+  `mitigated` | `accepted` | `closed`; question `open` | `answered`; idea
+  `proposed` | `adopted` | `dropped`), `owner` (who decides or is asked),
+  `task_ids` (array), `options` (array of strings, which may contain commas),
+  `recommendation`, `disposition` (`decision` | `task` | `limitation` |
+  `no-action`), `disposition_ids` (array), `disposition_reason`,
+  `exit_criteria`, `external_ref` (a key for a record kept outside YAPA). A
+  status change is an ordinary update; a remote that keeps revisions keeps
+  the earlier status as history.
 - Set by the remote: `origin_user` (MUST be overwritten with the row's owner)
   and `origin_device` (the reference overwrites it with the writer's device).
 - Reserved for the remote: `read_only` (section 10).

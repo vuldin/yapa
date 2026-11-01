@@ -41,9 +41,67 @@ import {
   updateTask,
   describeClaim,
   getConfig,
+  DISPOSITIONS,
+  MEMORY_KINDS,
+  KIND_STATUSES,
+  typedLabel,
+  updateMemory,
+  waitingOn,
+  waitingCount,
+  formatWaiting,
+  nextTasks,
+  recordForTask,
+  requestDecision,
+  validateLearned,
 } from '@yapa/core';
 
 const text = (t: string): ContentBlock[] => [{ type: 'text', text: t }];
+
+/** Typed-memory parameters (core memory/kinds.ts), shared by store and update. */
+const typedParams = {
+  kind: { type: 'string', enum: [...MEMORY_KINDS], description: 'finding (a result, root cause, retraction or trap), decision (a choice made, or one a person must make), limitation, question (for a person or another team), idea. Omit for an ordinary note.' },
+  status: { type: 'string', description: `Where it stands. ${Object.entries(KIND_STATUSES).map(([k, v]) => `${k}: ${v.join('|')}`).join('; ')}. Use decision "needed" for a choice only a person can make: never leave it only in chat.` },
+  owner: { type: 'string', description: 'Who decides (decision) or is asked (question). Omit for anyone.' },
+  task_ids: { type: 'array', items: { type: 'string' }, description: 'Tasks this came from; each lists it back' },
+  options: { type: 'array', items: { type: 'string' }, description: 'decision: the options (at least two when needed)' },
+  recommendation: { type: 'string', description: 'decision: what you recommend' },
+  disposition: { type: 'string', enum: [...DISPOSITIONS], description: 'finding: what became of it' },
+  disposition_ids: { type: 'array', items: { type: 'string' }, description: 'finding: what it led to' },
+  disposition_reason: { type: 'string', description: 'finding: why no action' },
+  exit_criteria: { type: 'string', description: 'limitation: what would close it' },
+} as const;
+
+const TYPED_KEYS = Object.keys(typedParams);
+
+/** Capture-at-close parameters (core tasks/close.ts). */
+const closeParams = {
+  learned: {
+    type: 'array',
+    description: 'What this task produced, stored as typed memories linked to it (findings, decisions made, limitations, questions, ideas)',
+    items: { type: 'object', additionalProperties: true, properties: { content: { type: 'string', required: true }, ...typedParams } },
+  },
+  follow_ups: {
+    type: 'array',
+    description: 'Follow-up work, created as new tasks that say where they came from',
+    items: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        title: { type: 'string', required: true },
+        priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+        tags: { type: 'array', items: { type: 'string' } },
+        notes: { type: 'string' },
+      },
+    },
+  },
+} as const;
+
+const closeSummary = (r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }) => [
+  r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(', ')}.` : '',
+  r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(', ')}.` : '',
+  r.nudge ?? '',
+].filter(Boolean).join('\n');
+const pickTyped = (args: Record<string, any>) =>
+  Object.fromEntries(TYPED_KEYS.filter(k => args[k] !== undefined).map(k => [k, args[k]]));
 
 /** Loose object node for freeform metadata passthrough. */
 const openObject = { type: 'object', additionalProperties: true } as const;
@@ -57,6 +115,7 @@ const memoryItem = {
     collection: { type: 'string' },
     distance: { type: 'number' },
     salience: { type: 'number' },
+    label: { type: 'string' },
   },
 } as const;
 
@@ -194,6 +253,7 @@ export function registerTools(ctx: Context): void {
       supersedes: { type: 'string', description: 'ID of an existing memory this one corrects/replaces — the old memory is archived (filtered from recall, recoverable), never hard-deleted' },
       sector: { type: 'string', enum: ['semantic', 'episodic'], description: 'Memory type (auto-detected if omitted)' },
       collection: { type: 'string', description: 'Collection name (default: global)' },
+      ...typedParams,
     },
     output: {
       schema: {
@@ -201,6 +261,7 @@ export function registerTools(ctx: Context): void {
         additionalProperties: false,
         properties: {
           ids: { type: 'array', required: true, items: { type: 'string' } },
+          label: { type: 'string' },
           conflicts: {
             type: 'array',
             items: {
@@ -217,7 +278,7 @@ export function registerTools(ctx: Context): void {
         },
       },
       render: (_args, v) => {
-        const lines = [`Stored memory: ${v.ids.join(', ')}`];
+        const lines = [`Stored memory: ${v.ids.join(', ')}${v.label ? ` ${v.label}` : ''}`];
         if (v.conflicts?.length) {
           lines.push('', `⚠ Potential conflicts (${v.conflicts.length}):`);
           for (const c of v.conflicts) {
@@ -229,15 +290,18 @@ export function registerTools(ctx: Context): void {
       },
     },
     async execute(args) {
+      const typed = pickTyped(args);
       const result = await storeMemory(args.content, {
         tags: args.tags,
         salience: args.salience,
         sector: args.sector,
         collection: args.collection,
         supersedes: args.supersedes,
+        ...(Object.keys(typed).length ? { typed } : {}),
       });
       return {
         ids: result.ids,
+        ...(typed.kind ? { label: typedLabel({ status: undefined, ...typed }) } : {}),
         conflicts: result.potential_conflicts.map(c => ({
           id: c.id, distance: c.distance, salience: c.salience, content: c.content,
         })),
@@ -252,6 +316,71 @@ export function registerTools(ctx: Context): void {
   }));
 
   ctx.tools.register(defineTool({
+    name: 'yapa_memory_update',
+    description:
+      'Change a memory in place: status, owner, links or other typed fields, and optionally a dated note '
+      + 'appended to its text. Record a needed decision with status "accepted" (or "rejected") and the choice '
+      + 'as the note; tasks waiting on it become ready again. Answer a question with status "answered".',
+    parameters: {
+      id: { type: 'string', required: true, description: 'Memory ID' },
+      collection: { type: 'string', description: 'Collection (default: searched)' },
+      note: { type: 'string', description: 'Appended as "<date> <user>: <note>"' },
+      tags: { type: 'array', items: { type: 'string' }, description: 'Replace the tags' },
+      ...typedParams,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true },
+          collection: { type: 'string', required: true },
+          label: { type: 'string' },
+        },
+      },
+      render: (_args, v) => text(`Updated ${v.id} in ${v.collection}${v.label ? ` ${v.label}` : ''}`),
+    },
+    async execute(args) {
+      const r = await updateMemory(args.id, {
+        ...pickTyped(args),
+        ...(args.note !== undefined ? { note: args.note } : {}),
+        ...(args.tags ? { tags: args.tags } : {}),
+      }, args.collection);
+      const label = typedLabel(r.metadata);
+      return { id: r.id, collection: r.collection, ...(label ? { label } : {}) };
+    },
+    presentCall: args => ({ card: 'generic', title: `Update memory ${args.id}`, kind: 'edit' }),
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'yapa_waiting',
+    description:
+      'Everything waiting on a person: decisions to make, questions to answer, task steps only a person '
+      + 'can take (tags needs-human, needs:<user>), and blocked tasks. Defaults to what waits on you (or anyone).',
+    parameters: {
+      collection: { type: 'string', description: 'One collection (default: all)' },
+      user: { type: 'string', description: 'Whose items (default: you); "*" for everyone' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          count: { type: 'number', required: true },
+          summary: { type: 'string', required: true },
+        },
+      },
+      render: (_args, v) => text(v.summary),
+    },
+    async execute(args) {
+      const who = args.user === '*' ? undefined : args.user ?? getConfig().USERNAME;
+      const w = await waitingOn({ collection: args.collection, user: who });
+      return { count: waitingCount(w), summary: formatWaiting(w, { collection: !args.collection }) };
+    },
+    presentCall: () => ({ card: 'generic', title: 'Waiting on people', kind: 'read' }),
+  }));
+
+  ctx.tools.register(defineTool({
     name: 'yapa_memory_recall',
     description:
       'Semantic search over durable memories with optional collection/tag filters, ranked by '
@@ -263,6 +392,8 @@ export function registerTools(ctx: Context): void {
       collection: { type: 'string', description: 'Limit search to this collection' },
       n_results: { type: 'number', description: 'Max results (default 5)' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags' },
+      kind: { type: 'string', enum: [...MEMORY_KINDS], description: 'Only typed memories of this kind' },
+      status: { type: 'string', description: 'Only typed memories with this status' },
       include_promoted: { type: 'boolean', description: 'Include promoted memories (default false)' },
     },
     output: {
@@ -276,7 +407,7 @@ export function registerTools(ctx: Context): void {
       render: (_args, v) => {
         if (v.results.length === 0) return text('No memories found.');
         return text(v.results.map(r =>
-          `**${r.id}** (${r.collection ?? 'unknown'}, salience: ${r.salience?.toFixed(2) ?? '?'}, distance: ${r.distance?.toFixed(3) ?? '?'})\n${r.content}`,
+          `**${r.id}**${r.label ? ` ${r.label}` : ''} (${r.collection ?? 'unknown'}, salience: ${r.salience?.toFixed(2) ?? '?'}, distance: ${r.distance?.toFixed(3) ?? '?'})\n${r.content}`,
         ).join('\n\n---\n\n'));
       },
     },
@@ -287,6 +418,8 @@ export function registerTools(ctx: Context): void {
         collection: args.collection,
         nResults: args.n_results,
         tags: args.tags,
+        kind: args.kind,
+        status: args.status,
         include_promoted: args.include_promoted,
       });
       return {
@@ -296,6 +429,7 @@ export function registerTools(ctx: Context): void {
           ...(r.collection !== undefined && { collection: r.collection }),
           distance: r.distance,
           ...(typeof r.metadata.salience === 'number' && { salience: r.metadata.salience }),
+          ...(typedLabel(r.metadata) && { label: typedLabel(r.metadata) }),
         })),
       };
     },
@@ -335,6 +469,9 @@ export function registerTools(ctx: Context): void {
       collection: { type: 'string', description: 'Filter by collection' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags' },
       sector: { type: 'string', enum: ['semantic', 'episodic'], description: 'Filter by sector' },
+      kind: { type: 'string', enum: [...MEMORY_KINDS], description: 'Only typed memories of this kind' },
+      status: { type: 'string', description: 'Only typed memories with this status' },
+      owner: { type: 'string', description: 'Only typed memories for this owner' },
       limit: { type: 'number', description: 'Max results (default 50)' },
       include_promoted: { type: 'boolean', description: 'Include promoted memories (default false)' },
     },
@@ -349,7 +486,7 @@ export function registerTools(ctx: Context): void {
       render: (_args, v) => {
         if (v.results.length === 0) return text('No memories found.');
         return text(v.results.map(r =>
-          `- **${r.id}** [${r.collection}] (salience: ${r.salience?.toFixed(2) ?? '?'}): `
+          `- **${r.id}**${r.label ? ` ${r.label}` : ''} [${r.collection}] (salience: ${r.salience?.toFixed(2) ?? '?'}): `
           + `${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`,
         ).join('\n'));
       },
@@ -360,6 +497,9 @@ export function registerTools(ctx: Context): void {
         collection: args.collection,
         tags: args.tags,
         sector: args.sector,
+        kind: args.kind,
+        status: args.status,
+        owner: args.owner,
         limit: args.limit,
         include_promoted: args.include_promoted,
       });
@@ -369,6 +509,7 @@ export function registerTools(ctx: Context): void {
           content: r.content,
           ...(r.collection !== undefined && { collection: r.collection }),
           ...(typeof r.metadata.salience === 'number' && { salience: r.metadata.salience }),
+          ...(typedLabel(r.metadata) && { label: typedLabel(r.metadata) }),
         })),
       };
     },
@@ -667,14 +808,27 @@ export function registerTools(ctx: Context): void {
       due: { type: 'string', description: 'Due date phrase' },
       tags: { type: 'array', items: { type: 'string' } },
       blocked_reason: { type: 'string' },
+      decision_needed: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'A choice only a person can make: recorded as a needed decision; the task waits on it (pending) until it is recorded with yapa_memory_update. Then take other work.',
+        properties: {
+          question: { type: 'string', required: true },
+          options: { type: 'array', items: { type: 'string' }, required: true },
+          recommendation: { type: 'string' },
+          owner: { type: 'string' },
+          context: { type: 'string' },
+        },
+      },
+      ...closeParams,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { id: { type: 'string', required: true }, claim: { type: 'string' } },
+        properties: { id: { type: 'string', required: true }, claim: { type: 'string' }, decision: { type: 'string' }, recorded: { type: 'string' } },
       },
-      render: (_args, v) => text(`Updated task ${v.id}${v.claim ? `\n${v.claim}` : ''}`),
+      render: (_args, v) => text(`Updated task ${v.id}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
     },
     async execute(args) {
       const updates: Record<string, any> = {};
@@ -688,20 +842,38 @@ export function registerTools(ctx: Context): void {
         const ts = parseRelativeDate(args.due);
         if (ts) updates.due_date = ts;
       }
+      validateLearned(args.learned);
+      if (args.decision_needed && args.status && args.status !== 'pending') {
+        throw new Error('decision_needed sets the task to pending; leave status out');
+      }
       // A move to in_progress claims the task; someone else's claim throws
       // TaskClaimedError, whose message names the holder.
-      const r = await updateTask(args.id, updates);
+      let decision: string | undefined;
+      let r;
+      if (args.decision_needed) {
+        const { status: _s, ...rest } = updates;
+        const d = await requestDecision(args.id, args.decision_needed, {}, rest);
+        decision = d.decision;
+        r = d;
+      } else {
+        r = await updateTask(args.id, updates);
+      }
+      const recorded = args.learned?.length || args.follow_ups?.length
+        ? await recordForTask({ id: r.id, collection: (await getTask(r.id))!.collection }, { learned: args.learned, follow_ups: args.follow_ups })
+        : undefined;
       const claim = r.claim ? describeClaim(r.claim) : '';
-      return { id: r.id, ...(claim && { claim }) };
+      const rec = closeSummary({ recorded });
+      return { id: r.id, ...(claim && { claim }), ...(decision && { decision }), ...(rec && { recorded: rec }) };
     },
     presentCall: args => ({ card: 'generic', title: `Update task ${args.id}`, kind: 'edit' }),
   }));
 
   ctx.tools.register(defineTool({
     name: 'yapa_task_complete',
-    description: 'Mark a durable task done. Handles recurring task regeneration.',
+    description: 'Mark a durable task done, and record what it produced in the same call: learned (typed memories linked to the task) and follow_ups (new tasks). Handles recurring task regeneration.',
     parameters: {
       id: { type: 'string', required: true },
+      ...closeParams,
     },
     output: {
       schema: {
@@ -710,17 +882,54 @@ export function registerTools(ctx: Context): void {
         properties: {
           id: { type: 'string', required: true },
           regenerated_id: { type: 'string' },
+          recorded: { type: 'string' },
         },
       },
       render: (_args, v) => text(
-        `Completed task ${v.id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}`,
+        `Completed task ${v.id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}${v.recorded ? `\n${v.recorded}` : ''}`,
       ),
     },
     async execute(args) {
-      const result = await completeTask(args.id);
-      return { id: args.id, ...(result.regeneratedId && { regenerated_id: result.regeneratedId }) };
+      const result = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups });
+      const rec = closeSummary(result);
+      return { id: args.id, ...(result.regeneratedId && { regenerated_id: result.regeneratedId }), ...(rec && { recorded: rec }) };
     },
     presentCall: args => ({ card: 'generic', title: `Complete task ${args.id}`, kind: 'edit' }),
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'yapa_task_next',
+    description:
+      'The ready queue for a collection: pending tasks whose dependencies are complete, that wait on no open decision, '
+      + 'need no person (needs-human) and that nobody has claimed, best first, with why others were skipped and cleanup '
+      + 'items when nothing is ready. claim: true claims the first ready task (or cleanup item).',
+    parameters: {
+      collection: { type: 'string', required: true },
+      tags: { type: 'array', items: { type: 'string' }, description: 'Only tasks carrying all of these tags' },
+      exclude_tags: { type: 'array', items: { type: 'string' }, description: 'Skip tasks carrying any of these tags' },
+      auto_only: { type: 'boolean', description: 'Only tasks tagged auto (for unattended work)' },
+      claim: { type: 'boolean', description: 'Claim the first ready task' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { summary: { type: 'string', required: true }, claimed: { type: 'string' } },
+      },
+      render: (_args, v) => text(v.summary),
+    },
+    async execute(args) {
+      const r = await nextTasks({ collection: args.collection, tags: args.tags, excludeTags: args.exclude_tags, autoOnly: args.auto_only, claim: args.claim });
+      const lines: string[] = [];
+      if (args.claim) lines.push(r.claimed ? (describeClaim(r.claimed) || `Started ${r.claimed.id}.`) : 'Nothing ready to claim.');
+      if (r.ready.length) {
+        lines.push('', '**Ready:**', ...r.ready.slice(0, 5).map(t => `- **${t.id}** [${t.priority}] ${t.title}${t.unblocks ? ` (unblocks ${t.unblocks})` : ''}`));
+      } else if (!args.claim) lines.push('No ready tasks.');
+      if (r.cleanup.length) lines.push('', '**Cleanup:**', ...r.cleanup.map(c => `- **${c.key}** ${c.title}${c.held_by ? ` (held by ${c.held_by})` : ''}`));
+      if (r.skipped.length) lines.push('', '**Skipped:**', ...r.skipped.slice(0, 15).map(x => `- ${x.id}: ${x.reason}`));
+      return { summary: lines.join('\n').trim(), ...(r.claimed ? { claimed: r.claimed.id } : {}) };
+    },
+    presentCall: args => ({ card: 'generic', title: `Next task in ${args.collection}`, kind: 'read' }),
   }));
 
   ctx.tools.register(defineTool({

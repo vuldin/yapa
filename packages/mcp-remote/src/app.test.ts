@@ -157,6 +157,13 @@ describe('MCP over stateless Streamable HTTP', () => {
     expect(lines.join('\n')).not.toContain('private-secret-notes');
   });
 
+  it('waiting is a read tool and refuses local-only collections before SQL', async () => {
+    expect(READ_TOOLS).toContain('waiting');
+    const r = await rpc(app(), SERVICE, 'tools/call', { name: 'waiting', arguments: { collection: 'local-notes', user: '*' } });
+    expect(r.body.result.isError).toBe(true);
+    expect(r.body.result.content[0].text).toMatch(/local_only_collection/);
+  });
+
   it('answers a malformed body with a JSON-RPC parse error', async () => {
     const r = await app().request('/mcp', { method: 'POST', headers: { ...USER, 'content-type': 'application/json' }, body: '{nope' });
     expect(r.status).toBe(400);

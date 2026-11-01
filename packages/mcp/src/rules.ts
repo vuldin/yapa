@@ -17,8 +17,19 @@ Call \`memory_store\` (salience >= 2.0) when: a bug's root cause is identified; 
 \`memory_store\` returns \`potential_conflicts\`: decide supersede (re-store with \`supersedes: "<old id>"\`) or coexist before moving on. Reserve \`memory_forget\` for memories that should never have existed (forgetting a teammate's memory only removes it for you).
 Do not store ephemeral conversation state, obvious code patterns, or anything already in git history or an existing memory.
 
+### Where what you learn goes
+Give a memory a \`kind\` when it is one of these, so it can be listed and waited on:
+- a result, root cause, retraction or methodology trap: \`kind: finding\` (status open; resolve it later with a \`disposition\`: decision, task, limitation, or no-action with a reason)
+- a choice that was made: \`kind: decision\`, status \`accepted\`
+- a choice only a person can make: \`kind: decision\`, status \`needed\`, with \`options\`, a \`recommendation\` and the \`owner\` who decides. Never leave such a choice only in chat. When it is for the task you are on, use \`task_update\` with \`decision_needed\` instead: it records the decision and the task waits on it.
+- something that can't be done yet: \`kind: limitation\`, with \`exit_criteria\`
+- a question for a person or another team: \`kind: question\`, with the \`owner\` who must answer
+- an idea nobody has committed to: \`kind: idea\`
+- follow-up work: a task
+A project's own instructions win where they keep these records elsewhere. Record a person's answer with \`memory_update\` (a decision: status accepted or rejected, the choice as \`note\`; a question: status answered). Session start lists what waits on you under "Waiting on you"; \`waiting\` lists everything: tell the user about items that are theirs.
+
 ### Tasks
-Call \`task_create\` in the active collection BEFORE starting multi-step or long-lived work, when a follow-up is identified, or when something can't finish this turn. On completion \`task_complete\` (pass \`duration\` for hands-on effort when known); on a blocker \`task_update\` with status \`blocked\` and a reason; on scope change amend the task instead of duplicating it. Items marked "by <user>" were written by a teammate (for their tasks, coordinate before changing them); "from <collection>" marks a hit from another customer or project.
+Call \`task_create\` in the active collection BEFORE starting multi-step or long-lived work, when a follow-up is identified, or when something can't finish this turn. On completion \`task_complete\` (pass \`duration\` for hands-on effort when known), and record what the task produced in the same call: \`learned\` (typed memories, linked to the task) and \`follow_ups\` (new tasks). If the reply says nothing was recorded, consider whether something should have been. On a blocker \`task_update\` with status \`blocked\` and a reason; when the blocker is a person's choice, \`decision_needed\` instead (then take other work: the task comes back once the decision is recorded). On scope change amend the task instead of duplicating it. Tags \`auto\` (an unattended session may do all of it), \`needs-human\` (a step only a person takes) and \`needs:<user>\` (one person must take it) triage a task; \`task_next\` never offers a \`needs-human\` task and, with \`auto_only\`, only offers \`auto\` ones. Items marked "by <user>" were written by a teammate (for their tasks, coordinate before changing them); "from <collection>" marks a hit from another customer or project.
 
 ### Journal
 Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.

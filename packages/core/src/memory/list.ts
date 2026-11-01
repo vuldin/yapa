@@ -9,6 +9,10 @@ export interface ListOptions {
   collection?: string;
   tags?: string[];
   sector?: 'semantic' | 'episodic';
+  /** Typed memories only: kind, status, owner (memory/kinds.ts). */
+  kind?: string;
+  status?: string;
+  owner?: string;
   limit?: number;
   include_promoted?: boolean;
   include_archived?: boolean;
@@ -32,6 +36,11 @@ export async function listMemories(options: ListOptions = {}): Promise<ListResul
   const includePromoted = options.include_promoted ?? false;
   const filter: Record<string, any> = { type: 'memory' };
   if (options.sector) filter.sector = options.sector;
+  if (options.kind) filter.kind = options.kind;
+  if (options.status) filter.status = options.status;
+  if (options.owner) filter.owner = options.owner;
+  // Tags are matched here, after the fetch: read enough to find matches past the first `limit` docs.
+  const fetchLimit = options.tags?.length ? Math.max(limit, 5000) : limit;
 
   const collectionNames = options.collection
     ? [options.collection]
@@ -41,7 +50,7 @@ export async function listMemories(options: ListOptions = {}): Promise<ListResul
 
   for (const name of collectionNames) {
     try {
-      const docs = await getDocumentsByFilter(name, filter, limit);
+      const docs = await getDocumentsByFilter(name, filter, fetchLimit);
       for (const doc of docs) {
         allResults.push({ ...doc, collection: name });
       }

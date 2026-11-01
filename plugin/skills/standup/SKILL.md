@@ -15,8 +15,9 @@ Produce a standup from YAPA's durable task store. Steps:
    the injected `# YAPA Context`, or aggregate across collections (omit
    `collection`) if the user asks for everything.
 3. Format as markdown sections in this order: **Overdue**, **Due today**,
-   **In progress**, **Blocked**. One checkbox line per task with its ID, title,
+   **In progress**, **Blocked**, **Waiting on you**. One checkbox line per task with its ID, title,
    and (for overdue) days overdue. Mark teammates' tasks with "(by <user>)".
-   Omit empty sections.
+   For **Waiting on you**, call `waiting` (it lists decisions and questions that
+   name you, and steps only a person can take). Omit empty sections.
 4. Close with one sentence suggesting the single highest-priority next action,
    and offer to create or update tasks with `task_create` / `task_update`.

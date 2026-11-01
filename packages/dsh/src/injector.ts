@@ -31,6 +31,8 @@ import {
   claimsFor,
   heartbeatIfDue,
   takeClaimNotices,
+  waitingOn,
+  waitingLine,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
@@ -43,6 +45,8 @@ interface AgentState {
   recalledMessageId?: string;
   /** Collections whose open tasks were already surfaced this session. */
   tasksSurfaced: Set<string>;
+  /** "Waiting on you" is shown once per session. */
+  waitingSurfaced?: boolean;
 }
 
 /** Extract text from a user message's content blocks. */
@@ -150,6 +154,24 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
           if (tasks.length > 10) lines.push(`- _…${tasks.length - 10} more (call \`yapa_task_list\`)_`);
         }
         state.tasksSurfaced.add(collection);
+
+        if (!state.waitingSurfaced) {
+          state.waitingSurfaced = true;
+          const me = getConfig().USERNAME;
+          const w = await waitingOn({ user: me }).catch(() => undefined);
+          signal.throwIfAborted();
+          if (w) {
+            const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
+            const mine = items.filter(i => i.for.includes(me));
+            const anyone = items.filter(i => i.for.length === 0).length;
+            if (mine.length || anyone) {
+              lines.push('', '## Waiting on you');
+              for (const i of mine.slice(0, 8)) lines.push(waitingLine(i, { collection: true }));
+              if (mine.length > 8) lines.push(`- _…${mine.length - 8} more (call \`yapa_waiting\`)_`);
+              if (anyone) lines.push(`- _${anyone} item(s) wait on anyone with the role (call \`yapa_waiting\`)_`);
+            }
+          }
+        }
 
         // Surface memory-compaction candidates once per session alongside the
         // task check (long-term store maintenance — not context compaction).

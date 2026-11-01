@@ -262,4 +262,60 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     const tail = latest.text.slice(latest.text.indexOf('Open follow-ups for customer-initech'));
     expect(tail.split('\n')[1]).toContain('**alice-200**'); // newest first, despite medium priority
   });
+
+  // Runs last: its own collection (project-typed), seeds no other test uses.
+  it('typed memories: labels in memory and task output, and the waiting tool', async () => {
+    const C = 'project-typed';
+    await insert('td-1', C, 'Batch size for the transform\nwith detail', 31, { type: 'memory', kind: 'decision', status: 'needed', owner: 'alice', options: ['1, simplest', '64'], recommendation: '64', external_ref: 'records/D-1.md' }, 'alice', null, 3 * 86400);
+    await insert('tq-1', C, 'Which region for the demo?', 32, { type: 'memory', kind: 'question', owner: 'bob' }, 'alice', null, 2 * 86400);
+    await insert('td-2', C, 'Settled choice', 33, { type: 'memory', kind: 'decision', status: 'accepted', owner: 'alice' });
+    await insert('tf-1', C, 'Root cause found', 34, { type: 'memory', kind: 'finding', status: 'open', owner: 'alice' });
+    await insert('alice-300', C, 'Rerun the bench at 64', 35, { type: 'task', status: 'pending', priority: 'high', tags: ['needs-human', 'needs:alex'], memory_ids: ['td-1'], waits_on: ['td-1'] });
+    await insert('alice-301', C, 'Get VPN access', 36, { type: 'task', status: 'blocked', priority: 'medium', blockedReason: 'ticket open' }, 'alice', null, 86400);
+    await insert('bob-300', C, 'Bob is stuck', 37, { type: 'task', status: 'blocked', priority: 'low' }, 'bob');
+
+    const listed = await call('memory_list', { collection: C });
+    expect(listed.text).toContain('- **td-1** [decision, needed, for alice] [project-typed]');
+    expect(listed.text).toContain('- **tq-1** [question, open, for bob] [project-typed]');
+    expect(listed.text).toContain('- **td-2** [decision, accepted, for alice] [project-typed]');
+    expect(listed.text).toContain('- **tf-1** [finding, open] [project-typed]'); // no "for" on a finding
+    const recalled = await call('memory_recall', { query: 'seed:31', collection: C, other_collections: 0, include_tasks: false });
+    expect(recalled.text).toContain('**td-1** [decision, needed, for alice] (project-typed, by alice');
+
+    const tasks = await call('task_list', { collection: C });
+    expect(tasks.text).toContain('Rerun the bench at 64 | needs a person (alex) | waits on td-1 (by alice');
+    const detail = await call('task_list', { id: 'alice-300' });
+    expect(detail.text).toContain('Waiting: needs a person (alex)');
+    expect(detail.text).toContain('Waiting: waits on td-1');
+    expect(detail.text).toContain('Memories: td-1');
+
+    // Default user: the caller (alice). td-1 is hers; tq-1 is bob's; alice-300 is alex's step.
+    const mine = await call('waiting', { collection: C });
+    expect(mine.isError).toBe(false);
+    expect(mine.text).toBe([
+      '## Decisions (1)',
+      '- **td-1** [decision needed, for alice, 3d] Batch size for the transform',
+      '  options: 1, simplest | 64; recommended: 64; waiting: alice-300',
+      '',
+      '## Blocked (1)',
+      '- **alice-301** [blocked, for alice, 1d] Get VPN access',
+      '  reason: ticket open',
+    ].join('\n'));
+    const alex = await call('waiting', { collection: 'typed', user: 'alex' });
+    expect(alex.text).toContain('## Steps only a person can take (1)\n- **alice-300** [needs a person, for alex, new] Rerun the bench at 64');
+    expect(alex.text).not.toContain('td-1');
+    expect(alex.text).not.toContain('Blocked');
+    // Across collections the collection is named; "*" is everyone.
+    const all = await call('waiting', { user: '*' });
+    expect(all.text).toContain('- **tq-1** (project-typed) [question, for bob, 2d] Which region for the demo?');
+    expect(all.text).toContain('## Blocked (2)');
+    expect(all.text).not.toContain('td-2');
+    expect(all.text).not.toContain('tf-1');
+    expect(await call('waiting', { user: 'bob' }, 'bob')).toMatchObject({ isError: false });
+
+    // A status-only change (the decision was made) clears it.
+    await db.adminPool.query("UPDATE documents SET metadata = metadata || '{\"status\": \"accepted\"}'::jsonb WHERE id = 'td-1'");
+    expect((await call('waiting', { collection: C })).text).not.toContain('td-1');
+    expect((await call('waiting', { collection: 'private-alice' })).isError).toBe(true);
+  });
 });

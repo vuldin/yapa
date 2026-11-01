@@ -380,6 +380,18 @@ the deploy pipeline, never by clients.
 }
 ```
 
+Metadata is opaque to the service: apart from `origin_user` and
+`origin_device` (set by the service) and `type` (task id rules, journal
+drafts), it stores the object as given and serves it back unchanged. That
+includes the typed memory keys (`kind`, `status`, `owner`, `task_ids`,
+`options`, `recommendation`, `disposition`, `disposition_ids`,
+`disposition_reason`, `exit_criteria`, `external_ref`) and the task links
+(`memory_ids`, `waits_on`) that YAPA 1.6.0 clients write; they are listed in
+docs/sync-api.md section 7 ("Metadata keys"). No server rule reads them, and
+`test/typed.integration.test.ts` checks that they round-trip. Only the remote
+MCP service reads `kind`/`status`/`owner` (and task `waits_on` and
+`needs-human` / `needs:<user>` tags) to label output and answer `waiting`.
+
 ### Pull
 
 `GET /v1/collections/{c}/documents?since=<unix>&cursor=<opaque>&limit=<n>&include_own_device=<bool>&embeddings=<bool>`

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased (next): findings, decisions and what waits on people
+
+Working in YAPA now leaves findings, decisions, questions and follow-ups behind on its own, keeps them current as people answer, and shows each person what waits on them.
+
+**Upgrading:** no schema change. The new metadata keys are opaque to the remote (listed in [docs/sync-api.md](docs/sync-api.md) section 7); older clients keep them on pull. `response_capture` is now on by default (one or two small-model calls per turn, through `claude -p --model haiku` without an API key). An install that saved `false` for it keeps that: turn it on in the plugin settings to get the per-turn capture and follow-through.
+
+### Features
+- **Typed memories.** `memory_store` takes `kind` (finding, decision, limitation, question, idea) with a per-kind `status`, `owner`, `task_ids`, `options`, `recommendation`, `disposition`, `exit_criteria`; validated (a needed decision lists two options; a resolved finding says what became of it). `memory_update` changes one in place with a dated note. `memory_recall` and `memory_list` filter on kind and status and label each hit `[decision, needed, for josh]`.
+- **Waiting on a person.** `waiting` (and `yapa waiting`) lists decisions to make, questions to answer, task steps only a person can take (`needs-human`, `needs:<user>`) and blocked tasks; session start shows what waits on you across collections.
+- **Capture when work closes.** `task_complete` takes `learned` and `follow_ups`; `task_update` takes `decision_needed`, which records the decision and makes the task wait on it (`waits_on`) until it is recorded. A memory linked to a task is listed on the task (`memory_ids`); a task closed with nothing recorded gets a one-line nudge. `yapa task release` takes `--learned-file`, `--follow-ups-file`, `--decision-needed-file` and `--waits-on`.
+- **Follow-through after each turn, on by default.** Response capture (now on unless `response_capture` / `YAPA_RESPONSE_CAPTURE` is `false`) (extractor prompt v2) types what it stores and links it to the session's task, then judges the open items the turn touches and records what it settles: a person's choice, an answer, a finding's disposition. Only the owner settles a decision that names one.
+- **Triage and cleanup in the queue.** `task_next` skips tasks that wait on an open decision or need a person, takes `auto_only`, and offers cleanup items (`cleanup:triage`, `cleanup:findings`, `cleanup:compaction`) when nothing is ready. New `/yapa:work` skill (DSH: `yapa-work`) runs the loop. DSH gains `yapa_task_next`, `yapa_memory_update` and `yapa_waiting`.
+- **`yapa memory list|put|update`** for project tooling; `put --ref` indexes a record kept outside YAPA (created once, updated in place).
+- Reference remote: `yapa-mcp-remote` labels typed memories, shows task triage and waits, and adds `waiting`; the service and conformance suites check that typed metadata round-trips and a status-only update is served.
+
+### Fixes
+- A task's blocked reason now syncs on its own and is cleared when the task leaves blocked.
+- `memory_list` with a tag filter no longer misses matches past the first `limit` memories.
+- Typed memories are never folded into a compaction summary or merged by the janitor, and response capture never replaces one.
+
 ## Unreleased
 
 Two people (or two of your own sessions) can no longer start the same task without knowing: claiming a task is a lease the sync service grants or refuses on the spot.

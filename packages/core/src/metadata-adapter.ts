@@ -17,7 +17,11 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
     if (value === null || value === undefined) {
       continue;
     } else if (Array.isArray(value)) {
-      result[key] = value.join(',');
+      // A list whose items contain commas (free text, e.g. a decision's
+      // options) is kept as JSON; fromChroma parses either form.
+      result[key] = value.some(v => typeof v !== 'string' || v.includes(',') || v.startsWith('['))
+        ? JSON.stringify(value)
+        : value.join(',');
     } else if (typeof value === 'object') {
       result[key] = JSON.stringify(value);
     } else {
@@ -34,7 +38,7 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
  */
 export function fromChroma(metadata: RawMetadata): Record<string, any> {
   const result: Record<string, any> = {};
-  const arrayFields = ['tags', 'depends_on', 'blocks', 'related_ids'];
+  const arrayFields = ['tags', 'depends_on', 'blocks', 'related_ids', 'claim_scope', 'task_ids', 'memory_ids', 'waits_on', 'options', 'disposition_ids'];
 
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === 'string') {

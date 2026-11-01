@@ -33,6 +33,9 @@ import {
   noteSyncOk,
   readSyncHealth,
   type SyncHealth,
+  waitingOn,
+  waitingLine,
+  heldKeys,
 } from '@yapa/core';
 
 import { CLAUDE_CODE_RULES } from '../rules.js';
@@ -317,6 +320,34 @@ async function findCompactionCandidates(): Promise<string[]> {
   return out;
 }
 
+/**
+ * "## Waiting on you": decisions, questions and person-only steps that name
+ * this user, across every collection, plus a count of those for anyone. Empty
+ * when nothing waits (or the read is slow: session start never waits on it).
+ */
+export async function waitingLines(user: string, budgetMs = 2000): Promise<string[]> {
+  try {
+    const w = await Promise.race([
+      waitingOn({ user }),
+      new Promise<undefined>(res => setTimeout(() => res(undefined), budgetMs).unref()),
+    ]);
+    if (!w) return [];
+    const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
+    const mine = items.filter(i => i.for.includes(user));
+    const anyone = items.filter(i => i.for.length === 0).length;
+    if (!mine.length && !anyone) return [];
+    const out = ['', '## Waiting on you'];
+    for (const i of mine.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
+    if (mine.length > 8) out.push(`- _…${mine.length - 8} more (call \`waiting\`)_`);
+    if (anyone) out.push(`- _${anyone} item(s) wait on anyone with the role (call \`waiting\`)_`);
+    out.push('Tell the user about these when relevant; record a choice with `memory_update` (status accepted), never only in chat.');
+    return out;
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] waiting failed: ${e}\n`);
+    return [];
+  }
+}
+
 export async function sessionStart(input: SessionStartInput): Promise<void> {
   const detection = await detectCollection(input.cwd);
   const collection = detection.collection;
@@ -350,6 +381,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   } catch (e) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}\n`);
   }
+
+  lines.push(...await waitingLines(getConfig().USERNAME));
 
   lines.push(...held.lines);
 
@@ -458,7 +491,7 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
 }
 
 /**
- * Response capture (opt-in: YAPA_RESPONSE_CAPTURE=true). Runs as an async
+ * Response capture (on unless YAPA_RESPONSE_CAPTURE=false). Runs as an async
  * Stop hook: judges the finished turn (buffered prompt + Claude Code's
  * `last_assistant_message`) with the aux LLM and stores durable findings. The
  * outcome surfaces as a one-line notice on the next prompt's context.
@@ -483,7 +516,11 @@ export async function stop(input: StopInput): Promise<void> {
     const { collection } = await detectCollection(input.cwd);
     const result = await captureTurn(
       { collection, sessionId: input.session_id, turn: turn?.turn ?? 0, userText, assistantText },
-      { maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE },
+      {
+        maxMemories: config.CAPTURE_MAX_MEMORIES, maxSalience: config.CAPTURE_MAX_SALIENCE, dedupeDistance: config.CAPTURE_DEDUPE_DISTANCE,
+        // Typed captures belong to the task this session is on.
+        taskIds: heldKeys(currentSession(input.session_id) ?? input.session_id, collection).filter(k => !k.startsWith('cleanup:')),
+      },
     );
     if (result.notice) writeFileSync(stateFile(input.session_id, 'notice'), result.notice);
   } catch (e) {

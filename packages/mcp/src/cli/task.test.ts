@@ -55,3 +55,45 @@ describe('yapa task', () => {
     expect((await runTask('bogus', [])).exit).toBe(2);
   });
 });
+
+describe('yapa task capture at close', () => {
+  it('release records a needed decision and the task waits on it; learned and follow-ups are stored with complete', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const id = await createTask('choose the cache', { tags: ['auto'] }, 'project-cap');
+    const dn = join(dir, 'dn.json');
+    writeFileSync(dn, JSON.stringify({ question: 'Shared cache or per user?', options: ['shared', 'per user'], owner: 'alex' }));
+    const rel = await runTask('release', [id, '--status', 'pending', '--decision-needed-file', dn]);
+    expect(rel.exit).toBe(0);
+    const decision = rel.json.decision as string;
+    expect(decision).toMatch(/^mem-/);
+    expect((await getTask(id))?.metadata).toMatchObject({ status: 'pending', waits_on: [decision] });
+
+    const next = await runTask('next', ['--collection', 'project-cap', '--auto-only']);
+    expect((next.json.skipped as any[]).find(s => s.id === id).reason).toBe(`waiting on decision ${decision} (needed, for alex)`);
+
+    expect((await runTask('release', [id, '--status', 'blocked', '--decision-needed-file', dn])).exit).toBe(2);
+
+    const learned = join(dir, 'learned.json');
+    writeFileSync(learned, JSON.stringify([{ kind: 'finding', content: 'A shared cache halves the cold starts.' }]));
+    const fu = join(dir, 'fu.json');
+    writeFileSync(fu, JSON.stringify([{ title: 'Measure the cache hit rate', tags: ['auto'] }]));
+    const done = await runTask('release', [id, '--status', 'complete', '--learned-file', learned, '--follow-ups-file', fu]);
+    expect(done.exit).toBe(0);
+    expect((done.json.recorded as any).memories).toHaveLength(1);
+    expect((done.json.recorded as any).follow_ups).toHaveLength(1);
+    expect(done.json.nudge).toBeNull();
+
+    const bad = join(dir, 'bad.json');
+    writeFileSync(bad, JSON.stringify([{ kind: 'finding', status: 'resolved', content: 'x' }]));
+    const other = await createTask('another', {}, 'project-cap');
+    expect((await runTask('release', [other, '--status', 'complete', '--learned-file', bad])).exit).toBe(2);
+    expect((await getTask(other))?.metadata.status).toBe('pending');
+  });
+
+  it('claims and releases a cleanup key as a lease only', async () => {
+    const c = await runTask('claim', ['cleanup:triage', '--collection', 'project-cap']);
+    expect(c).toMatchObject({ exit: 0, json: { ok: true, id: 'cleanup:triage', claim: { kind: 'local' } } });
+    expect((await runTask('claim', ['cleanup:triage'])).exit).toBe(2);
+    expect((await runTask('release', ['cleanup:triage', '--collection', 'project-cap'])).exit).toBe(0);
+  });
+});
