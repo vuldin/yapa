@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (next): findings, decisions and what waits on people
+## Unreleased
 
 Working in YAPA now leaves findings, decisions, questions and follow-ups behind on its own, keeps them current as people answer, and shows each person what waits on them.
 
@@ -20,7 +20,7 @@ Working in YAPA now leaves findings, decisions, questions and follow-ups behind 
 - `memory_list` with a tag filter no longer misses matches past the first `limit` memories.
 - Typed memories are never folded into a compaction summary or merged by the janitor, and response capture never replaces one.
 
-## Unreleased
+## 1.5.0 (2026-11-01)
 
 Two people (or two of your own sessions) can no longer start the same task without knowing: claiming a task is a lease the sync service grants or refuses on the spot.
 
