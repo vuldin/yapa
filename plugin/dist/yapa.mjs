@@ -8718,9 +8718,15 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    if (existsSync4(join9(dirname6(to), REMOVED_MARKER)) || !existsSync4(to)) return void 0;
+    const added = join9(dirname6(to), "statusline-added");
+    if (existsSync4(join9(dirname6(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
+      try {
+        writeFileSync10(added, `${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+      } catch {
+      }
       return `_YAPA added its status line (version, remote, sync health) under the prompt in ${settingsPath}; mention it once. To remove it: \`node "${to}" --uninstall\`._`;
     } catch (e) {
       process.stderr.write(`[yapa-hook] status line install failed: ${e}

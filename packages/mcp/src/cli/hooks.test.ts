@@ -360,6 +360,7 @@ describe('sync health (status line)', () => {
     writeFileSync(src, 'console.log("v3")\n');
     const stable = join(health, '..', 'statusline.mjs');
     rmSync(join(health, '..', 'statusline-removed'), { force: true });
+    rmSync(join(health, '..', 'statusline-added'), { force: true });
     configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_STATUSLINE: 'true' });
 
     const line = prepareStatusLine(src, settings);
@@ -370,8 +371,15 @@ describe('sync health (status line)', () => {
     expect(after.statusLine.command).toContain('--wrap');
     expect(prepareStatusLine(src, settings)).toBeUndefined(); // already there
 
-    // The user removes it (by hand, or --uninstall): it stays removed.
-    const { setRemovedMarker, uninstallStatusLine } = await import('./statusline.js');
+    // The user removes it by hand: it stays removed.
+    writeFileSync(settings, JSON.stringify({ theme: 'dark', statusLine: theirs }));
+    expect(prepareStatusLine(src, settings)).toBeUndefined();
+    expect(JSON.parse(readFileSync(settings, 'utf-8')).statusLine).toEqual(theirs);
+
+    // Or with --uninstall, even on a device that never auto-added it.
+    rmSync(join(health, '..', 'statusline-added'));
+    const { setRemovedMarker, installStatusLine: install, uninstallStatusLine } = await import('./statusline.js');
+    install(stable, settings);
     uninstallStatusLine(settings, stable);
     setRemovedMarker(join(health, '..'), true);
     expect(prepareStatusLine(src, settings)).toBeUndefined();

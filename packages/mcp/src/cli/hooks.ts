@@ -197,9 +197,17 @@ export function prepareStatusLine(
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return undefined;
   if (getConfig().STATUSLINE) {
-    if (existsSync(join(dirname(to), REMOVED_MARKER)) || !existsSync(to)) return undefined;
+    // Added once before and gone now: the user removed it (by hand or with
+    // --uninstall), so leave it removed. /yapa:statusline adds it back.
+    const added = join(dirname(to), 'statusline-added');
+    if (existsSync(join(dirname(to), REMOVED_MARKER)) || existsSync(added) || !existsSync(to)) return undefined;
     try {
       installStatusLine(to, settingsPath);
+      try {
+        writeFileSync(added, `${new Date().toISOString()}\n`);
+      } catch {
+        // without the marker a hand removal is undone next session; --uninstall still sticks
+      }
       return `_YAPA added its status line (version, remote, sync health) under the prompt in ${settingsPath}; mention it once. To remove it: \`node "${to}" --uninstall\`._`;
     } catch (e) {
       process.stderr.write(`[yapa-hook] status line install failed: ${e}\n`);
