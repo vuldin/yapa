@@ -2252,8 +2252,8 @@ var require_resolve = __commonJS({
     }
     exports.getFullPath = getFullPath;
     function _getFullPath(resolver, p) {
-      const serialized = resolver.serialize(p);
-      return serialized.split("#")[0] + "#";
+      const serialized2 = resolver.serialize(p);
+      return serialized2.split("#")[0] + "#";
     }
     exports._getFullPath = _getFullPath;
     var TRAILING_SLASH_HASH = /#\/?$/;
@@ -7265,7 +7265,7 @@ var require_dist = __commonJS({
 });
 
 // packages/core/src/config.ts
-import { homedir as homedir2, userInfo } from "os";
+import { homedir as homedir2, tmpdir, userInfo } from "os";
 import { join as pathJoin } from "path";
 function list(value) {
   return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
@@ -7351,7 +7351,8 @@ function createConfig(env = process.env) {
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
-    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
+    // Under vitest, never the developer's real lease markers and claim notices.
+    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
@@ -8282,6 +8283,102 @@ var init_store = __esm({
   }
 });
 
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+function isReadOnlyDoc(metadata) {
+  return metadata?.read_only === true;
+}
+function assertWritable(id, metadata) {
+  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
+}
+var init_syncable = __esm({
+  "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/sync/deletes.ts
+async function queueSyncDelete(docId, collection) {
+  await getOrCreateCollection2("global");
+  const existing = await getPendingDeletes();
+  const entry = `${collection}:${docId}`;
+  if (!existing.includes(entry)) {
+    existing.push(entry);
+  }
+  await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
+    type: "sync_sentinel",
+    pending_deletes: existing.join(",")
+  });
+}
+async function queueSyncDeletes(docIds, collection) {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection2("global");
+  const existing = new Set(await getPendingDeletes());
+  for (const id of docIds) existing.add(`${collection}:${id}`);
+  await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
+    type: "sync_sentinel",
+    pending_deletes: [...existing].join(",")
+  });
+}
+async function getPendingDeletes() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: "sync_sentinel" }, 10);
+    const sentinel = results.find((r) => r.id === SYNC_DELETES_ID);
+    if (!sentinel) return [];
+    const raw = sentinel.metadata.pending_deletes;
+    if (!raw || raw === "") return [];
+    return typeof raw === "string" ? raw.split(",").filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+async function clearPendingDeletes(processed) {
+  try {
+    const done = processed ? new Set(processed) : void 0;
+    const remaining = done ? (await getPendingDeletes()).filter((e) => !done.has(e)) : [];
+    await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
+      type: "sync_sentinel",
+      pending_deletes: remaining.join(",")
+    });
+  } catch {
+  }
+}
+async function addLocalTombstone(docId) {
+  await addLocalTombstones([docId]);
+}
+async function addLocalTombstones(docIds) {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection2("global");
+  const existing = await getLocalTombstones();
+  const before = existing.size;
+  for (const id of docIds) existing.add(id);
+  if (existing.size === before) return;
+  await addDocument2("global", SYNC_TOMBSTONES_ID, "sync tombstones", {
+    type: "sync_tombstones",
+    ids: [...existing].join(",")
+  });
+}
+async function getLocalTombstones() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: "sync_tombstones" }, 1);
+    const raw = results[0]?.metadata.ids;
+    return new Set(typeof raw === "string" ? raw.split(",").filter(Boolean) : []);
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+var SYNC_DELETES_ID, SYNC_TOMBSTONES_ID;
+var init_deletes = __esm({
+  "packages/core/src/sync/deletes.ts"() {
+    "use strict";
+    init_store();
+    SYNC_DELETES_ID = "__sync_deletes__";
+    SYNC_TOMBSTONES_ID = "__sync_tombstones__";
+  }
+});
+
 // packages/core/src/sync/health.ts
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname } from "node:path";
@@ -8750,7 +8847,16 @@ var init_http_backend = __esm({
       }
       coordination = {
         leaseAcquire: (req) => this.request("POST", "/v1/leases:acquire", {
-          body: { collection: req.collection, key: req.key, session: req.session, scope: req.scope ?? [], ttl_seconds: req.ttlSeconds, title: req.title },
+          // scope and ttl_seconds only when given: an omitted one keeps a renewed lease's stored value.
+          body: {
+            collection: req.collection,
+            key: req.key,
+            session: req.session,
+            scope: req.scope,
+            ttl_seconds: req.ttlSeconds,
+            title: req.title,
+            ...req.reclaim ? { reclaim: true } : {}
+          },
           quiet: true
         }),
         leaseHeartbeat: (collection, session, keys) => this.request("POST", "/v1/leases:heartbeat", { body: { collection, session, keys }, quiet: true }),
@@ -9382,6 +9488,7 @@ async function createTask(title, options = {}, collection = "global") {
     project: options.project,
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
+    ...options.claim_scope?.length ? { claim_scope: options.claim_scope } : {},
     is_recurring: options.is_recurring ?? false,
     recurrence_pattern: options.recurrence_pattern,
     created_at: now,
@@ -9409,6 +9516,651 @@ var init_create = __esm({
       medium: 2,
       low: 1.5
     };
+  }
+});
+
+// packages/core/src/sync/coordination.ts
+import { mkdirSync as mkdirSync5, readdirSync, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { join as join3 } from "node:path";
+function currentSession(explicit, env = process.env) {
+  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
+    if (v && SESSION_RE.test(v)) return v;
+  }
+  return void 0;
+}
+function markerPath(session) {
+  return join3(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function readMarker(session) {
+  try {
+    return JSON.parse(readFileSync6(markerPath(session), "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeMarker(m) {
+  try {
+    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync5(markerPath(m.session), JSON.stringify(m), { mode: 384 });
+  } catch {
+  }
+}
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
+  const prev = readMarker(session);
+  const keys = new Set(prev?.keys ?? []);
+  if (held) keys.add(heldKey(held.collection, held.key));
+  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
+}
+function noteLeaseReleased(session, collection, key) {
+  const prev = readMarker(session);
+  if (!prev?.keys) return;
+  const keys = prev.keys.filter((k) => k !== heldKey(collection, key));
+  writeMarker({ ...prev, keys });
+}
+function noticesPath() {
+  return join3(getConfig().LEASE_STATE_DIR, "notices.state");
+}
+function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
+  let list2 = [];
+  try {
+    list2 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
+  } catch {
+  }
+  if (!Array.isArray(list2)) list2 = [];
+  if (list2.some((n) => n.text === text)) return;
+  list2.push({ at: now, text });
+  try {
+    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync5(noticesPath(), JSON.stringify(list2.slice(-20)), { mode: 384 });
+  } catch {
+  }
+}
+async function requireCoordination() {
+  if (!isSyncConfigured()) {
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+  }
+  const backend = await getSyncBackend();
+  if (!backend?.coordination) {
+    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
+  }
+  return wrap(backend.coordination);
+}
+function isCoordinationUnavailable(e) {
+  if (e instanceof CoordinationUnavailableError) return true;
+  const err = e;
+  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
+}
+function wrap(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (isCoordinationUnavailable(e)) {
+        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+var SESSION_RE, heldKey, CoordinationUnavailableError;
+var init_coordination = __esm({
+  "packages/core/src/sync/coordination.ts"() {
+    "use strict";
+    init_config();
+    init_backend();
+    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+    heldKey = (collection, key) => `${collection}\0${key}`;
+    CoordinationUnavailableError = class extends Error {
+      constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+        this.name = "CoordinationUnavailableError";
+      }
+      reason;
+      code = "coordination_unavailable";
+    };
+  }
+});
+
+// packages/core/src/sync/sentinel.ts
+async function getSyncPullTimestamp() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_pull_sentinel" }
+    }, 1);
+    if (results.length === 0) return 0;
+    return results[0].metadata.last_pull ?? 0;
+  } catch {
+    return 0;
+  }
+}
+async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
+    type: "sync_pull_sentinel",
+    last_pull: at
+  });
+}
+async function getSyncSubscriptions() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_subscriptions" }
+    }, 1);
+    if (results.length === 0) return [];
+    const raw = results[0].metadata.collections;
+    if (!raw) return [];
+    return raw.split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function updateSyncSubscriptions(collections) {
+  await getOrCreateCollection2("global");
+  const deduped = [...new Set(collections)].sort();
+  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
+    type: "sync_subscriptions",
+    collections: deduped.join(",")
+  });
+}
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID;
+var init_sentinel = __esm({
+  "packages/core/src/sync/sentinel.ts"() {
+    "use strict";
+    init_store();
+    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
+    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
+  }
+});
+
+// packages/core/src/sync/push.ts
+import { createHash } from "node:crypto";
+function emptyPushStats() {
+  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+}
+function syncFingerprint(doc) {
+  const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
+  const meta3 = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
+  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta3)).digest("hex").slice(0, 32);
+}
+function stripLocalOnly(metadata) {
+  const out = { ...metadata };
+  for (const k of LOCAL_ONLY_KEYS) delete out[k];
+  return out;
+}
+function pushToRemote() {
+  return serialized(pushAll);
+}
+function serialized(fn) {
+  const run2 = pushChain.then(fn, fn);
+  pushChain = run2.catch(() => void 0);
+  return run2;
+}
+function pushDocsNow(collection, ids) {
+  return serialized(async () => {
+    const out = { pushed: [], renamed: {}, errors: 0 };
+    if (!ids.length || !isSyncableCollection(collection)) return out;
+    const backend = await getSyncBackend();
+    if (!backend) return out;
+    await resolveSyncUsername();
+    const docs = (await getDocumentsByIds2(collection, ids)).filter((d) => d.metadata.is_synced === false && !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const stats = emptyPushStats();
+    const batch = [];
+    for (const unsynced of docs) {
+      const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+      batch.push({ doc, upsert: await toUpsert(collection, doc) });
+    }
+    try {
+      await pushBatch(backend, collection, batch, stats, true);
+    } catch (e) {
+      noteSyncError(e);
+      out.errors++;
+      return out;
+    }
+    out.errors += stats.errors;
+    for (const id of ids) {
+      const [now] = await getDocumentsByIds2(collection, [id]).catch(() => []);
+      if (now) {
+        if (now.metadata.is_synced !== false) out.pushed.push(id);
+        continue;
+      }
+      const [moved] = await getDocumentsByFilter2(collection, { rekeyed_from: id }, 1).catch(() => []);
+      if (moved) {
+        out.renamed[id] = moved.id;
+        if (moved.metadata.is_synced !== false) out.pushed.push(moved.id);
+      }
+    }
+    return out;
+  });
+}
+async function pushAll() {
+  const stats = emptyPushStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
+  try {
+    const pendingDeletes = await getPendingDeletes();
+    if (pendingDeletes.length > 0) {
+      const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
+      stats.deleted = await backend.delete(docIds, "delete");
+      await clearPendingDeletes(pendingDeletes);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
+`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+  const collections = await listCollections2();
+  for (const collection of collections) {
+    if (isSyncableCollection(collection.name)) continue;
+    try {
+      stats.retracted += await retractSharedCopies(backend, collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
+`);
+      noteSyncError(e);
+      stats.errors++;
+      if (isCycleFatal(e)) return stats;
+    }
+  }
+  const pushedCollections = [];
+  for (const collection of collections) {
+    if (!isSyncableCollection(collection.name)) continue;
+    try {
+      const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
+      const before = stats.pushed + stats.linked;
+      const batch = [];
+      for (const unsynced of unsyncedDocs) {
+        if (unsynced.id.startsWith("__")) continue;
+        if (unsynced.metadata.type === "journal_draft") continue;
+        if (isReadOnlyDoc(unsynced.metadata)) continue;
+        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        try {
+          batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
+        } catch (e) {
+          process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+          stats.errors++;
+        }
+      }
+      await pushBatch(backend, collection.name, batch, stats, true);
+      if (stats.pushed + stats.linked > before) pushedCollections.push(collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}
+`);
+      noteSyncError(e);
+      stats.errors++;
+      if (isCycleFatal(e)) break;
+    }
+  }
+  if (pushedCollections.length > 0) {
+    try {
+      const existing = await getSyncSubscriptions();
+      const existingSet = new Set(existing);
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
+      if (newSubs.length > 0) {
+        await updateSyncSubscriptions([...existing, ...newSubs]);
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
+`);
+    }
+  }
+  return stats;
+}
+async function toUpsert(collection, doc) {
+  const now = Math.floor(Date.now() / 1e3);
+  const embedding = await generateEmbedding(doc.content) ?? [];
+  return {
+    id: doc.id,
+    collection,
+    content: doc.content,
+    embedding,
+    metadata: stripLocalOnly(doc.metadata),
+    origin_user: getConfig().USERNAME,
+    created_at: doc.metadata.created_at ?? now,
+    updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? now
+  };
+}
+async function pushBatch(backend, collection, batch, stats, allowRekey) {
+  if (batch.length === 0) return;
+  let outcomes;
+  try {
+    outcomes = await backend.upsertMany(batch.map((b) => b.upsert));
+  } catch (e) {
+    stats.errors += batch.length - 1;
+    throw e;
+  }
+  const retry = [];
+  for (let i = 0; i < batch.length; i++) {
+    const { doc, upsert } = batch[i];
+    const outcome = outcomes[i];
+    try {
+      if (outcome.ok) {
+        await applyPushed(backend, collection, doc, outcome.similar, stats);
+      } else if (outcome.code === "id_taken" && allowRekey && doc.metadata.type === "task") {
+        const renamed = await rekeyTask(collection, doc, outcome.suggestedId);
+        stats.renamed++;
+        retry.push({ doc: renamed, upsert: { ...upsert, id: renamed.id, metadata: stripLocalOnly(renamed.metadata) } });
+      } else if (outcome.permanent) {
+        await markRejected(collection, doc, outcome.code, outcome.message);
+        stats.rejected++;
+      } else {
+        process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${outcome.code}: ${outcome.message}
+`);
+        noteSyncError(`${doc.id}: ${outcome.code}: ${outcome.message}`);
+        stats.errors++;
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+      stats.errors++;
+    }
+  }
+  await pushBatch(backend, collection, retry, stats, false);
+}
+async function applyPushed(backend, collection, doc, similar, stats) {
+  const match = similar.find((s) => s.id !== doc.id);
+  const metadata = stripLocalOnly(doc.metadata);
+  if (!match) {
+    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
+    stats.pushed++;
+    return;
+  }
+  try {
+    await backend.addRelatedIds(match.id, [doc.id]);
+    await backend.addRelatedIds(doc.id, [match.id]);
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
+`);
+  }
+  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
+  if (!related.includes(match.id)) related.push(match.id);
+  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  stats.linked++;
+}
+async function markRejected(collection, doc, code, message) {
+  await updateDocument2(collection, doc.id, {
+    ...doc.metadata,
+    is_synced: false,
+    sync_rejected: code,
+    sync_rejected_message: message.slice(0, 300),
+    sync_rejected_fp: syncFingerprint(doc)
+  });
+  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
+`);
+}
+async function countUnpushed() {
+  let n = 0;
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
+      n++;
+    }
+  }
+  return n;
+}
+async function listRejectedDocs() {
+  const out = [];
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+        out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
+      }
+    }
+  }
+  return out;
+}
+async function rekeyTask(collection, doc, suggestedId) {
+  const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
+  const me = getConfig().USERNAME;
+  const localNext = Number((await getNextTaskId2()).split("-").pop());
+  const suggested = Number(suggestedId?.split("-").pop());
+  const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
+  const newId = `${me}-${n}`;
+  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
+  await addDocument2(collection, newId, doc.content, metadata);
+  await deleteDocument2(collection, doc.id);
+  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
+`);
+  return { ...doc, id: newId, metadata };
+}
+async function retractSharedCopies(backend, collection) {
+  const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
+  if (unchecked.length === 0) return 0;
+  const me = getConfig().USERNAME;
+  const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
+  const mine = unchecked.filter((d) => {
+    const row = remote.get(d.id);
+    const localCreated = Number(d.metadata.created_at);
+    return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
+  });
+  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
+  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
+`);
+  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  return removed;
+}
+var LOCAL_ONLY_KEYS, pushChain;
+var init_push = __esm({
+  "packages/core/src/sync/push.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_embeddings();
+    init_backend();
+    init_deletes();
+    init_sentinel();
+    init_device();
+    init_syncable();
+    LOCAL_ONLY_KEYS = ["sync_rejected", "sync_rejected_fp", "sync_rejected_message", "claim_unshared"];
+    pushChain = Promise.resolve();
+  }
+});
+
+// packages/core/src/tasks/claim.ts
+var claim_exports = {};
+__export(claim_exports, {
+  TaskClaimedError: () => TaskClaimedError,
+  claimNote: () => claimNote,
+  claimSession: () => claimSession,
+  claimTask: () => claimTask,
+  claimsApply: () => claimsApply,
+  claimsFor: () => claimsFor,
+  describeClaim: () => describeClaim,
+  describeHolder: () => describeHolder,
+  describeRefusal: () => describeRefusal,
+  releaseTaskClaim: () => releaseTaskClaim,
+  retryUnsharedClaims: () => retryUnsharedClaims
+});
+function claimSession(explicit) {
+  return currentSession(explicit) ?? `${getDeviceId()}:${process.pid}`.replace(SESSION_SAFE, "-").slice(0, 128);
+}
+function claimsApply(collection) {
+  return isSyncableCollection(collection) && isSyncConfigured();
+}
+function utc(t, now = Math.floor(Date.now() / 1e3)) {
+  const iso = new Date(t * 1e3).toISOString();
+  const day = iso.slice(0, 10);
+  const hm = iso.slice(11, 16);
+  return day === new Date(now * 1e3).toISOString().slice(0, 10) ? `${hm} UTC` : `${day} ${hm} UTC`;
+}
+function describeHolder(l, me = getConfig().USERNAME, mySession, now = Math.floor(Date.now() / 1e3)) {
+  const who = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
+  return `${who} since ${utc(l.acquired_at, now)}`;
+}
+function describeRefusal(r) {
+  const holders = r.conflicts.map((c) => {
+    const why = c.lease.key === r.id ? "" : ` (overlapping ${c.overlap.join(", ")} via ${c.lease.key})`;
+    return `${describeHolder(c.lease, void 0, r.session)}${why}`;
+  });
+  const ownOther = r.conflicts.every((c) => c.lease.holder.user === getConfig().USERNAME);
+  return `${r.id} is being worked on by ${holders.join("; ")}; not changed.` + (ownOther ? " If that other session is yours and finished or gone, retry with reclaim: true after the user confirms." : "");
+}
+async function claimTask(id, collection, metadata, opts = {}) {
+  if (!claimsApply(collection)) return { kind: "local", id };
+  const session = claimSession(opts.session);
+  const localHolder = metadata.status === "in_progress" && typeof metadata.claim_unshared === "string" ? metadata.claim_unshared : "";
+  if (localHolder && localHolder !== session && !opts.reclaim) {
+    const at = Number(metadata.updated_at ?? Math.floor(Date.now() / 1e3));
+    const lease = {
+      collection,
+      key: id,
+      holder: { user: getConfig().USERNAME, session: localHolder, device: getDeviceId() },
+      title: null,
+      scope: [`key:${id}`],
+      ttl_seconds: 0,
+      acquired_at: at,
+      heartbeat_at: at,
+      expires_at: at,
+      expired: false,
+      took_over_from: null
+    };
+    return { kind: "refused", id, collection, session, conflicts: [{ lease, overlap: [`key:${id}`] }] };
+  }
+  let key = id;
+  if (metadata.is_synced === false) {
+    try {
+      const r = await pushDocsNow(collection, [id]);
+      key = r.renamed[id] ?? id;
+    } catch {
+    }
+  }
+  try {
+    const c = await requireCoordination();
+    const r = await c.leaseAcquire({
+      collection,
+      key,
+      session,
+      ...opts.scope ? { scope: opts.scope } : {},
+      ...opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {},
+      ...opts.title ? { title: opts.title } : {},
+      ...opts.reclaim ? { reclaim: true } : {}
+    });
+    if (!r.granted) return { kind: "refused", id: key, collection, session, conflicts: r.conflicts };
+    noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
+    return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    throw e;
+  }
+}
+async function releaseTaskClaim(id, collection, outcome, session) {
+  if (!claimsApply(collection)) return { kind: "local" };
+  const s = claimSession(session);
+  try {
+    const r = await (await requireCoordination()).leaseRelease(collection, id, s, outcome);
+    noteLeaseReleased(s, collection, id);
+    if (r.released) return { kind: "released" };
+    if (r.reason === "held_by_other") return { kind: "held_by_other", lease: r.lease };
+    return { kind: "not_held" };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: "unshared", reason: e.message };
+    throw e;
+  }
+}
+function describeClaim(r) {
+  switch (r.kind) {
+    case "local":
+      return "";
+    case "granted": {
+      if (r.tookOverFrom) {
+        const prev = r.tookOverFrom;
+        const whose = prev.user === getConfig().USERNAME ? `your other session ${String(prev.session ?? "")}` : `${prev.user}'s expired claim`;
+        return `Claimed ${r.id} (took over from ${whose}).`;
+      }
+      return r.renewed ? `Claim on ${r.id} renewed.` : `Claimed ${r.id}: teammates see it as yours.`;
+    }
+    case "refused":
+      return describeRefusal(r);
+    case "unshared":
+      return `Claim on ${r.id} is NOT shared (${r.reason}): others may start it too. It will be retried when sync is back; tell the user.`;
+  }
+}
+async function retryUnsharedClaims() {
+  const out = { granted: 0, refused: 0 };
+  if (!isSyncConfigured()) return out;
+  for (const col of await listCollections2().catch(() => [])) {
+    if (!isSyncableCollection(col.name)) continue;
+    const pending = (await getDocumentsByFilter2(col.name, { status: "in_progress" }, 1e3).catch(() => [])).filter((d) => typeof d.metadata.claim_unshared === "string" && d.metadata.claim_unshared);
+    for (const d of pending) {
+      let r;
+      try {
+        r = await claimTask(d.id, col.name, d.metadata, { session: d.metadata.claim_unshared });
+      } catch {
+        continue;
+      }
+      if (r.kind === "unshared" || r.kind === "local") return out;
+      const [cur] = await getDocumentsByIds2(col.name, [r.id]).catch(() => []);
+      if (cur) await updateDocument2(col.name, r.id, { ...cur.metadata, claim_unshared: "" });
+      if (r.kind === "granted") {
+        out.granted++;
+      } else {
+        out.refused++;
+        addClaimNotice(`While you were offline, ${r.conflicts.map((c) => describeHolder(c.lease, void 0, r.session)).join("; ")} claimed ${r.id} (${col.name}). Your claim was not shared: coordinate before continuing that work.`);
+      }
+    }
+  }
+  return out;
+}
+async function claimsFor(collection, budgetMs = 1500) {
+  if (!claimsApply(collection)) return void 0;
+  try {
+    const work = (async () => (await requireCoordination()).leaseList(collection))();
+    const r = await Promise.race([work, new Promise((res) => setTimeout(() => res(void 0), budgetMs).unref())]);
+    if (!r) return void 0;
+    return new Map(r.leases.filter((l) => !l.expired).map((l) => [l.key, l]));
+  } catch {
+    return void 0;
+  }
+}
+function claimNote(task, claims, mySessions = [currentSession()]) {
+  if (!claims) return task.metadata.claim_unshared ? "claim not shared yet" : "";
+  const l = claims.get(task.id);
+  if (l) {
+    const mine = mySessions.find((s) => s && s === l.holder.session);
+    return `claimed by ${describeHolder(l, void 0, mine)}`;
+  }
+  if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
+  return "";
+}
+var TaskClaimedError, SESSION_SAFE;
+var init_claim = __esm({
+  "packages/core/src/tasks/claim.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_device();
+    init_backend();
+    init_coordination();
+    init_push();
+    init_syncable();
+    TaskClaimedError = class extends Error {
+      constructor(result) {
+        super(describeRefusal(result));
+        this.result = result;
+        this.name = "TaskClaimedError";
+      }
+      result;
+      code = "task_claimed";
+    };
+    SESSION_SAFE = /[^A-Za-z0-9._:-]/g;
   }
 });
 
@@ -28507,13 +29259,13 @@ function _promise(Class2, innerType) {
 }
 // @__NO_SIDE_EFFECTS__
 function _custom(Class2, fn, _params) {
-  const norm = normalizeParams(_params);
-  norm.abort ?? (norm.abort = true);
+  const norm2 = normalizeParams(_params);
+  norm2.abort ?? (norm2.abort = true);
   const schema = new Class2({
     type: "custom",
     check: "custom",
     fn,
-    ...norm
+    ...norm2
   });
   return schema;
 }
@@ -29779,14 +30531,14 @@ var nonoptionalProcessor = (schema, ctx, _json, params) => {
 var UNREPRESENTABLE_DEFAULT = /* @__PURE__ */ Symbol();
 function serializeDefaultValue(value, schema, ctx, json2, params) {
   let unrepresentable = false;
-  const serialized = JSON.stringify(value, (_, val) => {
+  const serialized2 = JSON.stringify(value, (_, val) => {
     if (typeof val !== "bigint")
       return val;
     unrepresentable = true;
     return null;
   });
   if (!unrepresentable)
-    return JSON.parse(serialized);
+    return JSON.parse(serialized2);
   handleUnrepresentable(schema, ctx, json2, params, "BigInt defaults cannot be represented in JSON Schema");
   return UNREPRESENTABLE_DEFAULT;
 }
@@ -38905,10 +39657,20 @@ already captured in git history or in an existing memory.
   a duplicate
 - Session start: covered by Per-Prompt Routine step 3
 
+### Task Claims
+- In a shared collection, setting a task to \`in_progress\` claims it for
+  this session (a lease on its id); completing, blocking, resetting or
+  deleting it releases the claim. Set \`in_progress\` when you start a task.
+- If the update is refused, nothing changed: tell the user who holds the
+  task and since when, and offer other work. Use \`reclaim: true\` only for
+  your own other session, after the user confirms.
+- If the claim is NOT shared (offline, signed out), tell the user others may
+  start the same task.
+
 ### Shared Work (leases)
-- Some projects coordinate work through YAPA leases (the \`lease\` tool, or a
-  project script calling \`yapa coord\`). Take a lease only when the
-  project's own instructions or tooling call for it.
+- For other shared resources, some projects coordinate through bare YAPA
+  leases (the \`lease\` tool, or a project script calling \`yapa coord\`).
+  Take a lease only when the project's own instructions or tooling call for it.
 - If an acquire is refused, tell the user who holds the work and since when,
   and offer something else. If you took over an expired lease, say whose it
   was. If the service is unreachable, say the work is not shared.
@@ -39062,19 +39824,7 @@ function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
 
 // packages/core/src/memory/store.ts
 init_config();
-
-// packages/core/src/sync/syncable.ts
-function isSyncableCollection(name) {
-  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
-}
-function isReadOnlyDoc(metadata) {
-  return metadata?.read_only === true;
-}
-function assertWritable(id, metadata) {
-  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
-}
-
-// packages/core/src/memory/store.ts
+init_syncable();
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
     id: c.id,
@@ -39261,82 +40011,8 @@ async function recallMemory(query, options = {}) {
 // packages/core/src/memory/forget.ts
 init_config();
 init_store();
-
-// packages/core/src/sync/deletes.ts
-init_store();
-var SYNC_DELETES_ID = "__sync_deletes__";
-async function queueSyncDelete(docId, collection) {
-  await getOrCreateCollection2("global");
-  const existing = await getPendingDeletes();
-  const entry = `${collection}:${docId}`;
-  if (!existing.includes(entry)) {
-    existing.push(entry);
-  }
-  await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
-    type: "sync_sentinel",
-    pending_deletes: existing.join(",")
-  });
-}
-async function queueSyncDeletes(docIds, collection) {
-  if (docIds.length === 0) return;
-  await getOrCreateCollection2("global");
-  const existing = new Set(await getPendingDeletes());
-  for (const id of docIds) existing.add(`${collection}:${id}`);
-  await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
-    type: "sync_sentinel",
-    pending_deletes: [...existing].join(",")
-  });
-}
-async function getPendingDeletes() {
-  try {
-    const results = await getDocumentsByFilter2("global", { type: "sync_sentinel" }, 10);
-    const sentinel = results.find((r) => r.id === SYNC_DELETES_ID);
-    if (!sentinel) return [];
-    const raw = sentinel.metadata.pending_deletes;
-    if (!raw || raw === "") return [];
-    return typeof raw === "string" ? raw.split(",").filter(Boolean) : [];
-  } catch {
-    return [];
-  }
-}
-async function clearPendingDeletes(processed) {
-  try {
-    const done = processed ? new Set(processed) : void 0;
-    const remaining = done ? (await getPendingDeletes()).filter((e) => !done.has(e)) : [];
-    await addDocument2("global", SYNC_DELETES_ID, "sync delete queue", {
-      type: "sync_sentinel",
-      pending_deletes: remaining.join(",")
-    });
-  } catch {
-  }
-}
-var SYNC_TOMBSTONES_ID = "__sync_tombstones__";
-async function addLocalTombstone(docId) {
-  await addLocalTombstones([docId]);
-}
-async function addLocalTombstones(docIds) {
-  if (docIds.length === 0) return;
-  await getOrCreateCollection2("global");
-  const existing = await getLocalTombstones();
-  const before = existing.size;
-  for (const id of docIds) existing.add(id);
-  if (existing.size === before) return;
-  await addDocument2("global", SYNC_TOMBSTONES_ID, "sync tombstones", {
-    type: "sync_tombstones",
-    ids: [...existing].join(",")
-  });
-}
-async function getLocalTombstones() {
-  try {
-    const results = await getDocumentsByFilter2("global", { type: "sync_tombstones" }, 1);
-    const raw = results[0]?.metadata.ids;
-    return new Set(typeof raw === "string" ? raw.split(",").filter(Boolean) : []);
-  } catch {
-    return /* @__PURE__ */ new Set();
-  }
-}
-
-// packages/core/src/memory/forget.ts
+init_deletes();
+init_syncable();
 function isSyncable(collection) {
   return !collection.startsWith("private-") && !collection.startsWith("local-");
 }
@@ -39662,7 +40338,10 @@ async function getDueTasks(includeOverdue = true) {
 // packages/core/src/tasks/update.ts
 init_config();
 init_store();
+init_syncable();
 init_create();
+init_claim();
+init_push();
 async function getTask(id) {
   const collections = await listCollections2();
   for (const collection of collections) {
@@ -39682,11 +40361,24 @@ async function getTask(id) {
   }
   return null;
 }
-async function updateTask(id, updates) {
-  const task = await getTask(id);
+var RELEASE_OUTCOME = { complete: "done", blocked: "blocked", pending: "pending" };
+async function updateTask(id, updates, ctx = {}) {
+  let task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
-  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes"];
+  const prevStatus = task.metadata.status;
+  const result = { id };
+  if (updates.status === "in_progress") {
+    const claim2 = await claimTask(task.id, task.collection, task.metadata, ctx);
+    if (claim2.kind === "refused") throw new TaskClaimedError(claim2);
+    result.claim = claim2;
+    if (claim2.id !== task.id) {
+      task = await getTask(claim2.id);
+      if (!task) throw new Error(`Task ${claim2.id} not found after re-key`);
+      result.id = task.id;
+    }
+  }
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const updatedMetadata = {
     ...task.metadata,
@@ -39694,13 +40386,23 @@ async function updateTask(id, updates) {
     updated_at: Math.floor(Date.now() / 1e3)
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
+  else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
   if (updates.title !== void 0 && updates.title !== task.title) {
-    await addDocument2(task.collection, id, updates.title, updatedMetadata);
-    return;
+    await addDocument2(task.collection, task.id, updates.title, updatedMetadata);
+  } else {
+    await updateDocument2(task.collection, task.id, updatedMetadata);
   }
-  await updateDocument2(task.collection, id, updatedMetadata);
+  if (result.claim?.kind === "granted") {
+    await pushDocsNow(task.collection, [task.id]).catch(() => void 0);
+  }
+  const outcome = updates.status !== void 0 ? RELEASE_OUTCOME[updates.status] : void 0;
+  if (outcome && prevStatus === "in_progress") {
+    result.release = await releaseTaskClaim(task.id, task.collection, outcome, ctx.session).catch(() => void 0);
+  }
+  return result;
 }
-async function completeTask(id, durationMinutes) {
+async function completeTask(id, durationMinutes, ctx = {}) {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   const completionUpdates = {
@@ -39713,7 +40415,7 @@ async function completeTask(id, durationMinutes) {
   if (durationMinutes != null) {
     completionUpdates.duration_minutes = durationMinutes;
   }
-  await updateTask(id, completionUpdates);
+  const { release } = await updateTask(id, completionUpdates, ctx);
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
@@ -39729,9 +40431,9 @@ async function completeTask(id, durationMinutes) {
       is_recurring: true,
       recurrence_pattern: task.metadata.recurrence_pattern
     }, task.collection);
-    return { regeneratedId: newId };
+    return { regeneratedId: newId, ...release ? { release } : {} };
   }
-  return {};
+  return release ? { release } : {};
 }
 function computeNextDue(currentDue, pattern) {
   const d = new Date(currentDue * 1e3);
@@ -39747,6 +40449,103 @@ function computeNextDue(currentDue, pattern) {
       break;
   }
   return Math.floor(d.getTime() / 1e3);
+}
+
+// packages/core/src/index.ts
+init_claim();
+
+// packages/core/src/tasks/next.ts
+init_store();
+init_claim();
+var PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+var norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
+async function nextTasks(opts) {
+  const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
+  const open2 = docs.filter((d) => d.metadata.status !== "complete");
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  const claims = await claimsFor(opts.collection);
+  const live = claims ? [...claims.values()] : [];
+  const liveScope = /* @__PURE__ */ new Map();
+  for (const l of live) {
+    for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
+    for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
+  }
+  const openIds = new Set(open2.map((d) => d.id));
+  const skipped = [];
+  const ready = [];
+  const depCache = /* @__PURE__ */ new Map();
+  const depStatus = async (id) => {
+    if (byId.has(id)) return byId.get(id).metadata.status;
+    if (!depCache.has(id)) depCache.set(id, (await getTask(id).catch(() => null))?.metadata.status);
+    return depCache.get(id);
+  };
+  for (const d of open2) {
+    const tags = norm(d.metadata.tags);
+    if (opts.tags?.length && !opts.tags.every((t) => tags.includes(t))) continue;
+    if (opts.excludeTags?.some((t) => tags.includes(t))) {
+      skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter((t) => tags.includes(t)).join(", ")}` });
+      continue;
+    }
+    const status = d.metadata.status ?? "pending";
+    if (status === "blocked") {
+      skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ""}` });
+      continue;
+    }
+    const held = claims?.get(d.id);
+    if (held) {
+      skipped.push({ id: d.id, reason: `claimed by ${describeHolder(held)}` });
+      continue;
+    }
+    if (status === "in_progress" && !claims) {
+      skipped.push({ id: d.id, reason: "in_progress (claims unknown: offline)" });
+      continue;
+    }
+    if (status === "in_progress" && d.metadata.claim_unshared) {
+      skipped.push({ id: d.id, reason: "in_progress (claimed on this machine, not shared yet)" });
+      continue;
+    }
+    const waiting = [];
+    for (const dep of norm(d.metadata.depends_on)) {
+      const s = await depStatus(dep);
+      if (s !== void 0 && s !== "complete") waiting.push(dep);
+    }
+    if (waiting.length) {
+      skipped.push({ id: d.id, reason: `waiting on ${waiting.join(", ")}` });
+      continue;
+    }
+    const near = [...new Set(norm(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
+    ready.push({
+      id: d.id,
+      title: d.content,
+      collection: opts.collection,
+      priority: d.metadata.priority ?? "medium",
+      status,
+      ...d.metadata.due_date ? { due_date: Number(d.metadata.due_date) } : {},
+      unblocks: norm(d.metadata.blocks).filter((b) => openIds.has(b)).length,
+      near,
+      lapsed: status === "in_progress"
+    });
+  }
+  const created = (id) => Number(byId.get(id)?.metadata.created_at ?? 0);
+  ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
+  const result = { ready, skipped, claimsKnown: claims !== void 0 };
+  if (!opts.claim) return result;
+  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, ...claimOpts } = opts;
+  for (const r of ready) {
+    try {
+      const u = await updateTask(r.id, { status: "in_progress" }, claimOpts);
+      result.claimed = u.claim ?? { kind: "local", id: u.id };
+      return result;
+    } catch (e) {
+      if (e instanceof TaskClaimedError) {
+        result.claimed = e.result;
+        skipped.push({ id: r.id, reason: `claim refused: ${e.message}` });
+        continue;
+      }
+      throw e;
+    }
+  }
+  return result;
 }
 
 // packages/core/src/tasks/search.ts
@@ -39779,11 +40578,18 @@ async function searchTasks(query, filters = {}) {
 }
 
 // packages/core/src/tasks/delete.ts
-async function deleteTask(id) {
-  return deleteDocumentEverywhere(id);
+init_claim();
+async function deleteTask(id, session) {
+  const task = await getTask(id).catch(() => null);
+  const collection = await deleteDocumentEverywhere(id);
+  if (task?.metadata.status === "in_progress") {
+    await releaseTaskClaim(id, task.collection, "deleted", session).catch(() => void 0);
+  }
+  return collection;
 }
 
 // packages/core/src/tasks/dependencies.ts
+init_syncable();
 async function addDependency(taskId, dependsOnId) {
   const task = await getTask(taskId);
   const dep = await getTask(dependsOnId);
@@ -39927,53 +40733,10 @@ function formatDuration(minutes) {
 
 // packages/core/src/collections/manage.ts
 init_config();
-
-// packages/core/src/sync/sentinel.ts
+init_deletes();
+init_sentinel();
 init_store();
-var SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
-var SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
-async function getSyncPullTimestamp() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_pull_sentinel" }
-    }, 1);
-    if (results.length === 0) return 0;
-    return results[0].metadata.last_pull ?? 0;
-  } catch {
-    return 0;
-  }
-}
-async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
-  await getOrCreateCollection2("global");
-  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
-    type: "sync_pull_sentinel",
-    last_pull: at
-  });
-}
-async function getSyncSubscriptions() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_subscriptions" }
-    }, 1);
-    if (results.length === 0) return [];
-    const raw = results[0].metadata.collections;
-    if (!raw) return [];
-    return raw.split(",").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-async function updateSyncSubscriptions(collections) {
-  await getOrCreateCollection2("global");
-  const deduped = [...new Set(collections)].sort();
-  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
-    type: "sync_subscriptions",
-    collections: deduped.join(",")
-  });
-}
-
-// packages/core/src/collections/manage.ts
-init_store();
+init_syncable();
 async function listCollectionsWithCounts() {
   const collections = await listCollections2();
   const results = await Promise.all(
@@ -40660,19 +41423,19 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync5, readdirSync, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "fs";
-import { join as join3 } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "fs";
+import { join as join4 } from "path";
 function artifactDir(kind) {
-  return join3(getConfig().ARTIFACTS_DIR, kind);
+  return join4(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync2(dir)) mkdirSync5(dir, { recursive: true });
+  if (!existsSync2(dir)) mkdirSync6(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
   const dir = ensureArtifactDir(kind);
-  const files = readdirSync(dir);
+  const files = readdirSync2(dir);
   let max = 0;
   for (const f of files) {
     const m = f.match(/^v(\d+)\./);
@@ -40685,12 +41448,12 @@ function nextVersion(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path = join3(dir, filename);
-  writeFileSync5(path, content);
+  const path = join4(dir, filename);
+  writeFileSync6(path, content);
   return path;
 }
 function artifactPath(kind, filename) {
-  return join3(artifactDir(kind), filename);
+  return join4(artifactDir(kind), filename);
 }
 
 // packages/core/src/buckets/router.ts
@@ -41074,250 +41837,15 @@ async function bucketStatus() {
 
 // packages/core/src/sync/index.ts
 init_config();
-
-// packages/core/src/sync/push.ts
-init_config();
-init_store();
-init_embeddings();
-init_backend();
-import { createHash } from "node:crypto";
-init_device();
-function emptyPushStats() {
-  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
-}
-var LOCAL_ONLY_KEYS = ["sync_rejected", "sync_rejected_fp", "sync_rejected_message"];
-function syncFingerprint(doc) {
-  const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
-  const meta3 = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
-  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta3)).digest("hex").slice(0, 32);
-}
-function stripLocalOnly(metadata) {
-  const out = { ...metadata };
-  for (const k of LOCAL_ONLY_KEYS) delete out[k];
-  return out;
-}
-async function pushToRemote() {
-  const stats = emptyPushStats();
-  const backend = await getSyncBackend();
-  if (!backend) return stats;
-  await resolveSyncUsername();
-  try {
-    const pendingDeletes = await getPendingDeletes();
-    if (pendingDeletes.length > 0) {
-      const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
-      stats.deleted = await backend.delete(docIds, "delete");
-      await clearPendingDeletes(pendingDeletes);
-    }
-  } catch (e) {
-    process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
-`);
-    noteSyncError(e);
-    stats.errors++;
-    if (isCycleFatal(e)) return stats;
-  }
-  const collections = await listCollections2();
-  for (const collection of collections) {
-    if (isSyncableCollection(collection.name)) continue;
-    try {
-      stats.retracted += await retractSharedCopies(backend, collection.name);
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
-`);
-      noteSyncError(e);
-      stats.errors++;
-      if (isCycleFatal(e)) return stats;
-    }
-  }
-  const pushedCollections = [];
-  for (const collection of collections) {
-    if (!isSyncableCollection(collection.name)) continue;
-    try {
-      const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
-      const before = stats.pushed + stats.linked;
-      const batch = [];
-      for (const unsynced of unsyncedDocs) {
-        if (unsynced.id.startsWith("__")) continue;
-        if (unsynced.metadata.type === "journal_draft") continue;
-        if (isReadOnlyDoc(unsynced.metadata)) continue;
-        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
-        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
-        try {
-          batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
-        } catch (e) {
-          process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
-`);
-          stats.errors++;
-        }
-      }
-      await pushBatch(backend, collection.name, batch, stats, true);
-      if (stats.pushed + stats.linked > before) pushedCollections.push(collection.name);
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}
-`);
-      noteSyncError(e);
-      stats.errors++;
-      if (isCycleFatal(e)) break;
-    }
-  }
-  if (pushedCollections.length > 0) {
-    try {
-      const existing = await getSyncSubscriptions();
-      const existingSet = new Set(existing);
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
-      if (newSubs.length > 0) {
-        await updateSyncSubscriptions([...existing, ...newSubs]);
-      }
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
-`);
-    }
-  }
-  return stats;
-}
-async function toUpsert(collection, doc) {
-  const now = Math.floor(Date.now() / 1e3);
-  const embedding = await generateEmbedding(doc.content) ?? [];
-  return {
-    id: doc.id,
-    collection,
-    content: doc.content,
-    embedding,
-    metadata: stripLocalOnly(doc.metadata),
-    origin_user: getConfig().USERNAME,
-    created_at: doc.metadata.created_at ?? now,
-    updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? now
-  };
-}
-async function pushBatch(backend, collection, batch, stats, allowRekey) {
-  if (batch.length === 0) return;
-  let outcomes;
-  try {
-    outcomes = await backend.upsertMany(batch.map((b) => b.upsert));
-  } catch (e) {
-    stats.errors += batch.length - 1;
-    throw e;
-  }
-  const retry = [];
-  for (let i = 0; i < batch.length; i++) {
-    const { doc, upsert } = batch[i];
-    const outcome = outcomes[i];
-    try {
-      if (outcome.ok) {
-        await applyPushed(backend, collection, doc, outcome.similar, stats);
-      } else if (outcome.code === "id_taken" && allowRekey && doc.metadata.type === "task") {
-        const renamed = await rekeyTask(collection, doc, outcome.suggestedId);
-        stats.renamed++;
-        retry.push({ doc: renamed, upsert: { ...upsert, id: renamed.id, metadata: stripLocalOnly(renamed.metadata) } });
-      } else if (outcome.permanent) {
-        await markRejected(collection, doc, outcome.code, outcome.message);
-        stats.rejected++;
-      } else {
-        process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${outcome.code}: ${outcome.message}
-`);
-        noteSyncError(`${doc.id}: ${outcome.code}: ${outcome.message}`);
-        stats.errors++;
-      }
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
-`);
-      stats.errors++;
-    }
-  }
-  await pushBatch(backend, collection, retry, stats, false);
-}
-async function applyPushed(backend, collection, doc, similar, stats) {
-  const match = similar.find((s) => s.id !== doc.id);
-  const metadata = stripLocalOnly(doc.metadata);
-  if (!match) {
-    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
-    stats.pushed++;
-    return;
-  }
-  try {
-    await backend.addRelatedIds(match.id, [doc.id]);
-    await backend.addRelatedIds(doc.id, [match.id]);
-  } catch (e) {
-    process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
-`);
-  }
-  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
-  if (!related.includes(match.id)) related.push(match.id);
-  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
-  stats.linked++;
-}
-async function markRejected(collection, doc, code, message) {
-  await updateDocument2(collection, doc.id, {
-    ...doc.metadata,
-    is_synced: false,
-    sync_rejected: code,
-    sync_rejected_message: message.slice(0, 300),
-    sync_rejected_fp: syncFingerprint(doc)
-  });
-  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
-`);
-}
-async function countUnpushed() {
-  let n = 0;
-  for (const col of await listCollections2()) {
-    if (!isSyncableCollection(col.name)) continue;
-    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
-    for (const d of docs) {
-      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
-      n++;
-    }
-  }
-  return n;
-}
-async function listRejectedDocs() {
-  const out = [];
-  for (const col of await listCollections2()) {
-    if (!isSyncableCollection(col.name)) continue;
-    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
-    for (const d of docs) {
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
-        out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
-      }
-    }
-  }
-  return out;
-}
-async function rekeyTask(collection, doc, suggestedId) {
-  const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
-  const me = getConfig().USERNAME;
-  const localNext = Number((await getNextTaskId2()).split("-").pop());
-  const suggested = Number(suggestedId?.split("-").pop());
-  const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
-  const newId = `${me}-${n}`;
-  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
-  await addDocument2(collection, newId, doc.content, metadata);
-  await deleteDocument2(collection, doc.id);
-  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
-`);
-  return { ...doc, id: newId, metadata };
-}
-async function retractSharedCopies(backend, collection) {
-  const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
-  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
-  if (unchecked.length === 0) return 0;
-  const me = getConfig().USERNAME;
-  const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
-  const mine = unchecked.filter((d) => {
-    const row = remote.get(d.id);
-    const localCreated = Number(d.metadata.created_at);
-    return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
-  });
-  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
-  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
-`);
-  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
-  return removed;
-}
+init_push();
 
 // packages/core/src/sync/pull.ts
 init_config();
 init_store();
 init_backend();
+init_sentinel();
+init_deletes();
+init_syncable();
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
 }
@@ -41588,6 +42116,15 @@ async function syncCycle() {
       await (await getSyncBackend())?.maintain();
     } catch {
     }
+    if (!hasErrors) {
+      try {
+        const { retryUnsharedClaims: retryUnsharedClaims2 } = await Promise.resolve().then(() => (init_claim(), claim_exports));
+        await retryUnsharedClaims2();
+      } catch (e) {
+        process.stderr.write(`[yapa-sync] Claim retry error: ${e}
+`);
+      }
+    }
     const unpushed = await countUnpushed().catch(() => void 0);
     if (!hasErrors) noteSyncOk(unpushed);
     else if (unpushed !== void 0) recordUnpushed(unpushed);
@@ -41702,88 +42239,13 @@ async function stopSync() {
 
 // packages/core/src/index.ts
 init_backend();
-
-// packages/core/src/sync/coordination.ts
-init_config();
-init_backend();
-import { mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync6 } from "node:fs";
-import { join as join4 } from "node:path";
-var SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-function currentSession(explicit, env = process.env) {
-  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
-    if (v && SESSION_RE.test(v)) return v;
-  }
-  return void 0;
-}
-function markerPath(session) {
-  return join4(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
-}
-function readMarker(session) {
-  try {
-    return JSON.parse(readFileSync7(markerPath(session), "utf-8"));
-  } catch {
-    return void 0;
-  }
-}
-function writeMarker(m) {
-  try {
-    mkdirSync6(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync6(markerPath(m.session), JSON.stringify(m), { mode: 384 });
-  } catch {
-  }
-}
-function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3)) {
-  const prev = readMarker(session);
-  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now });
-}
-var CoordinationUnavailableError = class extends Error {
-  constructor(reason, message) {
-    super(message);
-    this.reason = reason;
-    this.name = "CoordinationUnavailableError";
-  }
-  reason;
-  code = "coordination_unavailable";
-};
-async function requireCoordination() {
-  if (!isSyncConfigured()) {
-    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
-  }
-  const backend = await getSyncBackend();
-  if (!backend?.coordination) {
-    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
-  }
-  return wrap(backend.coordination);
-}
-function isCoordinationUnavailable(e) {
-  if (e instanceof CoordinationUnavailableError) return true;
-  const err = e;
-  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
-}
-function wrap(c) {
-  const guard = (fn) => async (...a) => {
-    try {
-      return await fn(...a);
-    } catch (e) {
-      if (isCoordinationUnavailable(e)) {
-        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
-      }
-      throw e;
-    }
-  };
-  return {
-    leaseAcquire: guard(c.leaseAcquire),
-    leaseHeartbeat: guard(c.leaseHeartbeat),
-    leaseRelease: guard(c.leaseRelease),
-    leaseList: guard(c.leaseList),
-    counterNext: guard(c.counterNext),
-    nextTaskId: guard(c.nextTaskId)
-  };
-}
-
-// packages/core/src/index.ts
+init_coordination();
 init_http_backend();
 init_postgres_backend();
+init_syncable();
+init_push();
+init_deletes();
+init_sentinel();
 init_health();
 init_device();
 
@@ -42777,7 +43239,7 @@ function leaseAcquire(a) {
     }
     const prev = r.took_over_from;
     noteLeaseHeld(session, r.lease.ttl_seconds);
-    const verb = r.renewed ? "renewed" : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
+    const verb = r.renewed ? "renewed" : prev?.reclaim ? `took over from ${prev.session} (your other session)` : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}` };
   });
 }
@@ -42825,6 +43287,7 @@ var SYNC_ON_WRITE_TOOLS = /* @__PURE__ */ new Set([
   "task_complete",
   "task_delete",
   "task_add_dependency",
+  "task_next",
   "task_remove_dependency",
   "collection_merge"
 ]);
@@ -42842,6 +43305,20 @@ function withSyncOnWrite(server2) {
     return register(name, ...rest);
   };
   return server2;
+}
+async function claimsByCollection(collections) {
+  const out = /* @__PURE__ */ new Map();
+  await Promise.all([...new Set(collections)].map(async (c) => {
+    out.set(c, await claimsFor(c));
+  }));
+  return out;
+}
+function releaseNote(r) {
+  if (!r) return "";
+  if (r.kind === "released") return "Claim released.";
+  if (r.kind === "held_by_other") return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
+  if (r.kind === "unshared") return `Claim release not shared (${r.reason}); it lapses on its own.`;
+  return "";
 }
 function registerTools(server2) {
   withSyncOnWrite(server2);
@@ -43561,9 +44038,10 @@ ${r.content}`
       project: external_exports.string().optional().describe("Project name"),
       collection: external_exports.string().optional().describe("Collection (default: global)"),
       is_recurring: external_exports.boolean().optional().describe("Whether task recurs"),
-      recurrence_pattern: external_exports.enum(["daily", "weekly", "monthly"]).optional().describe("Recurrence pattern")
+      recurrence_pattern: external_exports.enum(["daily", "weekly", "monthly"]).optional().describe("Recurrence pattern"),
+      claim_scope: external_exports.array(external_exports.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra"); task_next ranks tasks near live claims last')
     },
-    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern }) => {
+    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? void 0 : void 0;
       const id = await createTask(title, {
         priority,
@@ -43573,7 +44051,8 @@ ${r.content}`
         customer,
         project,
         is_recurring,
-        recurrence_pattern
+        recurrence_pattern,
+        claim_scope
       }, collection ?? "global");
       let text = `Created task ${id}: "${title}"`;
       if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
@@ -43598,7 +44077,7 @@ ${r.content}`
         if (!task) {
           return { content: [{ type: "text", text: `Task ${id} not found.` }] };
         }
-        const norm = (x) => Array.isArray(x) ? x : (x ?? "").toString().split(",").filter(Boolean);
+        const norm2 = (x) => Array.isArray(x) ? x : (x ?? "").toString().split(",").filter(Boolean);
         const lines = [
           `**${task.id}**: ${task.title}`,
           `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
@@ -43608,12 +44087,14 @@ ${r.content}`
         if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
         if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
         if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines.push(`Owner: ${task.metadata.origin_user}`);
+        const held = claimNote(task, await claimsFor(task.collection));
+        if (held) lines.push(`Claim: ${held}`);
         if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
-        const tags = norm(task.metadata.tags);
+        const tags = norm2(task.metadata.tags);
         if (tags.length) lines.push(`Tags: ${tags.join(", ")}`);
-        const deps = norm(task.metadata.depends_on);
+        const deps = norm2(task.metadata.depends_on);
         if (deps.length) lines.push(`Depends on: ${deps.join(", ")}`);
-        const blocks = norm(task.metadata.blocks);
+        const blocks = norm2(task.metadata.blocks);
         if (blocks.length) lines.push(`Blocks: ${blocks.join(", ")}`);
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
@@ -43628,8 +44109,11 @@ ${r.content}`
       if (tasks.length === 0) {
         return { content: [{ type: "text", text: "No tasks found." }] };
       }
+      const claims = await claimsByCollection(tasks.filter((t) => t.metadata.status !== "complete").map((t) => t.collection));
       const text = tasks.map((t) => {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
+        const held = t.metadata.status === "complete" ? "" : claimNote(t, claims.get(t.collection));
+        if (held) line += ` (${held})`;
         if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
         if (t.metadata.duration_minutes != null) line += ` (effort: ${formatDuration(t.metadata.duration_minutes)})`;
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
@@ -43651,10 +44135,13 @@ ${r.content}`
       due: external_exports.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date'),
       tags: external_exports.array(external_exports.string()).optional(),
       blocked_reason: external_exports.string().optional(),
-      duration: external_exports.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"')
+      duration: external_exports.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
+      reclaim: external_exports.boolean().optional().describe("With status in_progress: take over a claim held by another session of your own user (e.g. after --resume). Confirm with the user first."),
+      claim_scope: external_exports.array(external_exports.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra", "res:staging-cluster"); task_next ranks tasks near live claims last')
     },
-    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration: duration3 }) => {
+    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration: duration3, reclaim, claim_scope }) => {
       const updates = {};
+      if (claim_scope) updates.claim_scope = claim_scope;
       if (title) updates.title = title;
       if (status) updates.status = status;
       if (priority) updates.priority = priority;
@@ -43677,8 +44164,20 @@ ${r.content}`
         }
         updates.duration_minutes = parsed;
       }
-      await updateTask(id, updates);
-      return { content: [{ type: "text", text: `Updated task ${id}` }] };
+      try {
+        const r = await updateTask(id, updates, { reclaim });
+        let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
+        const claim2 = r.claim ? describeClaim(r.claim) : "";
+        if (claim2) text += `
+${claim2}`;
+        const release = releaseNote(r.release);
+        if (release) text += `
+${release}`;
+        return { content: [{ type: "text", text }] };
+      } catch (e) {
+        if (e instanceof TaskClaimedError) return { content: [{ type: "text", text: e.message }], isError: true };
+        throw e;
+      }
     }
   );
   server2.tool(
@@ -43700,10 +44199,54 @@ ${r.content}`
       const result = await completeTask(id, durationMinutes);
       let text = `Completed task ${id}`;
       if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
+      const release = releaseNote(result.release);
+      if (release) text += `
+${release}`;
       if (result.regeneratedId) {
         text += ` \u2192 regenerated as ${result.regeneratedId} (recurring)`;
       }
       return { content: [{ type: "text", text }] };
+    }
+  );
+  server2.tool(
+    "task_next",
+    "The ready queue for a collection: pending tasks whose dependencies are complete and that nobody has claimed, best first (priority, due date, how many tasks each unblocks, age; tasks near live claims last), with the reason each other open task was skipped. claim: true also claims the first ready task (moves it to in_progress), trying the next one if someone else got it first.",
+    {
+      collection: external_exports.string().describe("Collection to pick from"),
+      tags: external_exports.array(external_exports.string()).optional().describe("Only tasks carrying all of these tags"),
+      exclude_tags: external_exports.array(external_exports.string()).optional().describe("Skip tasks carrying any of these tags"),
+      claim: external_exports.boolean().optional().describe("Claim the first ready task"),
+      limit: external_exports.number().int().min(1).max(50).optional().describe("Ready tasks to show (default 5)")
+    },
+    async ({ collection, tags, exclude_tags, claim: claim2, limit }) => {
+      const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim: claim2 });
+      const lines = [];
+      if (!r.claimsKnown) lines.push("_Claims could not be read (offline or signed out): teammates may already be on some of these._");
+      if (claim2) {
+        if (!r.claimed) lines.push("Nothing ready to claim.");
+        else lines.push(describeClaim(r.claimed) || `Started ${r.claimed.id} (local collection: no claim needed).`);
+      }
+      const shown = r.ready.slice(0, limit ?? 5);
+      if (shown.length) {
+        lines.push("", "**Ready:**");
+        for (const t of shown) {
+          let line = `- **${t.id}** [${t.priority}] ${t.title}`;
+          if (t.due_date) line += ` (due: ${formatTaskDate(t.due_date)})`;
+          if (t.unblocks) line += ` (unblocks ${t.unblocks})`;
+          if (t.lapsed) line += " (was in_progress; its claim lapsed)";
+          if (t.near.length) line += ` (near live work: ${t.near.join(", ")})`;
+          lines.push(line);
+        }
+        if (r.ready.length > shown.length) lines.push(`- _\u2026${r.ready.length - shown.length} more_`);
+      } else if (!claim2) {
+        lines.push("No ready tasks.");
+      }
+      if (r.skipped.length) {
+        lines.push("", "**Skipped:**");
+        for (const s of r.skipped.slice(0, 15)) lines.push(`- ${s.id}: ${s.reason}`);
+        if (r.skipped.length > 15) lines.push(`- _\u2026${r.skipped.length - 15} more_`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n").trim() }] };
     }
   );
   server2.tool(
@@ -43769,25 +44312,26 @@ ${r.content}`
   );
   server2.tool(
     "lease",
-    "Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. acquire is granted only if no live lease (anyone else's, or this user's other sessions) has the same key or an overlapping scope; the answer comes from the service, not a queued push. YAPA's hooks renew this session's leases while it is active, so explicit heartbeats are rarely needed; a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.",
+    "Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. acquire is granted only if no live lease (anyone else's, or this user's other sessions unless reclaim) has the same key or an overlapping scope; re-acquiring your own lease renews it, keeping its scope and ttl_seconds unless you pass new ones; the answer comes from the service, not a queued push. YAPA's hooks renew this session's leases while it is active, so explicit heartbeats are rarely needed; a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.",
     {
       action: external_exports.enum(["acquire", "heartbeat", "release", "list"]),
       collection: external_exports.string().optional().describe("Shared collection (not global/private-*/local-*), e.g. project-acme; heartbeat without it renews the session's leases everywhere"),
       key: external_exports.string().optional().describe("acquire/release: what is leased, e.g. a task id or record id"),
       session: external_exports.string().optional().describe("Holder within your user; defaults to this Claude Code session (the hooks renew its leases automatically)"),
-      scope: external_exports.array(external_exports.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included'),
-      ttl_seconds: external_exports.number().int().optional().describe("acquire: expiry without a heartbeat, 30..86400 (default 7200)"),
+      scope: external_exports.array(external_exports.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included. Omitted on a renewal: the stored scope is kept'),
+      ttl_seconds: external_exports.number().int().optional().describe("acquire: expiry without a heartbeat, 30..86400 (default 7200; omitted on a renewal: the stored ttl is kept)"),
+      reclaim: external_exports.boolean().optional().describe("acquire: take over a live lease held by another session of your own user (e.g. after --resume); confirm with the user first"),
       title: external_exports.string().optional().describe("acquire: short description shown in list"),
       keys: external_exports.array(external_exports.string()).optional().describe("heartbeat: only these keys (default: every lease of the session)"),
       outcome: external_exports.string().optional().describe("release: done | blocked | pending | ... (logged)"),
       include_expired: external_exports.boolean().optional().describe("list: also show expired leases")
     },
-    async ({ action, collection, key, session, scope, ttl_seconds, title, keys, outcome, include_expired }) => {
+    async ({ action, collection, key, session, scope, ttl_seconds, title, reclaim, keys, outcome, include_expired }) => {
       const need = (v, what) => {
         if (!v) throw new Error(`lease ${action} needs ${what}`);
         return v;
       };
-      const r = action === "acquire" ? await leaseAcquire({ collection: need(collection, "collection"), key: need(key, "key"), session, scope, ttlSeconds: ttl_seconds, title }) : action === "heartbeat" ? await leaseHeartbeat(collection, session, keys) : action === "release" ? await leaseRelease(need(collection, "collection"), need(key, "key"), session, outcome) : await leaseList(need(collection, "collection"), include_expired ?? false);
+      const r = action === "acquire" ? await leaseAcquire({ collection: need(collection, "collection"), key: need(key, "key"), session, scope, ttlSeconds: ttl_seconds, title, reclaim }) : action === "heartbeat" ? await leaseHeartbeat(collection, session, keys) : action === "release" ? await leaseRelease(need(collection, "collection"), need(key, "key"), session, outcome) : await leaseList(need(collection, "collection"), include_expired ?? false);
       return { content: [{ type: "text", text: r.text }], ...r.exit === EXIT.error || r.exit === EXIT.usage ? { isError: true } : {} };
     }
   );

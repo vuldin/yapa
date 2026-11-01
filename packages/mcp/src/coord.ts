@@ -69,6 +69,8 @@ export interface AcquireArgs {
   scope?: string[];
   ttlSeconds?: number;
   title?: string;
+  /** Take over a live lease of your own other session (e.g. after a resume); confirm with the user first. */
+  reclaim?: boolean;
 }
 
 export function leaseAcquire(a: AcquireArgs): Promise<CoordResult> {
@@ -79,9 +81,11 @@ export function leaseAcquire(a: AcquireArgs): Promise<CoordResult> {
       const lines = r.conflicts.map(c => `CONFLICT ${a.key}: ${describeLease(c.lease)} (overlap: ${c.overlap.join(', ')})`);
       return { exit: EXIT.refused, json: { ok: false, ...r }, text: lines.join('\n') };
     }
-    const prev = r.took_over_from as { user?: string; session?: string } | undefined;
+    const prev = r.took_over_from as { user?: string; session?: string; reclaim?: boolean } | undefined;
     noteLeaseHeld(session, r.lease.ttl_seconds);
-    const verb = r.renewed ? 'renewed' : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : 'granted';
+    const verb = r.renewed ? 'renewed'
+      : prev?.reclaim ? `took over from ${prev.session} (your other session)`
+        : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : 'granted';
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(', ')}, expires ${new Date(r.lease.expires_at * 1000).toISOString()}` };
   });
 }

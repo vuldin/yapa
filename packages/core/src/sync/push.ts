@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { getConfig } from '../config.js';
-import { listCollections, getDocumentsByFilter, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
+import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
@@ -28,7 +28,7 @@ export function emptyPushStats(): PushStats {
 }
 
 /** Local bookkeeping that never leaves this machine. */
-const LOCAL_ONLY_KEYS = ['sync_rejected', 'sync_rejected_fp', 'sync_rejected_message'];
+const LOCAL_ONLY_KEYS = ['sync_rejected', 'sync_rejected_fp', 'sync_rejected_message', 'claim_unshared'];
 
 /**
  * Fingerprint of a doc's syncable state. A rejected doc is retried only when
@@ -51,7 +51,66 @@ function stripLocalOnly(metadata: Record<string, any>): Record<string, any> {
  * - Processes pending deletes first, then retracts shared copies of docs now in local-only collections
  * - Then pushes new/updated docs in batches; similar remote docs are linked via related_ids
  */
-export async function pushToRemote(): Promise<PushStats> {
+export function pushToRemote(): Promise<PushStats> {
+  return serialized(pushAll);
+}
+
+// Pushes run one at a time (the interval cycle, a write-triggered cycle, a
+// claim's immediate push): two concurrent pushes of a task that gets
+// re-keyed (id_taken) would each mint a new id and leave two copies.
+let pushChain: Promise<unknown> = Promise.resolve();
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const run = pushChain.then(fn, fn);
+  pushChain = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Push just these docs now, without waiting for the debounce or the interval
+ * (a task claim makes its new status visible at once). Returns the ids that
+ * reached the remote, and old -> new for tasks re-keyed on the way.
+ */
+export function pushDocsNow(collection: string, ids: string[]): Promise<{ pushed: string[]; renamed: Record<string, string>; errors: number }> {
+  return serialized(async () => {
+    const out = { pushed: [] as string[], renamed: {} as Record<string, string>, errors: 0 };
+    if (!ids.length || !isSyncable(collection)) return out;
+    const backend = await getSyncBackend();
+    if (!backend) return out;
+    await resolveSyncUsername();
+    const docs = (await getDocumentsByIds(collection, ids)).filter(d =>
+      d.metadata.is_synced === false && !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata)
+      && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const stats = emptyPushStats();
+    const batch: Array<{ doc: DocumentResult; upsert: UpsertDoc }> = [];
+    for (const unsynced of docs) {
+      const doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+      batch.push({ doc, upsert: await toUpsert(collection, doc) });
+    }
+    try {
+      await pushBatch(backend, collection, batch, stats, true);
+    } catch (e) {
+      noteSyncError(e);
+      out.errors++;
+      return out;
+    }
+    out.errors += stats.errors;
+    for (const id of ids) {
+      const [now] = await getDocumentsByIds(collection, [id]).catch(() => []);
+      if (now) {
+        if (now.metadata.is_synced !== false) out.pushed.push(id);
+        continue;
+      }
+      const [moved] = await getDocumentsByFilter(collection, { rekeyed_from: id }, 1).catch(() => []);
+      if (moved) {
+        out.renamed[id] = moved.id;
+        if (moved.metadata.is_synced !== false) out.pushed.push(moved.id);
+      }
+    }
+    return out;
+  });
+}
+
+async function pushAll(): Promise<PushStats> {
   const stats = emptyPushStats();
   const backend = await getSyncBackend();
   if (!backend) return stats;

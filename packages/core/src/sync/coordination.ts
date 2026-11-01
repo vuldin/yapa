@@ -42,7 +42,15 @@ interface HeldMarker {
   min_ttl: number;
   /** Unix seconds of the last successful heartbeat (or acquire). */
   last_beat: number;
+  /**
+   * Leases this session took through YAPA that it watches for loss
+   * ("collection\u0000key"). A watched key missing from a heartbeat's
+   * renewed list was taken over or released by someone else.
+   */
+  keys?: string[];
 }
+
+const heldKey = (collection: string, key: string) => `${collection}\u0000${key}`;
 
 function markerPath(session: string): string {
   return join(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, '_')}.json`);
@@ -65,18 +73,41 @@ function writeMarker(m: HeldMarker): void {
   }
 }
 
-/** Record that `session` holds a lease with this TTL (call after a grant). */
-export function noteLeaseHeld(session: string, ttlSeconds: number, now = Math.floor(Date.now() / 1000)): void {
+/**
+ * Record that `session` holds a lease with this TTL (call after a grant).
+ * With `held`, the lease is also watched: losing it to another holder leaves
+ * a notice for the next prompt (task claims pass it).
+ */
+export function noteLeaseHeld(session: string, ttlSeconds: number, now = Math.floor(Date.now() / 1000), held?: { collection: string; key: string }): void {
   const prev = readMarker(session);
-  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now });
+  const keys = new Set(prev?.keys ?? []);
+  if (held) keys.add(heldKey(held.collection, held.key));
+  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...(keys.size ? { keys: [...keys] } : {}) });
 }
 
-function noteRenewed(session: string, renewed: Lease[], now: number): void {
+/** Stop watching a lease this session released (or never got). */
+export function noteLeaseReleased(session: string, collection: string, key: string): void {
+  const prev = readMarker(session);
+  if (!prev?.keys) return;
+  const keys = prev.keys.filter(k => k !== heldKey(collection, key));
+  writeMarker({ ...prev, keys });
+}
+
+/** Watched leases missing from `renewed` (taken over or released elsewhere). */
+function noteRenewed(session: string, renewed: Lease[], now: number): Array<{ collection: string; key: string }> {
+  const prev = readMarker(session);
+  const have = new Set(renewed.map(l => heldKey(l.collection, l.key)));
+  const lost = (prev?.keys ?? []).filter(k => !have.has(k)).map(k => {
+    const [collection, key] = k.split('\u0000');
+    return { collection, key };
+  });
   if (renewed.length === 0) {
     try { rmSync(markerPath(session), { force: true }); } catch { /* ignore */ }
-    return;
+    return lost;
   }
-  writeMarker({ session, min_ttl: Math.min(...renewed.map(l => l.ttl_seconds)), last_beat: now });
+  const keys = (prev?.keys ?? []).filter(k => have.has(k));
+  writeMarker({ session, min_ttl: Math.min(...renewed.map(l => l.ttl_seconds)), last_beat: now, ...(keys.length ? { keys } : {}) });
+  return lost;
 }
 
 /** Sessions on this machine that hold leases (for status and tests). */
@@ -86,6 +117,46 @@ export function sessionsHoldingLeases(): string[] {
   } catch {
     return [];
   }
+}
+
+// ------------------------------------------------- claim notices
+//
+// Things a session should hear about on its next prompt, written by whichever
+// process noticed (a hook's heartbeat, the MCP server's sync cycle): a claim
+// taken over, or a claim made offline that turned out to clash. One small
+// JSON file beside the markers; its name does not end in .json, so it is
+// never mistaken for a session marker.
+
+interface ClaimNotice {
+  at: number;
+  text: string;
+}
+
+function noticesPath(): string {
+  return join(getConfig().LEASE_STATE_DIR, 'notices.state');
+}
+
+/** Queue a one-line notice for the next prompt on this machine. */
+export function addClaimNotice(text: string, now = Math.floor(Date.now() / 1000)): void {
+  let list: ClaimNotice[] = [];
+  try { list = JSON.parse(readFileSync(noticesPath(), 'utf-8')); } catch { /* none yet */ }
+  if (!Array.isArray(list)) list = [];
+  if (list.some(n => n.text === text)) return;
+  list.push({ at: now, text });
+  try {
+    mkdirSync(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(noticesPath(), JSON.stringify(list.slice(-20)), { mode: 0o600 });
+  } catch {
+    // best effort
+  }
+}
+
+/** Read and clear the queued notices. */
+export function takeClaimNotices(): string[] {
+  let list: ClaimNotice[] = [];
+  try { list = JSON.parse(readFileSync(noticesPath(), 'utf-8')); } catch { return []; }
+  try { rmSync(noticesPath(), { force: true }); } catch { /* ignore */ }
+  return Array.isArray(list) ? list.map(n => n.text) : [];
 }
 
 /**
@@ -103,7 +174,9 @@ export async function heartbeatIfDue(sessions: Array<string | undefined>, now = 
     if (now - m.last_beat < interval) continue;
     try {
       const r = await (await requireCoordination()).leaseHeartbeat(undefined, session);
-      noteRenewed(session, r.renewed, now);
+      for (const l of noteRenewed(session, r.renewed, now)) {
+        addClaimNotice(`Your claim on ${l.key} (${l.collection}) is no longer held: another session took it over or released it. Check \`task_list\` (id ${l.key}) or \`lease list\` before continuing that work.`, now);
+      }
       n += r.renewed.length;
     } catch {
       // offline or signed out: retry on the next prompt

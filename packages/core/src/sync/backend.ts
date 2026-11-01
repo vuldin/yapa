@@ -115,10 +115,21 @@ export interface LeaseAcquireRequest {
   key: string;
   /** Who holds it inside the user: a Claude session id, a process, ... */
   session: string;
-  /** What the work touches, e.g. `doc:runbook`, `res:staging-cluster`; `key:<key>` is always added. */
+  /**
+   * What the work touches, e.g. `doc:runbook`, `res:staging-cluster`; `key:<key>` is always added.
+   * Omitted: a renewal (same user and session) keeps the stored scope, anything else gets just `key:<key>`.
+   * `[]` replaces the stored scope with just `key:<key>`.
+   */
   scope?: string[];
+  /** Omitted: a renewal keeps the stored TTL, anything else gets the server default (7200). */
   ttlSeconds?: number;
   title?: string;
+  /**
+   * Live leases of your own other sessions are not conflicts; one on this key is
+   * taken over (took_over_from.reclaim = true). Other users' leases still refuse.
+   * For picking work back up after a resumed or restarted session; confirm with the user first.
+   */
+  reclaim?: boolean;
 }
 
 export type LeaseAcquireResult =

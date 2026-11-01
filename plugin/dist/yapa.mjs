@@ -16,7 +16,7 @@ var __export = (target, all) => {
 };
 
 // packages/core/src/config.ts
-import { homedir as homedir2, userInfo } from "os";
+import { homedir as homedir2, tmpdir, userInfo } from "os";
 import { join as pathJoin } from "path";
 function list(value) {
   return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
@@ -102,7 +102,8 @@ function createConfig(env = process.env) {
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
-    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
+    // Under vitest, never the developer's real lease markers and claim notices.
+    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
@@ -2264,7 +2265,16 @@ var init_http_backend = __esm({
       }
       coordination = {
         leaseAcquire: (req) => this.request("POST", "/v1/leases:acquire", {
-          body: { collection: req.collection, key: req.key, session: req.session, scope: req.scope ?? [], ttl_seconds: req.ttlSeconds, title: req.title },
+          // scope and ttl_seconds only when given: an omitted one keeps a renewed lease's stored value.
+          body: {
+            collection: req.collection,
+            key: req.key,
+            session: req.session,
+            scope: req.scope,
+            ttl_seconds: req.ttlSeconds,
+            title: req.title,
+            ...req.reclaim ? { reclaim: true } : {}
+          },
           quiet: true
         }),
         leaseHeartbeat: (collection, session, keys) => this.request("POST", "/v1/leases:heartbeat", { body: { collection, session, keys }, quiet: true }),
@@ -2906,6 +2916,7 @@ async function createTask(title, options = {}, collection = "global") {
     project: options.project,
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
+    ...options.claim_scope?.length ? { claim_scope: options.claim_scope } : {},
     is_recurring: options.is_recurring ?? false,
     recurrence_pattern: options.recurrence_pattern,
     created_at: now,
@@ -2985,6 +2996,709 @@ var init_list2 = __esm({
   }
 });
 
+// packages/core/src/sync/coordination.ts
+import { mkdirSync as mkdirSync4, readdirSync, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join3 } from "node:path";
+function currentSession(explicit, env = process.env) {
+  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
+    if (v && SESSION_RE.test(v)) return v;
+  }
+  return void 0;
+}
+function markerPath(session) {
+  return join3(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function readMarker(session) {
+  try {
+    return JSON.parse(readFileSync6(markerPath(session), "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeMarker(m) {
+  try {
+    mkdirSync4(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync4(markerPath(m.session), JSON.stringify(m), { mode: 384 });
+  } catch {
+  }
+}
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
+  const prev = readMarker(session);
+  const keys = new Set(prev?.keys ?? []);
+  if (held) keys.add(heldKey(held.collection, held.key));
+  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
+}
+function noteLeaseReleased(session, collection, key) {
+  const prev = readMarker(session);
+  if (!prev?.keys) return;
+  const keys = prev.keys.filter((k) => k !== heldKey(collection, key));
+  writeMarker({ ...prev, keys });
+}
+function noteRenewed(session, renewed, now) {
+  const prev = readMarker(session);
+  const have = new Set(renewed.map((l) => heldKey(l.collection, l.key)));
+  const lost = (prev?.keys ?? []).filter((k) => !have.has(k)).map((k) => {
+    const [collection, key] = k.split("\0");
+    return { collection, key };
+  });
+  if (renewed.length === 0) {
+    try {
+      rmSync2(markerPath(session), { force: true });
+    } catch {
+    }
+    return lost;
+  }
+  const keys = (prev?.keys ?? []).filter((k) => have.has(k));
+  writeMarker({ session, min_ttl: Math.min(...renewed.map((l) => l.ttl_seconds)), last_beat: now, ...keys.length ? { keys } : {} });
+  return lost;
+}
+function sessionsHoldingLeases() {
+  try {
+    return readdirSync(getConfig().LEASE_STATE_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
+  } catch {
+    return [];
+  }
+}
+function noticesPath() {
+  return join3(getConfig().LEASE_STATE_DIR, "notices.state");
+}
+function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
+  let list4 = [];
+  try {
+    list4 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
+  } catch {
+  }
+  if (!Array.isArray(list4)) list4 = [];
+  if (list4.some((n) => n.text === text)) return;
+  list4.push({ at: now, text });
+  try {
+    mkdirSync4(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
+    writeFileSync4(noticesPath(), JSON.stringify(list4.slice(-20)), { mode: 384 });
+  } catch {
+  }
+}
+function takeClaimNotices() {
+  let list4 = [];
+  try {
+    list4 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
+  } catch {
+    return [];
+  }
+  try {
+    rmSync2(noticesPath(), { force: true });
+  } catch {
+  }
+  return Array.isArray(list4) ? list4.map((n) => n.text) : [];
+}
+async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
+  if (!isSyncConfigured()) return 0;
+  let n = 0;
+  for (const session of new Set(sessions.filter((s) => !!s && SESSION_RE.test(s)))) {
+    const m = readMarker(session);
+    if (!m) continue;
+    const interval = Math.max(10, Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.floor(m.min_ttl / 3)));
+    if (now - m.last_beat < interval) continue;
+    try {
+      const r = await (await requireCoordination()).leaseHeartbeat(void 0, session);
+      for (const l of noteRenewed(session, r.renewed, now)) {
+        addClaimNotice(`Your claim on ${l.key} (${l.collection}) is no longer held: another session took it over or released it. Check \`task_list\` (id ${l.key}) or \`lease list\` before continuing that work.`, now);
+      }
+      n += r.renewed.length;
+    } catch {
+    }
+  }
+  return n;
+}
+async function requireCoordination() {
+  if (!isSyncConfigured()) {
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+  }
+  const backend = await getSyncBackend();
+  if (!backend?.coordination) {
+    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
+  }
+  return wrap(backend.coordination);
+}
+function isCoordinationUnavailable(e) {
+  if (e instanceof CoordinationUnavailableError) return true;
+  const err = e;
+  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
+}
+function wrap(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (isCoordinationUnavailable(e)) {
+        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+var SESSION_RE, HEARTBEAT_MAX_INTERVAL_S, heldKey, CoordinationUnavailableError;
+var init_coordination = __esm({
+  "packages/core/src/sync/coordination.ts"() {
+    "use strict";
+    init_config();
+    init_backend();
+    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+    HEARTBEAT_MAX_INTERVAL_S = 300;
+    heldKey = (collection, key) => `${collection}\0${key}`;
+    CoordinationUnavailableError = class extends Error {
+      constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+        this.name = "CoordinationUnavailableError";
+      }
+      reason;
+      code = "coordination_unavailable";
+    };
+  }
+});
+
+// packages/core/src/sync/sentinel.ts
+async function getSyncPullTimestamp() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_pull_sentinel" }
+    }, 1);
+    if (results.length === 0) return 0;
+    return results[0].metadata.last_pull ?? 0;
+  } catch {
+    return 0;
+  }
+}
+async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
+    type: "sync_pull_sentinel",
+    last_pull: at
+  });
+}
+async function getSyncSubscriptions() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_subscriptions" }
+    }, 1);
+    if (results.length === 0) return [];
+    const raw = results[0].metadata.collections;
+    if (!raw) return [];
+    return raw.split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function updateSyncSubscriptions(collections) {
+  await getOrCreateCollection2("global");
+  const deduped = [...new Set(collections)].sort();
+  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
+    type: "sync_subscriptions",
+    collections: deduped.join(",")
+  });
+}
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID;
+var init_sentinel = __esm({
+  "packages/core/src/sync/sentinel.ts"() {
+    "use strict";
+    init_store();
+    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
+    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
+  }
+});
+
+// packages/core/src/sync/push.ts
+import { createHash } from "node:crypto";
+function emptyPushStats() {
+  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+}
+function syncFingerprint(doc) {
+  const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
+  const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
+  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+}
+function stripLocalOnly(metadata) {
+  const out = { ...metadata };
+  for (const k of LOCAL_ONLY_KEYS) delete out[k];
+  return out;
+}
+function pushToRemote() {
+  return serialized(pushAll);
+}
+function serialized(fn) {
+  const run2 = pushChain.then(fn, fn);
+  pushChain = run2.catch(() => void 0);
+  return run2;
+}
+function pushDocsNow(collection, ids) {
+  return serialized(async () => {
+    const out = { pushed: [], renamed: {}, errors: 0 };
+    if (!ids.length || !isSyncableCollection(collection)) return out;
+    const backend = await getSyncBackend();
+    if (!backend) return out;
+    await resolveSyncUsername();
+    const docs = (await getDocumentsByIds2(collection, ids)).filter((d) => d.metadata.is_synced === false && !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const stats = emptyPushStats();
+    const batch = [];
+    for (const unsynced of docs) {
+      const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+      batch.push({ doc, upsert: await toUpsert(collection, doc) });
+    }
+    try {
+      await pushBatch(backend, collection, batch, stats, true);
+    } catch (e) {
+      noteSyncError(e);
+      out.errors++;
+      return out;
+    }
+    out.errors += stats.errors;
+    for (const id of ids) {
+      const [now] = await getDocumentsByIds2(collection, [id]).catch(() => []);
+      if (now) {
+        if (now.metadata.is_synced !== false) out.pushed.push(id);
+        continue;
+      }
+      const [moved] = await getDocumentsByFilter2(collection, { rekeyed_from: id }, 1).catch(() => []);
+      if (moved) {
+        out.renamed[id] = moved.id;
+        if (moved.metadata.is_synced !== false) out.pushed.push(moved.id);
+      }
+    }
+    return out;
+  });
+}
+async function pushAll() {
+  const stats = emptyPushStats();
+  const backend = await getSyncBackend();
+  if (!backend) return stats;
+  await resolveSyncUsername();
+  try {
+    const pendingDeletes = await getPendingDeletes();
+    if (pendingDeletes.length > 0) {
+      const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
+      stats.deleted = await backend.delete(docIds, "delete");
+      await clearPendingDeletes(pendingDeletes);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
+`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+  const collections = await listCollections2();
+  for (const collection of collections) {
+    if (isSyncableCollection(collection.name)) continue;
+    try {
+      stats.retracted += await retractSharedCopies(backend, collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
+`);
+      noteSyncError(e);
+      stats.errors++;
+      if (isCycleFatal(e)) return stats;
+    }
+  }
+  const pushedCollections = [];
+  for (const collection of collections) {
+    if (!isSyncableCollection(collection.name)) continue;
+    try {
+      const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
+      const before = stats.pushed + stats.linked;
+      const batch = [];
+      for (const unsynced of unsyncedDocs) {
+        if (unsynced.id.startsWith("__")) continue;
+        if (unsynced.metadata.type === "journal_draft") continue;
+        if (isReadOnlyDoc(unsynced.metadata)) continue;
+        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
+        try {
+          batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
+        } catch (e) {
+          process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+          stats.errors++;
+        }
+      }
+      await pushBatch(backend, collection.name, batch, stats, true);
+      if (stats.pushed + stats.linked > before) pushedCollections.push(collection.name);
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}
+`);
+      noteSyncError(e);
+      stats.errors++;
+      if (isCycleFatal(e)) break;
+    }
+  }
+  if (pushedCollections.length > 0) {
+    try {
+      const existing = await getSyncSubscriptions();
+      const existingSet = new Set(existing);
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
+      if (newSubs.length > 0) {
+        await updateSyncSubscriptions([...existing, ...newSubs]);
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
+`);
+    }
+  }
+  return stats;
+}
+async function toUpsert(collection, doc) {
+  const now = Math.floor(Date.now() / 1e3);
+  const embedding = await generateEmbedding(doc.content) ?? [];
+  return {
+    id: doc.id,
+    collection,
+    content: doc.content,
+    embedding,
+    metadata: stripLocalOnly(doc.metadata),
+    origin_user: getConfig().USERNAME,
+    created_at: doc.metadata.created_at ?? now,
+    updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? now
+  };
+}
+async function pushBatch(backend, collection, batch, stats, allowRekey) {
+  if (batch.length === 0) return;
+  let outcomes;
+  try {
+    outcomes = await backend.upsertMany(batch.map((b) => b.upsert));
+  } catch (e) {
+    stats.errors += batch.length - 1;
+    throw e;
+  }
+  const retry = [];
+  for (let i = 0; i < batch.length; i++) {
+    const { doc, upsert } = batch[i];
+    const outcome = outcomes[i];
+    try {
+      if (outcome.ok) {
+        await applyPushed(backend, collection, doc, outcome.similar, stats);
+      } else if (outcome.code === "id_taken" && allowRekey && doc.metadata.type === "task") {
+        const renamed = await rekeyTask(collection, doc, outcome.suggestedId);
+        stats.renamed++;
+        retry.push({ doc: renamed, upsert: { ...upsert, id: renamed.id, metadata: stripLocalOnly(renamed.metadata) } });
+      } else if (outcome.permanent) {
+        await markRejected(collection, doc, outcome.code, outcome.message);
+        stats.rejected++;
+      } else {
+        process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${outcome.code}: ${outcome.message}
+`);
+        noteSyncError(`${doc.id}: ${outcome.code}: ${outcome.message}`);
+        stats.errors++;
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
+`);
+      stats.errors++;
+    }
+  }
+  await pushBatch(backend, collection, retry, stats, false);
+}
+async function applyPushed(backend, collection, doc, similar, stats) {
+  const match = similar.find((s) => s.id !== doc.id);
+  const metadata = stripLocalOnly(doc.metadata);
+  if (!match) {
+    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
+    stats.pushed++;
+    return;
+  }
+  try {
+    await backend.addRelatedIds(match.id, [doc.id]);
+    await backend.addRelatedIds(doc.id, [match.id]);
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
+`);
+  }
+  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
+  if (!related.includes(match.id)) related.push(match.id);
+  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  stats.linked++;
+}
+async function markRejected(collection, doc, code, message) {
+  await updateDocument2(collection, doc.id, {
+    ...doc.metadata,
+    is_synced: false,
+    sync_rejected: code,
+    sync_rejected_message: message.slice(0, 300),
+    sync_rejected_fp: syncFingerprint(doc)
+  });
+  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
+`);
+}
+async function countUnpushed() {
+  let n = 0;
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
+      n++;
+    }
+  }
+  return n;
+}
+async function listRejectedDocs() {
+  const out = [];
+  for (const col of await listCollections2()) {
+    if (!isSyncableCollection(col.name)) continue;
+    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
+    for (const d of docs) {
+      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+        out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
+      }
+    }
+  }
+  return out;
+}
+async function rekeyTask(collection, doc, suggestedId) {
+  const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
+  const me = getConfig().USERNAME;
+  const localNext = Number((await getNextTaskId2()).split("-").pop());
+  const suggested = Number(suggestedId?.split("-").pop());
+  const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
+  const newId = `${me}-${n}`;
+  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
+  await addDocument2(collection, newId, doc.content, metadata);
+  await deleteDocument2(collection, doc.id);
+  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
+`);
+  return { ...doc, id: newId, metadata };
+}
+async function retractSharedCopies(backend, collection) {
+  const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
+  if (unchecked.length === 0) return 0;
+  const me = getConfig().USERNAME;
+  const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
+  const mine = unchecked.filter((d) => {
+    const row = remote.get(d.id);
+    const localCreated = Number(d.metadata.created_at);
+    return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
+  });
+  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
+  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
+`);
+  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  return removed;
+}
+var LOCAL_ONLY_KEYS, pushChain;
+var init_push = __esm({
+  "packages/core/src/sync/push.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_embeddings();
+    init_backend();
+    init_deletes();
+    init_sentinel();
+    init_device();
+    init_syncable();
+    LOCAL_ONLY_KEYS = ["sync_rejected", "sync_rejected_fp", "sync_rejected_message", "claim_unshared"];
+    pushChain = Promise.resolve();
+  }
+});
+
+// packages/core/src/tasks/claim.ts
+var claim_exports = {};
+__export(claim_exports, {
+  TaskClaimedError: () => TaskClaimedError,
+  claimNote: () => claimNote,
+  claimSession: () => claimSession,
+  claimTask: () => claimTask,
+  claimsApply: () => claimsApply,
+  claimsFor: () => claimsFor,
+  describeClaim: () => describeClaim,
+  describeHolder: () => describeHolder,
+  describeRefusal: () => describeRefusal,
+  releaseTaskClaim: () => releaseTaskClaim,
+  retryUnsharedClaims: () => retryUnsharedClaims
+});
+function claimSession(explicit) {
+  return currentSession(explicit) ?? `${getDeviceId()}:${process.pid}`.replace(SESSION_SAFE, "-").slice(0, 128);
+}
+function claimsApply(collection) {
+  return isSyncableCollection(collection) && isSyncConfigured();
+}
+function utc(t, now = Math.floor(Date.now() / 1e3)) {
+  const iso = new Date(t * 1e3).toISOString();
+  const day = iso.slice(0, 10);
+  const hm = iso.slice(11, 16);
+  return day === new Date(now * 1e3).toISOString().slice(0, 10) ? `${hm} UTC` : `${day} ${hm} UTC`;
+}
+function describeHolder(l, me = getConfig().USERNAME, mySession, now = Math.floor(Date.now() / 1e3)) {
+  const who = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
+  return `${who} since ${utc(l.acquired_at, now)}`;
+}
+function describeRefusal(r) {
+  const holders = r.conflicts.map((c) => {
+    const why = c.lease.key === r.id ? "" : ` (overlapping ${c.overlap.join(", ")} via ${c.lease.key})`;
+    return `${describeHolder(c.lease, void 0, r.session)}${why}`;
+  });
+  const ownOther = r.conflicts.every((c) => c.lease.holder.user === getConfig().USERNAME);
+  return `${r.id} is being worked on by ${holders.join("; ")}; not changed.` + (ownOther ? " If that other session is yours and finished or gone, retry with reclaim: true after the user confirms." : "");
+}
+async function claimTask(id, collection, metadata, opts = {}) {
+  if (!claimsApply(collection)) return { kind: "local", id };
+  const session = claimSession(opts.session);
+  const localHolder = metadata.status === "in_progress" && typeof metadata.claim_unshared === "string" ? metadata.claim_unshared : "";
+  if (localHolder && localHolder !== session && !opts.reclaim) {
+    const at = Number(metadata.updated_at ?? Math.floor(Date.now() / 1e3));
+    const lease = {
+      collection,
+      key: id,
+      holder: { user: getConfig().USERNAME, session: localHolder, device: getDeviceId() },
+      title: null,
+      scope: [`key:${id}`],
+      ttl_seconds: 0,
+      acquired_at: at,
+      heartbeat_at: at,
+      expires_at: at,
+      expired: false,
+      took_over_from: null
+    };
+    return { kind: "refused", id, collection, session, conflicts: [{ lease, overlap: [`key:${id}`] }] };
+  }
+  let key = id;
+  if (metadata.is_synced === false) {
+    try {
+      const r = await pushDocsNow(collection, [id]);
+      key = r.renamed[id] ?? id;
+    } catch {
+    }
+  }
+  try {
+    const c = await requireCoordination();
+    const r = await c.leaseAcquire({
+      collection,
+      key,
+      session,
+      ...opts.scope ? { scope: opts.scope } : {},
+      ...opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {},
+      ...opts.title ? { title: opts.title } : {},
+      ...opts.reclaim ? { reclaim: true } : {}
+    });
+    if (!r.granted) return { kind: "refused", id: key, collection, session, conflicts: r.conflicts };
+    noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
+    return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    throw e;
+  }
+}
+async function releaseTaskClaim(id, collection, outcome, session) {
+  if (!claimsApply(collection)) return { kind: "local" };
+  const s = claimSession(session);
+  try {
+    const r = await (await requireCoordination()).leaseRelease(collection, id, s, outcome);
+    noteLeaseReleased(s, collection, id);
+    if (r.released) return { kind: "released" };
+    if (r.reason === "held_by_other") return { kind: "held_by_other", lease: r.lease };
+    return { kind: "not_held" };
+  } catch (e) {
+    if (isCoordinationUnavailable(e)) return { kind: "unshared", reason: e.message };
+    throw e;
+  }
+}
+function describeClaim(r) {
+  switch (r.kind) {
+    case "local":
+      return "";
+    case "granted": {
+      if (r.tookOverFrom) {
+        const prev = r.tookOverFrom;
+        const whose = prev.user === getConfig().USERNAME ? `your other session ${String(prev.session ?? "")}` : `${prev.user}'s expired claim`;
+        return `Claimed ${r.id} (took over from ${whose}).`;
+      }
+      return r.renewed ? `Claim on ${r.id} renewed.` : `Claimed ${r.id}: teammates see it as yours.`;
+    }
+    case "refused":
+      return describeRefusal(r);
+    case "unshared":
+      return `Claim on ${r.id} is NOT shared (${r.reason}): others may start it too. It will be retried when sync is back; tell the user.`;
+  }
+}
+async function retryUnsharedClaims() {
+  const out = { granted: 0, refused: 0 };
+  if (!isSyncConfigured()) return out;
+  for (const col of await listCollections2().catch(() => [])) {
+    if (!isSyncableCollection(col.name)) continue;
+    const pending = (await getDocumentsByFilter2(col.name, { status: "in_progress" }, 1e3).catch(() => [])).filter((d) => typeof d.metadata.claim_unshared === "string" && d.metadata.claim_unshared);
+    for (const d of pending) {
+      let r;
+      try {
+        r = await claimTask(d.id, col.name, d.metadata, { session: d.metadata.claim_unshared });
+      } catch {
+        continue;
+      }
+      if (r.kind === "unshared" || r.kind === "local") return out;
+      const [cur] = await getDocumentsByIds2(col.name, [r.id]).catch(() => []);
+      if (cur) await updateDocument2(col.name, r.id, { ...cur.metadata, claim_unshared: "" });
+      if (r.kind === "granted") {
+        out.granted++;
+      } else {
+        out.refused++;
+        addClaimNotice(`While you were offline, ${r.conflicts.map((c) => describeHolder(c.lease, void 0, r.session)).join("; ")} claimed ${r.id} (${col.name}). Your claim was not shared: coordinate before continuing that work.`);
+      }
+    }
+  }
+  return out;
+}
+async function claimsFor(collection, budgetMs = 1500) {
+  if (!claimsApply(collection)) return void 0;
+  try {
+    const work = (async () => (await requireCoordination()).leaseList(collection))();
+    const r = await Promise.race([work, new Promise((res) => setTimeout(() => res(void 0), budgetMs).unref())]);
+    if (!r) return void 0;
+    return new Map(r.leases.filter((l) => !l.expired).map((l) => [l.key, l]));
+  } catch {
+    return void 0;
+  }
+}
+function claimNote(task, claims, mySessions = [currentSession()]) {
+  if (!claims) return task.metadata.claim_unshared ? "claim not shared yet" : "";
+  const l = claims.get(task.id);
+  if (l) {
+    const mine = mySessions.find((s) => s && s === l.holder.session);
+    return `claimed by ${describeHolder(l, void 0, mine)}`;
+  }
+  if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
+  return "";
+}
+var TaskClaimedError, SESSION_SAFE;
+var init_claim = __esm({
+  "packages/core/src/tasks/claim.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_device();
+    init_backend();
+    init_coordination();
+    init_push();
+    init_syncable();
+    TaskClaimedError = class extends Error {
+      constructor(result) {
+        super(describeRefusal(result));
+        this.result = result;
+        this.name = "TaskClaimedError";
+      }
+      result;
+      code = "task_claimed";
+    };
+    SESSION_SAFE = /[^A-Za-z0-9._:-]/g;
+  }
+});
+
 // packages/core/src/tasks/update.ts
 async function getTask(id) {
   const collections = await listCollections2();
@@ -3005,11 +3719,23 @@ async function getTask(id) {
   }
   return null;
 }
-async function updateTask(id, updates) {
-  const task = await getTask(id);
+async function updateTask(id, updates, ctx = {}) {
+  let task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
-  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes"];
+  const prevStatus = task.metadata.status;
+  const result = { id };
+  if (updates.status === "in_progress") {
+    const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
+    if (claim.kind === "refused") throw new TaskClaimedError(claim);
+    result.claim = claim;
+    if (claim.id !== task.id) {
+      task = await getTask(claim.id);
+      if (!task) throw new Error(`Task ${claim.id} not found after re-key`);
+      result.id = task.id;
+    }
+  }
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const updatedMetadata = {
     ...task.metadata,
@@ -3017,13 +3743,23 @@ async function updateTask(id, updates) {
     updated_at: Math.floor(Date.now() / 1e3)
   };
   if (hasStructuralChange) updatedMetadata.is_synced = false;
+  if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
+  else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
   if (updates.title !== void 0 && updates.title !== task.title) {
-    await addDocument2(task.collection, id, updates.title, updatedMetadata);
-    return;
+    await addDocument2(task.collection, task.id, updates.title, updatedMetadata);
+  } else {
+    await updateDocument2(task.collection, task.id, updatedMetadata);
   }
-  await updateDocument2(task.collection, id, updatedMetadata);
+  if (result.claim?.kind === "granted") {
+    await pushDocsNow(task.collection, [task.id]).catch(() => void 0);
+  }
+  const outcome = updates.status !== void 0 ? RELEASE_OUTCOME[updates.status] : void 0;
+  if (outcome && prevStatus === "in_progress") {
+    result.release = await releaseTaskClaim(task.id, task.collection, outcome, ctx.session).catch(() => void 0);
+  }
+  return result;
 }
-async function completeTask(id, durationMinutes) {
+async function completeTask(id, durationMinutes, ctx = {}) {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   const completionUpdates = {
@@ -3036,7 +3772,7 @@ async function completeTask(id, durationMinutes) {
   if (durationMinutes != null) {
     completionUpdates.duration_minutes = durationMinutes;
   }
-  await updateTask(id, completionUpdates);
+  const { release } = await updateTask(id, completionUpdates, ctx);
   if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
@@ -3052,9 +3788,9 @@ async function completeTask(id, durationMinutes) {
       is_recurring: true,
       recurrence_pattern: task.metadata.recurrence_pattern
     }, task.collection);
-    return { regeneratedId: newId };
+    return { regeneratedId: newId, ...release ? { release } : {} };
   }
-  return {};
+  return release ? { release } : {};
 }
 function computeNextDue(currentDue, pattern) {
   const d = new Date(currentDue * 1e3);
@@ -3071,6 +3807,7 @@ function computeNextDue(currentDue, pattern) {
   }
   return Math.floor(d.getTime() / 1e3);
 }
+var RELEASE_OUTCOME;
 var init_update = __esm({
   "packages/core/src/tasks/update.ts"() {
     "use strict";
@@ -3078,6 +3815,110 @@ var init_update = __esm({
     init_store();
     init_syncable();
     init_create();
+    init_claim();
+    init_push();
+    RELEASE_OUTCOME = { complete: "done", blocked: "blocked", pending: "pending" };
+  }
+});
+
+// packages/core/src/tasks/next.ts
+async function nextTasks(opts) {
+  const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
+  const open = docs.filter((d) => d.metadata.status !== "complete");
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  const claims = await claimsFor(opts.collection);
+  const live = claims ? [...claims.values()] : [];
+  const liveScope = /* @__PURE__ */ new Map();
+  for (const l of live) {
+    for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
+    for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
+  }
+  const openIds = new Set(open.map((d) => d.id));
+  const skipped = [];
+  const ready = [];
+  const depCache = /* @__PURE__ */ new Map();
+  const depStatus = async (id) => {
+    if (byId.has(id)) return byId.get(id).metadata.status;
+    if (!depCache.has(id)) depCache.set(id, (await getTask(id).catch(() => null))?.metadata.status);
+    return depCache.get(id);
+  };
+  for (const d of open) {
+    const tags = norm(d.metadata.tags);
+    if (opts.tags?.length && !opts.tags.every((t) => tags.includes(t))) continue;
+    if (opts.excludeTags?.some((t) => tags.includes(t))) {
+      skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter((t) => tags.includes(t)).join(", ")}` });
+      continue;
+    }
+    const status = d.metadata.status ?? "pending";
+    if (status === "blocked") {
+      skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ""}` });
+      continue;
+    }
+    const held = claims?.get(d.id);
+    if (held) {
+      skipped.push({ id: d.id, reason: `claimed by ${describeHolder(held)}` });
+      continue;
+    }
+    if (status === "in_progress" && !claims) {
+      skipped.push({ id: d.id, reason: "in_progress (claims unknown: offline)" });
+      continue;
+    }
+    if (status === "in_progress" && d.metadata.claim_unshared) {
+      skipped.push({ id: d.id, reason: "in_progress (claimed on this machine, not shared yet)" });
+      continue;
+    }
+    const waiting = [];
+    for (const dep of norm(d.metadata.depends_on)) {
+      const s = await depStatus(dep);
+      if (s !== void 0 && s !== "complete") waiting.push(dep);
+    }
+    if (waiting.length) {
+      skipped.push({ id: d.id, reason: `waiting on ${waiting.join(", ")}` });
+      continue;
+    }
+    const near = [...new Set(norm(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
+    ready.push({
+      id: d.id,
+      title: d.content,
+      collection: opts.collection,
+      priority: d.metadata.priority ?? "medium",
+      status,
+      ...d.metadata.due_date ? { due_date: Number(d.metadata.due_date) } : {},
+      unblocks: norm(d.metadata.blocks).filter((b) => openIds.has(b)).length,
+      near,
+      lapsed: status === "in_progress"
+    });
+  }
+  const created = (id) => Number(byId.get(id)?.metadata.created_at ?? 0);
+  ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
+  const result = { ready, skipped, claimsKnown: claims !== void 0 };
+  if (!opts.claim) return result;
+  const { collection: _c, tags: _t, excludeTags: _x, claim: _k, ...claimOpts } = opts;
+  for (const r of ready) {
+    try {
+      const u = await updateTask(r.id, { status: "in_progress" }, claimOpts);
+      result.claimed = u.claim ?? { kind: "local", id: u.id };
+      return result;
+    } catch (e) {
+      if (e instanceof TaskClaimedError) {
+        result.claimed = e.result;
+        skipped.push({ id: r.id, reason: `claim refused: ${e.message}` });
+        continue;
+      }
+      throw e;
+    }
+  }
+  return result;
+}
+var PRIORITY_RANK, norm;
+var init_next = __esm({
+  "packages/core/src/tasks/next.ts"() {
+    "use strict";
+    init_store();
+    init_claim();
+    init_update();
+    PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+    norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -3116,13 +3957,20 @@ var init_search = __esm({
 });
 
 // packages/core/src/tasks/delete.ts
-async function deleteTask(id) {
-  return deleteDocumentEverywhere(id);
+async function deleteTask(id, session) {
+  const task = await getTask(id).catch(() => null);
+  const collection = await deleteDocumentEverywhere(id);
+  if (task?.metadata.status === "in_progress") {
+    await releaseTaskClaim(id, task.collection, "deleted", session).catch(() => void 0);
+  }
+  return collection;
 }
 var init_delete = __esm({
   "packages/core/src/tasks/delete.ts"() {
     "use strict";
     init_forget();
+    init_claim();
+    init_update();
   }
 });
 
@@ -3278,56 +4126,6 @@ function formatDuration(minutes) {
 var init_dates = __esm({
   "packages/core/src/tasks/dates.ts"() {
     "use strict";
-  }
-});
-
-// packages/core/src/sync/sentinel.ts
-async function getSyncPullTimestamp() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_pull_sentinel" }
-    }, 1);
-    if (results.length === 0) return 0;
-    return results[0].metadata.last_pull ?? 0;
-  } catch {
-    return 0;
-  }
-}
-async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
-  await getOrCreateCollection2("global");
-  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
-    type: "sync_pull_sentinel",
-    last_pull: at
-  });
-}
-async function getSyncSubscriptions() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_subscriptions" }
-    }, 1);
-    if (results.length === 0) return [];
-    const raw = results[0].metadata.collections;
-    if (!raw) return [];
-    return raw.split(",").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-async function updateSyncSubscriptions(collections) {
-  await getOrCreateCollection2("global");
-  const deduped = [...new Set(collections)].sort();
-  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
-    type: "sync_subscriptions",
-    collections: deduped.join(",")
-  });
-}
-var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID;
-var init_sentinel = __esm({
-  "packages/core/src/sync/sentinel.ts"() {
-    "use strict";
-    init_store();
-    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
-    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
   }
 });
 
@@ -4290,19 +5088,19 @@ var init_capture = __esm({
 });
 
 // packages/core/src/buckets/artifacts.ts
-import { existsSync, mkdirSync as mkdirSync4, readdirSync, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "fs";
-import { join as join3 } from "path";
+import { existsSync, mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "fs";
+import { join as join4 } from "path";
 function artifactDir(kind) {
-  return join3(getConfig().ARTIFACTS_DIR, kind);
+  return join4(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync(dir)) mkdirSync4(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSync5(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
   const dir = ensureArtifactDir(kind);
-  const files = readdirSync(dir);
+  const files = readdirSync2(dir);
   let max = 0;
   for (const f of files) {
     const m = f.match(/^v(\d+)\./);
@@ -4317,7 +5115,7 @@ function listVersions(kind) {
   const dir = artifactDir(kind);
   if (!existsSync(dir)) return [];
   const versions = /* @__PURE__ */ new Set();
-  for (const f of readdirSync(dir)) {
+  for (const f of readdirSync2(dir)) {
     const m = f.match(/^v(\d+)\./);
     if (m) versions.add(parseInt(m[1], 10));
   }
@@ -4325,17 +5123,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path = join3(dir, filename);
-  writeFileSync4(path, content);
+  const path = join4(dir, filename);
+  writeFileSync5(path, content);
   return path;
 }
 function readArtifact(kind, filename) {
-  const path = join3(artifactDir(kind), filename);
+  const path = join4(artifactDir(kind), filename);
   if (!existsSync(path)) return null;
-  return readFileSync6(path, "utf-8");
+  return readFileSync7(path, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join3(artifactDir(kind), filename);
+  return join4(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -4752,254 +5550,6 @@ var init_buckets = __esm({
   }
 });
 
-// packages/core/src/sync/push.ts
-import { createHash } from "node:crypto";
-function emptyPushStats() {
-  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
-}
-function syncFingerprint(doc) {
-  const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
-  const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
-  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
-}
-function stripLocalOnly(metadata) {
-  const out = { ...metadata };
-  for (const k of LOCAL_ONLY_KEYS) delete out[k];
-  return out;
-}
-async function pushToRemote() {
-  const stats = emptyPushStats();
-  const backend = await getSyncBackend();
-  if (!backend) return stats;
-  await resolveSyncUsername();
-  try {
-    const pendingDeletes = await getPendingDeletes();
-    if (pendingDeletes.length > 0) {
-      const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
-      stats.deleted = await backend.delete(docIds, "delete");
-      await clearPendingDeletes(pendingDeletes);
-    }
-  } catch (e) {
-    process.stderr.write(`[yapa-sync] Delete propagation error: ${e}
-`);
-    noteSyncError(e);
-    stats.errors++;
-    if (isCycleFatal(e)) return stats;
-  }
-  const collections = await listCollections2();
-  for (const collection of collections) {
-    if (isSyncableCollection(collection.name)) continue;
-    try {
-      stats.retracted += await retractSharedCopies(backend, collection.name);
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Private-copy check failed for ${collection.name}: ${e}
-`);
-      noteSyncError(e);
-      stats.errors++;
-      if (isCycleFatal(e)) return stats;
-    }
-  }
-  const pushedCollections = [];
-  for (const collection of collections) {
-    if (!isSyncableCollection(collection.name)) continue;
-    try {
-      const unsyncedDocs = await getDocumentsByFilter2(collection.name, { is_synced: false }, 500);
-      const before = stats.pushed + stats.linked;
-      const batch = [];
-      for (const unsynced of unsyncedDocs) {
-        if (unsynced.id.startsWith("__")) continue;
-        if (unsynced.metadata.type === "journal_draft") continue;
-        if (isReadOnlyDoc(unsynced.metadata)) continue;
-        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
-        const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
-        try {
-          batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
-        } catch (e) {
-          process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
-`);
-          stats.errors++;
-        }
-      }
-      await pushBatch(backend, collection.name, batch, stats, true);
-      if (stats.pushed + stats.linked > before) pushedCollections.push(collection.name);
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Push error for collection ${collection.name}: ${e}
-`);
-      noteSyncError(e);
-      stats.errors++;
-      if (isCycleFatal(e)) break;
-    }
-  }
-  if (pushedCollections.length > 0) {
-    try {
-      const existing = await getSyncSubscriptions();
-      const existingSet = new Set(existing);
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
-      if (newSubs.length > 0) {
-        await updateSyncSubscriptions([...existing, ...newSubs]);
-      }
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
-`);
-    }
-  }
-  return stats;
-}
-async function toUpsert(collection, doc) {
-  const now = Math.floor(Date.now() / 1e3);
-  const embedding = await generateEmbedding(doc.content) ?? [];
-  return {
-    id: doc.id,
-    collection,
-    content: doc.content,
-    embedding,
-    metadata: stripLocalOnly(doc.metadata),
-    origin_user: getConfig().USERNAME,
-    created_at: doc.metadata.created_at ?? now,
-    updated_at: doc.metadata.updated_at ?? doc.metadata.created_at ?? now
-  };
-}
-async function pushBatch(backend, collection, batch, stats, allowRekey) {
-  if (batch.length === 0) return;
-  let outcomes;
-  try {
-    outcomes = await backend.upsertMany(batch.map((b) => b.upsert));
-  } catch (e) {
-    stats.errors += batch.length - 1;
-    throw e;
-  }
-  const retry = [];
-  for (let i = 0; i < batch.length; i++) {
-    const { doc, upsert } = batch[i];
-    const outcome = outcomes[i];
-    try {
-      if (outcome.ok) {
-        await applyPushed(backend, collection, doc, outcome.similar, stats);
-      } else if (outcome.code === "id_taken" && allowRekey && doc.metadata.type === "task") {
-        const renamed = await rekeyTask(collection, doc, outcome.suggestedId);
-        stats.renamed++;
-        retry.push({ doc: renamed, upsert: { ...upsert, id: renamed.id, metadata: stripLocalOnly(renamed.metadata) } });
-      } else if (outcome.permanent) {
-        await markRejected(collection, doc, outcome.code, outcome.message);
-        stats.rejected++;
-      } else {
-        process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${outcome.code}: ${outcome.message}
-`);
-        noteSyncError(`${doc.id}: ${outcome.code}: ${outcome.message}`);
-        stats.errors++;
-      }
-    } catch (e) {
-      process.stderr.write(`[yapa-sync] Push error for ${doc.id}: ${e}
-`);
-      stats.errors++;
-    }
-  }
-  await pushBatch(backend, collection, retry, stats, false);
-}
-async function applyPushed(backend, collection, doc, similar, stats) {
-  const match = similar.find((s) => s.id !== doc.id);
-  const metadata = stripLocalOnly(doc.metadata);
-  if (!match) {
-    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
-    stats.pushed++;
-    return;
-  }
-  try {
-    await backend.addRelatedIds(match.id, [doc.id]);
-    await backend.addRelatedIds(doc.id, [match.id]);
-  } catch (e) {
-    process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
-`);
-  }
-  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
-  if (!related.includes(match.id)) related.push(match.id);
-  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
-  stats.linked++;
-}
-async function markRejected(collection, doc, code, message) {
-  await updateDocument2(collection, doc.id, {
-    ...doc.metadata,
-    is_synced: false,
-    sync_rejected: code,
-    sync_rejected_message: message.slice(0, 300),
-    sync_rejected_fp: syncFingerprint(doc)
-  });
-  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
-`);
-}
-async function countUnpushed() {
-  let n = 0;
-  for (const col of await listCollections2()) {
-    if (!isSyncableCollection(col.name)) continue;
-    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
-    for (const d of docs) {
-      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
-      n++;
-    }
-  }
-  return n;
-}
-async function listRejectedDocs() {
-  const out = [];
-  for (const col of await listCollections2()) {
-    if (!isSyncableCollection(col.name)) continue;
-    const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
-    for (const d of docs) {
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
-        out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
-      }
-    }
-  }
-  return out;
-}
-async function rekeyTask(collection, doc, suggestedId) {
-  const { getNextTaskId: getNextTaskId2 } = await Promise.resolve().then(() => (init_create(), create_exports));
-  const me = getConfig().USERNAME;
-  const localNext = Number((await getNextTaskId2()).split("-").pop());
-  const suggested = Number(suggestedId?.split("-").pop());
-  const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
-  const newId = `${me}-${n}`;
-  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
-  await addDocument2(collection, newId, doc.content, metadata);
-  await deleteDocument2(collection, doc.id);
-  process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
-`);
-  return { ...doc, id: newId, metadata };
-}
-async function retractSharedCopies(backend, collection) {
-  const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
-  const unchecked = (await getDocumentsByFilter2(collection, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.remote_checked_at !== versionOf(d));
-  if (unchecked.length === 0) return 0;
-  const me = getConfig().USERNAME;
-  const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
-  const mine = unchecked.filter((d) => {
-    const row = remote.get(d.id);
-    const localCreated = Number(d.metadata.created_at);
-    return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
-  });
-  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
-  if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
-`);
-  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
-  return removed;
-}
-var LOCAL_ONLY_KEYS;
-var init_push = __esm({
-  "packages/core/src/sync/push.ts"() {
-    "use strict";
-    init_config();
-    init_store();
-    init_embeddings();
-    init_backend();
-    init_deletes();
-    init_sentinel();
-    init_device();
-    init_syncable();
-    LOCAL_ONLY_KEYS = ["sync_rejected", "sync_rejected_fp", "sync_rejected_message"];
-  }
-});
-
 // packages/core/src/sync/pull.ts
 function emptyPullStats() {
   return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
@@ -5274,6 +5824,15 @@ async function syncCycle() {
       await (await getSyncBackend())?.maintain();
     } catch {
     }
+    if (!hasErrors) {
+      try {
+        const { retryUnsharedClaims: retryUnsharedClaims2 } = await Promise.resolve().then(() => (init_claim(), claim_exports));
+        await retryUnsharedClaims2();
+      } catch (e) {
+        process.stderr.write(`[yapa-sync] Claim retry error: ${e}
+`);
+      }
+    }
     const unpushed = await countUnpushed().catch(() => void 0);
     if (!hasErrors) noteSyncOk(unpushed);
     else if (unpushed !== void 0) recordUnpushed(unpushed);
@@ -5404,125 +5963,6 @@ var init_sync = __esm({
     lastStats = null;
     soonTimer = null;
     inFlight = null;
-  }
-});
-
-// packages/core/src/sync/coordination.ts
-import { mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join4 } from "node:path";
-function currentSession(explicit, env = process.env) {
-  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
-    if (v && SESSION_RE.test(v)) return v;
-  }
-  return void 0;
-}
-function markerPath(session) {
-  return join4(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
-}
-function readMarker(session) {
-  try {
-    return JSON.parse(readFileSync7(markerPath(session), "utf-8"));
-  } catch {
-    return void 0;
-  }
-}
-function writeMarker(m) {
-  try {
-    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync5(markerPath(m.session), JSON.stringify(m), { mode: 384 });
-  } catch {
-  }
-}
-function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3)) {
-  const prev = readMarker(session);
-  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now });
-}
-function noteRenewed(session, renewed, now) {
-  if (renewed.length === 0) {
-    try {
-      rmSync2(markerPath(session), { force: true });
-    } catch {
-    }
-    return;
-  }
-  writeMarker({ session, min_ttl: Math.min(...renewed.map((l) => l.ttl_seconds)), last_beat: now });
-}
-function sessionsHoldingLeases() {
-  try {
-    return readdirSync2(getConfig().LEASE_STATE_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
-  } catch {
-    return [];
-  }
-}
-async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
-  if (!isSyncConfigured()) return 0;
-  let n = 0;
-  for (const session of new Set(sessions.filter((s) => !!s && SESSION_RE.test(s)))) {
-    const m = readMarker(session);
-    if (!m) continue;
-    const interval = Math.max(10, Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.floor(m.min_ttl / 3)));
-    if (now - m.last_beat < interval) continue;
-    try {
-      const r = await (await requireCoordination()).leaseHeartbeat(void 0, session);
-      noteRenewed(session, r.renewed, now);
-      n += r.renewed.length;
-    } catch {
-    }
-  }
-  return n;
-}
-async function requireCoordination() {
-  if (!isSyncConfigured()) {
-    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
-  }
-  const backend = await getSyncBackend();
-  if (!backend?.coordination) {
-    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
-  }
-  return wrap(backend.coordination);
-}
-function isCoordinationUnavailable(e) {
-  if (e instanceof CoordinationUnavailableError) return true;
-  const err = e;
-  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
-}
-function wrap(c) {
-  const guard = (fn) => async (...a) => {
-    try {
-      return await fn(...a);
-    } catch (e) {
-      if (isCoordinationUnavailable(e)) {
-        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
-      }
-      throw e;
-    }
-  };
-  return {
-    leaseAcquire: guard(c.leaseAcquire),
-    leaseHeartbeat: guard(c.leaseHeartbeat),
-    leaseRelease: guard(c.leaseRelease),
-    leaseList: guard(c.leaseList),
-    counterNext: guard(c.counterNext),
-    nextTaskId: guard(c.nextTaskId)
-  };
-}
-var SESSION_RE, HEARTBEAT_MAX_INTERVAL_S, CoordinationUnavailableError;
-var init_coordination = __esm({
-  "packages/core/src/sync/coordination.ts"() {
-    "use strict";
-    init_config();
-    init_backend();
-    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-    HEARTBEAT_MAX_INTERVAL_S = 300;
-    CoordinationUnavailableError = class extends Error {
-      constructor(reason, message) {
-        super(message);
-        this.reason = reason;
-        this.name = "CoordinationUnavailableError";
-      }
-      reason;
-      code = "coordination_unavailable";
-    };
   }
 });
 
@@ -6599,10 +7039,12 @@ __export(src_exports, {
   SYNTHESIS_PROMPT_VERSION: () => SYNTHESIS_PROMPT_VERSION,
   SYNTHESIS_SYSTEM_PROMPT: () => SYNTHESIS_SYSTEM_PROMPT,
   ServiceError: () => ServiceError,
+  TaskClaimedError: () => TaskClaimedError,
   VERIFY_JUDGE_SYSTEM_PROMPT: () => VERIFY_JUDGE_SYSTEM_PROMPT,
   adapterDemote: () => adapterDemote,
   adapterPromote: () => adapterPromote,
   addAdapter: () => addAdapter,
+  addClaimNotice: () => addClaimNotice,
   addDependency: () => addDependency,
   addDocument: () => addDocument2,
   addDocumentsBatch: () => addDocumentsBatch2,
@@ -6626,6 +7068,11 @@ __export(src_exports, {
   chromaStore: () => chromaStore,
   chunk: () => chunk,
   chunkText: () => chunkText,
+  claimNote: () => claimNote,
+  claimSession: () => claimSession,
+  claimTask: () => claimTask,
+  claimsApply: () => claimsApply,
+  claimsFor: () => claimsFor,
   classifyMemories: () => classifyMemories,
   clearEmbeddingMemo: () => clearEmbeddingMemo,
   clearPendingDeletes: () => clearPendingDeletes,
@@ -6650,6 +7097,9 @@ __export(src_exports, {
   deleteDocument: () => deleteDocument2,
   deleteDocumentEverywhere: () => deleteDocumentEverywhere,
   deleteTask: () => deleteTask,
+  describeClaim: () => describeClaim,
+  describeHolder: () => describeHolder,
+  describeRefusal: () => describeRefusal,
   detectChromaVersion: () => detectChromaVersion,
   detectCollection: () => detectCollection,
   detectSector: () => detectSector,
@@ -6719,9 +7169,11 @@ __export(src_exports, {
   loadManifestSplit: () => loadManifestSplit,
   markDecayRun: () => markDecayRun,
   mergeCollections: () => mergeCollections,
+  nextTasks: () => nextTasks,
   nextVersion: () => nextVersion,
   normalizedSalience: () => normalizedSalience,
   noteLeaseHeld: () => noteLeaseHeld,
+  noteLeaseReleased: () => noteLeaseReleased,
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
   parseAggregateJudge: () => parseAggregateJudge,
@@ -6736,6 +7188,7 @@ __export(src_exports, {
   passesScoreFilters: () => passesScoreFilters,
   pullCollection: () => pullCollection,
   pullFromRemote: () => pullFromRemote,
+  pushDocsNow: () => pushDocsNow,
   pushToRemote: () => pushToRemote,
   queryAllCollections: () => queryAllCollections2,
   queryDocuments: () => queryDocuments2,
@@ -6750,6 +7203,7 @@ __export(src_exports, {
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
   rekeyTask: () => rekeyTask,
+  releaseTaskClaim: () => releaseTaskClaim,
   removeCollection: () => removeCollection,
   removeDependency: () => removeDependency,
   requireCoordination: () => requireCoordination,
@@ -6759,6 +7213,7 @@ __export(src_exports, {
   resetStore: () => resetStore,
   resolveConflict: () => resolveConflict,
   resolveSyncUsername: () => resolveSyncUsername,
+  retryUnsharedClaims: () => retryUnsharedClaims,
   routeMemory: () => routeMemory,
   runDecaySweep: () => runDecaySweep,
   scheduleSyncSoon: () => scheduleSyncSoon,
@@ -6785,6 +7240,7 @@ __export(src_exports, {
   systemPromptActivate: () => systemPromptActivate,
   systemPromptDeactivate: () => systemPromptDeactivate,
   systemPromptThresholds: () => systemPromptThresholds,
+  takeClaimNotices: () => takeClaimNotices,
   toChroma: () => toChroma,
   touchDocument: () => touchDocument,
   trainingCancel: () => trainingCancel,
@@ -6826,6 +7282,8 @@ var init_src = __esm({
     init_create();
     init_list2();
     init_update();
+    init_claim();
+    init_next();
     init_search();
     init_delete();
     init_dependencies();
@@ -6893,8 +7351,11 @@ Call \`task_create\` in the active collection BEFORE starting multi-step or long
 ### Journal
 Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.
 
+### Task claims
+In a shared collection, setting a task to \`in_progress\` claims it for this session (a lease on its id), so teammates and your other sessions don't start the same work; leaving \`in_progress\` (complete, blocked, pending, delete) releases it. Set \`in_progress\` when you actually start a task. If the update is refused, nothing changed: tell the user who holds it and since when, and offer other work. If it names your own other session, pass \`reclaim: true\` only after the user confirms that session is finished or theirs to take over. If the reply says the claim is NOT shared (offline, signed out), tell the user others may start it too. Task lines show "claimed by <who>"; before starting a task claimed by someone else, tell the user. A "**YAPA claim:**" line in the context means a claim was taken over or clashed: pass it on to the user.
+
 ### Shared work (leases)
-Some projects coordinate work through YAPA leases (the \`lease\` tool, or a project script calling \`yapa coord\`). Take a lease only when the project's own instructions or tooling call for it, never on your own initiative. Session start lists live leases in the active collection under "Work in progress": before starting something listed there, tell the user who holds it. If an acquire is refused, say who holds the work and since when, and offer something else; don't retry in a loop. If you took over an expired lease, say whose it was. If the service is unreachable, say the work is not shared. Heartbeats are automatic while this session is active; don't schedule them.
+For other shared resources, some projects coordinate through bare YAPA leases (the \`lease\` tool, or a project script calling \`yapa coord\`). Take one only when the project's own instructions or tooling call for it, never on your own initiative. Session start lists live leases in the active collection under "Work in progress": before starting something listed there, tell the user who holds it. If an acquire is refused, say who holds the work and since when, and offer something else; don't retry in a loop. If you took over an expired lease, say whose it was. If the service is unreachable, say the work is not shared. Heartbeats are automatic while this session is active; don't schedule them.
 
 ### Memory compaction
 When the injected context lists a "compaction candidate", call \`compaction_suggest\` for it, write a rolling summary per group, and submit with \`compaction_apply\`.
@@ -7074,8 +7535,8 @@ function copyScript(from, to) {
   renameSync3(tmp, to);
   return true;
 }
-function argValue(args, flag2) {
-  const i = args.indexOf(flag2);
+function argValue(args, flag3) {
+  const i = args.indexOf(flag3);
   return i >= 0 ? args[i + 1] : void 0;
 }
 async function readStdin() {
@@ -7150,7 +7611,7 @@ __export(hooks_exports, {
   userText: () => userText
 });
 import { existsSync as existsSync4, mkdirSync as mkdirSync9, readFileSync as readFileSync13, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname5, join as join8 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
@@ -7239,7 +7700,7 @@ function prepareStatusLine(from = bundledStatusLineScript()) {
   return `_Mention once to the user: they can show YAPA sync health under the prompt with ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join8(tmpdir(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const base = process.env.CLAUDE_PLUGIN_DATA || join8(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
   const dir = join8(base, "sessions");
   mkdirSync9(dir, { recursive: true });
   return dir;
@@ -7291,7 +7752,7 @@ function presenceLines(leases, now, mySessions, me) {
   const mine = new Set(mySessions.filter(Boolean));
   const out = ["", "## Work in progress (leases)"];
   for (const l of leases.slice(0, 10)) {
-    const who = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session.slice(0, 8)})` : l.holder.user;
+    const who = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
     const title = l.title ? ` ${l.title}` : "";
     out.push(`- **${l.key}**${title}: ${who}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
   }
@@ -7299,14 +7760,18 @@ function presenceLines(leases, now, mySessions, me) {
   return out;
 }
 async function presence(collection, input) {
-  if (!isSyncConfigured() || !isSyncableCollection(collection)) return [];
+  if (!isSyncConfigured() || !isSyncableCollection(collection)) return { lines: [] };
   try {
     const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
-    if (!r) return [];
-    return presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME);
+    if (!r) return { lines: [] };
+    const live = r.leases.filter((l) => !l.expired);
+    return { lines: presenceLines(r.leases, r.now, leaseSessions(input), getConfig().USERNAME), claims: new Map(live.map((l) => [l.key, l])) };
   } catch {
-    return [];
+    return { lines: [] };
   }
+}
+function claimNoticeLines() {
+  return takeClaimNotices().map((n) => `**YAPA claim:** ${n}`);
 }
 async function findCompactionCandidates() {
   const cols = await listCollections2().catch(() => []);
@@ -7332,6 +7797,7 @@ async function sessionStart(input) {
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
   const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
+  lines.push(...claimNoticeLines());
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
     if (tasks.length) {
@@ -7339,7 +7805,8 @@ async function sessionStart(input) {
       for (const t of tasks.slice(0, 10)) {
         const status = t.metadata.status ?? "open";
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : "";
-        lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}] ${t.title}`);
+        const claim = claimNote(t, held.claims, leaseSessions(input));
+        lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${t.title}`);
       }
       if (tasks.length > 10) lines.push(`- _\u2026${tasks.length - 10} more (call \`task_list\` for the full list)_`);
     }
@@ -7347,7 +7814,7 @@ async function sessionStart(input) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}
 `);
   }
-  lines.push(...held);
+  lines.push(...held.lines);
   try {
     const memories = await listMemories({ collection, limit: 5 });
     if (memories.length) {
@@ -7403,9 +7870,11 @@ async function userPromptSubmit(input) {
   if (notice) lines.push(`_${notice}_`);
   const down = syncDownLine();
   if (down) lines.push(down);
+  const claimNotices = claimNoticeLines();
+  lines.push(...claimNotices);
   try {
     const recall = await recallMemory(prompt, { collection, nResults: 3, crossCollection: getConfig().CROSS_COLLECTION_RESULTS });
-    if (recall.length === 0 && !notice && !down) {
+    if (recall.length === 0 && !notice && !down && !claimNotices.length) {
       emit({});
       return;
     }
@@ -7623,7 +8092,7 @@ function leaseAcquire(a) {
     }
     const prev = r.took_over_from;
     noteLeaseHeld(session, r.lease.ttl_seconds);
-    const verb = r.renewed ? "renewed" : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
+    const verb = r.renewed ? "renewed" : prev?.reclaim ? `took over from ${prev.session} (your other session)` : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}` };
   });
 }
@@ -7674,6 +8143,171 @@ var init_coord = __esm({
       const s = Math.max(0, now - t);
       return s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
     };
+  }
+});
+
+// packages/mcp/src/cli/task.ts
+var task_exports = {};
+__export(task_exports, {
+  TASK_USAGE: () => TASK_USAGE,
+  runTask: () => runTask
+});
+function flag(args, name) {
+  const i = args.indexOf(name);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
+}
+function int(v, name) {
+  if (v === void 0) return void 0;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) throw new UsageError(`${name} must be a non-negative integer`);
+  return n;
+}
+function taskJson(t, claims) {
+  const m = t.metadata;
+  const lease = claims?.get(t.id);
+  return {
+    id: t.id,
+    title: t.title,
+    collection: t.collection,
+    status: m.status,
+    priority: m.priority,
+    tags: Array.isArray(m.tags) ? m.tags : String(m.tags ?? "").split(",").filter(Boolean),
+    depends_on: Array.isArray(m.depends_on) ? m.depends_on : String(m.depends_on ?? "").split(",").filter(Boolean),
+    blocks: Array.isArray(m.blocks) ? m.blocks : String(m.blocks ?? "").split(",").filter(Boolean),
+    claim_scope: Array.isArray(m.claim_scope) ? m.claim_scope : [],
+    notes: m.notes ?? "",
+    due_date: m.due_date || null,
+    owner: m.origin_user ?? null,
+    created_at: m.created_at ?? null,
+    updated_at: m.updated_at ?? null,
+    claim: lease ? { user: lease.holder.user, session: lease.holder.session, since: lease.acquired_at, expires_at: lease.expires_at } : null,
+    claim_note: claimNote(t, claims) || null
+  };
+}
+function claimExit(c) {
+  if (c?.kind === "refused") return EXIT.refused;
+  if (c?.kind === "unshared") return EXIT.unavailable;
+  return EXIT.ok;
+}
+function claimJson(c) {
+  if (!c) return null;
+  const base = { kind: c.kind, id: c.id };
+  switch (c.kind) {
+    case "granted":
+      return { ...base, session: c.session, renewed: c.renewed, lease: c.lease, took_over_from: c.tookOverFrom ?? null };
+    case "refused":
+      return { ...base, session: c.session, conflicts: c.conflicts };
+    case "unshared":
+      return { ...base, session: c.session, reason: c.reason };
+    default:
+      return base;
+  }
+}
+async function runTask(sub, args) {
+  try {
+    return await dispatch(sub, args);
+  } catch (e) {
+    if (e instanceof TaskClaimedError) {
+      return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
+    }
+    const usage2 = e instanceof UsageError;
+    const message = e instanceof Error ? e.message : String(e);
+    return { exit: usage2 ? EXIT.usage : EXIT.error, json: { ok: false, error: message }, text: `yapa task ${sub ?? ""}: ${message}` };
+  }
+}
+async function dispatch(sub, args) {
+  const positional = args.find((a) => !a.startsWith("--") && !isFlagValue(args, a));
+  const session = flag(args, "--session");
+  const claimOpts = {
+    session,
+    scope: list2(flag(args, "--scope")),
+    ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
+    title: flag(args, "--title"),
+    reclaim: args.includes("--reclaim") || void 0
+  };
+  switch (sub) {
+    case "list": {
+      const status = flag(args, "--status");
+      if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(", ")}`);
+      const collection = flag(args, "--collection");
+      const tasks = await listTasks({ collection, status, includeComplete: args.includes("--include-complete") });
+      const claims = collection ? await claimsFor(collection) : void 0;
+      return { exit: EXIT.ok, json: { ok: true, tasks: tasks.map((t) => taskJson(t, claims)) }, text: `${tasks.length} task(s)` };
+    }
+    case "show": {
+      if (!positional) throw new UsageError("task id required");
+      const t = await getTask(positional);
+      if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional} not found` };
+      return { exit: EXIT.ok, json: { ok: true, task: taskJson(t, await claimsFor(t.collection)) }, text: `${t.id} [${t.metadata.status}] ${t.title}` };
+    }
+    case "next": {
+      const collection = flag(args, "--collection");
+      if (!collection) throw new UsageError("--collection is required");
+      const r = await nextTasks({ collection, tags: list2(flag(args, "--tag")), excludeTags: list2(flag(args, "--exclude-tag")), claim: args.includes("--claim"), ...claimOpts });
+      const json = { ok: true, claims_known: r.claimsKnown, ready: r.ready, skipped: r.skipped, claimed: claimJson(r.claimed) };
+      if (!args.includes("--claim")) {
+        return { exit: EXIT.ok, json, text: r.ready.length ? `next: ${r.ready[0].id} ${r.ready[0].title} (${r.ready.length} ready)` : "nothing ready" };
+      }
+      if (!r.claimed) return { exit: EXIT.ok, json: { ...json, ok: true }, text: "nothing ready" };
+      return { exit: claimExit(r.claimed), json, text: describeClaim(r.claimed) || `started ${r.claimed.id}` };
+    }
+    case "claim": {
+      if (!positional) throw new UsageError("task id required");
+      const r = await updateTask(positional, { status: "in_progress" }, claimOpts);
+      return {
+        exit: claimExit(r.claim),
+        json: { ok: true, id: r.id, session: claimSession(session), claim: claimJson(r.claim) },
+        text: r.claim && describeClaim(r.claim) || `started ${r.id}`
+      };
+    }
+    case "release": {
+      if (!positional) throw new UsageError("task id required");
+      const status = flag(args, "--status");
+      if (!status || !["pending", "blocked", "complete"].includes(status)) throw new UsageError("--status must be pending, blocked or complete");
+      const t = await getTask(positional);
+      if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional} not found` };
+      const note = flag(args, "--note");
+      const addTags = list2(flag(args, "--tag")) ?? [];
+      const extra = {};
+      if (note) extra.notes = t.metadata.notes ? `${t.metadata.notes}
+${note}` : note;
+      if (addTags.length) {
+        const cur = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",").filter(Boolean);
+        extra.tags = [.../* @__PURE__ */ new Set([...cur, ...addTags])];
+      }
+      let release;
+      if (status === "complete") {
+        if (Object.keys(extra).length) await updateTask(t.id, extra, { session });
+        release = (await completeTask(t.id, int(flag(args, "--duration"), "--duration"), { session })).release;
+      } else {
+        const reason = flag(args, "--reason");
+        release = (await updateTask(t.id, { status, ...reason ? { blockedReason: reason } : {}, ...extra }, { session })).release;
+      }
+      const pushed = await pushDocsNow(t.collection, [t.id]).catch(() => void 0);
+      const exit = release?.kind === "unshared" || pushed && pushed.errors > 0 ? EXIT.unavailable : EXIT.ok;
+      const text = release?.kind === "released" ? `${t.id} -> ${status}; claim released` : release?.kind === "held_by_other" ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it` : release?.kind === "unshared" ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own` : `${t.id} -> ${status}`;
+      return { exit, json: { ok: true, id: t.id, status, release: release ?? null }, text };
+    }
+    default:
+      throw new UsageError(`unknown command
+${TASK_USAGE}`);
+  }
+}
+function isFlagValue(args, a) {
+  const i = args.indexOf(a);
+  return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text"].includes(args[i - 1]);
+}
+var TASK_USAGE, list2, UsageError, STATUSES;
+var init_task = __esm({
+  "packages/mcp/src/cli/task.ts"() {
+    "use strict";
+    init_src();
+    init_coord();
+    TASK_USAGE = "Usage: yapa task list    [--collection C] [--status S] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--claim [claim options]]\n       yapa task claim   ID [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN] [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n";
+    list2 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    UsageError = class extends Error {
+    };
+    STATUSES = ["pending", "in_progress", "blocked", "complete"];
   }
 });
 
@@ -7743,8 +8377,8 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n";
-var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nExit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n";
+var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nExit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
   process.exit(2);
@@ -7806,7 +8440,7 @@ async function runStatusLineCommand(action, args) {
   const sl = await Promise.resolve().then(() => (init_statusline(), statusline_exports));
   const { statusLineScriptPath: statusLineScriptPath2, bundledStatusLineScript: bundledStatusLineScript2 } = await Promise.resolve().then(() => (init_hooks(), hooks_exports));
   const { getConfig: getConfig2 } = await Promise.resolve().then(() => (init_src(), src_exports));
-  const path = flag(args, "--settings");
+  const path = flag2(args, "--settings");
   const script = statusLineScriptPath2();
   switch (action) {
     case "install": {
@@ -7828,14 +8462,14 @@ async function runStatusLineCommand(action, args) {
       usage();
   }
 }
-function flag(args, name) {
+function flag2(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
 }
-function list2(v) {
+function list3(v) {
   return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
 }
-function int(v, name) {
+function int2(v, name) {
   if (v === void 0) return void 0;
   const n = Number(v);
   if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer`);
@@ -7848,14 +8482,14 @@ async function runCoord(sub, args) {
   }
   adoptCliEnv(process.cwd());
   const coord = await Promise.resolve().then(() => (init_coord(), coord_exports));
-  const collection = flag(args, "--collection");
+  const collection = flag2(args, "--collection");
   const need = (v, name) => {
     if (!v) throw new Error(`${name} is required`);
     return v;
   };
   let r;
   try {
-    const session = coord.currentSession(flag(args, "--session"));
+    const session = coord.currentSession(flag2(args, "--session"));
     if (!session && ["acquire", "heartbeat", "release"].includes(sub)) {
       throw new Error("--session is required outside Claude Code (or set YAPA_SESSION)");
     }
@@ -7863,27 +8497,28 @@ async function runCoord(sub, args) {
       case "acquire":
         r = await coord.leaseAcquire({
           collection: need(collection, "--collection"),
-          key: need(flag(args, "--key"), "--key"),
+          key: need(flag2(args, "--key"), "--key"),
           session,
-          scope: list2(flag(args, "--scope")),
-          ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
-          title: flag(args, "--title")
+          scope: list3(flag2(args, "--scope")),
+          ttlSeconds: int2(flag2(args, "--ttl"), "--ttl"),
+          title: flag2(args, "--title"),
+          ...args.includes("--reclaim") ? { reclaim: true } : {}
         });
         break;
       case "heartbeat":
-        r = await coord.leaseHeartbeat(collection, session, list2(flag(args, "--keys")));
+        r = await coord.leaseHeartbeat(collection, session, list3(flag2(args, "--keys")));
         break;
       case "release":
-        r = await coord.leaseRelease(need(collection, "--collection"), need(flag(args, "--key"), "--key"), session, flag(args, "--outcome"));
+        r = await coord.leaseRelease(need(collection, "--collection"), need(flag2(args, "--key"), "--key"), session, flag2(args, "--outcome"));
         break;
       case "list":
         r = await coord.leaseList(need(collection, "--collection"), args.includes("--include-expired"));
         break;
       case "counter-next":
-        r = await coord.counterNext(need(collection, "--collection"), need(flag(args, "--name"), "--name"), int(flag(args, "--floor"), "--floor"));
+        r = await coord.counterNext(need(collection, "--collection"), need(flag2(args, "--name"), "--name"), int2(flag2(args, "--floor"), "--floor"));
         break;
       case "task-id":
-        r = await coord.nextTaskId(int(flag(args, "--floor"), "--floor"));
+        r = await coord.nextTaskId(int2(flag2(args, "--floor"), "--floor"));
         break;
       default:
         process.stderr.write(COORD_USAGE);
@@ -7901,6 +8536,18 @@ async function main2() {
   const [command, sub, ...rest] = process.argv.slice(2);
   if (command === "coord") {
     process.exit(await runCoord(sub, rest));
+  }
+  if (command === "task") {
+    if (!sub || sub === "help" || rest.includes("--help")) {
+      const { TASK_USAGE: TASK_USAGE2 } = await Promise.resolve().then(() => (init_task(), task_exports));
+      process.stderr.write(TASK_USAGE2);
+      process.exit(sub ? 0 : 2);
+    }
+    adoptCliEnv(process.cwd());
+    const { runTask: runTask2 } = await Promise.resolve().then(() => (init_task(), task_exports));
+    const r = await runTask2(sub, rest);
+    process.stdout.write((rest.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
+    process.exit(r.exit);
   }
   if (command === "hooks") {
     await runHooksCommand(sub, rest);

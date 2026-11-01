@@ -688,6 +688,18 @@ describe('coordination (leases, counters, task ids)', () => {
     expect(seen[5].headers['idempotency-key']).toBeTruthy();
   });
 
+  it('acquire sends scope and ttl_seconds only when given (an omitted one keeps a renewal\'s stored value), and reclaim only when true', async () => {
+    const lease = { collection: 'project-acme', key: 'tester-1', holder: { user: 'tester', session: 's1', device: 'dev-A' }, scope: ['key:tester-1'] };
+    handler = () => ({ json: { granted: true, renewed: true, lease } });
+    const c = backend().coordination;
+    await c.leaseAcquire({ collection: 'project-acme', key: 'tester-1', session: 's1' });
+    expect(seen[0].body).toEqual({ collection: 'project-acme', key: 'tester-1', session: 's1' });
+    await c.leaseAcquire({ collection: 'project-acme', key: 'tester-1', session: 's1', scope: [], reclaim: false });
+    expect(seen[1].body).toEqual({ collection: 'project-acme', key: 'tester-1', session: 's1', scope: [] });
+    await c.leaseAcquire({ collection: 'project-acme', key: 'tester-1', session: 's2', ttlSeconds: 900, reclaim: true });
+    expect(seen[2].body).toEqual({ collection: 'project-acme', key: 'tester-1', session: 's2', ttl_seconds: 900, reclaim: true });
+  });
+
   it('getNextTaskId takes the id from the service counter, floored by the local max', async () => {
     setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base }));
     setStore(createLocalStore(dir));

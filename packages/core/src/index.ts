@@ -34,6 +34,8 @@ export * from './memory/filters.js';
 export * from './tasks/create.js';
 export * from './tasks/list.js';
 export * from './tasks/update.js';
+export * from './tasks/claim.js';
+export * from './tasks/next.js';
 export * from './tasks/search.js';
 export * from './tasks/delete.js';
 export * from './tasks/dependencies.js';

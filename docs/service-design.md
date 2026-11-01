@@ -580,8 +580,15 @@ Implementation: `packages/service/src/coord.ts`; tables in
   `{granted: false, conflicts: [{lease, overlap}]}` (200 either way). Refused
   when a live lease held by anyone else, including the caller's other
   sessions, has the same key or an intersecting scope. Re-acquiring your own
-  lease renews it and replaces its scope. An expired lease is taken over and
-  the previous holder recorded.
+  lease (same user and session, live or expired) renews it: a `scope` or
+  `ttl_seconds` that is sent replaces the stored one, an omitted one is kept
+  (and the overlap check uses the kept scope). A fresh acquire or a takeover
+  without them gets just `key:<key>` and 2 h. An expired lease is taken over
+  and the previous holder recorded. With `reclaim: true` the caller's own
+  other sessions do not conflict: a live lease of theirs on the same key is
+  taken over (`took_over_from.reclaim: true`, logged as `takeover`), their
+  leases on other keys stay, and another user's overlapping lease still
+  refuses (only those are listed in `conflicts`).
 - `POST /v1/leases:heartbeat` `{collection?, session, keys?}` -> `{renewed, lost}`:
   renews the session's leases, in one collection or (no collection) in all of
   them; an expired one nobody took is renewed too; `lost` lists requested keys

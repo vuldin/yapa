@@ -72,6 +72,16 @@ export async function syncCycle(): Promise<SyncStats | null> {
     // Backend maintenance (Postgres: ivfflat index once there is enough data)
     try { await (await getSyncBackend())?.maintain(); } catch { /* non-critical */ }
 
+    // Claims made while offline: retry now that the remote answered.
+    if (!hasErrors) {
+      try {
+        const { retryUnsharedClaims } = await import('../tasks/claim.js');
+        await retryUnsharedClaims();
+      } catch (e) {
+        process.stderr.write(`[yapa-sync] Claim retry error: ${e}\n`);
+      }
+    }
+
     // Health for the status line: errors were recorded as they happened.
     const unpushed = await countUnpushed().catch(() => undefined);
     if (!hasErrors) noteSyncOk(unpushed);

@@ -137,7 +137,7 @@ capabilities with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`),
 plus `yapa_status` and `yapa_storage_import`. `setup_instructions` and
 `uninstall` are MCP-only (the plugin has nothing to write into config files).
 
-**Tool surface, kept lean:** the 25 tools below are visible by default. The
+**Tool surface, kept lean:** the 28 tools below are visible by default. The
 ML-ops subsystem (curation classifier, bucket routing, system-prompt
 companion, training, eval, adapter promotion — 18 more) is operator workflow,
 not daily agent surface: it appears only when `trainingPipeline: true` (DSH
@@ -159,12 +159,15 @@ walkthrough and its tools.
 | `janitor_now` | Run the contradiction janitor: resolve near-duplicate pairs (archive duplicates, supersede stale memories, keep distinct facts) |
 | `task_create` | Create task with title, priority, due date, tags, collection |
 | `task_list` | List tasks with filters; pass `id` for a single task with full detail (notes, dependencies) |
-| `task_update` | Update task fields (including renaming via `title`) |
+| `task_update` | Update task fields (including renaming via `title`); `status: in_progress` claims a task in a shared collection (see [Task claims](#task-claims)) |
+| `task_next` | The ready queue for a collection: what to start next, why other tasks were skipped; `claim: true` claims the first ready task |
 | `task_complete` | Mark done + handle recurring regeneration |
 | `task_delete` | Remove a task |
 | `task_search` | Semantic search across tasks |
 | `task_add_dependency` | Add depends-on/blocks relationship |
 | `task_remove_dependency` | Remove a depends-on/blocks relationship (both sides, dangling edges too) |
+| `lease` | Bare leases on the sync service for non-task resources: `acquire` / `heartbeat` / `release` / `list` (also `yapa coord`) |
+| `counter_next` | Next value of a shared counter (ids that must not collide across people) |
 | `collection_list` | List all collections with doc counts |
 | `collection_create` | Create new collection |
 | `collection_merge` | Move every document of one collection into another (ids and metadata kept, synced as a move), then remove the empty source |
@@ -376,6 +379,18 @@ The cycle itself:
 - **Access control**: with the sync service, the server checks every request against your Google identity; with a direct database, everyone with the URL can read every shared collection. Either way, use `private-`/`local-` collections for anything that must not leave your machine.
 
 You can also trigger a sync manually with `sync` (`action: 'now'`), check status with `action: 'status'`, and manage subscriptions with `action: 'subscribe'` / `'unsubscribe'`.
+
+### Task claims
+
+Writes reach the remote seconds after they happen, but a status change is still an ordinary last-writer-wins write: two people could both mark the same task `in_progress` and neither would know. So in a shared collection, setting a task to `in_progress` **claims** it first, through a lease on its id that the sync service grants atomically:
+
+- **Granted:** the status changes and is pushed at once. Teammates' task lists, session-start context and `task_next` show `claimed by you (this session) since 09:12 UTC`.
+- **Refused:** someone else (or another of your own sessions) holds it. Nothing changes, and the reply names the holder and since when. For your own other session (after `--resume`, say), `task_update` with `reclaim: true` takes it over once you confirm.
+- **Not shared** (offline, signed out): the status changes locally and the reply says others may start it too. The claim is retried when sync is back; if someone claimed the task meanwhile, the next prompt says so.
+
+Completing, blocking, resetting to pending or deleting the task releases the claim. The hooks renew this session's claims while it is active, and a claim lapses one TTL (2 h by default) after the session goes quiet. Its task then shows `no live claim` and is offered again by `task_next`. If another session takes a claim over, the next prompt says so.
+
+`task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
 
 ### Deduplication
 

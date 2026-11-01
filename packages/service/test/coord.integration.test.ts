@@ -160,6 +160,128 @@ describe.skipIf(!URL_)('coordination (real Postgres)', () => {
       expect((await call('alice', 'POST', '/v1/leases:acquire', { collection: C, key: 'bad key', session: 's' })).status).toBe(400);
       expect((await call('alice', 'POST', '/v1/leases:acquire', { collection: C, key: 'k', session: 's', ttl_seconds: 5 })).status).toBe(400);
       expect((await call('alice', 'POST', '/v1/leases:acquire', { collection: C, key: 'k' })).status).toBe(400);
+      for (const reclaim of ['true', 1, null, {}]) {
+        const r = await call('alice', 'POST', '/v1/leases:acquire', { collection: C, key: 'k', session: 's', reclaim });
+        expect(r.status).toBe(400);
+        expect(r.body.error.code).toBe('invalid_request');
+      }
+    });
+  });
+
+  describe('renewal keeps stored scope and ttl when omitted', () => {
+    // Raw bodies: the acquire() helper always sends a scope.
+    const raw = (user: string, session: string, key: string, extra: Record<string, unknown> = {}) =>
+      call(user, 'POST', '/v1/leases:acquire', { collection: C, key, session, ...extra });
+
+    it('a fresh acquire without scope or ttl gets just key:<key> and the default ttl', async () => {
+      const r = await raw('alice', 'rn-1', 'rn-fresh');
+      expect(r.body.granted).toBe(true);
+      expect(r.body.lease.scope).toEqual(['key:rn-fresh']);
+      expect(r.body.lease.ttl_seconds).toBe(7200);
+    });
+
+    it('a renewal without scope keeps the stored scope, and without ttl keeps the stored ttl', async () => {
+      expect((await raw('alice', 'rn-1', 'rn-a', { scope: ['res:rn-a'], ttl_seconds: 600 })).body.granted).toBe(true);
+      const r = await raw('alice', 'rn-1', 'rn-a');
+      expect(r.body).toMatchObject({ granted: true, renewed: true });
+      expect(r.body.lease.scope).toEqual(['key:rn-a', 'res:rn-a']);
+      expect(r.body.lease.ttl_seconds).toBe(600);
+      expect(r.body.lease.expires_at - r.body.lease.heartbeat_at).toBe(600);
+      // the kept scope still blocks others
+      expect((await acquire('bob', 'rn-b', 'rn-bob', ['res:rn-a'])).body.granted).toBe(false);
+      // omitted ttl with a new scope: ttl kept, scope replaced
+      const s2 = await raw('alice', 'rn-1', 'rn-a', { scope: ['res:rn-a2'] });
+      expect(s2.body.lease.scope).toEqual(['key:rn-a', 'res:rn-a2']);
+      expect(s2.body.lease.ttl_seconds).toBe(600);
+    });
+
+    it('an explicit scope (even []) and ttl replace the stored ones on a renewal', async () => {
+      const r = await raw('alice', 'rn-1', 'rn-a', { scope: [], ttl_seconds: 900 });
+      expect(r.body).toMatchObject({ granted: true, renewed: true });
+      expect(r.body.lease.scope).toEqual(['key:rn-a']);
+      expect(r.body.lease.ttl_seconds).toBe(900);
+      expect((await acquire('bob', 'rn-b', 'rn-bob', ['res:rn-a2'])).body.granted).toBe(true);
+      expect((await raw('alice', 'rn-1', 'rn-a')).body.lease.ttl_seconds).toBe(900);
+    });
+
+    it('re-acquiring your own expired lease without scope keeps its scope and ttl', async () => {
+      expect((await raw('alice', 'rn-1', 'rn-c', { scope: ['res:rn-c'], ttl_seconds: 300 })).body.granted).toBe(true);
+      await expire('rn-c');
+      const r = await raw('alice', 'rn-1', 'rn-c');
+      expect(r.body).toMatchObject({ granted: true, renewed: true });
+      expect(r.body.lease.scope).toEqual(['key:rn-c', 'res:rn-c']);
+      expect(r.body.lease.ttl_seconds).toBe(300);
+      expect(r.body.lease.expired).toBe(false);
+    });
+
+    it('the conflict check of a renewal without scope uses the stored scope', async () => {
+      expect((await raw('alice', 'rn-1', 'rn-d', { scope: ['res:rn-d'], ttl_seconds: 300 })).body.granted).toBe(true);
+      await expire('rn-d');
+      expect((await acquire('bob', 'rn-b', 'rn-bob-d', ['res:rn-d'])).body.granted).toBe(true);
+      const r = await raw('alice', 'rn-1', 'rn-d');
+      expect(r.body.granted).toBe(false);
+      expect(r.body.conflicts.map((x: any) => [x.lease.key, x.overlap])).toEqual([['rn-bob-d', ['res:rn-d']]]);
+      // with an explicit scope that no longer overlaps, the renewal goes through
+      expect((await raw('alice', 'rn-1', 'rn-d', { scope: [] })).body).toMatchObject({ granted: true, renewed: true });
+    });
+
+    it('a takeover of an expired lease without scope or ttl does not inherit them', async () => {
+      expect((await raw('bob', 'rn-b', 'rn-e', { scope: ['res:rn-e'], ttl_seconds: 300 })).body.granted).toBe(true);
+      await expire('rn-e');
+      const r = await raw('alice', 'rn-1', 'rn-e');
+      expect(r.body).toMatchObject({ granted: true, renewed: false, took_over_from: { user: 'bob', session: 'rn-b' } });
+      expect(r.body.took_over_from.reclaim).toBeUndefined();
+      expect(r.body.lease.scope).toEqual(['key:rn-e']);
+      expect(r.body.lease.ttl_seconds).toBe(7200);
+    });
+  });
+
+  describe('reclaim', () => {
+    it('takes over a live lease held by your own other session and records it', async () => {
+      const old = await acquire('alice', 'rc-old', 'rc-1', ['res:rc-1'], { ttl_seconds: 600 });
+      expect(old.body.granted).toBe(true);
+      // without reclaim your other session still conflicts
+      const plain = await acquire('alice', 'rc-new', 'rc-1');
+      expect(plain.body.granted).toBe(false);
+      expect(plain.body.conflicts[0].lease.holder.session).toBe('rc-old');
+
+      const r = await call('alice', 'POST', '/v1/leases:acquire', { collection: C, key: 'rc-1', session: 'rc-new', reclaim: true });
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ granted: true, renewed: false });
+      const from = { user: 'alice', session: 'rc-old', device: 'alice-laptop', expired_at: old.body.lease.expires_at, acquired_at: old.body.lease.acquired_at, reclaim: true };
+      expect(r.body.took_over_from).toEqual(from);
+      expect(r.body.lease.took_over_from).toEqual(from);
+      expect(r.body.lease.holder.session).toBe('rc-new');
+      expect(r.body.lease.scope).toEqual(['key:rc-1']);
+
+      const log = await db.adminPool.query("SELECT action, detail FROM lease_log WHERE key = 'rc-1' ORDER BY seq");
+      expect(log.rows.map(x => x.action)).toEqual(['acquire', 'refused', 'takeover']);
+      expect(log.rows[2].detail).toMatchObject({ reclaim: true, took_over_from: { session: 'rc-old', reclaim: true } });
+      // the old session lost it
+      const hb = await call('alice', 'POST', '/v1/leases:heartbeat', { collection: C, session: 'rc-old', keys: ['rc-1'] });
+      expect(hb.body).toMatchObject({ renewed: [], lost: ['rc-1'] });
+    });
+
+    it('is refused when another user holds the key, listing only that user', async () => {
+      expect((await acquire('bob', 'rc-bob', 'rc-2')).body.granted).toBe(true);
+      const r = await call('alice', 'POST', '/v1/leases:acquire', { collection: C, key: 'rc-2', session: 'rc-new', reclaim: true });
+      expect(r.body.granted).toBe(false);
+      expect(r.body.conflicts.map((x: any) => x.lease.holder.user)).toEqual(['bob']);
+    });
+
+    it('with own and other-user overlaps: refused listing only the other user; without that overlap granted, own lease left in place', async () => {
+      expect((await acquire('alice', 'rc-old', 'rc-3', ['res:rc-x'])).body.granted).toBe(true);
+      expect((await acquire('bob', 'rc-bob', 'rc-4', ['res:rc-y'])).body.granted).toBe(true);
+      const both = await acquire('alice', 'rc-new', 'rc-5', ['res:rc-x', 'res:rc-y'], { reclaim: true });
+      expect(both.body.granted).toBe(false);
+      expect(both.body.conflicts.map((x: any) => [x.lease.key, x.lease.holder.user, x.overlap])).toEqual([['rc-4', 'bob', ['res:rc-y']]]);
+
+      const own = await acquire('alice', 'rc-new', 'rc-5', ['res:rc-x'], { reclaim: true });
+      expect(own.body).toMatchObject({ granted: true, renewed: false });
+      expect(own.body.took_over_from).toBeUndefined();
+      const l = (await call('alice', 'GET', `/v1/leases?collection=${C}`)).body.leases;
+      expect(l.find((x: any) => x.key === 'rc-3')).toMatchObject({ holder: { session: 'rc-old' }, scope: ['key:rc-3', 'res:rc-x'] });
+      expect(l.find((x: any) => x.key === 'rc-5')).toMatchObject({ holder: { session: 'rc-new' } });
     });
   });
 
