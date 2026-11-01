@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 (2026-11-01)
 
 Two people (or two of your own sessions) can no longer start the same task without knowing: claiming a task is a lease the sync service grants or refuses on the spot.
 
