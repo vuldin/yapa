@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { YAPA_VERSION } from './version.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
@@ -15,6 +16,7 @@ import {
   shouldRunDecay,
   startCuration,
   startSync,
+  startUpdateChecks,
   stopSync,
   flushPendingSync,
   consolidateSessionEverywhere,
@@ -22,7 +24,7 @@ import {
 
 const server = new McpServer({
   name: 'yapa',
-  version: '0.1.0',
+  version: YAPA_VERSION,
 });
 
 registerTools(server);
@@ -115,6 +117,9 @@ async function main(): Promise<void> {
   if (getConfig().SYNC_ENABLED) {
     startSync().catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));
   }
+
+  // Is a newer YAPA out? Daily, in the background (update-check.json, read by the status line).
+  startUpdateChecks(YAPA_VERSION);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

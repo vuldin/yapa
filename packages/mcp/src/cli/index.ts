@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { dirname, join } from 'node:path';
 import { adoptCliEnv, adoptHostEnv } from './env.js';
 
 const USAGE =
@@ -113,14 +114,23 @@ async function runStatusLineCommand(action: string | undefined, args: string[]):
       if (!script || !from) throw new Error('no status line script (YAPA_SYNC_HEALTH_FILE is off, or this build has none)');
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path)} (runs ${script})\n`);
+      sl.setRemovedMarker(dirname(script), false);
       return;
     }
     case 'uninstall':
-      process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path)}\n`);
+      process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path, script)}\n`);
+      // Removed on purpose: the session-start hook must not add it back.
+      if (script) sl.setRemovedMarker(dirname(script), true);
       return;
-    case 'show':
-      process.stdout.write(sl.renderSegment(sl.readHealth(getConfig().SYNC_HEALTH_FILE), Date.now(), { color: !process.env.NO_COLOR }) + '\n');
+    case 'show': {
+      const { YAPA_VERSION } = await import('../version.js');
+      const health = getConfig().SYNC_HEALTH_FILE;
+      const update = health ? sl.readUpdate(join(dirname(health), 'update-check.json')) : undefined;
+      process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
+        color: !process.env.NO_COLOR, version: YAPA_VERSION, remote: getConfig().REMOTE_NAME || undefined, update,
+      }) + '\n');
       return;
+    }
     default:
       usage();
   }

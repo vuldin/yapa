@@ -95,3 +95,4 @@ export * from './memory/links.js';
 export * from './tasks/waiting.js';
 export * from './tasks/close.js';
 export * from './curation/follow-through.js';
+export * from './update-check.js';

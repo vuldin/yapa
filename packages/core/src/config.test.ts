@@ -29,3 +29,15 @@ describe('createConfig', () => {
     expect(c.SYNC_PUSH_DEBOUNCE_MS).toBeGreaterThan(0);
   });
 });
+
+describe('remote name', () => {
+  it('comes from REMOTE_NAME, else a legacy status line name other than yapa', () => {
+    expect(createConfig({}).REMOTE_NAME).toBe('');
+    expect(createConfig({ YAPA_REMOTE_NAME: ' c360 ' }).REMOTE_NAME).toBe('c360');
+    expect(createConfig({ YAPA_STATUS_LABEL: 'c360' }).REMOTE_NAME).toBe('c360');
+    expect(createConfig({ YAPA_STATUS_LABEL: 'yapa' }).REMOTE_NAME).toBe('');
+    expect(createConfig({ YAPA_REMOTE_NAME: 'team', YAPA_STATUS_LABEL: 'old' }).REMOTE_NAME).toBe('team');
+    expect(createConfig({ YAPA_STATUSLINE: 'true' }).STATUSLINE).toBe(true);
+    expect(createConfig({ YAPA_STATUSLINE: 'false' }).STATUSLINE).toBe(false);
+  });
+});

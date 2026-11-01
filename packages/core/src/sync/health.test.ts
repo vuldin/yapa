@@ -35,12 +35,12 @@ describe('sync health record', () => {
   it('keeps the start of a failure streak across observations, and clears it on success', () => {
     recordSyncHealth({ status: 'ok' }, 1000);
     const first = recordSyncHealth({ status: 'signed_out', code: 'token_command', message: 'no token' }, 2000)!;
-    expect(first).toMatchObject({ status: 'signed_out', since: 2000, at: 2000, last_ok_at: 1000, label: 'acme-sync', interval_ms: 60000 });
+    expect(first).toMatchObject({ status: 'signed_out', since: 2000, at: 2000, last_ok_at: 1000, label: 'acme-sync', remote: 'acme-sync', interval_ms: 60000 });
     // A different failure later is still the same outage.
     recordSyncHealth({ status: 'unreachable', code: 'unreachable' }, 3000);
     expect(readSyncHealth()).toMatchObject({ status: 'unreachable', since: 2000, at: 3000 });
     const ok = recordSyncHealth({ status: 'ok' }, 4000)!;
-    expect(ok).toEqual({ status: 'ok', at: 4000, last_ok_at: 4000, interval_ms: 60000, label: 'acme-sync' });
+    expect(ok).toEqual({ status: 'ok', at: 4000, last_ok_at: 4000, interval_ms: 60000, label: 'acme-sync', remote: 'acme-sync' });
   });
 
   it('keeps the to-push count until a new one is known', () => {
@@ -84,5 +84,23 @@ describe('noteSyncError / noteSyncOk', () => {
   it('isSignedOutError picks out sign-in failures only', () => {
     expect(isSignedOutError(new ServiceError('x', 401, 'unauthenticated'))).toBe(true);
     expect(isSignedOutError(new ServiceError('x', 503, 'unavailable'))).toBe(false);
+  });
+});
+
+describe('refreshSyncHealthNames', () => {
+  it('renames the remote in place, and records local only when sync is off and nothing is there', async () => {
+    const { refreshSyncHealthNames, readSyncHealth, recordSyncHealth } = await import('./health.js');
+    recordSyncHealth({ status: 'ok' }, 5000, file);
+    setConfig(createConfig({ YAPA_SYNC_HEALTH_FILE: file, YAPA_REMOTE_NAME: 'c360' }));
+    refreshSyncHealthNames(true, file);
+    expect(readSyncHealth(file)).toMatchObject({ status: 'ok', at: 5000, remote: 'c360' });
+    setConfig(createConfig({ YAPA_SYNC_HEALTH_FILE: file }));
+    refreshSyncHealthNames(true, file);
+    expect(readSyncHealth(file)?.remote).toBeUndefined();
+    rmSync(file, { force: true });
+    refreshSyncHealthNames(true, file);
+    expect(readSyncHealth(file)).toBeUndefined();
+    refreshSyncHealthNames(false, file);
+    expect(readSyncHealth(file)?.status).toBe('disabled');
   });
 });

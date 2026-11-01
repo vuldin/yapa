@@ -7344,6 +7344,11 @@ function createConfig(env = process.env) {
     // sync on purpose must not paint the developer's own status line red.
     SYNC_HEALTH_FILE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_HEALTH_FILE", process.env.VITEST ? "" : pathJoin(homedir2(), ".local", "share", "yapa", "sync-health.json"))),
     STATUS_LABEL: get(env, "STATUS_LABEL", "yapa").trim().slice(0, 32) || "yapa",
+    // The old option replaced the word yapa; any name it set other than yapa is the remote's.
+    REMOTE_NAME: (get(env, "REMOTE_NAME", "").trim() || /* @__PURE__ */ ((l) => l && l !== "yapa" ? l : "")(get(env, "STATUS_LABEL", "").trim())).replace(/[\x00-\x1f\x7f]/g, "").slice(0, 32),
+    STATUSLINE: get(env, "STATUSLINE", process.env.VITEST ? "false" : "true") !== "false",
+    UPDATE_CHECK: get(env, "UPDATE_CHECK", process.env.VITEST ? "false" : "true") !== "false",
+    UPDATE_SOURCE: get(env, "UPDATE_SOURCE", "https://raw.githubusercontent.com/vuldin/yapa/main/plugin/.claude-plugin/plugin.json"),
     SYNC_HTTP_TIMEOUT_MS: parseInt(get(env, "SYNC_HTTP_TIMEOUT_MS", "15000"), 10),
     SYNC_DATABASE_URL: get(env, "SYNC_DATABASE_URL", ""),
     SYNC_INTERVAL_MS: parseInt(get(env, "SYNC_INTERVAL_MS", "300000"), 10),
@@ -8401,6 +8406,7 @@ function recordSyncHealth(update, now = Date.now(), path = getConfig().SYNC_HEAL
   const prev = readSyncHealth(path);
   const config2 = getConfig();
   const next = { status: update.status, at: now, interval_ms: config2.SYNC_INTERVAL_MS, label: config2.STATUS_LABEL };
+  if (config2.REMOTE_NAME) next.remote = config2.REMOTE_NAME;
   if (prev?.last_ok_at) next.last_ok_at = prev.last_ok_at;
   const unpushed = update.unpushed ?? prev?.unpushed;
   if (unpushed !== void 0) next.unpushed = unpushed;
@@ -10186,6 +10192,9 @@ var init_claim = __esm({
     SESSION_SAFE = /[^A-Za-z0-9._:-]/g;
   }
 });
+
+// packages/mcp/src/version.ts
+var YAPA_VERSION = true ? "1.6.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -41435,7 +41444,7 @@ async function callClaudeCli(model, options) {
     });
     let out = "";
     let err = "";
-    const timer2 = setTimeout(() => {
+    const timer3 = setTimeout(() => {
       child.kill("SIGTERM");
       reject(new Error(`claude -p timed out after ${CLAUDE_CLI_TIMEOUT_MS}ms`));
     }, CLAUDE_CLI_TIMEOUT_MS);
@@ -41446,11 +41455,11 @@ async function callClaudeCli(model, options) {
       err += d;
     });
     child.on("error", (e) => {
-      clearTimeout(timer2);
+      clearTimeout(timer3);
       reject(e);
     });
     child.on("close", (code) => {
-      clearTimeout(timer2);
+      clearTimeout(timer3);
       if (code === 0) resolve(out.trim());
       else reject(new Error(`claude -p exited ${code}: ${err.trim().slice(0, 300)}`));
     });
@@ -42692,12 +42701,12 @@ async function flushPendingSync(timeoutMs = 5e3) {
     work.push(inFlight.catch(() => void 0));
   }
   if (work.length === 0) return;
-  let timer2;
+  let timer3;
   const timeout = new Promise((resolve) => {
-    timer2 = setTimeout(resolve, timeoutMs);
+    timer3 = setTimeout(resolve, timeoutMs);
   });
   await Promise.race([Promise.all(work), timeout]);
-  if (timer2) clearTimeout(timer2);
+  if (timer3) clearTimeout(timer3);
 }
 async function startSync() {
   if (!getConfig().SYNC_ENABLED) {
@@ -43720,6 +43729,89 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
 
 // packages/core/src/memory/external.ts
 init_store();
+
+// packages/core/src/update-check.ts
+init_config();
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync11, renameSync as renameSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { dirname as dirname4, join as join7 } from "node:path";
+var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+var FETCH_TIMEOUT_MS = 5e3;
+var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+function compareVersions(a, b) {
+  const pa = SEMVER.exec(String(a ?? "").trim());
+  const pb = SEMVER.exec(String(b ?? "").trim());
+  if (!pa || !pb) return pa ? 1 : pb ? -1 : 0;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d) return d;
+  }
+  if (pa[4] && !pb[4]) return -1;
+  if (!pa[4] && pb[4]) return 1;
+  return (pa[4] ?? "").localeCompare(pb[4] ?? "");
+}
+function updateStatePath() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join7(dirname4(health), "update-check.json") : void 0;
+}
+function readUpdateState(path = updateStatePath()) {
+  if (!path) return void 0;
+  try {
+    const s = JSON.parse(readFileSync11(path, "utf-8"));
+    return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function writeUpdateState(s, path = updateStatePath()) {
+  if (!path) return;
+  try {
+    mkdirSync9(dirname4(path), { recursive: true, mode: 448 });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync9(tmp, JSON.stringify(s) + "\n", { mode: 384 });
+    renameSync3(tmp, path);
+  } catch {
+  }
+}
+function noteInstalledVersion(current, path = updateStatePath()) {
+  if (!path) return void 0;
+  const prev = readUpdateState(path);
+  if (prev && prev.current === current) return prev;
+  const next = { current, checked_at: prev?.checked_at ?? 0 };
+  if (prev?.latest && compareVersions(prev.latest, current) > 0) next.latest = prev.latest;
+  if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
+  writeUpdateState(next, path);
+  return next;
+}
+async function checkForUpdate(current, opts = {}) {
+  const config2 = getConfig();
+  const path = opts.path ?? updateStatePath();
+  if (!config2.UPDATE_CHECK || !path || !config2.UPDATE_SOURCE) return void 0;
+  const now = opts.now ?? Date.now();
+  const prev = noteInstalledVersion(current, path);
+  if (!opts.force && prev && prev.checked_at > 0 && now - prev.checked_at < UPDATE_CHECK_INTERVAL_MS) return prev;
+  let released;
+  try {
+    const r = await (opts.fetchImpl ?? fetch)(config2.UPDATE_SOURCE, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!r.ok) return prev;
+    const body = await r.json();
+    if (typeof body?.version !== "string" || !SEMVER.test(body.version.trim())) return prev;
+    released = body.version.trim().replace(/^v/, "");
+  } catch {
+    return prev;
+  }
+  const next = { current, checked_at: now };
+  if (compareVersions(released, current) > 0) next.latest = released;
+  if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
+  writeUpdateState(next, path);
+  return next;
+}
+var timer2;
+function startUpdateChecks(current) {
+  if (timer2 || !getConfig().UPDATE_CHECK) return;
+  void checkForUpdate(current);
+  timer2 = setInterval(() => void checkForUpdate(current), UPDATE_CHECK_INTERVAL_MS);
+  timer2.unref?.();
+}
 
 // packages/mcp/src/coord.ts
 var EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
@@ -45463,7 +45555,7 @@ function registerPrompts(server2) {
 // packages/mcp/src/index.ts
 var server = new McpServer({
   name: "yapa",
-  version: "0.1.0"
+  version: YAPA_VERSION
 });
 registerTools(server);
 registerResources(server);
@@ -45557,6 +45649,7 @@ async function main() {
     startSync().catch((e) => process.stderr.write(`[yapa] Sync startup error: ${e}
 `));
   }
+  startUpdateChecks(YAPA_VERSION);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

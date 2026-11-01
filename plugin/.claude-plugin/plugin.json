@@ -75,10 +75,22 @@
       "description": "Advanced/self-host (direct database only): PEM file with the database server CA; the server certificate is verified against it.",
       "default": ""
     },
+    "remote_name": {
+      "type": "string",
+      "title": "Remote name",
+      "description": "What your team's sync remote is called (e.g. c360). The status line then reads `yapa@v<version> <-> c360 ● synced 2m ago`; empty shows just `yapa@v<version>`. Set it at install with `claude plugin install yapa@yapa --config remote_name=c360`.",
+      "default": ""
+    },
+    "statusline": {
+      "type": "boolean",
+      "title": "Status line",
+      "description": "Add YAPA's status line (version, remote, sync health, new releases) to your Claude Code settings at session start. An existing status line is kept and shown above it. Removing YAPA's status line yourself keeps it removed.",
+      "default": true
+    },
     "status_label": {
       "type": "string",
-      "title": "Status line name",
-      "description": "What the status line (/yapa:statusline) calls the sync, e.g. the name of your team's remote. Empty = yapa.",
+      "title": "Status line name (deprecated)",
+      "description": "Deprecated: use Remote name. Still read when Remote name is empty.",
       "default": ""
     },
     "response_capture": {

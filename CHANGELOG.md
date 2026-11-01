@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+The status line now says which YAPA you run, what your team's remote is called, and when a newer YAPA is out, and it sets itself up from the install command.
+
+**Upgrading:** update the plugin and restart Claude Code. If you named the status line with "Status line name" (`status_label`), that name carries over; set it from now on with `remote_name`. Nothing to deploy.
+
+### Features
+- **`yapa@v<version> <-> <remote> ● synced 2m ago`.** The status line starts with the YAPA version running. The new option `remote_name` (`YAPA_REMOTE_NAME`) names your team's sync remote; the name, and the `<->` before it (printed as is, so ligature fonts draw one arrow), appear only when it is set. Set it at install: `claude plugin install yapa@yapa --config remote_name=c360`; change it with `claude plugin configure yapa@yapa --values-stdin` or `/plugin`. `status_label` is deprecated and still read when `remote_name` is empty.
+- **New releases on the status line.** The MCP server checks once a day for a newer release (the plugin manifest on `main`; `YAPA_UPDATE_SOURCE`, `YAPA_UPDATE_CHECK=false`), and the status line shows `(v1.8.0 available)` right after the version. The next session start tells Claude the update command once; the note clears itself after updating.
+- **The status line sets itself up.** New option `statusline` (on by default): the session-start hook adds YAPA's status line to `~/.claude/settings.json`, keeping one you already have, so the two install commands are all it takes. Removing it (`--uninstall`, or by hand) keeps it removed; `/yapa:statusline` adds it back.
+
+### Fixes
+- The status line's install and uninstall recognize their script wherever it lives (a custom `YAPA_SYNC_HEALTH_FILE` folder), so an install never wraps YAPA's own status line again.
+- The MCP server reports YAPA's real version instead of 0.1.0.
+
 ## 1.6.0 (2026-11-01)
 
 Working in YAPA now leaves findings, decisions, questions and follow-ups behind on its own, keeps them current as people answer, and shows each person what waits on them.

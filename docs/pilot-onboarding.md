@@ -37,8 +37,13 @@ pushes every shared collection on this machine to the remote.
 
 ```sh
 claude plugin marketplace add vuldin/yapa
-claude plugin install yapa@yapa
+claude plugin install yapa@yapa --config remote_name=<REMOTE_NAME> \
+  --config sync_enabled=true --config sync_service_url=<SERVICE_URL>
 ```
+
+The `--config` options save step 3 below for these settings. `remote_name` is
+what the status line calls the team remote: `yapa@v<version> <-> <REMOTE_NAME>
+● synced 2m ago`. YAPA adds that status line by itself at the first session.
 
 Pilots pinned to v1.0 add the tagged marketplace instead:
 `claude plugin marketplace add vuldin/yapa#v1.0.0`.
@@ -57,6 +62,8 @@ from a shell: `claude plugin configure yapa@yapa`). Set:
 | `customers` | subfolder names under those roots that are customers, e.g. `acme,globex` |
 | `username` | leave as is; with the sync service your name comes from your Google account |
 | `response_capture` | on by default: after each turn, saves typed findings and records answers to open decisions and questions; `false` turns it off |
+| `remote_name` | the team remote's name, shown on the status line (`yapa@v<version> <-> <REMOTE_NAME>`) |
+| `statusline` | on by default: YAPA adds its status line to your Claude Code settings at the first session |
 
 How scope works: with `project_roots=~/work/projects` and `customers=acme`,
 starting Claude Code in `~/work/projects/acme/...` uses collection

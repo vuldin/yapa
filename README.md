@@ -12,8 +12,15 @@ project folders as usual.
 
 ```
 claude plugin marketplace add vuldin/yapa
-claude plugin install yapa@yapa
+claude plugin install yapa@yapa --config remote_name=c360
 ```
+
+`--config remote_name=<name>` names your team's sync remote on the status line
+(`yapa@v1.7.0 <-> c360 ● synced 2m ago`); leave it out for no name. Any option
+below can be set the same way (`--config key=value`, repeatable). Change one
+later without editing a file:
+`echo '{"remote_name":"c360"}' | claude plugin configure yapa@yapa --values-stdin`
+(or `/plugin` → Configure options).
 
 **Claude Code via `claude mcp add` / Cursor / OpenCode:** see [Install](#install), or give your AI agent this prompt: `install https://github.com/vuldin/yapa`
 
@@ -93,7 +100,9 @@ Configure options, or `claude plugin configure yapa`):
 | `customers` | _(empty)_ | Folder names under a root that are customers |
 | `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
 | `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
-| `status_label` | `yapa` | The name the sync status line shows (see [Sync health in the status line](#sync-health-in-the-status-line)) |
+| `remote_name` | _(empty)_ | Your team's sync remote's name on the status line: `yapa@v<version> <-> <name>` (see [The status line](#sync-health-in-the-status-line)) |
+| `statusline` | on | Add YAPA's status line to `~/.claude/settings.json` at session start (an existing one is kept; removing YAPA's keeps it removed) |
+| `status_label` | _(empty)_ | Deprecated: use `remote_name` (still read when that is empty) |
 | `response_capture` | on | After each turn: capture durable findings (typed: finding, decision made, limitation, question, idea) and record what the turn settles in open decisions, questions and findings (see hooks below) |
 
 For a whole team, add the marketplace and enable the plugin in managed or
@@ -334,22 +343,30 @@ Remote sync lets multiple machines or teammates share memories and tasks. It is 
 2. Set `sync_service_url` to your team's YAPA sync service URL (ask your YAPA admin). Any remote that implements [YAPA Sync API v1](docs/sync-api.md) works, including one under a path prefix such as `https://example.com/api/yapa`. Read [Connecting to a remote](docs/connecting-to-a-remote.md) first: the first sync pushes every shared collection to it.
 3. Sign in once: `gcloud auth login` with your company Google account. YAPA calls `gcloud auth print-identity-token` for a short-lived (1 h) ID token and refreshes it before it expires. The current token is cached in a 0600 file (`~/.local/share/yapa/id-token`, set `YAPA_SYNC_ID_TOKEN_CACHE` to another path, or `off` to keep it in memory only) so short-lived hook processes don't mint a new one each time. Other token sources: set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints an ID token.
 4. Check with the `sync` tool, `action: 'status'`: it shows the backend, the service URL, who you are signed in as, the last error, and any docs the service refused.
-5. Optional, recommended: run `/yapa:statusline` (with `claude mcp add`: `yapa statusline install`) to keep sync health under the prompt, e.g. `yapa ● synced 2m ago` or, when your sign-in lapses, `yapa ● signed out since 09:12 · run: gcloud auth login`. See [Sync health in the status line](#sync-health-in-the-status-line).
+5. The status line shows sync health under the prompt from the first session (option `statusline`), e.g. `yapa@v1.7.0 <-> c360 ● synced 2m ago` or, when your sign-in lapses, `yapa@v1.7.0 <-> c360 ● signed out since 09:12 · run: gcloud auth login`. See [The status line](#sync-health-in-the-status-line).
 
 ### Sync health in the status line
 
-Sync fails quietly by design (local work never waits on the remote), so an expired `gcloud` sign-in used to go unnoticed. The MCP server and the hooks now record every sync outcome in `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`; `off` disables it), and a small script turns it into a Claude Code status line segment:
+Sync fails quietly by design (local work never waits on the remote), so an expired `gcloud` sign-in used to go unnoticed. The MCP server and the hooks record every sync outcome in `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`; `off` disables it), and a small script turns it into a Claude Code status line segment:
+
+```
+yapa@v1.7.0 (v1.8.0 available) <-> c360 ● synced 2m ago
+└ YAPA's version  └ a newer release  └ your remote  └ sync health
+```
+
+`<->` is printed as is, so a font with programming ligatures (Fira Code, JetBrains Mono, Cascadia Code, ...) draws it as one arrow. It and the name appear only when `remote_name` is set. The sync states:
 
 | Segment | Meaning |
 |---|---|
-| `yapa ● synced 2m ago · 3 to push` (green) | healthy; local writes waiting for the next push, if any |
-| `yapa ● signed out since 09:12 · run: gcloud auth login` (red) | the ID token command failed or the remote rejected the sign-in |
-| `yapa ● offline since 09:12` (yellow) | the remote is unreachable |
-| `yapa ● sync error since 09:12: ...` (yellow) | any other failure; `sync status` has details |
-| `yapa ○ local only` / `yapa ○ sync status unknown` (dim) | sync is off / no recent check |
+| `● synced 2m ago · 3 to push` (green) | healthy; local writes waiting for the next push, if any |
+| `● signed out since 09:12 · run: gcloud auth login` (red) | the ID token command failed or the remote rejected the sign-in |
+| `● offline since 09:12` (yellow) | the remote is unreachable |
+| `● sync error since 09:12: ...` (yellow) | any other failure; `sync status` has details |
+| `○ local only` / `○ sync status unknown` (dim) | sync is off / no recent check |
 
-- **Install:** `/yapa:statusline` (plugin) or `yapa statusline install`. It writes `statusLine` in `~/.claude/settings.json`, pointing at a stable copy of the script (`~/.local/share/yapa/statusline.mjs`, refreshed by the session-start hook so plugin updates reach it). A status line you already had keeps running, with the YAPA segment as a line beneath it. `--uninstall` (or `yapa statusline uninstall`) restores it.
-- **Name:** the plugin option "Status line name" (`status_label`, `YAPA_STATUS_LABEL`) replaces `yapa`, e.g. with the name of your team's remote.
+- **Install:** automatic. With the option `statusline` on (the default), the session-start hook writes `statusLine` in `~/.claude/settings.json`, pointing at a stable copy of the script (`~/.local/share/yapa/statusline.mjs`, refreshed by the session-start hook so plugin updates reach it). A status line you already had keeps running, with the YAPA segment as a line beneath it. `node ~/.local/share/yapa/statusline.mjs --uninstall` (or `yapa statusline uninstall`) restores it, and YAPA then leaves it removed; `/yapa:statusline` or `yapa statusline install` adds it back.
+- **Name:** the option `remote_name` (`YAPA_REMOTE_NAME`). The older `status_label` is still read when `remote_name` is empty.
+- **New releases:** the MCP server checks once a day (the plugin manifest on `main`, `YAPA_UPDATE_SOURCE`; `YAPA_UPDATE_CHECK=false` turns it off) and keeps the answer in `~/.local/share/yapa/update-check.json`. The status line shows `(v1.8.0 available)`, and the next session start tells Claude the update command (`claude plugin marketplace update yapa && claude plugin update yapa@yapa`, then restart). The note clears itself once you run the new version.
 - **Cost:** the script reads one local file; no network, no `gcloud`.
 - **Recovery:** after `gcloud auth login`, the next request mints a new token; no restart. The segment turns green at the next sync cycle or prompt.
 - While sync is down, the hooks also tell Claude, so it doesn't claim your writes reached teammates.

@@ -1,23 +1,34 @@
 ---
 name: statusline
-description: Show YAPA team-sync health in the Claude Code status line (synced, signed out, offline), or remove it. Use when the user asks for the YAPA status line, wants to see whether sync is working, or asks to remove it.
+description: Show YAPA's version, team remote and sync health in the Claude Code status line (synced, signed out, offline, a newer release), add it back, rename the remote, or remove it. Use when the user asks about the YAPA status line, wants to see whether sync is working, or asks to remove it.
 ---
 
 # YAPA status line
 
 The status line shows one segment under the prompt, read from YAPA's local
-sync health record (no network calls):
+sync health record and its daily release check (no network calls of its own):
 
-- `yapa ● synced 2m ago` (green), with `· 3 to push` when local writes are waiting
-- `yapa ● signed out since 09:12 · run: gcloud auth login` (red)
-- `yapa ● offline since 09:12` / `yapa ● sync error ...` (yellow)
-- `yapa ○ local only` / `yapa ○ sync status unknown` (dim)
+    yapa@v1.7.0 (v1.8.0 available) <-> c360 ● synced 2m ago
+
+- `yapa@v<version>`: the YAPA running. `(v<new> available)` (yellow) when a
+  newer release is out.
+- `<-> c360`: the team remote's name, only when the option `remote_name` is
+  set. `<->` is printed as is so ligature fonts draw one arrow.
+- The sync state: `● synced 2m ago` (green, with `· 3 to push` when local
+  writes are waiting), `● signed out since 09:12 · run: gcloud auth login`
+  (red), `● offline since 09:12` / `● sync error ...` (yellow), `○ local only` /
+  `○ sync status unknown` (dim).
+
+YAPA adds it by itself at session start while the option `statusline` is on
+(the default), unless the user removed it.
 
 The session-start hook keeps the script at a stable path,
 `~/.local/share/yapa/statusline.mjs` (next to the file named by
 `YAPA_SYNC_HEALTH_FILE` when that is set).
 
 ## Install
+
+Only needed when the user removed it, or turned the option `statusline` off.
 
 1. Run `node ~/.local/share/yapa/statusline.mjs --install`.
    - If the file does not exist yet, the session started before this YAPA
@@ -26,14 +37,19 @@ The session-start hook keeps the script at a stable path,
    right away, with no restart.
 3. If the user already had a status line, theirs is kept: it still runs, and
    the YAPA segment is added as a line beneath it.
-4. Mention that the plugin option "Status line name" (`status_label`) changes
-   the name shown in place of `yapa` (for example the team's remote), from the
-   next sync check on.
+4. To name the remote: `echo '{"remote_name":"c360"}' | claude plugin configure
+   yapa@yapa --values-stdin` (suggest `!` so it runs in this session), or
+   `/plugin` → Configure options. It shows from the next sync check on.
 
 ## Remove
 
 Run `node ~/.local/share/yapa/statusline.mjs --uninstall`. That puts back the
-status line the user had before, if any.
+status line the user had before, if any, and YAPA does not add its own back.
+
+## A newer release
+
+When it says `(v<new> available)`: `claude plugin marketplace update yapa &&
+claude plugin update yapa@yapa`, then restart Claude Code.
 
 ## When it shows a problem
 

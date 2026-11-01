@@ -3,10 +3,24 @@ import { createRequire as __yapaCreateRequire } from 'node:module'; const requir
 
 // packages/mcp/src/cli/statusline.ts
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+var SCRIPT_VERSION = true ? "1.6.0" : void 0;
+var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+function newer(a, b) {
+  const pa = SEMVER.exec(String(a ?? "").trim());
+  const pb = SEMVER.exec(String(b ?? "").trim());
+  if (!pa || !pb) return false;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d) return d > 0;
+  }
+  if (pa[4] && !pb[4]) return false;
+  if (!pa[4] && pb[4]) return true;
+  return (pa[4] ?? "") > (pb[4] ?? "");
+}
 var DEFAULT_INTERVAL_MS = 3e5;
 var STALE_INTERVALS = 3;
 var WRAP_TIMEOUT_MS = 5e3;
@@ -31,32 +45,48 @@ function cleanLabel(label) {
   const v = label.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 32);
   return v || void 0;
 }
+function remoteName(health, explicit) {
+  const legacy = cleanLabel(health?.label);
+  return cleanLabel(explicit) ?? cleanLabel(health?.remote) ?? (legacy && legacy !== "yapa" ? legacy : void 0);
+}
 function renderSegment(health, now, opts = {}) {
-  const name = cleanLabel(opts.label) ?? cleanLabel(health?.label) ?? "yapa";
   const paint = (tone, text) => opts.color ? `${ANSI[tone]}${text}${ANSI.reset}` : text;
+  const version = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
+  const latest = opts.update?.latest && version && newer(opts.update.latest, version) ? opts.update.latest : void 0;
+  const remote = remoteName(health, opts.remote ?? opts.label);
+  const head = `yapa${version ? `@v${version}` : ""}` + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
-  if (!health) return paint("dim", `${name} \u25CB sync status unknown`);
+  const state = (tone, text) => `${head} ${paint(tone, text)}`;
+  if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
     case "disabled":
-      return paint("dim", `${name} \u25CB local only`);
+      return state("dim", "\u25CB local only");
     case "signed_out":
-      return paint("red", `${name} \u25CF signed out${since}${push} \xB7 run: gcloud auth login`);
+      return state("red", `\u25CF signed out${since}${push} \xB7 run: gcloud auth login`);
     case "unreachable":
-      return paint("yellow", `${name} \u25CF offline${since}${push}`);
+      return state("yellow", `\u25CF offline${since}${push}`);
     case "error": {
       const why = health.message ? `: ${health.message.replace(/\s+/g, " ").slice(0, 60)}` : "";
-      return paint("yellow", `${name} \u25CF sync error${since}${why}`);
+      return state("yellow", `\u25CF sync error${since}${why}`);
     }
     case "ok": {
       const interval = health.interval_ms && health.interval_ms > 0 ? health.interval_ms : DEFAULT_INTERVAL_MS;
       if (now - health.at > STALE_INTERVALS * interval) {
-        return paint("dim", `${name} \u25CB sync status unknown (last checked ${formatAgo(now - health.at)})`);
+        return state("dim", `\u25CB sync status unknown (last checked ${formatAgo(now - health.at)})`);
       }
-      return paint("green", `${name} \u25CF synced ${formatAgo(now - (health.last_ok_at ?? health.at))}${push}`);
+      return state("green", `\u25CF synced ${formatAgo(now - (health.last_ok_at ?? health.at))}${push}`);
     }
     default:
-      return paint("dim", `${name} \u25CB sync status unknown`);
+      return state("dim", "\u25CB sync status unknown");
+  }
+}
+function readUpdate(path) {
+  try {
+    const u = JSON.parse(readFileSync(path, "utf-8"));
+    return u && typeof u === "object" ? { current: typeof u.current === "string" ? u.current : void 0, latest: typeof u.latest === "string" ? u.latest : void 0 } : void 0;
+  } catch {
+    return void 0;
   }
 }
 function readHealth(path) {
@@ -78,8 +108,9 @@ function decodeWrapped(b64) {
     return void 0;
   }
 }
-function isYapaStatusLine(statusLine) {
-  return typeof statusLine?.command === "string" && /yapa[\\/]statusline\.mjs/.test(statusLine.command);
+function isYapaStatusLine(statusLine, script) {
+  if (typeof statusLine?.command !== "string") return false;
+  return /yapa[\\/]statusline\.mjs/.test(statusLine.command) || !!script && statusLine.command.includes(`"${script}"`);
 }
 function wrappedOf(statusLine) {
   const m = typeof statusLine?.command === "string" ? statusLine.command.match(/--wrap\s+([A-Za-z0-9_-]+)/) : null;
@@ -88,7 +119,7 @@ function wrappedOf(statusLine) {
 function mergeStatusLine(settings, script, refreshInterval = 30) {
   const next = structuredClone(settings ?? {});
   const current = next.statusLine;
-  const wrapped = isYapaStatusLine(current) ? wrappedOf(current) : current && typeof current === "object" ? current : void 0;
+  const wrapped = isYapaStatusLine(current, script) ? wrappedOf(current) : current && typeof current === "object" ? current : void 0;
   let command = `node "${script}"`;
   if (wrapped) command += ` --wrap ${encodeWrapped(wrapped)}`;
   next.statusLine = {
@@ -99,9 +130,9 @@ function mergeStatusLine(settings, script, refreshInterval = 30) {
   };
   return next;
 }
-function removeStatusLine(settings) {
+function removeStatusLine(settings, script) {
   const next = structuredClone(settings ?? {});
-  if (!isYapaStatusLine(next.statusLine)) return next;
+  if (!isYapaStatusLine(next.statusLine, script)) return next;
   const wrapped = wrappedOf(next.statusLine);
   if (wrapped) next.statusLine = wrapped;
   else delete next.statusLine;
@@ -128,13 +159,13 @@ function installStatusLine(script, path = defaultSettingsPath()) {
   writeSettings(path, mergeStatusLine(readSettings(path), script));
   return path;
 }
-function uninstallStatusLine(path = defaultSettingsPath()) {
-  writeSettings(path, removeStatusLine(readSettings(path)));
+function uninstallStatusLine(path = defaultSettingsPath(), script) {
+  writeSettings(path, removeStatusLine(readSettings(path), script));
   return path;
 }
-function hasStatusLine(path = defaultSettingsPath()) {
+function hasStatusLine(path = defaultSettingsPath(), script) {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync(path, "utf-8")).statusLine);
+    return isYapaStatusLine(JSON.parse(readFileSync(path, "utf-8")).statusLine, script);
   } catch {
     return false;
   }
@@ -156,6 +187,20 @@ function copyScript(from, to) {
   renameSync(tmp, to);
   return true;
 }
+var REMOVED_MARKER = "statusline-removed";
+function setRemovedMarker(dir, removed) {
+  const p = join(dir, REMOVED_MARKER);
+  try {
+    if (removed) {
+      mkdirSync(dir, { recursive: true, mode: 448 });
+      writeFileSync(p, `${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+    } else {
+      rmSync(p, { force: true });
+    }
+  } catch {
+  }
+}
 function argValue(args, flag) {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : void 0;
@@ -171,11 +216,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
+    setRemovedMarker(dirname(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
-    process.stdout.write(`Status line removed from ${uninstallStatusLine(settings)}
+    process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
+    setRemovedMarker(dirname(self2), true);
     return;
   }
   const input = await readStdin();
@@ -187,8 +234,13 @@ async function main(args, self2) {
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
   const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join(dirname(self2), "sync-health.json");
+  const update = readUpdate(join(dirname(healthPath), "update-check.json"));
   const color = !process.env.NO_COLOR;
-  process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), { color, label: argValue(args, "--label") }) + "\n");
+  process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
+    color,
+    remote: argValue(args, "--remote") ?? argValue(args, "--label"),
+    update
+  }) + "\n");
 }
 function isMain(argv1, self2) {
   if (!argv1 || !/statusline\.m?js$/.test(self2)) return false;
@@ -200,9 +252,12 @@ function isMain(argv1, self2) {
 }
 var self = fileURLToPath(import.meta.url);
 if (isMain(process.argv[1], self)) {
-  main(process.argv.slice(2), self).catch(() => process.stdout.write("yapa \u25CB sync status unknown\n"));
+  main(process.argv.slice(2), self).catch(() => process.stdout.write(`yapa${SCRIPT_VERSION ? `@v${SCRIPT_VERSION}` : ""} \u25CB sync status unknown
+`));
 }
 export {
+  REMOVED_MARKER,
+  SCRIPT_VERSION,
   copyScript,
   decodeWrapped,
   defaultSettingsPath,
@@ -214,8 +269,11 @@ export {
   isYapaStatusLine,
   main,
   mergeStatusLine,
+  newer,
   readHealth,
+  readUpdate,
   removeStatusLine,
   renderSegment,
+  setRemovedMarker,
   uninstallStatusLine
 };
