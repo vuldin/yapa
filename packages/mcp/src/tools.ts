@@ -36,6 +36,7 @@ import {
   getPendingDeletes,
   getSyncPullTimestamp,
   getSyncState,
+  readSyncHealth,
   getSyncSubscriptions,
   getTask,
   janitorSweep,
@@ -1245,6 +1246,16 @@ export function registerTools(server: McpServer): void {
             lines.push(`Last pull: ${lastPull ? new Date(lastPull * 1000).toISOString() : 'never'}`);
           } catch {
             lines.push('Last pull: unknown');
+          }
+          const health = readSyncHealth();
+          if (health) {
+            const iso = (ms?: number) => (ms ? new Date(ms).toISOString() : 'never');
+            let line = `Health (status line): ${health.status}`;
+            if (health.since) line += ` since ${iso(health.since)}`;
+            if (health.code) line += ` [${health.code}]`;
+            line += `; last ok ${iso(health.last_ok_at)}; checked ${iso(health.at)}`;
+            if (health.unpushed !== undefined) line += `; ${health.unpushed} to push`;
+            lines.push(line);
           }
           try {
             const pending = await getPendingDeletes();

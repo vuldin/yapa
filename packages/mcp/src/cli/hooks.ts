@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   getConfig,
@@ -27,9 +28,13 @@ import {
   heartbeatIfDue,
   requireCoordination,
   type Lease,
+  noteSyncOk,
+  readSyncHealth,
+  type SyncHealth,
 } from '@yapa/core';
 
 import { CLAUDE_CODE_RULES } from '../rules.js';
+import { copyScript, hasStatusLine } from './statusline.js';
 
 interface BaseHookInput {
   session_id?: string;
@@ -117,6 +122,7 @@ export async function freshenFromRemote(collection: string): Promise<number> {
       process.stderr.write(`[yapa-hook] remote pull for ${collection} timed out\n`);
       return 0;
     }
+    if (stats.errors === 0) noteSyncOk();
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();
       if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
@@ -126,6 +132,64 @@ export async function freshenFromRemote(collection: string): Promise<number> {
     process.stderr.write(`[yapa-hook] remote pull for ${collection} failed: ${e}\n`);
     return 0;
   }
+}
+
+// --- Sync health (status line) -----------------------------------------------
+
+/**
+ * One context line while sync is down, so Claude knows writes are not
+ * reaching teammates (and why) instead of claiming they are shared.
+ */
+export function syncDownLine(health: SyncHealth | undefined = readSyncHealth()): string | undefined {
+  if (!health || !isSyncConfigured(getConfig())) return undefined;
+  const since = health.since ? ` since ${new Date(health.since).toISOString().slice(0, 16).replace('T', ' ')} UTC` : '';
+  switch (health.status) {
+    case 'signed_out':
+      return `_YAPA sync is signed out${since}: writes stay on this machine until the user runs \`gcloud auth login\` (sync resumes by itself, no restart)._`;
+    case 'unreachable':
+      return `_YAPA sync service is unreachable${since}: writes stay on this machine and push when it is back._`;
+    case 'error':
+      return `_YAPA sync is failing${since}${health.message ? ` (${health.message.slice(0, 160)})` : ''}: writes stay on this machine for now._`;
+    default:
+      return undefined;
+  }
+}
+
+/** Where the status line script lives: beside the health file, outside the versioned plugin folder. */
+export function statusLineScriptPath(): string | undefined {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join(dirname(health), 'statusline.mjs') : undefined;
+}
+
+/** The script shipped with this build (plugin: dist/statusline.mjs; npm build: dist/cli/statusline.js). */
+export function bundledStatusLineScript(): string | undefined {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return ['statusline.mjs', 'statusline.js'].map(f => join(here, f)).find(p => existsSync(p));
+}
+
+/**
+ * Keep the stable copy current (plugin updates reach the status line), and
+ * the first time on this device with sync on but no status line, return a
+ * hint line telling Claude how the user can add one.
+ */
+export function prepareStatusLine(from: string | undefined = bundledStatusLineScript()): string | undefined {
+  const to = statusLineScriptPath();
+  if (!to) return undefined;
+  try {
+    if (from) copyScript(from, to);
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] status line script copy failed: ${e}\n`);
+  }
+  if (!isSyncConfigured(getConfig()) || hasStatusLine()) return undefined;
+  const marker = join(dirname(to), 'statusline-hint');
+  if (existsSync(marker)) return undefined;
+  try {
+    writeFileSync(marker, `${new Date().toISOString()}\n`);
+  } catch {
+    return undefined; // could not remember it: better silent than repeated
+  }
+  const how = process.env.CLAUDE_PLUGIN_ROOT ? '`/yapa:statusline`' : `\`node "${to}" --install\``;
+  return `_Mention once to the user: they can show YAPA sync health under the prompt with ${how}._`;
 }
 
 // --- Per-session hook state (turn buffer, capture notices) -----------------
@@ -248,6 +312,10 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, '');
   lines.push('# YAPA Context', '', scopeLine(detection));
   if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
+  const down = syncDownLine();
+  if (down) lines.push(down);
+  const hint = prepareStatusLine();
+  if (hint) lines.push(hint);
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
   const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
@@ -345,10 +413,12 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
   const lines: string[] = ['# YAPA Recall', '', `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`];
   const notice = takeNotice(input.session_id);
   if (notice) lines.push(`_${notice}_`);
+  const down = syncDownLine();
+  if (down) lines.push(down);
 
   try {
     const recall = await recallMemory(prompt, { collection, nResults: 3, crossCollection: getConfig().CROSS_COLLECTION_RESULTS });
-    if (recall.length === 0 && !notice) {
+    if (recall.length === 0 && !notice && !down) {
       emit({});
       return;
     }

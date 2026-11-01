@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { getConfig, getEmbeddingModel } from '../config.js';
 import { getDeviceId } from './device.js';
 import {
-  applyServerUsername, chunk, noteSyncError, syncUsernameNote, type PullPage, type PullRequest, type RemoteDocument, type RemoteOwner, type SimilarMatch, type SyncBackend,
+  applyServerUsername, chunk, isSignedOutError, noteSyncError, syncUsernameNote, type PullPage, type PullRequest, type RemoteDocument, type RemoteOwner, type SimilarMatch, type SyncBackend,
   type UpsertDoc, type UpsertOutcome, type Coordination, type Lease, type LeaseAcquireResult, type LeaseReleaseResult,
 } from './backend.js';
 
@@ -242,7 +242,9 @@ export class HttpBackend implements SyncBackend {
   }
 
   private fail(err: Error, quiet = false): never {
-    if (!quiet) noteSyncError(err);
+    // Quiet calls (leases, counters) fall back locally, but a sign-out is
+    // still the person's to fix, so it reaches the status line either way.
+    if (!quiet || isSignedOutError(err)) noteSyncError(err);
     throw err;
   }
 

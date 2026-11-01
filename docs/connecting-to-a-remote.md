@@ -82,6 +82,12 @@ informational while syncing.
 | `unreachable` | wrong host, network, or VPN |
 | `sync service error 404 http_404` | the URL answers but is not the API: check the path prefix |
 
+To keep an eye on it afterwards, add the status line: `/yapa:statusline` (or
+`yapa statusline install`). It shows `yapa ● synced 2m ago`, and turns red
+(`signed out since 09:12 · run: gcloud auth login`) when your sign-in lapses;
+`gcloud auth login` fixes it without a restart. See the README's "Sync health
+in the status line".
+
 ## What syncs
 
 - Shared collections only: anything except `global`, `private-*` and

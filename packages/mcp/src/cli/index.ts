@@ -8,6 +8,9 @@ const USAGE =
   '       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n' +
   '       yapa hooks uninstall [--settings <path>]  remove them\n' +
   '       yapa hooks print                          show the hooks block without writing it\n' +
+  '       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n' +
+  '       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n' +
+  '       yapa statusline show                      print the status line segment now\n' +
   '       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n';
 
 const COORD_USAGE =
@@ -78,6 +81,32 @@ async function runHooksCommand(action: string | undefined, args: string[]): Prom
       return;
     case 'print':
       process.stdout.write(JSON.stringify(mergeHooks({}, selfCommand()), null, 2) + '\n');
+      return;
+    default:
+      usage();
+  }
+}
+
+async function runStatusLineCommand(action: string | undefined, args: string[]): Promise<void> {
+  adoptCliEnv(process.cwd());
+  const sl = await import('./statusline.js');
+  const { statusLineScriptPath, bundledStatusLineScript } = await import('./hooks.js');
+  const { getConfig } = await import('@yapa/core');
+  const path = flag(args, '--settings');
+  const script = statusLineScriptPath();
+  switch (action) {
+    case 'install': {
+      const from = bundledStatusLineScript();
+      if (!script || !from) throw new Error('no status line script (YAPA_SYNC_HEALTH_FILE is off, or this build has none)');
+      sl.copyScript(from, script);
+      process.stdout.write(`Status line added to ${sl.installStatusLine(script, path)} (runs ${script})\n`);
+      return;
+    }
+    case 'uninstall':
+      process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path)}\n`);
+      return;
+    case 'show':
+      process.stdout.write(sl.renderSegment(sl.readHealth(getConfig().SYNC_HEALTH_FILE), Date.now(), { color: !process.env.NO_COLOR }) + '\n');
       return;
     default:
       usage();
@@ -161,6 +190,15 @@ async function main(): Promise<void> {
   if (command === 'hooks') {
     await runHooksCommand(sub, rest);
     return;
+  }
+  if (command === 'statusline') {
+    try {
+      await runStatusLineCommand(sub, rest);
+    } catch (e) {
+      process.stderr.write(`yapa statusline ${sub}: ${e instanceof Error ? e.message : e}\n`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
   if (command !== 'hook' || !sub) usage();
 

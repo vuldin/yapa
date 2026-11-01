@@ -1,8 +1,9 @@
 
 import { getConfig } from '../config.js';
-import { pushToRemote, emptyPushStats, type PushStats } from './push.js';
+import { pushToRemote, emptyPushStats, countUnpushed, type PushStats } from './push.js';
 import { pullFromRemote, emptyPullStats, type PullStats } from './pull.js';
-import { closeSyncBackend, getSyncBackend, isSyncConfigured, lastSyncError, syncBackendKind } from './backend.js';
+import { closeSyncBackend, getSyncBackend, isSyncConfigured, lastSyncError, noteSyncOk, syncBackendKind } from './backend.js';
+import { recordSyncHealth, recordUnpushed } from './health.js';
 
 export interface SyncStats {
   push: PushStats;
@@ -70,6 +71,11 @@ export async function syncCycle(): Promise<SyncStats | null> {
 
     // Backend maintenance (Postgres: ivfflat index once there is enough data)
     try { await (await getSyncBackend())?.maintain(); } catch { /* non-critical */ }
+
+    // Health for the status line: errors were recorded as they happened.
+    const unpushed = await countUnpushed().catch(() => undefined);
+    if (!hasErrors) noteSyncOk(unpushed);
+    else if (unpushed !== undefined) recordUnpushed(unpushed);
 
     lastCycleAt = Date.now();
     lastCycleError = null;
@@ -143,11 +149,15 @@ export async function flushPendingSync(timeoutMs = 5000): Promise<void> {
  * Runs schema migration on first connect, then syncs on interval.
  */
 export async function startSync(): Promise<void> {
-  if (!getConfig().SYNC_ENABLED) return;
+  if (!getConfig().SYNC_ENABLED) {
+    recordSyncHealth({ status: 'disabled' });
+    return;
+  }
 
   const kind = syncBackendKind();
   if (!kind) {
     process.stderr.write('[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n');
+    recordSyncHealth({ status: 'disabled' });
     return;
   }
   if (kind === 'service' && getConfig().SYNC_DATABASE_URL) {

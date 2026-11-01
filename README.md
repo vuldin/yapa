@@ -93,6 +93,7 @@ Configure options, or `claude plugin configure yapa`):
 | `customers` | _(empty)_ | Folder names under a root that are customers |
 | `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
 | `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
+| `status_label` | `yapa` | The name the sync status line shows (see [Sync health in the status line](#sync-health-in-the-status-line)) |
 | `response_capture` | off | Auto-capture durable findings after each turn (see hooks below) |
 
 For a whole team, add the marketplace and enable the plugin in managed or
@@ -328,6 +329,25 @@ Remote sync lets multiple machines or teammates share memories and tasks. It is 
 2. Set `sync_service_url` to your team's YAPA sync service URL (ask your YAPA admin). Any remote that implements [YAPA Sync API v1](docs/sync-api.md) works, including one under a path prefix such as `https://example.com/api/yapa`. Read [Connecting to a remote](docs/connecting-to-a-remote.md) first: the first sync pushes every shared collection to it.
 3. Sign in once: `gcloud auth login` with your company Google account. YAPA calls `gcloud auth print-identity-token` for a short-lived (1 h) ID token and refreshes it before it expires. The current token is cached in a 0600 file (`~/.local/share/yapa/id-token`, set `YAPA_SYNC_ID_TOKEN_CACHE` to another path, or `off` to keep it in memory only) so short-lived hook processes don't mint a new one each time. Other token sources: set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints an ID token.
 4. Check with the `sync` tool, `action: 'status'`: it shows the backend, the service URL, who you are signed in as, the last error, and any docs the service refused.
+5. Optional, recommended: run `/yapa:statusline` (with `claude mcp add`: `yapa statusline install`) to keep sync health under the prompt, e.g. `yapa ● synced 2m ago` or, when your sign-in lapses, `yapa ● signed out since 09:12 · run: gcloud auth login`. See [Sync health in the status line](#sync-health-in-the-status-line).
+
+### Sync health in the status line
+
+Sync fails quietly by design (local work never waits on the remote), so an expired `gcloud` sign-in used to go unnoticed. The MCP server and the hooks now record every sync outcome in `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`; `off` disables it), and a small script turns it into a Claude Code status line segment:
+
+| Segment | Meaning |
+|---|---|
+| `yapa ● synced 2m ago · 3 to push` (green) | healthy; local writes waiting for the next push, if any |
+| `yapa ● signed out since 09:12 · run: gcloud auth login` (red) | the ID token command failed or the remote rejected the sign-in |
+| `yapa ● offline since 09:12` (yellow) | the remote is unreachable |
+| `yapa ● sync error since 09:12: ...` (yellow) | any other failure; `sync status` has details |
+| `yapa ○ local only` / `yapa ○ sync status unknown` (dim) | sync is off / no recent check |
+
+- **Install:** `/yapa:statusline` (plugin) or `yapa statusline install`. It writes `statusLine` in `~/.claude/settings.json`, pointing at a stable copy of the script (`~/.local/share/yapa/statusline.mjs`, refreshed by the session-start hook so plugin updates reach it). A status line you already had keeps running, with the YAPA segment as a line beneath it. `--uninstall` (or `yapa statusline uninstall`) restores it.
+- **Name:** the plugin option "Status line name" (`status_label`, `YAPA_STATUS_LABEL`) replaces `yapa`, e.g. with the name of your team's remote.
+- **Cost:** the script reads one local file; no network, no `gcloud`.
+- **Recovery:** after `gcloud auth login`, the next request mints a new token; no restart. The segment turns green at the next sync cycle or prompt.
+- While sync is down, the hooks also tell Claude, so it doesn't claim your writes reached teammates.
 
 With the service, your username comes from your Google account (shown in `sync status`); task ids use it, and the `username` option is informational. The service enforces ownership (only the owner deletes a shared row), refuses content that looks like a secret (the doc stays local and unsynced, listed in `sync status`, and is retried only after you edit it), renames a task whose id already belongs to a different task, and sends deletions to teammates' machines (a clean copy is removed; a copy with unpushed edits is kept and reported).
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,7 +11,7 @@ const { pullCollection, captureTurn, heartbeatIfDue } = vi.hoisted(() => ({
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines } from './hooks.js';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -277,5 +277,76 @@ describe('lease presence at session start', () => {
     expect(out[2]).toBe('- **josh-7** upgrade runbook: you (this session), for 30m, expires in 90m');
     expect(out[3]).toBe('- **josh-8**: you (another session, other-se), for 30m, expires in 90m');
     expect(out[4]).toBe('- **dana-3**: dana, for 30m, expires in 90m');
+  });
+});
+
+describe('sync health (status line)', () => {
+  let health: string;
+  const record = (h: object) => writeFileSync(health, JSON.stringify({ at: Date.now(), interval_ms: 300000, label: 'yapa', ...h }));
+
+  beforeEach(() => {
+    const hd = mkdtempSync(join(dir, 'health-'));
+    health = join(hd, 'sync-health.json');
+    configure({ YAPA_SYNC_HEALTH_FILE: health });
+    process.env.CLAUDE_CONFIG_DIR = join(hd, 'claude');
+  });
+
+  afterAll(() => {
+    delete process.env.CLAUDE_CONFIG_DIR;
+  });
+
+  it('a clean hook pull records sync as ok; a failed one does not', async () => {
+    record({ status: 'signed_out', since: 1 });
+    pullCollection.mockResolvedValueOnce({ pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 1 });
+    await freshenFromRemote('project-acme');
+    expect(JSON.parse(readFileSync(health, 'utf-8')).status).toBe('signed_out');
+    await freshenFromRemote('project-acme');
+    expect(JSON.parse(readFileSync(health, 'utf-8'))).toMatchObject({ status: 'ok' });
+  });
+
+  it('tells Claude while sync is down, and says nothing while it is healthy', async () => {
+    record({ status: 'ok' });
+    expect(syncDownLine()).toBeUndefined();
+    record({ status: 'signed_out', since: Date.UTC(2026, 10, 1, 9, 12) });
+    expect(syncDownLine()).toBe('_YAPA sync is signed out since 2026-11-01 09:12 UTC: writes stay on this machine until the user runs `gcloud auth login` (sync resumes by itself, no restart)._');
+    record({ status: 'unreachable' });
+    expect(syncDownLine()).toContain('unreachable');
+    configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_SYNC_ENABLED: 'false' });
+    expect(syncDownLine()).toBeUndefined();
+  });
+
+  it('the down line reaches the prompt context even with no recall hits', async () => {
+    record({ status: 'signed_out', since: 1 });
+    // Still signed out: the hook's own pull fails too.
+    pullCollection.mockResolvedValue({ pulled: 0, updated: 0, linked: 0, skipped: 0, errors: 1 });
+    capture();
+    await userPromptSubmit({ session_id: 'h1', cwd: join(dir, 'proj', 'empty-project'), prompt: 'zzqx unrelated words' });
+    expect(restore().hookSpecificOutput.additionalContext).toContain('YAPA sync is signed out');
+    capture();
+    await sessionStart({ session_id: 'h1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+    expect(restore().hookSpecificOutput.additionalContext).toContain('YAPA sync is signed out');
+  });
+
+  it('keeps the stable script copy current and hints at the install once', () => {
+    const src = join(dir, 'statusline-src.mjs');
+    writeFileSync(src, 'console.log("v1")\n');
+    const stable = join(health, '..', 'statusline.mjs');
+    const hint = prepareStatusLine(src);
+    expect(readFileSync(stable, 'utf-8')).toBe('console.log("v1")\n');
+    expect(hint).toContain('--install');
+    expect(prepareStatusLine(src)).toBeUndefined();
+    writeFileSync(src, 'console.log("v2")\n');
+    prepareStatusLine(src);
+    expect(readFileSync(stable, 'utf-8')).toBe('console.log("v2")\n');
+  });
+
+  it('no hint once the status line is installed, or when sync is off', () => {
+    const settings = join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json');
+    mkdirSync(join(settings, '..'), { recursive: true });
+    writeFileSync(settings, JSON.stringify({ statusLine: { type: 'command', command: 'node "/h/.local/share/yapa/statusline.mjs"' } }));
+    expect(prepareStatusLine(undefined)).toBeUndefined();
+    rmSync(settings);
+    configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_SYNC_ENABLED: 'false' });
+    expect(prepareStatusLine(undefined)).toBeUndefined();
   });
 });

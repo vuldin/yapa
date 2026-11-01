@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Sync health in the Claude Code status line.** An expired `gcloud` sign-in used to stop sync silently: errors went to stderr and an in-memory "last error" that was never cleared. Every sync outcome (the MCP server's cycles, the hooks' pulls, and sign-in failures on lease calls, which were not recorded at all) now goes to `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`), with when the outage started and how many local writes are waiting. `/yapa:statusline` (or `yapa statusline install`) adds a status line segment that reads it: `yapa ● synced 2m ago`, `yapa ● signed out since 09:12 · run: gcloud auth login`, `yapa ● offline since 09:12`. An existing status line is kept and restored on uninstall. New option `status_label` (`YAPA_STATUS_LABEL`) renames the segment. `yapa statusline show` prints it.
+- While sync is down, the session-start and prompt hooks add one line telling Claude that writes are staying local and why.
+- `sync status` shows the health record (status, since, last ok, to push).
+
+### Fixes
+- A successful sync now clears the "last error" `sync status` reported; it used to stay until the server restarted.
+
 ## 1.3.0 (2026-10-30)
 
 Other services can now be a YAPA client's remote: the sync API is written down as a contract, with a conformance runner to check an implementation.

@@ -71,6 +71,7 @@ export { isSyncableCollection, isReadOnlyDoc, assertWritable } from './sync/sync
 export * from './sync/push.js';
 export * from './sync/deletes.js';
 export * from './sync/sentinel.js';
+export * from './sync/health.js';
 export * from './sync/device.js';
 
 // Training / eval / promotion.
