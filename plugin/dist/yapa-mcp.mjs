@@ -7360,8 +7360,10 @@ function createConfig(env = process.env) {
     LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
+    SYNC_COORDINATE: get(env, "SYNC_COORDINATE", "true") !== "false",
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
+    HOOK_PULL_WINDOW_MS: parseInt(get(env, "HOOK_PULL_WINDOW_MS", "30000"), 10),
     HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
     RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "true") !== "false",
     CAPTURE_MIN_CHARS: parseInt(get(env, "CAPTURE_MIN_CHARS", "280"), 10),
@@ -42593,15 +42595,229 @@ async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
 // packages/core/src/sync/index.ts
 init_backend();
 init_health();
+
+// packages/core/src/sync/shared-cycle.ts
+init_config();
+import { createHash as createHash2 } from "node:crypto";
+import { closeSync, mkdirSync as mkdirSync7, openSync, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync7, writeSync } from "node:fs";
+import { dirname as dirname4, join as join5 } from "node:path";
+var DUE_FRACTION = 0.9;
+var MIN_STALE_LOCK_MS = 10 * 60 * 1e3;
+function syncTargetKey(config2 = getConfig()) {
+  let remote = "";
+  if (config2.SYNC_SERVICE_URL) remote = `service:${config2.SYNC_SERVICE_URL}`;
+  else if (config2.SYNC_DATABASE_URL) {
+    try {
+      const u = new URL(config2.SYNC_DATABASE_URL);
+      remote = `postgres:${u.hostname}:${u.port}${u.pathname}`;
+    } catch {
+      remote = "postgres:unparsed";
+    }
+  }
+  const store = config2.STORAGE === "local" ? `local:${config2.LOCAL_STORE_PATH}` : `chroma:${config2.CHROMA_URL}`;
+  return createHash2("sha256").update(JSON.stringify([remote, store, config2.USERNAME])).digest("hex").slice(0, 12);
+}
+function sharedDir(config2 = getConfig()) {
+  if (!config2.SYNC_COORDINATE || !config2.SYNC_HEALTH_FILE) return void 0;
+  return dirname4(config2.SYNC_HEALTH_FILE);
+}
+function paths(config2 = getConfig()) {
+  const dir = sharedDir(config2);
+  if (!dir) return void 0;
+  const key = syncTargetKey(config2);
+  return {
+    dir,
+    record: join5(dir, `sync-cycle-${key}.json`),
+    lock: join5(dir, `sync-cycle-${key}.lock`),
+    pulls: join5(dir, `sync-pulls-${key}.json`)
+  };
+}
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync8(path, "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeJson(path, value) {
+  try {
+    mkdirSync7(dirname4(path), { recursive: true, mode: 448 });
+    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    writeFileSync7(tmp, JSON.stringify(value) + "\n", { mode: 384 });
+    renameSync3(tmp, path);
+  } catch {
+  }
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function readCycleRecord(config2 = getConfig()) {
+  const p = paths(config2);
+  if (!p) return void 0;
+  const r = readJson(p.record);
+  return r && typeof r.finished_at === "number" ? r : void 0;
+}
+function shouldRunCycle(now = Date.now(), config2 = getConfig()) {
+  const r = readCycleRecord(config2);
+  if (!r) return true;
+  return now - r.finished_at >= config2.SYNC_INTERVAL_MS * DUE_FRACTION || r.finished_at > now + 6e4;
+}
+function tryAcquireCycle(opts = {}, config2 = getConfig()) {
+  const p = paths(config2);
+  if (!p) return () => {
+  };
+  const now = opts.now ?? Date.now();
+  const alive = opts.alive ?? pidAlive;
+  const staleAfter = Math.max(2 * config2.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
+  const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync7(p.dir, { recursive: true, mode: 448 });
+      const fd = openSync(p.lock, "wx", 384);
+      try {
+        writeSync(fd, JSON.stringify(body));
+      } finally {
+        closeSync(fd);
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const held = readJson(p.lock);
+        if (held?.pid === process.pid && held.started_at === now) rmSync3(p.lock, { force: true });
+      };
+    } catch (e) {
+      if (e.code !== "EEXIST") return () => {
+      };
+      const held = readJson(p.lock);
+      const stale = !held || !alive(held.pid) || now - held.started_at > staleAfter || held.started_at > now + 6e4;
+      if (!stale || attempt > 0) return void 0;
+      rmSync3(p.lock, { force: true });
+    }
+  }
+  return void 0;
+}
+function recordCycle(run2, config2 = getConfig()) {
+  const p = paths(config2);
+  if (!p) return;
+  const prev = readJson(p.record);
+  const finished = run2.finishedAt ?? Date.now();
+  const next = {
+    started_at: run2.startedAt,
+    finished_at: finished,
+    pid: process.pid,
+    cycles: (typeof prev?.cycles === "number" ? prev.cycles : 0) + 1,
+    ...run2.version ? { version: run2.version } : {}
+  };
+  const okAt = run2.ok ? finished : prev?.ok_at;
+  if (okAt) next.ok_at = okAt;
+  writeJson(p.record, next);
+}
+
+// packages/core/src/sync/index.ts
+init_sentinel();
+
+// packages/core/src/update-check.ts
+init_config();
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync9, renameSync as renameSync4, writeFileSync as writeFileSync8 } from "node:fs";
+import { dirname as dirname5, join as join6 } from "node:path";
+var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+var FETCH_TIMEOUT_MS = 5e3;
+var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+function compareVersions(a, b) {
+  const pa = SEMVER.exec(String(a ?? "").trim());
+  const pb = SEMVER.exec(String(b ?? "").trim());
+  if (!pa || !pb) return pa ? 1 : pb ? -1 : 0;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d) return d;
+  }
+  if (pa[4] && !pb[4]) return -1;
+  if (!pa[4] && pb[4]) return 1;
+  return (pa[4] ?? "").localeCompare(pb[4] ?? "");
+}
+function updateStatePath() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join6(dirname5(health), "update-check.json") : void 0;
+}
+function readUpdateState(path = updateStatePath()) {
+  if (!path) return void 0;
+  try {
+    const s = JSON.parse(readFileSync9(path, "utf-8"));
+    return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function writeUpdateState(s, path = updateStatePath()) {
+  if (!path) return;
+  try {
+    mkdirSync8(dirname5(path), { recursive: true, mode: 448 });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync8(tmp, JSON.stringify(s) + "\n", { mode: 384 });
+    renameSync4(tmp, path);
+  } catch {
+  }
+}
+function noteInstalledVersion(current, path = updateStatePath()) {
+  if (!path) return void 0;
+  const prev = readUpdateState(path);
+  if (prev && prev.current === current) return prev;
+  const next = { current, checked_at: prev?.checked_at ?? 0 };
+  if (prev?.latest && compareVersions(prev.latest, current) > 0) next.latest = prev.latest;
+  if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
+  writeUpdateState(next, path);
+  return next;
+}
+async function checkForUpdate(current, opts = {}) {
+  const config2 = getConfig();
+  const path = opts.path ?? updateStatePath();
+  if (!config2.UPDATE_CHECK || !path || !config2.UPDATE_SOURCE) return void 0;
+  const now = opts.now ?? Date.now();
+  const prev = noteInstalledVersion(current, path);
+  if (!opts.force && prev && prev.checked_at > 0 && now - prev.checked_at < UPDATE_CHECK_INTERVAL_MS) return prev;
+  let released;
+  try {
+    const r = await (opts.fetchImpl ?? fetch)(config2.UPDATE_SOURCE, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!r.ok) return prev;
+    const body = await r.json();
+    if (typeof body?.version !== "string" || !SEMVER.test(body.version.trim())) return prev;
+    released = body.version.trim().replace(/^v/, "");
+  } catch {
+    return prev;
+  }
+  const next = { current, checked_at: now };
+  if (compareVersions(released, current) > 0) next.latest = released;
+  if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
+  writeUpdateState(next, path);
+  return next;
+}
+var timer2;
+function startUpdateChecks(current) {
+  if (timer2 || !getConfig().UPDATE_CHECK) return;
+  void checkForUpdate(current);
+  timer2 = setInterval(() => void checkForUpdate(current), UPDATE_CHECK_INTERVAL_MS);
+  timer2.unref?.();
+}
+
+// packages/core/src/sync/index.ts
 var syncTimer = null;
 var syncRunning = false;
+var runningVersion;
 var lastCycleAt = null;
 var lastCycleError = null;
 var cycleCount2 = 0;
+var skippedCount = 0;
 var timerActive2 = false;
 var lastStats = null;
 function getSyncState() {
-  return { lastCycleAt, lastCycleError, cycleCount: cycleCount2, timerActive: timerActive2, lastStats, lastError: lastSyncError() ?? null };
+  return { lastCycleAt, lastCycleError, cycleCount: cycleCount2, skippedCount, timerActive: timerActive2, lastStats, lastError: lastSyncError() ?? null };
 }
 async function syncCycle() {
   if (syncRunning) {
@@ -42609,6 +42825,7 @@ async function syncCycle() {
     return null;
   }
   syncRunning = true;
+  const startedAt = Date.now();
   try {
     let pushStats = emptyPushStats();
     let pullStats = emptyPullStats();
@@ -42659,6 +42876,7 @@ async function syncCycle() {
     lastCycleError = null;
     cycleCount2++;
     lastStats = { push: pushStats, pull: pullStats };
+    recordCycle({ startedAt, finishedAt: lastCycleAt, ok: !hasErrors, version: runningVersion });
     return lastStats;
   } catch (e) {
     const msg = `${e}`;
@@ -42667,6 +42885,7 @@ async function syncCycle() {
     lastCycleAt = Date.now();
     lastCycleError = msg;
     cycleCount2++;
+    recordCycle({ startedAt, finishedAt: lastCycleAt, ok: false, version: runningVersion });
     return null;
   } finally {
     syncRunning = false;
@@ -42681,14 +42900,54 @@ function runTracked(work) {
   inFlight = tracked;
   return tracked;
 }
+async function pushNow() {
+  const stats = await pushToRemote();
+  const unpushed = await countUnpushed().catch(() => void 0);
+  if (stats.errors === 0) noteSyncOk(unpushed);
+  else if (unpushed !== void 0) recordUnpushed(unpushed);
+  return stats;
+}
 function scheduleSyncSoon(delayMs = getConfig().SYNC_PUSH_DEBOUNCE_MS) {
   if (!isSyncConfigured() || delayMs <= 0) return;
   if (soonTimer) clearTimeout(soonTimer);
   soonTimer = setTimeout(() => {
     soonTimer = null;
-    runTracked(syncCycle()).catch((e) => process.stderr.write(`[yapa-sync] Write-triggered sync error: ${e}
+    runTracked(pushNow()).catch((e) => process.stderr.write(`[yapa-sync] Write-triggered push error: ${e}
 `));
   }, delayMs);
+}
+async function syncTick(opts = {}) {
+  const now = opts.now ?? Date.now();
+  let due = shouldRunCycle(now);
+  if (!due && opts.initial) {
+    const lastPull = await getSyncPullTimestamp().catch(() => 0);
+    const last = readCycleRecord();
+    due = lastPull === 0 || !!runningVersion && compareVersions(runningVersion, last?.version) > 0;
+  }
+  if (!due) {
+    skippedCount++;
+    return null;
+  }
+  const release = tryAcquireCycle({ now, version: runningVersion });
+  if (!release) {
+    skippedCount++;
+    return null;
+  }
+  try {
+    return await syncCycle();
+  } finally {
+    release();
+  }
+}
+function scheduleTick() {
+  const base = getConfig().SYNC_INTERVAL_MS;
+  const delay = Math.max(1e3, Math.round(base * (0.9 + Math.random() * 0.2)));
+  syncTimer = setTimeout(() => {
+    runTracked(syncTick()).catch((e) => process.stderr.write(`[yapa-sync] Sync error: ${e}
+`)).finally(() => {
+      if (timerActive2) scheduleTick();
+    });
+  }, delay);
 }
 async function flushPendingSync(timeoutMs = 5e3) {
   const work = [];
@@ -42708,7 +42967,8 @@ async function flushPendingSync(timeoutMs = 5e3) {
   await Promise.race([Promise.all(work), timeout]);
   if (timer3) clearTimeout(timer3);
 }
-async function startSync() {
+async function startSync(opts = {}) {
+  if (opts.version) runningVersion = opts.version;
   if (!getConfig().SYNC_ENABLED) {
     recordSyncHealth({ status: "disabled" });
     return;
@@ -42736,13 +42996,10 @@ async function startSync() {
 `);
     process.stderr.write("[yapa-sync] Sync will retry on next interval\n");
   }
-  syncCycle().catch((e) => process.stderr.write(`[yapa-sync] Initial sync error: ${e}
+  runTracked(syncTick({ initial: true })).catch((e) => process.stderr.write(`[yapa-sync] Initial sync error: ${e}
 `));
-  syncTimer = setInterval(() => {
-    syncCycle().catch((e) => process.stderr.write(`[yapa-sync] Sync error: ${e}
-`));
-  }, getConfig().SYNC_INTERVAL_MS);
   timerActive2 = true;
+  scheduleTick();
   process.stderr.write(`[yapa-sync] Background sync started (interval: ${getConfig().SYNC_INTERVAL_MS / 1e3}s)
 `);
 }
@@ -42755,10 +43012,10 @@ function formatSyncStats({ push, pull }) {
   return `${line}, ${pull.errors} errors`;
 }
 async function stopSync() {
+  timerActive2 = false;
   if (syncTimer) {
-    clearInterval(syncTimer);
+    clearTimeout(syncTimer);
     syncTimer = null;
-    timerActive2 = false;
   }
   await closeSyncBackend();
   process.stderr.write("[yapa-sync] Sync stopped\n");
@@ -42779,9 +43036,9 @@ init_device();
 // packages/core/src/training/index.ts
 init_config();
 init_store();
-import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync8, readFileSync as readFileSync10, writeFileSync as writeFileSync8 } from "fs";
-import { join as join6 } from "path";
+import { createHash as createHash3 } from "crypto";
+import { existsSync as existsSync4, mkdirSync as mkdirSync10, readFileSync as readFileSync12, writeFileSync as writeFileSync10 } from "fs";
+import { join as join8 } from "path";
 
 // packages/core/src/training/fireworks.ts
 init_config();
@@ -42943,21 +43200,21 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "fs";
-import { join as join5 } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync10, writeFileSync as writeFileSync9 } from "fs";
+import { join as join7 } from "path";
 function registryPath() {
-  return join5(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join7(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join5(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync3(dir)) mkdirSync7(dir, { recursive: true });
+  const dir = join7(getConfig().ARTIFACTS_DIR, "adapters");
+  if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
 }
 function load() {
   ensureDir();
   const path = registryPath();
   if (!existsSync3(path)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync8(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync10(path, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -42968,7 +43225,7 @@ function load() {
 }
 function save(file2) {
   ensureDir();
-  writeFileSync7(registryPath(), JSON.stringify(file2, null, 2) + "\n");
+  writeFileSync9(registryPath(), JSON.stringify(file2, null, 2) + "\n");
 }
 function addAdapter(entry) {
   const file2 = load();
@@ -42999,7 +43256,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync9 } from "fs";
+import { readFileSync as readFileSync11 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -43102,7 +43359,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path) {
-  const content = readFileSync9(path, "utf-8");
+  const content = readFileSync11(path, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -43130,12 +43387,12 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join6(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync4(dir)) mkdirSync8(dir, { recursive: true });
+  const dir = join8(getConfig().ARTIFACTS_DIR, "training-runs");
+  if (!existsSync4(dir)) mkdirSync10(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
-  return createHash2("sha256").update(content, "utf-8").digest("hex");
+  return createHash3("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -43164,8 +43421,8 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join6(dir, filename);
-  writeFileSync8(previewPath, jsonl);
+  const previewPath = join8(dir, filename);
+  writeFileSync10(previewPath, jsonl);
   return {
     manifestVersion,
     previewPath,
@@ -43181,7 +43438,7 @@ async function trainingTrigger(args) {
   if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync10(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync12(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -43729,89 +43986,6 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
 
 // packages/core/src/memory/external.ts
 init_store();
-
-// packages/core/src/update-check.ts
-init_config();
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync11, renameSync as renameSync3, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname4, join as join7 } from "node:path";
-var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
-var FETCH_TIMEOUT_MS = 5e3;
-var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
-function compareVersions(a, b) {
-  const pa = SEMVER.exec(String(a ?? "").trim());
-  const pb = SEMVER.exec(String(b ?? "").trim());
-  if (!pa || !pb) return pa ? 1 : pb ? -1 : 0;
-  for (let i = 1; i <= 3; i++) {
-    const d = Number(pa[i]) - Number(pb[i]);
-    if (d) return d;
-  }
-  if (pa[4] && !pb[4]) return -1;
-  if (!pa[4] && pb[4]) return 1;
-  return (pa[4] ?? "").localeCompare(pb[4] ?? "");
-}
-function updateStatePath() {
-  const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join7(dirname4(health), "update-check.json") : void 0;
-}
-function readUpdateState(path = updateStatePath()) {
-  if (!path) return void 0;
-  try {
-    const s = JSON.parse(readFileSync11(path, "utf-8"));
-    return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
-  } catch {
-    return void 0;
-  }
-}
-function writeUpdateState(s, path = updateStatePath()) {
-  if (!path) return;
-  try {
-    mkdirSync9(dirname4(path), { recursive: true, mode: 448 });
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync9(tmp, JSON.stringify(s) + "\n", { mode: 384 });
-    renameSync3(tmp, path);
-  } catch {
-  }
-}
-function noteInstalledVersion(current, path = updateStatePath()) {
-  if (!path) return void 0;
-  const prev = readUpdateState(path);
-  if (prev && prev.current === current) return prev;
-  const next = { current, checked_at: prev?.checked_at ?? 0 };
-  if (prev?.latest && compareVersions(prev.latest, current) > 0) next.latest = prev.latest;
-  if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
-  writeUpdateState(next, path);
-  return next;
-}
-async function checkForUpdate(current, opts = {}) {
-  const config2 = getConfig();
-  const path = opts.path ?? updateStatePath();
-  if (!config2.UPDATE_CHECK || !path || !config2.UPDATE_SOURCE) return void 0;
-  const now = opts.now ?? Date.now();
-  const prev = noteInstalledVersion(current, path);
-  if (!opts.force && prev && prev.checked_at > 0 && now - prev.checked_at < UPDATE_CHECK_INTERVAL_MS) return prev;
-  let released;
-  try {
-    const r = await (opts.fetchImpl ?? fetch)(config2.UPDATE_SOURCE, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (!r.ok) return prev;
-    const body = await r.json();
-    if (typeof body?.version !== "string" || !SEMVER.test(body.version.trim())) return prev;
-    released = body.version.trim().replace(/^v/, "");
-  } catch {
-    return prev;
-  }
-  const next = { current, checked_at: now };
-  if (compareVersions(released, current) > 0) next.latest = released;
-  if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
-  writeUpdateState(next, path);
-  return next;
-}
-var timer2;
-function startUpdateChecks(current) {
-  if (timer2 || !getConfig().UPDATE_CHECK) return;
-  void checkForUpdate(current);
-  timer2 = setInterval(() => void checkForUpdate(current), UPDATE_CHECK_INTERVAL_MS);
-  timer2.unref?.();
-}
 
 // packages/mcp/src/coord.ts
 var EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
@@ -45221,7 +45395,9 @@ ${rec}`;
           try {
             const state = getSyncState();
             lines.push(`Background timer: ${state.timerActive ? "active" : "inactive"}`);
-            lines.push(`Cycles completed: ${state.cycleCount}`);
+            lines.push(`Cycles completed: ${state.cycleCount}${state.skippedCount ? ` (skipped ${state.skippedCount}: another server on this machine synced)` : ""}`);
+            const shared = readCycleRecord();
+            if (shared) lines.push(`Shared sync (all servers on this machine): last cycle ${new Date(shared.finished_at).toISOString()} by pid ${shared.pid}${shared.version ? ` (v${shared.version})` : ""}${shared.pid === process.pid ? ", this server" : ""}; ${shared.cycles} cycles recorded`);
             if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
             if (state.lastStats) lines.push(`Last cycle result: ${formatSyncStats(state.lastStats)}`);
             if (state.lastCycleError) lines.push(`Last cycle error: ${state.lastCycleError}`);
@@ -45646,7 +45822,7 @@ async function main() {
 `));
   }
   if (getConfig().SYNC_ENABLED) {
-    startSync().catch((e) => process.stderr.write(`[yapa] Sync startup error: ${e}
+    startSync({ version: YAPA_VERSION }).catch((e) => process.stderr.write(`[yapa] Sync startup error: ${e}
 `));
   }
   startUpdateChecks(YAPA_VERSION);

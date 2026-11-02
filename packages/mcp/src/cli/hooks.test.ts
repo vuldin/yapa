@@ -103,6 +103,26 @@ describe('freshenFromRemote', () => {
     expect(await freshenFromRemote('project-acme')).toBe(0);
     expect(pullCollection).not.toHaveBeenCalled();
   });
+
+  it('the prompt path skips a collection any session pulled moments ago; session start and backfills never skip', async () => {
+    const core = await import('@yapa/core');
+    configure({ YAPA_SYNC_HEALTH_FILE: join(dir, 'gate', 'sync-health.json') });
+    await core.updateSyncSubscriptions(['project-acme']);
+    await freshenFromRemote('project-acme', { gate: true });
+    expect(pullCollection).toHaveBeenCalledTimes(1);
+    await freshenFromRemote('project-acme', { gate: true }); // another prompt, any session
+    expect(pullCollection).toHaveBeenCalledTimes(1);
+    await freshenFromRemote('project-acme'); // session start
+    expect(pullCollection).toHaveBeenCalledTimes(2);
+    await core.updateSyncSubscriptions([]);
+    await freshenFromRemote('project-acme', { gate: true }); // first visit: backfill
+    expect(pullCollection.mock.calls.at(-1)?.slice(0, 2)).toEqual(['project-acme', 0]);
+    // Outside the window it pulls again.
+    configure({ YAPA_SYNC_HEALTH_FILE: join(dir, 'gate', 'sync-health.json'), YAPA_HOOK_PULL_WINDOW_MS: '0' });
+    const before = pullCollection.mock.calls.length;
+    await freshenFromRemote('project-acme', { gate: true });
+    expect(pullCollection.mock.calls.length).toBe(before + 1);
+  });
 });
 
 describe('userPromptSubmit', () => {

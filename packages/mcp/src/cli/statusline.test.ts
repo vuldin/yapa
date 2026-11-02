@@ -29,19 +29,19 @@ describe('renderSegment', () => {
   });
 
   it('names the remote only when one is set: yapa@v<version> <-> <remote>', () => {
-    expect(renderSegment(rec({ remote: 'c360', last_ok_at: NOW - 120_000 }), NOW, v)).toBe('yapa@v1.6.0 <-> c360 ● synced 2m ago');
-    expect(renderSegment(rec({ label: 'c360' }), NOW, v)).toBe('yapa@v1.6.0 <-> c360 ● synced 1m ago'); // an older writer's label
+    expect(renderSegment(rec({ remote: 'acme', last_ok_at: NOW - 120_000 }), NOW, v)).toBe('yapa@v1.6.0 <-> acme ● synced 2m ago');
+    expect(renderSegment(rec({ label: 'acme' }), NOW, v)).toBe('yapa@v1.6.0 <-> acme ● synced 1m ago'); // an older writer's label
     expect(renderSegment(rec({ label: 'yapa' }), NOW, v)).toBe('yapa@v1.6.0 ● synced 1m ago');
-    expect(renderSegment(rec({ remote: 'c360' }), NOW, { ...v, remote: 'team' })).toBe('yapa@v1.6.0 <-> team ● synced 1m ago');
+    expect(renderSegment(rec({ remote: 'acme' }), NOW, { ...v, remote: 'team' })).toBe('yapa@v1.6.0 <-> team ● synced 1m ago');
     expect(renderSegment(rec({}), NOW, { ...v, label: 'team' })).toBe('yapa@v1.6.0 <-> team ● synced 1m ago');
     expect(renderSegment(rec({ remote: '\x1b[31m ' }), NOW, v)).toBe('yapa@v1.6.0 <-> [31m ● synced 1m ago');
-    expect(renderSegment(undefined, NOW, { ...v, remote: 'c360' })).toBe('yapa@v1.6.0 <-> c360 ○ sync status unknown');
+    expect(renderSegment(undefined, NOW, { ...v, remote: 'acme' })).toBe('yapa@v1.6.0 <-> acme ○ sync status unknown');
   });
 
   it('says when a newer YAPA is out, right after the version', () => {
     const update = { current: '1.6.0', latest: '1.7.0' };
-    expect(renderSegment(rec({ remote: 'c360', last_ok_at: NOW - 120_000 }), NOW, { ...v, update }))
-      .toBe('yapa@v1.6.0 (v1.7.0 available) <-> c360 ● synced 2m ago');
+    expect(renderSegment(rec({ remote: 'acme', last_ok_at: NOW - 120_000 }), NOW, { ...v, update }))
+      .toBe('yapa@v1.6.0 (v1.7.0 available) <-> acme ● synced 2m ago');
     expect(renderSegment(rec({}), NOW, { version: '1.7.0', update })).toBe('yapa@v1.7.0 ● synced 1m ago'); // already updated
     expect(renderSegment(rec({}), NOW, { update })).toBe('yapa@v1.6.0 (v1.7.0 available) ● synced 1m ago'); // version from the record
     expect(renderSegment(rec({}), NOW, { ...v, update, color: true })).toContain('\x1b[33m(v1.7.0 available)\x1b[0m');
@@ -142,9 +142,9 @@ describe('the script as Claude Code runs it', () => {
   });
 
   it('shows a newer release from update-check.json beside the health file', () => {
-    writeFileSync(join(d, 'sync-health.json'), JSON.stringify({ status: 'ok', at: Date.now(), last_ok_at: Date.now(), remote: 'c360', label: 'c360' }));
+    writeFileSync(join(d, 'sync-health.json'), JSON.stringify({ status: 'ok', at: Date.now(), last_ok_at: Date.now(), remote: 'acme', label: 'acme' }));
     writeFileSync(join(d, 'update-check.json'), JSON.stringify({ current: '1.6.0', latest: '1.7.0', checked_at: Date.now() }));
-    expect(run().stdout).toBe('yapa@v1.6.0 (v1.7.0 available) <-> c360 ● synced just now\n');
+    expect(run().stdout).toBe('yapa@v1.6.0 (v1.7.0 available) <-> acme ● synced just now\n');
     rmSync(join(d, 'update-check.json'));
   });
 

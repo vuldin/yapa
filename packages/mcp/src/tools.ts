@@ -79,6 +79,7 @@ import {
   storeMemory,
   suggestCompaction,
   syncCycle,
+  readCycleRecord,
   systemPromptActivate,
   systemPromptDeactivate,
   trainingCancel,
@@ -1520,7 +1521,9 @@ export function registerTools(server: McpServer): void {
           try {
             const state = getSyncState();
             lines.push(`Background timer: ${state.timerActive ? 'active' : 'inactive'}`);
-            lines.push(`Cycles completed: ${state.cycleCount}`);
+            lines.push(`Cycles completed: ${state.cycleCount}${state.skippedCount ? ` (skipped ${state.skippedCount}: another server on this machine synced)` : ''}`);
+            const shared = readCycleRecord();
+            if (shared) lines.push(`Shared sync (all servers on this machine): last cycle ${new Date(shared.finished_at).toISOString()} by pid ${shared.pid}${shared.version ? ` (v${shared.version})` : ''}${shared.pid === process.pid ? ', this server' : ''}; ${shared.cycles} cycles recorded`);
             if (state.lastCycleAt) lines.push(`Last cycle: ${new Date(state.lastCycleAt).toISOString()}`);
             if (state.lastStats) lines.push(`Last cycle result: ${formatSyncStats(state.lastStats)}`);
             if (state.lastCycleError) lines.push(`Last cycle error: ${state.lastCycleError}`);

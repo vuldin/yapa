@@ -8,11 +8,11 @@ description: Show YAPA's version, team remote and sync health in the Claude Code
 The status line shows one segment under the prompt, read from YAPA's local
 sync health record and its daily release check (no network calls of its own):
 
-    yapa@v1.7.0 (v1.8.0 available) <-> c360 ● synced 2m ago
+    yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago
 
 - `yapa@v<version>`: the YAPA running. `(v<new> available)` (yellow) when a
   newer release is out.
-- `<-> c360`: the team remote's name, only when the option `remote_name` is
+- `<-> acme`: the team remote's name, only when the option `remote_name` is
   set. `<->` is printed as is so ligature fonts draw one arrow.
 - The sync state: `● synced 2m ago` (green, with `· 3 to push` when local
   writes are waiting), `● signed out since 09:12 · run: gcloud auth login`
@@ -37,7 +37,7 @@ Only needed when the user removed it, or turned the option `statusline` off.
    right away, with no restart.
 3. If the user already had a status line, theirs is kept: it still runs, and
    the YAPA segment is added as a line beneath it.
-4. To name the remote: `echo '{"remote_name":"c360"}' | claude plugin configure
+4. To name the remote: `echo '{"remote_name":"acme"}' | claude plugin configure
    yapa@yapa --values-stdin` (suggest `!` so it runs in this session), or
    `/plugin` → Configure options. It shows from the next sync check on.
 

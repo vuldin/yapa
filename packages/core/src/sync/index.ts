@@ -4,25 +4,32 @@ import { pushToRemote, emptyPushStats, countUnpushed, type PushStats } from './p
 import { pullFromRemote, emptyPullStats, type PullStats } from './pull.js';
 import { closeSyncBackend, getSyncBackend, isSyncConfigured, lastSyncError, noteSyncOk, syncBackendKind } from './backend.js';
 import { recordSyncHealth, recordUnpushed } from './health.js';
+import { readCycleRecord, recordCycle, shouldRunCycle, tryAcquireCycle } from './shared-cycle.js';
+import { getSyncPullTimestamp } from './sentinel.js';
+import { compareVersions } from '../update-check.js';
 
 export interface SyncStats {
   push: PushStats;
   pull: PullStats;
 }
 
-let syncTimer: ReturnType<typeof setInterval> | null = null;
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
 let syncRunning = false;
+/** The YAPA version running the timer (recorded with each cycle). */
+let runningVersion: string | undefined;
 
 // In-memory sync state for observability
 let lastCycleAt: number | null = null;
 let lastCycleError: string | null = null;
 let cycleCount = 0;
+/** Timer ticks this server skipped because another server synced recently or held the lock. */
+let skippedCount = 0;
 let timerActive = false;
 let lastStats: SyncStats | null = null;
 
 /** Get the current background sync state (in-memory, not persisted). */
 export function getSyncState() {
-  return { lastCycleAt, lastCycleError, cycleCount, timerActive, lastStats, lastError: lastSyncError() ?? null };
+  return { lastCycleAt, lastCycleError, cycleCount, skippedCount, timerActive, lastStats, lastError: lastSyncError() ?? null };
 }
 
 /**
@@ -37,6 +44,7 @@ export async function syncCycle(): Promise<SyncStats | null> {
   }
 
   syncRunning = true;
+  const startedAt = Date.now();
   try {
     let pushStats: PushStats = emptyPushStats();
     let pullStats: PullStats = emptyPullStats();
@@ -91,6 +99,8 @@ export async function syncCycle(): Promise<SyncStats | null> {
     lastCycleError = null;
     cycleCount++;
     lastStats = { push: pushStats, pull: pullStats };
+    // Other servers on this machine skip their next tick.
+    recordCycle({ startedAt, finishedAt: lastCycleAt, ok: !hasErrors, version: runningVersion });
 
     return lastStats;
   } catch (e) {
@@ -99,6 +109,7 @@ export async function syncCycle(): Promise<SyncStats | null> {
     lastCycleAt = Date.now();
     lastCycleError = msg;
     cycleCount++;
+    recordCycle({ startedAt, finishedAt: lastCycleAt, ok: false, version: runningVersion });
     return null;
   } finally {
     syncRunning = false;
@@ -115,7 +126,20 @@ function runTracked<T>(work: Promise<T>): Promise<T> {
 }
 
 /**
- * Debounced, fire-and-forget sync shortly after a local write, so teammates
+ * Push this store's unpushed docs, without the pull half of a cycle: what a
+ * local write needs. Pulls come from the shared interval cycle and the
+ * prompt hook.
+ */
+export async function pushNow(): Promise<PushStats> {
+  const stats = await pushToRemote();
+  const unpushed = await countUnpushed().catch(() => undefined);
+  if (stats.errors === 0) noteSyncOk(unpushed);
+  else if (unpushed !== undefined) recordUnpushed(unpushed);
+  return stats;
+}
+
+/**
+ * Debounced, fire-and-forget push shortly after a local write, so teammates
  * see a new memory/task within seconds instead of on the next interval tick.
  */
 export function scheduleSyncSoon(delayMs: number = getConfig().SYNC_PUSH_DEBOUNCE_MS): void {
@@ -123,8 +147,49 @@ export function scheduleSyncSoon(delayMs: number = getConfig().SYNC_PUSH_DEBOUNC
   if (soonTimer) clearTimeout(soonTimer);
   soonTimer = setTimeout(() => {
     soonTimer = null;
-    runTracked(syncCycle()).catch(e => process.stderr.write(`[yapa-sync] Write-triggered sync error: ${e}\n`));
+    runTracked(pushNow()).catch(e => process.stderr.write(`[yapa-sync] Write-triggered push error: ${e}\n`));
   }, delayMs);
+}
+
+/**
+ * One timer tick: run a full cycle unless another server on this machine
+ * finished one within the interval or is running one now. `initial` (server
+ * start) also runs for a store that has never pulled, and for a server newer
+ * than the one that ran the last cycle.
+ */
+export async function syncTick(opts: { initial?: boolean; now?: number } = {}): Promise<SyncStats | null> {
+  const now = opts.now ?? Date.now();
+  let due = shouldRunCycle(now);
+  if (!due && opts.initial) {
+    const lastPull = await getSyncPullTimestamp().catch(() => 0);
+    const last = readCycleRecord();
+    due = lastPull === 0 || (!!runningVersion && compareVersions(runningVersion, last?.version) > 0);
+  }
+  if (!due) {
+    skippedCount++;
+    return null;
+  }
+  const release = tryAcquireCycle({ now, version: runningVersion });
+  if (!release) {
+    skippedCount++;
+    return null;
+  }
+  try {
+    return await syncCycle();
+  } finally {
+    release();
+  }
+}
+
+/** The next tick, jittered ±10% so servers started together don't fire together. */
+function scheduleTick(): void {
+  const base = getConfig().SYNC_INTERVAL_MS;
+  const delay = Math.max(1000, Math.round(base * (0.9 + Math.random() * 0.2)));
+  syncTimer = setTimeout(() => {
+    runTracked(syncTick())
+      .catch(e => process.stderr.write(`[yapa-sync] Sync error: ${e}\n`))
+      .finally(() => { if (timerActive) scheduleTick(); });
+  }, delay);
 }
 
 /** True while a write-triggered sync is scheduled but hasn't run yet. */
@@ -158,7 +223,8 @@ export async function flushPendingSync(timeoutMs = 5000): Promise<void> {
  * Start the background sync process.
  * Runs schema migration on first connect, then syncs on interval.
  */
-export async function startSync(): Promise<void> {
+export async function startSync(opts: { version?: string } = {}): Promise<void> {
+  if (opts.version) runningVersion = opts.version;
   if (!getConfig().SYNC_ENABLED) {
     recordSyncHealth({ status: 'disabled' });
     return;
@@ -189,14 +255,12 @@ export async function startSync(): Promise<void> {
     process.stderr.write('[yapa-sync] Sync will retry on next interval\n');
   }
 
-  // Run first sync immediately (non-blocking)
-  syncCycle().catch(e => process.stderr.write(`[yapa-sync] Initial sync error: ${e}\n`));
+  // First cycle now (non-blocking), unless another server on this machine just ran one.
+  runTracked(syncTick({ initial: true })).catch(e => process.stderr.write(`[yapa-sync] Initial sync error: ${e}\n`));
 
-  // Schedule recurring sync
-  syncTimer = setInterval(() => {
-    syncCycle().catch(e => process.stderr.write(`[yapa-sync] Sync error: ${e}\n`));
-  }, getConfig().SYNC_INTERVAL_MS);
+  // Recurring cycles, shared with the other servers on this machine.
   timerActive = true;
+  scheduleTick();
 
   process.stderr.write(`[yapa-sync] Background sync started (interval: ${getConfig().SYNC_INTERVAL_MS / 1000}s)\n`);
 }
@@ -215,10 +279,10 @@ export function formatSyncStats({ push, pull }: SyncStats): string {
  * Stop the background sync process and close connections.
  */
 export async function stopSync(): Promise<void> {
+  timerActive = false;
   if (syncTimer) {
-    clearInterval(syncTimer);
+    clearTimeout(syncTimer);
     syncTimer = null;
-    timerActive = false;
   }
   await closeSyncBackend();
   process.stderr.write('[yapa-sync] Sync stopped\n');

@@ -78,7 +78,7 @@
     "remote_name": {
       "type": "string",
       "title": "Remote name",
-      "description": "What your team's sync remote is called (e.g. c360). The status line then reads `yapa@v<version> <-> c360 ● synced 2m ago`; empty shows just `yapa@v<version>`. Set it at install with `claude plugin install yapa@yapa --config remote_name=c360`.",
+      "description": "What your team's sync remote is called (e.g. acme). The status line then reads `yapa@v<version> <-> acme ● synced 2m ago`; empty shows just `yapa@v<version>`. Set it at install with `claude plugin install yapa@yapa --config remote_name=acme`.",
       "default": ""
     },
     "statusline": {

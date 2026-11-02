@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+One sync cycle per interval for the whole machine, however many sessions are open. Each Claude Code session runs its own YAPA server, and each used to run its own full push and pull of every collection every 5 minutes.
+
+**Upgrading:** update the plugin and restart Claude Code, including old sessions: servers older than 1.8.0 keep syncing on their own timer. Nothing to deploy.
+
+### Features
+- **Shared sync cycle.** The servers on one machine share a record of the last cycle and a lock beside the sync health file, keyed by remote, local store and username. A timer tick (now jittered ±10%) skips when another server synced within the interval or holds the lock; a lock whose holder died, or that is older than twice the interval, is taken over. Startup still syncs at once for a store that has never pulled and for a server newer than the last one that synced. A manual `sync now` always runs. `YAPA_SYNC_COORDINATE=false` turns it off. `sync status` shows the shared record and the ticks this server skipped.
+- **A write pushes only.** The sync 2 seconds after a write no longer pulls every collection as well; pulls come from the shared cycle and the prompt hook.
+- **Prompt-hook pull shared too.** The prompt hook skips its pull of the active collection when any session pulled it, or a full cycle finished, in the last 30 seconds (`YAPA_HOOK_PULL_WINDOW_MS`, `0` to always pull). Session start and a collection's first visit (its full backfill) always pull.
+
 ## 1.7.0 (2026-11-01)
 
 The status line now says which YAPA you run, what your team's remote is called, and when a newer YAPA is out, and it sets itself up from the install command.
@@ -7,7 +18,7 @@ The status line now says which YAPA you run, what your team's remote is called, 
 **Upgrading:** update the plugin and restart Claude Code. If you named the status line with "Status line name" (`status_label`), that name carries over; set it from now on with `remote_name`. Nothing to deploy.
 
 ### Features
-- **`yapa@v<version> <-> <remote> ● synced 2m ago`.** The status line starts with the YAPA version running. The new option `remote_name` (`YAPA_REMOTE_NAME`) names your team's sync remote; the name, and the `<->` before it (printed as is, so ligature fonts draw one arrow), appear only when it is set. Set it at install: `claude plugin install yapa@yapa --config remote_name=c360`; change it with `claude plugin configure yapa@yapa --values-stdin` or `/plugin`. `status_label` is deprecated and still read when `remote_name` is empty.
+- **`yapa@v<version> <-> <remote> ● synced 2m ago`.** The status line starts with the YAPA version running. The new option `remote_name` (`YAPA_REMOTE_NAME`) names your team's sync remote; the name, and the `<->` before it (printed as is, so ligature fonts draw one arrow), appear only when it is set. Set it at install: `claude plugin install yapa@yapa --config remote_name=acme`; change it with `claude plugin configure yapa@yapa --values-stdin` or `/plugin`. `status_label` is deprecated and still read when `remote_name` is empty.
 - **New releases on the status line.** The MCP server checks once a day for a newer release (the plugin manifest on `main`; `YAPA_UPDATE_SOURCE`, `YAPA_UPDATE_CHECK=false`), and the status line shows `(v1.8.0 available)` right after the version. The next session start tells Claude the update command once; the note clears itself after updating.
 - **The status line sets itself up.** New option `statusline` (on by default): the session-start hook adds YAPA's status line to `~/.claude/settings.json`, keeping one you already have, so the two install commands are all it takes. Removing it (`--uninstall`, or by hand) keeps it removed; `/yapa:statusline` adds it back.
 
