@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 (2026-11-01)
 
 One sync cycle per interval for the whole machine, however many sessions are open. Each Claude Code session runs its own YAPA server, and each used to run its own full push and pull of every collection every 5 minutes.
 
