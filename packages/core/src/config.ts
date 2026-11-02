@@ -158,6 +158,12 @@ export interface YapaConfig {
   /** Debounce before a write-triggered push (0 disables push-on-write). */
   SYNC_PUSH_DEBOUNCE_MS: number;
   /**
+   * Share one sync cycle per interval among every YAPA server on this machine
+   * (a record and a lock beside SYNC_HEALTH_FILE). Off: each server syncs on
+   * its own timer.
+   */
+  SYNC_COORDINATE: boolean;
+  /**
    * PEM file with the database server's CA. Set: TLS with the server cert
    * verified against it. Unset: TLS without verification (warned), except
    * for localhost, which stays plaintext. A `sslmode` in the URL overrides.
@@ -167,6 +173,8 @@ export interface YapaConfig {
   // Harness hooks (Claude Code)
   /** Cap on the hook's pre-recall pull of the active collection. */
   HOOK_PULL_TIMEOUT_MS: number;
+  /** The prompt hook skips its pull when any session pulled that collection this recently (0: always pull). */
+  HOOK_PULL_WINDOW_MS: number;
   /** Prepend YAPA's standing rules to the SessionStart context (plugin installs). */
   HOOK_INJECT_RULES: boolean;
 
@@ -297,9 +305,11 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     LEASE_STATE_DIR: get(env, 'LEASE_STATE_DIR', process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir(), '.local', 'share', 'yapa', 'leases')),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
+    SYNC_COORDINATE: get(env, 'SYNC_COORDINATE', 'true') !== 'false',
     SYNC_CA_CERT: get(env, 'SYNC_CA_CERT', ''),
 
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, 'HOOK_PULL_TIMEOUT_MS', '4000'), 10),
+    HOOK_PULL_WINDOW_MS: parseInt(get(env, 'HOOK_PULL_WINDOW_MS', '30000'), 10),
     HOOK_INJECT_RULES: get(env, 'HOOK_INJECT_RULES', 'false') === 'true',
 
     RESPONSE_CAPTURE: get(env, 'RESPONSE_CAPTURE', 'true') !== 'false',

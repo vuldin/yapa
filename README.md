@@ -12,14 +12,14 @@ project folders as usual.
 
 ```
 claude plugin marketplace add vuldin/yapa
-claude plugin install yapa@yapa --config remote_name=c360
+claude plugin install yapa@yapa --config remote_name=acme
 ```
 
 `--config remote_name=<name>` names your team's sync remote on the status line
-(`yapa@v1.7.0 <-> c360 ● synced 2m ago`); leave it out for no name. Any option
+(`yapa@v1.7.0 <-> acme ● synced 2m ago`); leave it out for no name. Any option
 below can be set the same way (`--config key=value`, repeatable). Change one
 later without editing a file:
-`echo '{"remote_name":"c360"}' | claude plugin configure yapa@yapa --values-stdin`
+`echo '{"remote_name":"acme"}' | claude plugin configure yapa@yapa --values-stdin`
 (or `/plugin` → Configure options).
 
 **Claude Code via `claude mcp add` / Cursor / OpenCode:** see [Install](#install), or give your AI agent this prompt: `install https://github.com/vuldin/yapa`
@@ -317,12 +317,14 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_SYNC_ID_TOKEN_CMD` | Command printing a Google ID token for the service | `gcloud auth print-identity-token` |
 | `YAPA_SYNC_HTTP_TIMEOUT_MS` | Per-request timeout for the sync service | `15000` |
 | `YAPA_SYNC_DATABASE_URL` | Advanced/self-host: direct PostgreSQL connection string (ignored when a service URL is set) | _(none)_ |
-| `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms | `300000` (5 min) |
+| `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms (one cycle per interval per machine, shared by every session) | `300000` (5 min) |
+| `YAPA_SYNC_COORDINATE` | Share the interval cycle among every YAPA server on this machine; `false`: each server syncs on its own timer | `true` |
 | `YAPA_SYNC_SIMILARITY_THRESHOLD` | Cosine similarity threshold for dedup | `0.95` |
 | `YAPA_SYNC_PUSH_DEBOUNCE_MS` | Delay before a write-triggered push (`0` = interval only) | `2000` |
 | `YAPA_SYNC_PULL_OVERLAP_SECONDS` | Re-read window on each pull so mid-pull pushes are never skipped | `120` |
 | `YAPA_DEVICE_ID` | Stable id for this machine (else generated once at `YAPA_DEVICE_ID_PATH`) | _(generated)_ |
 | `YAPA_HOOK_PULL_TIMEOUT_MS` | Cap on the hooks' pre-recall pull | `4000` |
+| `YAPA_HOOK_PULL_WINDOW_MS` | The prompt hook skips its pull when any session pulled that collection this recently (`0` = always pull) | `30000` |
 | `YAPA_RESPONSE_CAPTURE` | After each turn (Stop hook): capture typed findings and record what the turn settles in open decisions and questions | `true` |
 | `YAPA_CURATION_LLM_PROVIDER` | Aux model for capture/curation: `anthropic` \| `openai` \| `fireworks` \| `ollama` \| `claude-cli` | `anthropic` (hooks fall back to `claude-cli` without a key) |
 | `YAPA_MODEL_CACHE_DIR` | Where the in-process embedder caches model weights | library default |
@@ -343,14 +345,14 @@ Remote sync lets multiple machines or teammates share memories and tasks. It is 
 2. Set `sync_service_url` to your team's YAPA sync service URL (ask your YAPA admin). Any remote that implements [YAPA Sync API v1](docs/sync-api.md) works, including one under a path prefix such as `https://example.com/api/yapa`. Read [Connecting to a remote](docs/connecting-to-a-remote.md) first: the first sync pushes every shared collection to it.
 3. Sign in once: `gcloud auth login` with your company Google account. YAPA calls `gcloud auth print-identity-token` for a short-lived (1 h) ID token and refreshes it before it expires. The current token is cached in a 0600 file (`~/.local/share/yapa/id-token`, set `YAPA_SYNC_ID_TOKEN_CACHE` to another path, or `off` to keep it in memory only) so short-lived hook processes don't mint a new one each time. Other token sources: set `YAPA_SYNC_ID_TOKEN_CMD` to a command that prints an ID token.
 4. Check with the `sync` tool, `action: 'status'`: it shows the backend, the service URL, who you are signed in as, the last error, and any docs the service refused.
-5. The status line shows sync health under the prompt from the first session (option `statusline`), e.g. `yapa@v1.7.0 <-> c360 ● synced 2m ago` or, when your sign-in lapses, `yapa@v1.7.0 <-> c360 ● signed out since 09:12 · run: gcloud auth login`. See [The status line](#sync-health-in-the-status-line).
+5. The status line shows sync health under the prompt from the first session (option `statusline`), e.g. `yapa@v1.7.0 <-> acme ● synced 2m ago` or, when your sign-in lapses, `yapa@v1.7.0 <-> acme ● signed out since 09:12 · run: gcloud auth login`. See [The status line](#sync-health-in-the-status-line).
 
 ### Sync health in the status line
 
 Sync fails quietly by design (local work never waits on the remote), so an expired `gcloud` sign-in used to go unnoticed. The MCP server and the hooks record every sync outcome in `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`; `off` disables it), and a small script turns it into a Claude Code status line segment:
 
 ```
-yapa@v1.7.0 (v1.8.0 available) <-> c360 ● synced 2m ago
+yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago
 └ YAPA's version  └ a newer release  └ your remote  └ sync health
 ```
 
@@ -381,8 +383,10 @@ Instead of the service, `sync_database_url` (`YAPA_SYNC_DATABASE_URL`) connects 
 
 When sync is enabled, YAPA runs a background push/pull cycle every 5 minutes (configurable via `YAPA_SYNC_INTERVAL_MS`), and two faster paths keep teammates current within seconds:
 
-- **Push on write** — every write tool (`memory_store`, `task_update`, …) schedules a debounced push (`YAPA_SYNC_PUSH_DEBOUNCE_MS`), and the MCP server flushes pending pushes on shutdown.
-- **Pull before recall** — the Claude Code hooks pull the active collection right before injecting context, so a teammate's memory from seconds ago shows up on your next prompt.
+- **Push on write** — every write tool (`memory_store`, `task_update`, …) schedules a debounced push (`YAPA_SYNC_PUSH_DEBOUNCE_MS`), and the MCP server flushes pending pushes on shutdown. A write pushes only; pulls come from the cycle and the hooks.
+- **Pull before recall** — the Claude Code hooks pull the active collection right before injecting context, so a teammate's memory from seconds ago shows up on your next prompt. A prompt skips the pull when any session on this machine pulled that collection in the last 30 seconds (`YAPA_HOOK_PULL_WINDOW_MS`); session start and the first visit to a collection always pull.
+
+**One cycle per machine.** Every Claude Code session runs its own YAPA server, and all of them share one local store, so one cycle per interval is enough for all of them. The servers keep a small record of the last cycle and a lock beside the sync health file (`sync-cycle-<key>.json`, `.lock`; the key is a hash of the remote, the local store and the username, so different installs never sync for each other). A server's timer (jittered ±10%) skips when another server finished a cycle within the interval or is running one; a lock whose holder died or is older than twice the interval (at least 10 minutes) is taken over. Anything unreadable means "go ahead", so the worst case is the old behavior of every server syncing. A manual `sync now` always runs. `sync status` shows the shared record and how many ticks this server skipped. Servers older than 1.8.0 don't take part: restart old sessions after updating.
 
 The cycle itself:
 

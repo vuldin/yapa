@@ -39,6 +39,8 @@ import {
   noteInstalledVersion,
   markUpdateNotified,
   refreshSyncHealthNames,
+  shouldPull,
+  recordPull,
 } from '@yapa/core';
 
 import { CLAUDE_CODE_RULES } from '../rules.js';
@@ -113,7 +115,7 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
  * MCP server's next interval pull. Bounded and fail-open: a slow or
  * unreachable remote only costs HOOK_PULL_TIMEOUT_MS.
  */
-export async function freshenFromRemote(collection: string): Promise<number> {
+export async function freshenFromRemote(collection: string, opts: { gate?: boolean } = {}): Promise<number> {
   const config = getConfig();
   if (!isSyncConfigured(config)) return 0;
   // global/private-*/local-* never sync: skip the sign-in and the request.
@@ -124,6 +126,9 @@ export async function freshenFromRemote(collection: string): Promise<number> {
     // background sync keeps it current. Subscribe only after the backfill
     // finished, so a pull cut off by the timeout simply retries next prompt.
     const followed = (await getSyncSubscriptions()).includes(collection);
+    // Another session (or the shared cycle) pulled it moments ago: nothing new
+    // worth a request. A first visit (backfill) is never skipped.
+    if (opts.gate && followed && !shouldPull(collection)) return 0;
     const since = followed ? Math.max(0, (await getSyncPullTimestamp()) - HOOK_PULL_OVERLAP_SECONDS) : 0;
     // The service's username (Google account) drives "by <user>" attribution.
     const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
@@ -131,7 +136,10 @@ export async function freshenFromRemote(collection: string): Promise<number> {
       process.stderr.write(`[yapa-hook] remote pull for ${collection} timed out\n`);
       return 0;
     }
-    if (stats.errors === 0) noteSyncOk();
+    if (stats.errors === 0) {
+      noteSyncOk();
+      recordPull(collection);
+    }
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();
       if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
@@ -503,7 +511,7 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
   const detection = await detectCollection(input.cwd);
   const collection = detection.collection;
   recordPrompt(input.session_id, prompt);
-  await Promise.all([freshenFromRemote(collection), keepLeasesAlive(input)]);
+  await Promise.all([freshenFromRemote(collection, { gate: true }), keepLeasesAlive(input)]);
 
   const lines: string[] = ['# YAPA Recall', '', `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`];
   const notice = takeNotice(input.session_id);

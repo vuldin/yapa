@@ -115,7 +115,7 @@ async function main(): Promise<void> {
 
   // Start remote sync if enabled
   if (getConfig().SYNC_ENABLED) {
-    startSync().catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));
+    startSync({ version: YAPA_VERSION }).catch(e => process.stderr.write(`[yapa] Sync startup error: ${e}\n`));
   }
 
   // Is a newer YAPA out? Daily, in the background (update-check.json, read by the status line).

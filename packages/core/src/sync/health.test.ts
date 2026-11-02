@@ -91,9 +91,9 @@ describe('refreshSyncHealthNames', () => {
   it('renames the remote in place, and records local only when sync is off and nothing is there', async () => {
     const { refreshSyncHealthNames, readSyncHealth, recordSyncHealth } = await import('./health.js');
     recordSyncHealth({ status: 'ok' }, 5000, file);
-    setConfig(createConfig({ YAPA_SYNC_HEALTH_FILE: file, YAPA_REMOTE_NAME: 'c360' }));
+    setConfig(createConfig({ YAPA_SYNC_HEALTH_FILE: file, YAPA_REMOTE_NAME: 'acme' }));
     refreshSyncHealthNames(true, file);
-    expect(readSyncHealth(file)).toMatchObject({ status: 'ok', at: 5000, remote: 'c360' });
+    expect(readSyncHealth(file)).toMatchObject({ status: 'ok', at: 5000, remote: 'acme' });
     setConfig(createConfig({ YAPA_SYNC_HEALTH_FILE: file }));
     refreshSyncHealthNames(true, file);
     expect(readSyncHealth(file)?.remote).toBeUndefined();

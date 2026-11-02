@@ -33,11 +33,20 @@ describe('createConfig', () => {
 describe('remote name', () => {
   it('comes from REMOTE_NAME, else a legacy status line name other than yapa', () => {
     expect(createConfig({}).REMOTE_NAME).toBe('');
-    expect(createConfig({ YAPA_REMOTE_NAME: ' c360 ' }).REMOTE_NAME).toBe('c360');
-    expect(createConfig({ YAPA_STATUS_LABEL: 'c360' }).REMOTE_NAME).toBe('c360');
+    expect(createConfig({ YAPA_REMOTE_NAME: ' acme ' }).REMOTE_NAME).toBe('acme');
+    expect(createConfig({ YAPA_STATUS_LABEL: 'acme' }).REMOTE_NAME).toBe('acme');
     expect(createConfig({ YAPA_STATUS_LABEL: 'yapa' }).REMOTE_NAME).toBe('');
     expect(createConfig({ YAPA_REMOTE_NAME: 'team', YAPA_STATUS_LABEL: 'old' }).REMOTE_NAME).toBe('team');
     expect(createConfig({ YAPA_STATUSLINE: 'true' }).STATUSLINE).toBe(true);
     expect(createConfig({ YAPA_STATUSLINE: 'false' }).STATUSLINE).toBe(false);
+  });
+});
+
+describe('shared sync cycle', () => {
+  it('is on by default with a 30 s prompt-pull window', () => {
+    expect(createConfig({}).SYNC_COORDINATE).toBe(true);
+    expect(createConfig({ YAPA_SYNC_COORDINATE: 'false' }).SYNC_COORDINATE).toBe(false);
+    expect(createConfig({}).HOOK_PULL_WINDOW_MS).toBe(30000);
+    expect(createConfig({ YAPA_HOOK_PULL_WINDOW_MS: '0' }).HOOK_PULL_WINDOW_MS).toBe(0);
   });
 });

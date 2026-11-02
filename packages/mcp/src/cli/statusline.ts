@@ -6,7 +6,7 @@
 // packages/core update-check.ts). No network, no gcloud: it runs after every
 // assistant message.
 //
-//   yapa@v1.6.0 (v1.7.0 available) <-> c360 ● synced 2m ago
+//   yapa@v1.6.0 (v1.7.0 available) <-> acme ● synced 2m ago
 //
 // `<->` is printed as is, so a font with programming ligatures draws one
 // arrow; it appears only when the remote has a name (option remote_name).
