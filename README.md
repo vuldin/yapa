@@ -352,8 +352,8 @@ Remote sync lets multiple machines or teammates share memories and tasks. It is 
 Sync fails quietly by design (local work never waits on the remote), so an expired `gcloud` sign-in used to go unnoticed. The MCP server and the hooks record every sync outcome in `~/.local/share/yapa/sync-health.json` (`YAPA_SYNC_HEALTH_FILE`; `off` disables it), and a small script turns it into a Claude Code status line segment:
 
 ```
-yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago
-└ YAPA's version  └ a newer release  └ your remote  └ sync health
+yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago | project-acme
+└ YAPA's version  └ a newer release  └ your remote  └ sync health  └ last written
 ```
 
 `<->` is printed as is, so a font with programming ligatures (Fira Code, JetBrains Mono, Cascadia Code, ...) draws it as one arrow. It and the name appear only when `remote_name` is set. The sync states:
@@ -367,9 +367,10 @@ yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago
 | `○ local only` / `○ sync status unknown` (dim) | sync is off / no recent check |
 
 - **Install:** automatic. With the option `statusline` on (the default), the session-start hook writes `statusLine` in `~/.claude/settings.json`, pointing at a stable copy of the script (`~/.local/share/yapa/statusline.mjs`, refreshed by the session-start hook so plugin updates reach it). A status line you already had keeps running, with the YAPA segment as a line beneath it. `node ~/.local/share/yapa/statusline.mjs --uninstall` (or `yapa statusline uninstall`) restores it, and YAPA then leaves it removed; `/yapa:statusline` or `yapa statusline install` adds it back.
+- **Last written:** after ` | `, the collection this session last wrote to through the YAPA tools or the `yapa memory` / `yapa task` CLI (a memory stored or updated, a task created, updated, claimed or deleted, a journal entry, a merge). Nothing shows until the session's first write; reads, sync pulls and background sweeps never change it. Each session keeps its own, in `~/.local/share/yapa/last-write/<session id>.json`.
 - **Name:** the option `remote_name` (`YAPA_REMOTE_NAME`). The older `status_label` is still read when `remote_name` is empty.
 - **New releases:** the MCP server checks once a day (the plugin manifest on `main`, `YAPA_UPDATE_SOURCE`; `YAPA_UPDATE_CHECK=false` turns it off) and keeps the answer in `~/.local/share/yapa/update-check.json`. The status line shows `(v1.8.0 available)`, and the next session start tells Claude the update command (`claude plugin marketplace update yapa && claude plugin update yapa@yapa`, then restart). The note clears itself once you run the new version.
-- **Cost:** the script reads one local file; no network, no `gcloud`.
+- **Cost:** the script reads a few small local files; no network, no `gcloud`.
 - **Recovery:** after `gcloud auth login`, the next request mints a new token; no restart. The segment turns green at the next sync cycle or prompt.
 - While sync is down, the hooks also tell Claude, so it doesn't claim your writes reached teammates.
 

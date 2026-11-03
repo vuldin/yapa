@@ -10,6 +10,11 @@
 //
 // `<->` is printed as is, so a font with programming ligatures draws one
 // arrow; it appears only when the remote has a name (option remote_name).
+// After ` | ` comes the collection this session last wrote to
+// (last-write/<session>.json, packages/core last-write.ts), once it has
+// written one:
+//
+//   yapa@v1.8.0 <-> acme ● synced 1m ago | project-acme
 //
 // SELF-CONTAINED: node built-ins only, no local imports. It is copied as a
 // single file to a stable path (~/.local/share/yapa/statusline.mjs) because
@@ -115,6 +120,8 @@ export interface RenderOptions {
   version?: string;
   /** What update-check.json says. */
   update?: UpdateRecord;
+  /** The collection this session last wrote to. */
+  collection?: string;
 }
 
 /** The segment for `health` (undefined: no record yet). */
@@ -128,7 +135,8 @@ export function renderSegment(health: HealthRecord | undefined, now: number, opt
     + (remote ? ` <-> ${remote}` : '');
   const push = health?.unpushed ? ` · ${health.unpushed} to push` : '';
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : '';
-  const state = (tone: Tone, text: string) => `${head} ${paint(tone, text)}`;
+  const tail = cleanCollection(opts.collection);
+  const state = (tone: Tone, text: string) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ''}`;
 
   if (!health) return state('dim', '○ sync status unknown');
   switch (health.status) {
@@ -151,6 +159,42 @@ export function renderSegment(health: HealthRecord | undefined, now: number, opt
     }
     default:
       return state('dim', '○ sync status unknown');
+  }
+}
+
+function cleanCollection(name: unknown): string | undefined {
+  if (typeof name !== 'string') return undefined;
+  const v = name.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64);
+  return v || undefined;
+}
+
+export interface LastWrite {
+  collection: string;
+  at: number;
+}
+
+/** The newest last-write record among `sessions` (the same file names as core's lastWriteFile). */
+export function readLastWrite(dir: string, sessions: Array<string | undefined>): LastWrite | undefined {
+  let best: LastWrite | undefined;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, '_')}.json`), 'utf-8'));
+      if (r && typeof r.collection === 'string' && typeof r.at === 'number' && (!best || r.at > best.at)) best = r;
+    } catch {
+      // none for this id
+    }
+  }
+  return best;
+}
+
+/** `session_id` from the JSON Claude Code sends the status line on stdin. */
+export function stdinSession(input: string): string | undefined {
+  try {
+    const v = JSON.parse(input)?.session_id;
+    return typeof v === 'string' ? v : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -344,9 +388,12 @@ export async function main(args: string[], self: string): Promise<void> {
 
   const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join(dirname(self), 'sync-health.json');
   const update = readUpdate(join(dirname(healthPath), 'update-check.json'));
+  // The session on stdin, and the id Claude Code started with (the MCP server
+  // keeps that one after /clear): whichever wrote last.
+  const last = readLastWrite(join(dirname(healthPath), 'last-write'), [stdinSession(input), process.env.CLAUDE_CODE_SESSION_ID]);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
-    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update,
+    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection: last?.collection,
   }) + '\n');
 }
 

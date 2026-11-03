@@ -8,7 +8,7 @@ description: Show YAPA's version, team remote and sync health in the Claude Code
 The status line shows one segment under the prompt, read from YAPA's local
 sync health record and its daily release check (no network calls of its own):
 
-    yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago
+    yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago | project-acme
 
 - `yapa@v<version>`: the YAPA running. `(v<new> available)` (yellow) when a
   newer release is out.
@@ -18,6 +18,9 @@ sync health record and its daily release check (no network calls of its own):
   writes are waiting), `● signed out since 09:12 · run: gcloud auth login`
   (red), `● offline since 09:12` / `● sync error ...` (yellow), `○ local only` /
   `○ sync status unknown` (dim).
+- `| project-acme`: the collection this session last wrote to (a memory,
+  task, journal entry or merge through YAPA). Absent until the session's
+  first write.
 
 YAPA adds it by itself at session start while the option `statusline` is on
 (the default), unless the user removed it.

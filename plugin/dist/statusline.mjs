@@ -57,7 +57,8 @@ function renderSegment(health, now, opts = {}) {
   const head = `yapa${version ? `@v${version}` : ""}` + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
-  const state = (tone, text) => `${head} ${paint(tone, text)}`;
+  const tail = cleanCollection(opts.collection);
+  const state = (tone, text) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ""}`;
   if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
     case "disabled":
@@ -79,6 +80,31 @@ function renderSegment(health, now, opts = {}) {
     }
     default:
       return state("dim", "\u25CB sync status unknown");
+  }
+}
+function cleanCollection(name) {
+  if (typeof name !== "string") return void 0;
+  const v = name.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64);
+  return v || void 0;
+}
+function readLastWrite(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
+    } catch {
+    }
+  }
+  return best;
+}
+function stdinSession(input) {
+  try {
+    const v = JSON.parse(input)?.session_id;
+    return typeof v === "string" ? v : void 0;
+  } catch {
+    return void 0;
   }
 }
 function readUpdate(path) {
@@ -235,11 +261,13 @@ async function main(args, self2) {
   }
   const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join(dirname(self2), "sync-health.json");
   const update = readUpdate(join(dirname(healthPath), "update-check.json"));
+  const last = readLastWrite(join(dirname(healthPath), "last-write"), [stdinSession(input), process.env.CLAUDE_CODE_SESSION_ID]);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
-    update
+    update,
+    collection: last?.collection
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -271,9 +299,11 @@ export {
   mergeStatusLine,
   newer,
   readHealth,
+  readLastWrite,
   readUpdate,
   removeStatusLine,
   renderSegment,
   setRemovedMarker,
+  stdinSession,
   uninstallStatusLine
 };

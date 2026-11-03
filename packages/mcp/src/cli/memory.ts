@@ -10,7 +10,7 @@
  */
 import {
   getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError,
-  updateMemory, waitingOn, formatWaiting, type TypedFields,
+  recordLastWrite, updateMemory, waitingOn, formatWaiting, type TypedFields,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -151,6 +151,7 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         const { content, tags, typed } = split(await input(args));
         if (!content?.trim()) throw new UsageError('content is required (--content or "content" in --stdin-json)');
         const r = await putExternal(collection, ref, { content, typed, tags });
+        recordLastWrite(collection);
         return { exit: 0, json: { ok: true, ...r, ref }, text: `${r.id} ${r.action}` };
       }
       case 'update': {
@@ -158,6 +159,7 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         if (!id) throw new UsageError('memory id required');
         const { content, note, tags, typed } = split(await input(args));
         const r = await updateMemory(id, { ...typed, ...(content !== undefined ? { content } : {}), ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, flag(args, '--collection'));
+        recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
       }
       default:

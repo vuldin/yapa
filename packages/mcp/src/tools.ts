@@ -57,6 +57,7 @@ import {
   readSyncHealth,
   getSyncSubscriptions,
   getTask,
+  recordLastWrite,
   janitorSweep,
   journalAppend,
   journalConsolidate,
@@ -224,6 +225,7 @@ export function registerTools(server: McpServer): void {
       let result;
       try {
         result = await storeMemory(content, { tags, salience, sector, collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
+        recordLastWrite(collection ?? 'global');
       } catch (e) {
         return typedError(e);
       }
@@ -291,6 +293,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ id }) => {
       const collection = await forgetMemory(id);
+      recordLastWrite(collection);
       return {
         content: [{ type: 'text' as const, text: `Deleted ${id} from collection "${collection}"` }],
       };
@@ -355,6 +358,7 @@ export function registerTools(server: McpServer): void {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       try {
         const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, collection);
+        recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
         return { content: [{ type: 'text' as const, text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ''}` }] };
       } catch (e) {
@@ -417,6 +421,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ collection, member_ids, summary, tags }) => {
       const result = await applyCompaction({ collection, member_ids, summary, tags });
+      recordLastWrite(collection);
       return {
         content: [{
           type: 'text' as const,
@@ -436,6 +441,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ entry, collection }) => {
       const id = await journalAppend(entry, collection);
+      recordLastWrite(collection ?? 'global');
       return { content: [{ type: 'text' as const, text: `Journal draft saved: ${id}` }] };
     },
   );
@@ -449,6 +455,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ collection, summary }) => {
       const result = await journalConsolidate({ collection, summary });
+      recordLastWrite(collection ?? 'global');
       if (!result) {
         return { content: [{ type: 'text' as const, text: 'No journal drafts found for this session — nothing to consolidate.' }] };
       }
@@ -1033,6 +1040,7 @@ export function registerTools(server: McpServer): void {
       const id = await createTask(title, {
         priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, claim_scope,
       }, collection ?? 'global');
+      recordLastWrite(collection ?? 'global');
 
       let text = `Created task ${id}: "${title}"`;
       if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
@@ -1170,8 +1178,10 @@ export function registerTools(server: McpServer): void {
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
+        const taskCollection = (await getTask(r.id))?.collection;
+        recordLastWrite(taskCollection);
         const recorded = learned?.length || follow_ups?.length
-          ? await recordForTask({ id: r.id, collection: (await getTask(r.id))!.collection }, { learned, follow_ups })
+          ? await recordForTask({ id: r.id, collection: taskCollection! }, { learned, follow_ups })
           : undefined;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
         if (decision) text += `\nRecorded decision ${decision} (needed${decision_needed!.owner ? `, for ${decision_needed!.owner}` : ''}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
@@ -1209,6 +1219,7 @@ export function registerTools(server: McpServer): void {
       let result;
       try {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
+        recordLastWrite((await getTask(id))?.collection);
       } catch (e) {
         return typedError(e);
       }
@@ -1239,6 +1250,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ collection, tags, exclude_tags, claim, auto_only, include_cleanup, limit }) => {
       const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim, autoOnly: auto_only, includeCleanup: include_cleanup });
+      if (r.claimed) recordLastWrite(collection);
       const lines: string[] = [];
       if (!r.claimsKnown) lines.push('_Claims could not be read (offline or signed out): teammates may already be on some of these._');
       if (claim) {
@@ -1281,6 +1293,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ id }) => {
       const collection = await deleteTask(id);
+      recordLastWrite(collection);
       return {
         content: [{ type: 'text' as const, text: `Deleted task ${id} from collection "${collection}"` }],
       };
@@ -1317,6 +1330,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ task_id, depends_on_id }) => {
       await addDependency(task_id, depends_on_id);
+      recordLastWrite((await getTask(task_id))?.collection);
       return {
         content: [{ type: 'text' as const, text: `${task_id} now depends on ${depends_on_id}` }],
       };
@@ -1332,6 +1346,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ task_id, depends_on_id }) => {
       await removeDependency(task_id, depends_on_id);
+      recordLastWrite((await getTask(task_id))?.collection);
       return {
         content: [{ type: 'text' as const, text: `${task_id} no longer depends on ${depends_on_id}` }],
       };
@@ -1427,6 +1442,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ from, into, dry_run }) => {
       const r = await mergeCollections(from, into, { dryRun: dry_run });
+      if (!r.dryRun) recordLastWrite(into);
       const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
       const lines = r.dryRun
         ? [`Dry run: would move ${r.moved} document(s) from "${from}" into "${into}" (${types}), then remove "${from}". Nothing changed.`]

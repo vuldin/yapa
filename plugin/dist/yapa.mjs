@@ -8093,6 +8093,67 @@ var init_external = __esm({
   }
 });
 
+// packages/core/src/last-write.ts
+import { mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, renameSync as renameSync5, rmSync as rmSync4, statSync, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname6, join as join9 } from "node:path";
+function lastWriteDir() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join9(dirname6(health), "last-write") : "";
+}
+function lastWriteFile(session, dir = lastWriteDir()) {
+  return join9(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function recordLastWrite(collection, opts = {}) {
+  const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
+  const dir = opts.dir ?? lastWriteDir();
+  if (!collection || !session || !dir) return;
+  const now = opts.now ?? Date.now();
+  try {
+    mkdirSync10(dir, { recursive: true, mode: 448 });
+    const file = lastWriteFile(session, dir);
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync10(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
+    renameSync5(tmp, file);
+    if (!pruned) {
+      pruned = true;
+      pruneLastWrites(dir, now);
+    }
+  } catch {
+  }
+}
+function readLastWrite(session, dir = lastWriteDir()) {
+  if (!dir) return void 0;
+  try {
+    const r = JSON.parse(readFileSync14(lastWriteFile(session, dir), "utf-8"));
+    return r && typeof r.collection === "string" && typeof r.at === "number" ? r : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
+  if (!dir) return;
+  try {
+    for (const name of readdirSync3(dir)) {
+      const p = join9(dir, name);
+      try {
+        if (now - statSync(p).mtimeMs > PRUNE_AFTER_MS) rmSync4(p, { force: true });
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+var PRUNE_AFTER_MS, pruned;
+var init_last_write = __esm({
+  "packages/core/src/last-write.ts"() {
+    "use strict";
+    init_config();
+    init_coordination();
+    PRUNE_AFTER_MS = 7 * 24 * 3600 * 1e3;
+    pruned = false;
+  }
+});
+
 // packages/core/src/index.ts
 var src_exports = {};
 __export(src_exports, {
@@ -8268,6 +8329,8 @@ __export(src_exports, {
   judgeAggregate: () => judgeAggregate,
   judgeVerification: () => judgeVerification,
   lastSyncError: () => lastSyncError,
+  lastWriteDir: () => lastWriteDir,
+  lastWriteFile: () => lastWriteFile,
   linkMemoryToTasks: () => linkMemoryToTasks,
   listAdapters: () => listAdapters,
   listCollections: () => listCollections2,
@@ -8303,6 +8366,7 @@ __export(src_exports, {
   passesPromotedFilter: () => passesPromotedFilter,
   passesScoreFilters: () => passesScoreFilters,
   pidAlive: () => pidAlive,
+  pruneLastWrites: () => pruneLastWrites,
   pullCollection: () => pullCollection,
   pullFromRemote: () => pullFromRemote,
   pushDocsNow: () => pushDocsNow,
@@ -8317,12 +8381,14 @@ __export(src_exports, {
   readArtifact: () => readArtifact,
   readCycleRecord: () => readCycleRecord,
   readHoldoutFile: () => readHoldoutFile,
+  readLastWrite: () => readLastWrite,
   readManifestSource: () => readManifestSource,
   readSyncHealth: () => readSyncHealth,
   readUpdateState: () => readUpdateState,
   recallMemory: () => recallMemory,
   recordCycle: () => recordCycle,
   recordForTask: () => recordForTask,
+  recordLastWrite: () => recordLastWrite,
   recordPull: () => recordPull,
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
@@ -8476,6 +8542,7 @@ var init_src = __esm({
     init_close();
     init_follow_through();
     init_update_check();
+    init_last_write();
   }
 });
 
@@ -8546,16 +8613,18 @@ __export(statusline_exports, {
   mergeStatusLine: () => mergeStatusLine,
   newer: () => newer,
   readHealth: () => readHealth,
+  readLastWrite: () => readLastWrite2,
   readUpdate: () => readUpdate,
   removeStatusLine: () => removeStatusLine,
   renderSegment: () => renderSegment,
   setRemovedMarker: () => setRemovedMarker,
+  stdinSession: () => stdinSession,
   uninstallStatusLine: () => uninstallStatusLine
 });
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync10, readFileSync as readFileSync14, realpathSync, renameSync as renameSync5, rmSync as rmSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync15, realpathSync, renameSync as renameSync6, rmSync as rmSync5, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname6, join as join9, resolve } from "node:path";
+import { dirname as dirname7, join as join10, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -8601,7 +8670,8 @@ function renderSegment(health, now, opts = {}) {
   const head = `yapa${version ? `@v${version}` : ""}` + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
-  const state = (tone, text) => `${head} ${paint(tone, text)}`;
+  const tail = cleanCollection(opts.collection);
+  const state = (tone, text) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ""}`;
   if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
     case "disabled":
@@ -8625,9 +8695,34 @@ function renderSegment(health, now, opts = {}) {
       return state("dim", "\u25CB sync status unknown");
   }
 }
+function cleanCollection(name) {
+  if (typeof name !== "string") return void 0;
+  const v = name.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64);
+  return v || void 0;
+}
+function readLastWrite2(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync15(join10(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
+    } catch {
+    }
+  }
+  return best;
+}
+function stdinSession(input2) {
+  try {
+    const v = JSON.parse(input2)?.session_id;
+    return typeof v === "string" ? v : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function readUpdate(path) {
   try {
-    const u = JSON.parse(readFileSync14(path, "utf-8"));
+    const u = JSON.parse(readFileSync15(path, "utf-8"));
     return u && typeof u === "object" ? { current: typeof u.current === "string" ? u.current : void 0, latest: typeof u.latest === "string" ? u.latest : void 0 } : void 0;
   } catch {
     return void 0;
@@ -8635,7 +8730,7 @@ function readUpdate(path) {
 }
 function readHealth(path) {
   try {
-    const h = JSON.parse(readFileSync14(path, "utf-8"));
+    const h = JSON.parse(readFileSync15(path, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -8683,21 +8778,21 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join9(process.env.CLAUDE_CONFIG_DIR ?? join9(homedir3(), ".claude"), "settings.json");
+  return join10(process.env.CLAUDE_CONFIG_DIR ?? join10(homedir3(), ".claude"), "settings.json");
 }
 function readSettings(path) {
   try {
-    return JSON.parse(readFileSync14(path, "utf-8"));
+    return JSON.parse(readFileSync15(path, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);
   }
 }
 function writeSettings(path, settings) {
-  mkdirSync10(dirname6(path), { recursive: true });
+  mkdirSync11(dirname7(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
-  renameSync5(tmp, path);
+  writeFileSync11(tmp, JSON.stringify(settings, null, 2) + "\n");
+  renameSync6(tmp, path);
 }
 function installStatusLine(script, path = defaultSettingsPath()) {
   writeSettings(path, mergeStatusLine(readSettings(path), script));
@@ -8709,7 +8804,7 @@ function uninstallStatusLine(path = defaultSettingsPath(), script) {
 }
 function hasStatusLine(path = defaultSettingsPath(), script) {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync14(path, "utf-8")).statusLine, script);
+    return isYapaStatusLine(JSON.parse(readFileSync15(path, "utf-8")).statusLine, script);
   } catch {
     return false;
   }
@@ -8717,29 +8812,29 @@ function hasStatusLine(path = defaultSettingsPath(), script) {
 function copyScript(from, to) {
   let src;
   try {
-    src = readFileSync14(from);
+    src = readFileSync15(from);
   } catch {
     return false;
   }
   try {
-    if (readFileSync14(to).equals(src)) return false;
+    if (readFileSync15(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync10(dirname6(to), { recursive: true, mode: 448 });
+  mkdirSync11(dirname7(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
-  renameSync5(tmp, to);
+  renameSync6(tmp, to);
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join9(dir, REMOVED_MARKER);
+  const p = join10(dir, REMOVED_MARKER);
   try {
     if (removed) {
-      mkdirSync10(dir, { recursive: true, mode: 448 });
-      writeFileSync10(p, `${(/* @__PURE__ */ new Date()).toISOString()}
+      mkdirSync11(dir, { recursive: true, mode: 448 });
+      writeFileSync11(p, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
     } else {
-      rmSync4(p, { force: true });
+      rmSync5(p, { force: true });
     }
   } catch {
   }
@@ -8759,13 +8854,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
-    setRemovedMarker(dirname6(self2), false);
+    setRemovedMarker(dirname7(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
     process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
-    setRemovedMarker(dirname6(self2), true);
+    setRemovedMarker(dirname7(self2), true);
     return;
   }
   const input2 = await readStdin();
@@ -8776,13 +8871,15 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join9(dirname6(self2), "sync-health.json");
-  const update = readUpdate(join9(dirname6(healthPath), "update-check.json"));
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join10(dirname7(self2), "sync-health.json");
+  const update = readUpdate(join10(dirname7(healthPath), "update-check.json"));
+  const last = readLastWrite2(join10(dirname7(healthPath), "last-write"), [stdinSession(input2), process.env.CLAUDE_CODE_SESSION_ID]);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
-    update
+    update,
+    collection: last?.collection
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -8845,9 +8942,9 @@ __export(hooks_exports, {
   userText: () => userText,
   waitingLines: () => waitingLines
 });
-import { existsSync as existsSync4, mkdirSync as mkdirSync11, readFileSync as readFileSync15, rmSync as rmSync5, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync16, rmSync as rmSync6, writeFileSync as writeFileSync12 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname7, join as join10 } from "node:path";
+import { dirname as dirname8, join as join11 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -8911,11 +9008,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join10(dirname7(health), "statusline.mjs") : void 0;
+  return health ? join11(dirname8(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
-  const here = dirname7(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join10(here, f)).find((p) => existsSync4(p));
+  const here = dirname8(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join11(here, f)).find((p) => existsSync4(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -8929,12 +9026,12 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join10(dirname7(to), "statusline-added");
-    if (existsSync4(join10(dirname7(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    const added = join11(dirname8(to), "statusline-added");
+    if (existsSync4(join11(dirname8(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
-        writeFileSync11(added, `${(/* @__PURE__ */ new Date()).toISOString()}
+        writeFileSync12(added, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
       } catch {
       }
@@ -8946,10 +9043,10 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join10(dirname7(to), "statusline-hint");
+  const marker = join11(dirname8(to), "statusline-hint");
   if (existsSync4(marker)) return void 0;
   try {
-    writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
+    writeFileSync12(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   } catch {
     return void 0;
@@ -8965,17 +9062,17 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join10(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join10(base, "sessions");
-  mkdirSync11(dir, { recursive: true });
+  const base = process.env.CLAUDE_PLUGIN_DATA || join11(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join11(base, "sessions");
+  mkdirSync12(dir, { recursive: true });
   return dir;
 }
 function stateFile(sessionId, kind) {
-  return join10(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join11(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId) {
   try {
-    return JSON.parse(readFileSync15(stateFile(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync16(stateFile(sessionId, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -8984,7 +9081,7 @@ function recordPrompt(sessionId, prompt) {
   if (!sessionId) return;
   try {
     const turn = (readTurn(sessionId)?.turn ?? 0) + 1;
-    writeFileSync11(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
+    writeFileSync12(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
@@ -8994,8 +9091,8 @@ function takeNotice(sessionId) {
   if (!sessionId) return void 0;
   const file = stateFile(sessionId, "notice");
   try {
-    const notice = readFileSync15(file, "utf-8").trim();
-    rmSync5(file, { force: true });
+    const notice = readFileSync16(file, "utf-8").trim();
+    rmSync6(file, { force: true });
     return notice || void 0;
   } catch {
     return void 0;
@@ -9209,7 +9306,7 @@ async function stop(input2) {
         taskIds: heldKeys(currentSession(input2.session_id) ?? input2.session_id, collection).filter((k) => !k.startsWith("cleanup:"))
       }
     );
-    if (result.notice) writeFileSync11(stateFile(input2.session_id, "notice"), result.notice);
+    if (result.notice) writeFileSync12(stateFile(input2.session_id, "notice"), result.notice);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -9240,7 +9337,7 @@ async function sessionEnd(input2) {
   if (!input2.session_id) return;
   for (const kind of ["turn", "notice"]) {
     try {
-      rmSync5(stateFile(input2.session_id, kind), { force: true });
+      rmSync6(stateFile(input2.session_id, kind), { force: true });
     } catch {
     }
   }
@@ -9275,9 +9372,9 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync12, readFileSync as readFileSync16, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync13, readFileSync as readFileSync17, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname8, join as join11 } from "node:path";
+import { dirname as dirname9, join as join12 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -9304,14 +9401,14 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join11(process.env.CLAUDE_CONFIG_DIR ?? join11(homedir4(), ".claude"), "settings.json");
+  return join12(process.env.CLAUDE_CONFIG_DIR ?? join12(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
 function readSettings2(path) {
   try {
-    return JSON.parse(readFileSync16(path, "utf-8"));
+    return JSON.parse(readFileSync17(path, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path}: ${e?.message ?? e}`);
@@ -9319,12 +9416,12 @@ function readSettings2(path) {
 }
 function installHooks(path = defaultSettingsPath2(), command = selfCommand()) {
   const merged = mergeHooks(readSettings2(path), command);
-  mkdirSync12(dirname8(path), { recursive: true });
-  writeFileSync12(path, JSON.stringify(merged, null, 2) + "\n");
+  mkdirSync13(dirname9(path), { recursive: true });
+  writeFileSync13(path, JSON.stringify(merged, null, 2) + "\n");
   return path;
 }
 function uninstallHooks(path = defaultSettingsPath2()) {
-  writeFileSync12(path, JSON.stringify(removeHooks(readSettings2(path)), null, 2) + "\n");
+  writeFileSync13(path, JSON.stringify(removeHooks(readSettings2(path)), null, 2) + "\n");
   return path;
 }
 var HOOK_EVENTS, MARKER;
@@ -9450,7 +9547,7 @@ __export(task_exports, {
   TASK_USAGE: () => TASK_USAGE,
   runTask: () => runTask
 });
-import { readFileSync as readFileSync17 } from "node:fs";
+import { readFileSync as readFileSync18 } from "node:fs";
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -9559,6 +9656,7 @@ async function dispatch(sub, args) {
         includeCleanup: args.includes("--include-cleanup"),
         ...claimOpts
       });
+      if (r.claimed) recordLastWrite(collection);
       const json = { ok: true, claims_known: r.claimsKnown, ready: r.ready, skipped: r.skipped, cleanup: r.cleanup, claimed: claimJson(r.claimed) };
       if (!args.includes("--claim")) {
         return { exit: EXIT.ok, json, text: r.ready.length ? `next: ${r.ready[0].id} ${r.ready[0].title} (${r.ready.length} ready)` : "nothing ready" };
@@ -9575,6 +9673,7 @@ async function dispatch(sub, args) {
         return { exit: claimExit(c), json: { ok: c.kind !== "refused", id: positional2, session: claimSession(session), claim: claimJson(c) }, text: describeClaim(c) || `claimed ${positional2}` };
       }
       const r = await updateTask(positional2, { status: "in_progress" }, claimOpts);
+      recordLastWrite((await getTask(r.id))?.collection);
       return {
         exit: claimExit(r.claim),
         json: { ok: true, id: r.id, session: claimSession(session), claim: claimJson(r.claim) },
@@ -9634,6 +9733,7 @@ ${note}` : note;
         }
         if (learned?.length || followUps?.length) recorded = await recordForTask({ id: t.id, collection: t.collection }, { learned, follow_ups: followUps });
       }
+      recordLastWrite(t.collection);
       const pushed = await pushDocsNow(t.collection, [t.id]).catch(() => void 0);
       const exit = release?.kind === "unshared" || pushed && pushed.errors > 0 ? EXIT.unavailable : EXIT.ok;
       const text = release?.kind === "released" ? `${t.id} -> ${status}; claim released` : release?.kind === "held_by_other" ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it` : release?.kind === "unshared" ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own` : `${t.id} -> ${status}`;
@@ -9659,7 +9759,7 @@ function jsonFile(path, shape) {
   if (path === void 0) return void 0;
   let v;
   try {
-    v = JSON.parse(readFileSync17(path === "-" ? 0 : path, "utf8"));
+    v = JSON.parse(readFileSync18(path === "-" ? 0 : path, "utf8"));
   } catch (e) {
     throw new UsageError(`${path}: ${e instanceof Error ? e.message : e}`);
   }
@@ -9798,6 +9898,7 @@ async function runMemory(sub, args) {
         const { content, tags, typed } = split(await input(args));
         if (!content?.trim()) throw new UsageError2('content is required (--content or "content" in --stdin-json)');
         const r = await putExternal(collection, ref, { content, typed, tags });
+        recordLastWrite(collection);
         return { exit: 0, json: { ok: true, ...r, ref }, text: `${r.id} ${r.action}` };
       }
       case "update": {
@@ -9805,6 +9906,7 @@ async function runMemory(sub, args) {
         if (!id) throw new UsageError2("memory id required");
         const { content, note, tags, typed } = split(await input(args));
         const r = await updateMemory(id, { ...typed, ...content !== void 0 ? { content } : {}, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, flag2(args, "--collection"));
+        recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
       }
       default:
@@ -9864,7 +9966,7 @@ var init_memory = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname9, join as join12 } from "node:path";
+import { dirname as dirname10, join as join13 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 import { readFileSync } from "node:fs";
@@ -10009,18 +10111,18 @@ async function runStatusLineCommand(action, args) {
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path)} (runs ${script})
 `);
-      sl.setRemovedMarker(dirname9(script), false);
+      sl.setRemovedMarker(dirname10(script), false);
       return;
     }
     case "uninstall":
       process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path, script)}
 `);
-      if (script) sl.setRemovedMarker(dirname9(script), true);
+      if (script) sl.setRemovedMarker(dirname10(script), true);
       return;
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join12(dirname9(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join13(dirname10(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,
