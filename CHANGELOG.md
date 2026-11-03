@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 (2026-11-02)
+
+Private and local-only collections work fully on one machine: claims, leases, counters and task ids are coordinated there, a project folder can be mapped to a private collection, private memories stay out of other projects' recall, and sessions on one machine no longer lose each other's writes.
 
 **Upgrading:** restart every Claude Code session after updating. Older YAPA processes don't take the new locks.
 
