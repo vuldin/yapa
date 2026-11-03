@@ -1,6 +1,6 @@
 import { getConfig } from '../config.js';
 import { artifactPath } from '../buckets/artifacts.js';
-import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 
 import { defaultInferenceCaller, type InferenceCaller } from './inference.js';
 import { judgeVerification, type JudgeCaller } from './judge.js';
@@ -122,7 +122,7 @@ export async function verifyAdapterAgainstManifest(
         verification_last_result: item.passed ? 'passed' : 'failed',
       };
       try {
-        await updateDocument(found.collection, mem.id, updated);
+        await patchDocument(found.collection, mem.id, metadataDelta(found.metadata, updated));
       } catch (e) {
         process.stderr.write(`[yapa-verify] Metadata update failed for ${mem.id}: ${e}\n`);
       }

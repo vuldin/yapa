@@ -29,7 +29,11 @@ beforeAll(async () => {
       const deps = [];
       for (let k = 0; k < ${PROCS}; k++) deps.push(await y.createTask('dep ' + k, {}, C));
       const mem = (await y.storeMemory('the shared memory', { collection: C })).ids[0];
-      writeFileSync(state, JSON.stringify({ task, deps, mem }));
+      const blocker = await y.createTask('one blocker for all', {}, C);
+      const waiters = [];
+      for (let k = 0; k < ${PROCS}; k++) waiters.push(await y.createTask('waiter ' + k, {}, C));
+      const recurring = await y.createTask('weekly report', { is_recurring: true, recurrence_pattern: 'weekly', due_date: 1900000000 }, C);
+      writeFileSync(state, JSON.stringify({ task, deps, mem, blocker, waiters, recurring }));
       process.exit(0);
     }
     if (mode === 'check') {
@@ -37,7 +41,9 @@ beforeAll(async () => {
       const t = await y.getTask(s.task);
       const m = (await y.getDocumentsByIds(C, [s.mem]))[0];
       const refs = await y.getDocumentsByFilter(C, { type: 'memory', external_ref: 'spec:X-1' }, 100);
-      process.stdout.write(JSON.stringify({ task: t.metadata, memory: m.content, refs: refs.length }));
+      const blocker = await y.getTask(s.blocker);
+      const reports = (await y.getDocumentsByFilter(C, { type: 'task' }, 1000)).filter(d => d.content === 'weekly report');
+      process.stdout.write(JSON.stringify({ task: t.metadata, memory: m.content, refs: refs.length, blocks: blocker.metadata.blocks, reports: reports.map(d => d.metadata.status) }));
       process.exit(0);
     }
     const s = ids();
@@ -53,6 +59,10 @@ beforeAll(async () => {
       await y.putExternal(C, 'spec:X-1', { content: 'index entry', typed: {} });
     } else if (mode === 'deps') {
       await y.addDependency(s.task, s.deps[n]);
+    } else if (mode === 'blocks') {
+      await y.addDependency(s.waiters[n], s.blocker);
+    } else if (mode === 'complete') {
+      await y.completeTask(s.recurring);
     }
     process.exit(0);
   `);
@@ -112,7 +122,7 @@ async function all(mode: string): Promise<void> {
 }
 
 describe('writes from several processes to one local store', () => {
-  let after: { task: Record<string, any>; memory: string; refs: number };
+  let after: { task: Record<string, any>; memory: string; refs: number; blocks: string[]; reports: string[] };
 
   beforeAll(async () => {
     await run(['setup', state, '0', '0']);
@@ -120,6 +130,8 @@ describe('writes from several processes to one local store', () => {
     await all('notes');
     await all('external');
     await all('deps');
+    await all('blocks');
+    await all('complete');
     after = JSON.parse(await run(['check', state, '0', '0']));
   }, 120_000);
 
@@ -138,6 +150,15 @@ describe('writes from several processes to one local store', () => {
 
   it('one external ref put by six processes at once is one memory', () => {
     expect(after.refs).toBe(1);
+  });
+
+  it('six tasks made to wait on one blocker at once leave all six in its blocks list', () => {
+    const waiters = JSON.parse(readFileSync(state, 'utf-8')).waiters as string[];
+    expect([...after.blocks].sort()).toEqual([...waiters].sort());
+  });
+
+  it('a recurring task completed by six processes at once gets one next occurrence', () => {
+    expect([...after.reports].sort()).toEqual(['complete', 'pending']);
   });
 
   it('dependencies added to one task at once are all kept', () => {

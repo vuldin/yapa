@@ -18,7 +18,9 @@
   - **Embedded store** (`storage: local`): every change now happens under its collection file's lock, against a fresh read. Two sessions writing at once could lose one's change, or crash on a shared temp file.
   - **Read-modify-writes** (both stores): `task_update`, task dependencies, links from memories to tasks, `memory_update` notes, `yapa task release` notes and tags, and `yapa memory put` now run under a per-document lock and merge into the current document. Concurrent edits all land, and a ref put twice at once makes one memory.
   - **Push:** it marks a doc synced only if the doc is unchanged since it was pushed. An edit made during a push stays unsynced and goes out next, instead of being reverted.
-  - **Recurring tasks:** completing one twice at once creates its next occurrence once.
+  - **Recurring tasks:** completing one twice at once creates its next occurrence once, and the first close time is kept.
+  - **Field patches** (new store operation `patchDocuments`, which merges into the document as it is now; `null` removes a key): the recall salience boost, decay, archiving (supersede, compaction, janitor), selection and promotion, classification, and locked updates now write only the fields they change. A boost after another session's edit no longer reverts it, and an edit no longer reverts a boost.
+  - **Merges, re-keys and pull links:** a merge re-copies a doc edited while it ran; a task re-keyed on push carries edits made during the upsert; pull links a similar local doc under that doc's own lock, and calls the remote after releasing it.
 
 ## 1.9.0 (2026-11-02)
 

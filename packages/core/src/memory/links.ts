@@ -36,19 +36,20 @@ export async function linkMemoryToTasks(memoryId: string, taskIds: string[]): Pr
     }
     // Under the task's lock, onto its metadata as it is now: writing back the
     // copy found above would revert a status or claim set meanwhile.
-    await withDocLock(t.collection, tid, async () => {
+    const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds(t.collection, [tid]))[0];
-      if (!fresh) return;
+      if (!fresh) return false;
       const cur = list(fresh.metadata.memory_ids);
-      if (cur.includes(memoryId)) return;
+      if (cur.includes(memoryId)) return true;
       await updateDocument(t.collection, tid, {
         ...fresh.metadata,
         memory_ids: [...cur, memoryId],
         updated_at: Math.floor(Date.now() / 1000),
         is_synced: false,
       });
+      return true;
     });
-    out.linked.push(tid);
+    (present ? out.linked : out.missing).push(tid);
   }
   return out;
 }

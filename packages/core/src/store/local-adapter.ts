@@ -95,7 +95,7 @@ export function createLocalStore(rootDir: string): VectorStore {
    * means someone wrote; mtime alone misses writes within one clock tick.
    */
   const cacheMtimes = new Map<string, string>();
-  const identity = (st: { ino: number | bigint; mtimeMs: number; size: number }) => `${st.ino}:${st.mtimeMs}:${st.size}`;
+  const identity = (st: { ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint }) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = new Map<string, Promise<void>>();
 
   const fileFor = (name: string) => join(rootDir, `${encodeURIComponent(name)}.json`);
@@ -108,7 +108,7 @@ export function createLocalStore(rootDir: string): VectorStore {
       let raw: string;
       let id: string;
       try {
-        id = identity(await fh.stat());
+        id = identity(await fh.stat({ bigint: true }));
         raw = await fh.readFile('utf-8');
       } finally {
         await fh.close();
@@ -138,7 +138,7 @@ export function createLocalStore(rootDir: string): VectorStore {
     const cached = cache.get(name);
     if (!cached) return readFromDisk(name);
     try {
-      const st = await stat(fileFor(name));
+      const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e: any) {
       if (e?.code === 'ENOENT') {
@@ -166,7 +166,7 @@ export function createLocalStore(rootDir: string): VectorStore {
     }
     cache.set(cf.name, cf);
     // Our own write's mtime, taken under the lock: nobody else wrote since.
-    cacheMtimes.set(cf.name, identity(await stat(file)));
+    cacheMtimes.set(cf.name, identity(await stat(file, { bigint: true })));
   }
 
   /**
@@ -181,9 +181,19 @@ export function createLocalStore(rootDir: string): VectorStore {
     const next = prev.then(async () => {
       await mkdir(rootDir, { recursive: true });
       await withFileLock(lockFileFor(fileFor(name)), async () => {
-        const cur = await readFromDisk(name);
-        const out = apply(cur);
-        if (out) await writeAtomic(out);
+        // Under the lock, the cache is current exactly when the file's
+        // identity still matches it (nobody else can write meanwhile).
+        const cur = await load(name);
+        try {
+          const out = apply(cur);
+          if (out) await writeAtomic(out);
+        } catch (e) {
+          // apply changes the cached object in place: drop it so readers
+          // reload what is really on disk.
+          cache.delete(name);
+          cacheMtimes.delete(name);
+          throw e;
+        }
       }, { waitMs: 15_000 });
     });
     writeChains.set(name, next.catch(() => {}));
@@ -326,6 +336,24 @@ export function createLocalStore(rootDir: string): VectorStore {
           changed++;
         }
         return changed > 0 ? cf : false; // one flush for the whole sweep
+      });
+    },
+
+    async patchDocuments(collection, entries): Promise<void> {
+      if (entries.length === 0) return;
+      await mutate(collection, cf => {
+        if (!cf) return false;
+        let changed = 0;
+        for (const e of entries) {
+          const doc = cf.docs[e.id];
+          if (!doc) continue;
+          const set = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v !== null && v !== undefined));
+          const next = { ...doc.metadata, ...toChroma(set) };
+          for (const [k, v] of Object.entries(e.patch)) if (v === null || v === undefined) delete next[k];
+          doc.metadata = next;
+          changed++;
+        }
+        return changed > 0 ? cf : false;
       });
     },
 

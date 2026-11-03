@@ -7845,6 +7845,26 @@ async function updateDocument(collectionName, id, metadata) {
     throw new Error(`Update failed: ${response.status} - ${await response.text()}`);
   }
 }
+async function patchDocuments(collectionName, entries) {
+  if (entries.length === 0) return;
+  const collectionId = await getCollectionId(collectionName);
+  const existing = new Set((await getDocumentsByIds(collectionName, entries.map((e) => e.id))).map((d) => d.id));
+  const live = entries.filter((e) => existing.has(e.id));
+  if (live.length === 0) return;
+  const response = await chromaFetch(`/collections/${collectionId}/update`, {
+    method: "POST",
+    body: JSON.stringify({
+      ids: live.map((e) => e.id),
+      metadatas: live.map((e) => {
+        const removed = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v === null || v === void 0).map(([k]) => [k, null]));
+        return { ...toChroma(e.patch), ...removed };
+      })
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Patch failed: ${response.status} - ${await response.text()}`);
+  }
+}
 async function updateDocumentsBatch(collectionName, entries) {
   if (entries.length === 0) return;
   const collectionId = await getCollectionId(collectionName);
@@ -7971,6 +7991,7 @@ var init_chroma_adapter = __esm({
       getDocumentsByIds: (col, ids) => getDocumentsByIds(col, ids),
       updateDocument: (col, id, metadata) => updateDocument(col, id, metadata),
       updateDocumentsBatch: (col, entries) => updateDocumentsBatch(col, entries),
+      patchDocuments: (col, entries) => patchDocuments(col, entries),
       deleteDocument: (col, id) => deleteDocument(col, id),
       findAndDeleteDocument: (id) => findAndDeleteDocument(id)
     };
@@ -8213,7 +8234,7 @@ function matchesFilter(metadata, filter) {
 function createLocalStore(rootDir) {
   const cache = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
-  const identity = (st) => `${st.ino}:${st.mtimeMs}:${st.size}`;
+  const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
   const fileFor = (name) => join3(rootDir, `${encodeURIComponent(name)}.json`);
   async function readFromDisk(name) {
@@ -8222,7 +8243,7 @@ function createLocalStore(rootDir) {
       let raw;
       let id;
       try {
-        id = identity(await fh.stat());
+        id = identity(await fh.stat({ bigint: true }));
         raw = await fh.readFile("utf-8");
       } finally {
         await fh.close();
@@ -8245,7 +8266,7 @@ function createLocalStore(rootDir) {
     const cached3 = cache.get(name);
     if (!cached3) return readFromDisk(name);
     try {
-      const st = await stat(fileFor(name));
+      const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
@@ -8270,16 +8291,22 @@ function createLocalStore(rootDir) {
       throw e;
     }
     cache.set(cf.name, cf);
-    cacheMtimes.set(cf.name, identity(await stat(file2)));
+    cacheMtimes.set(cf.name, identity(await stat(file2, { bigint: true })));
   }
   function mutate(name, apply) {
     const prev = writeChains.get(name) ?? Promise.resolve();
     const next = prev.then(async () => {
       await mkdir(rootDir, { recursive: true });
       await withFileLock(lockFileFor(fileFor(name)), async () => {
-        const cur = await readFromDisk(name);
-        const out = apply(cur);
-        if (out) await writeAtomic(out);
+        const cur = await load2(name);
+        try {
+          const out = apply(cur);
+          if (out) await writeAtomic(out);
+        } catch (e) {
+          cache.delete(name);
+          cacheMtimes.delete(name);
+          throw e;
+        }
       }, { waitMs: 15e3 });
     });
     writeChains.set(name, next.catch(() => {
@@ -8407,6 +8434,23 @@ function createLocalStore(rootDir) {
         return changed > 0 ? cf : false;
       });
     },
+    async patchDocuments(collection, entries) {
+      if (entries.length === 0) return;
+      await mutate(collection, (cf) => {
+        if (!cf) return false;
+        let changed = 0;
+        for (const e of entries) {
+          const doc = cf.docs[e.id];
+          if (!doc) continue;
+          const set2 = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v !== null && v !== void 0));
+          const next = { ...doc.metadata, ...toChroma(set2) };
+          for (const [k, v] of Object.entries(e.patch)) if (v === null || v === void 0) delete next[k];
+          doc.metadata = next;
+          changed++;
+        }
+        return changed > 0 ? cf : false;
+      });
+    },
     async deleteDocument(collection, id) {
       await mutate(collection, (cf) => cf && cf.docs[id] && delete cf.docs[id] ? cf : false);
     },
@@ -8460,6 +8504,9 @@ __export(store_exports, {
   getOrCreateCollection: () => getOrCreateCollection2,
   getStore: () => getStore,
   listCollections: () => listCollections2,
+  metadataDelta: () => metadataDelta,
+  patchDocument: () => patchDocument,
+  patchDocuments: () => patchDocuments2,
   queryAllCollections: () => queryAllCollections2,
   queryDocuments: () => queryDocuments2,
   resetStore: () => resetStore,
@@ -8479,7 +8526,14 @@ function getStore() {
 function resetStore() {
   active2 = void 0;
 }
-var active2, listCollections2, createCollection2, deleteCollection2, getCollectionCount2, getOrCreateCollection2, addDocument2, addDocumentsBatch2, queryDocuments2, queryAllCollections2, getDocumentsByFilter2, getDocumentsByIds2, updateDocument2, updateDocumentsBatch2, deleteDocument2, findAndDeleteDocument2;
+function metadataDelta(before, after) {
+  const out = {};
+  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  for (const [k, v] of Object.entries(after)) if (!same(before[k], v)) out[k] = v ?? null;
+  for (const k of Object.keys(before)) if (!(k in after) && before[k] != null) out[k] = null;
+  return out;
+}
+var active2, listCollections2, createCollection2, deleteCollection2, getCollectionCount2, getOrCreateCollection2, addDocument2, addDocumentsBatch2, queryDocuments2, queryAllCollections2, getDocumentsByFilter2, getDocumentsByIds2, updateDocument2, updateDocumentsBatch2, patchDocuments2, patchDocument, deleteDocument2, findAndDeleteDocument2;
 var init_store = __esm({
   "packages/core/src/store/index.ts"() {
     "use strict";
@@ -8502,6 +8556,8 @@ var init_store = __esm({
     getDocumentsByIds2 = (collection, ids) => getStore().getDocumentsByIds(collection, ids);
     updateDocument2 = (collection, id, metadata) => getStore().updateDocument(collection, id, metadata);
     updateDocumentsBatch2 = (collection, entries) => getStore().updateDocumentsBatch(collection, entries);
+    patchDocuments2 = (collection, entries) => entries.length ? getStore().patchDocuments(collection, entries) : Promise.resolve();
+    patchDocument = (collection, id, patch) => patchDocuments2(collection, [{ id, patch }]);
     deleteDocument2 = (collection, id) => getStore().deleteDocument(collection, id);
     findAndDeleteDocument2 = (id) => getStore().findAndDeleteDocument(id);
   }
@@ -8533,9 +8589,16 @@ function docLockPath(collection, id) {
 }
 async function withDocLock(collection, id, fn) {
   const path = docLockPath(collection, id);
-  const mine = held.getStore();
-  if (mine?.has(path)) return fn();
-  return withFileLock(path, () => held.run(/* @__PURE__ */ new Set([...mine ?? [], path]), fn), { waitMs: WAIT_MS });
+  const mine = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine.some((h) => h.paths.has(path))) return fn();
+  return withFileLock(path, async () => {
+    const me = { paths: /* @__PURE__ */ new Set([path]), active: true };
+    try {
+      return await held.run([...mine, me], fn);
+    } finally {
+      me.active = false;
+    }
+  }, { waitMs: WAIT_MS });
 }
 var held, WAIT_MS;
 var init_doc_lock = __esm({
@@ -10463,8 +10526,7 @@ async function pushBatch(backend, collection, batch, stats, allowRekey) {
 async function applyPushed(backend, collection, doc, similar, stats) {
   const match = similar.find((s) => s.id !== doc.id);
   if (!match) {
-    await writeIfUnchanged(collection, doc, (cur) => ({ ...stripLocalOnly(cur), is_synced: true }));
-    stats.pushed++;
+    if (await writeIfUnchanged(collection, doc, (cur) => ({ ...stripLocalOnly(cur), is_synced: true }))) stats.pushed++;
     return;
   }
   try {
@@ -10525,9 +10587,14 @@ async function rekeyTask(collection, doc, suggestedId) {
   const suggested = Number(suggestedId?.split("-").pop());
   const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
   const newId = `${me}-${n}`;
-  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
-  await addDocument2(collection, newId, doc.content, metadata);
-  await deleteDocument2(collection, doc.id);
+  const metadata = await withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds2(collection, [doc.id]);
+    const src = cur ?? doc;
+    const m = { ...src.metadata, id: newId, rekeyed_from: doc.id };
+    await addDocument2(collection, newId, src.content, m);
+    await deleteDocument2(collection, doc.id);
+    return m;
+  });
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
 `);
   return { ...doc, id: newId, metadata };
@@ -10728,8 +10795,7 @@ async function retryUnsharedClaims() {
         continue;
       }
       if (r.kind === "unshared" || r.kind === "local") return out;
-      const [cur] = await getDocumentsByIds2(col.name, [r.id]).catch(() => []);
-      if (cur) await updateDocument2(col.name, r.id, { ...cur.metadata, claim_unshared: "" });
+      await patchDocument(col.name, r.id, { claim_unshared: "" }).catch(() => void 0);
       if (r.kind === "granted") {
         out.granted++;
       } else {
@@ -40615,19 +40681,20 @@ async function linkMemoryToTasks(memoryId, taskIds) {
       out.missing.push(tid);
       continue;
     }
-    await withDocLock(t.collection, tid, async () => {
+    const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
-      if (!fresh) return;
+      if (!fresh) return false;
       const cur = list3(fresh.metadata.memory_ids);
-      if (cur.includes(memoryId)) return;
+      if (cur.includes(memoryId)) return true;
       await updateDocument2(t.collection, tid, {
         ...fresh.metadata,
         memory_ids: [...cur, memoryId],
         updated_at: Math.floor(Date.now() / 1e3),
         is_synced: false
       });
+      return true;
     });
-    out.linked.push(tid);
+    (present ? out.linked : out.missing).push(tid);
   }
   return out;
 }
@@ -40662,7 +40729,7 @@ async function archiveSuperseded(collection, oldId, newId) {
 `);
       return;
     }
-    await updateDocument2(collection, oldId, archivedMetadata(existing[0].metadata, { superseded_by: newId }));
+    await patchDocument(collection, oldId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { superseded_by: newId })));
   } catch (e) {
     process.stderr.write(`[yapa] store: failed to archive superseded ${oldId}: ${e}
 `);
@@ -40806,6 +40873,7 @@ async function recallMemory(query, options = {}) {
     (a, b) => rankScore(a.distance, a.metadata.salience) - rankScore(b.distance, b.metadata.salience)
   );
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
+  const boosts = /* @__PURE__ */ new Map();
   for (const r of results) {
     if (options.boost === false || r.distance >= boostMaxDistance) continue;
     if (r.collection) {
@@ -40816,11 +40884,18 @@ async function recallMemory(query, options = {}) {
         sector: r.metadata.sector ?? "episodic"
       };
       const boosted = touchDocument(lifecycleMeta);
-      updateDocument2(r.collection, r.id, { ...r.metadata, ...boosted }).catch(() => {
-      });
+      const patch = metadataDelta(r.metadata, { ...r.metadata, ...boosted });
+      if (Object.keys(patch).length) boosts.set(r.collection, [...boosts.get(r.collection) ?? [], { id: r.id, patch }]);
     }
   }
+  for (const [collection, entries] of boosts) track(patchDocuments2(collection, entries).catch(() => {
+  }));
   return results;
+}
+var pendingBoosts = /* @__PURE__ */ new Set();
+function track(p) {
+  pendingBoosts.add(p);
+  p.finally(() => pendingBoosts.delete(p));
 }
 
 // packages/core/src/memory/forget.ts
@@ -40927,13 +41002,10 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
           sector: doc.metadata.sector ?? "episodic"
         };
         const decayed = applyDecay(lifecycleMeta, days);
-        updates.push({
-          id: doc.id,
-          metadata: { ...doc.metadata, salience: decayed.salience, decayed_at: now }
-        });
+        updates.push({ id: doc.id, patch: { salience: decayed.salience, decayed_at: now } });
       }
       if (updates.length > 0) {
-        await updateDocumentsBatch2(collection.name, updates);
+        await patchDocuments2(collection.name, updates);
         decayedCount += updates.length;
       }
     } catch {
@@ -41017,7 +41089,7 @@ async function applyCompaction(input2) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
       if (!existing.length) continue;
-      await updateDocument2(input2.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
+      await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
       process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}
@@ -41027,10 +41099,7 @@ async function applyCompaction(input2) {
   try {
     const summaryDocs = await getDocumentsByIds2(input2.collection, [summaryId]);
     if (summaryDocs.length) {
-      await updateDocument2(input2.collection, summaryId, {
-        ...summaryDocs[0].metadata,
-        compacted_from: archivedIds
-      });
+      await patchDocument(input2.collection, summaryId, { compacted_from: archivedIds });
     }
   } catch (e) {
     process.stderr.write(`[yapa] compact: failed to set back-reference on summary: ${e}
@@ -41301,6 +41370,7 @@ async function updateTask(id, updates, ctx = {}) {
       ...updates,
       updated_at: Math.floor(Date.now() / 1e3)
     };
+    if (updates.completed_at != null && cur.metadata.completed_at != null) updatedMetadata.completed_at = cur.metadata.completed_at;
     if (hasStructuralChange) updatedMetadata.is_synced = false;
     if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && cur.metadata.blockedReason) {
       updatedMetadata.blockedReason = "";
@@ -41310,7 +41380,7 @@ async function updateTask(id, updates, ctx = {}) {
     if (updates.title !== void 0 && updates.title !== cur.content) {
       await addDocument2(t.collection, t.id, updates.title, updatedMetadata);
     } else {
-      await updateDocument2(t.collection, t.id, updatedMetadata);
+      await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
     return cur.metadata.status;
   });
@@ -41842,6 +41912,7 @@ function formatDuration(minutes) {
 init_config();
 init_deletes();
 init_sentinel();
+init_doc_lock();
 init_store();
 init_syncable();
 async function listCollectionsWithCounts() {
@@ -41937,7 +42008,18 @@ async function mergeCollections(from, into, opts = {}) {
     if (landed.length !== ids.length || after !== before + ids.length) {
       throw new Error(`Merge verification failed: "${into}" holds ${landed.length} of ${ids.length} moved docs (count ${before} -> ${after}); "${from}" was left intact`);
     }
-    for (const id of ids) await deleteDocument2(from, id);
+    const copied = new Map(docs.map((d) => [d.id, JSON.stringify([d.content, d.metadata])]));
+    for (const id of ids) {
+      await withDocLock(from, id, async () => {
+        const [cur] = await getDocumentsByIds2(from, [id]);
+        if (cur && JSON.stringify([cur.content, cur.metadata]) !== copied.get(id)) {
+          const metadata = { ...cur.metadata, is_synced: false };
+          delete metadata.remote_checked_at;
+          await addDocument2(into, id, cur.content, metadata);
+        }
+        await deleteDocument2(from, id);
+      });
+    }
     const left = await getCollectionCount2(from);
     if (left !== 0) throw new Error(`"${from}" still holds ${left} document(s) after the move; it was not deleted`);
   }
@@ -42272,7 +42354,7 @@ async function curationCycle() {
             };
             if (result.rationale) updated.classification_rationale = result.rationale;
             try {
-              await updateDocument2(c.name, doc.id, updated);
+              await patchDocument(c.name, doc.id, metadataDelta(doc.metadata, updated));
               stats.scored++;
             } catch (e) {
               process.stderr.write(`[yapa-curation] Update error for ${doc.id}: ${e}
@@ -42446,7 +42528,7 @@ async function findDuplicatePairs(collection, distanceThreshold) {
 async function archiveDuplicate(collection, loserId, winnerId) {
   const existing = await getDocumentsByIds2(collection, [loserId]);
   if (!existing.length) return;
-  await updateDocument2(collection, loserId, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId }));
+  await patchDocument(collection, loserId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId })));
 }
 async function janitorSweep(options = {}) {
   const stats = {
@@ -42574,7 +42656,7 @@ async function updateMemory(id, patch, collection) {
 
 ${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
       } else {
-        await updateDocument2(found.collection, d.id, metadata2);
+        await patchDocument(found.collection, d.id, metadataDelta(d.metadata, metadata2));
       }
     }
     return metadata2;
@@ -42874,7 +42956,7 @@ async function bucketRouteNow() {
       selected_at: now
     };
     try {
-      await updateDocument2(entry.collection, entry.id, updated);
+      await patchDocument(entry.collection, entry.id, metadataDelta(entry.metadata, updated));
       tagged++;
     } catch (e) {
       process.stderr.write(`[yapa-buckets] Tag error for ${entry.id}: ${e}
@@ -42941,11 +43023,7 @@ async function systemPromptActivate(version2) {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
-          await updateDocument2(c.name, d.id, {
-            ...d.metadata,
-            promoted_to: target,
-            promoted_at: now
-          });
+          await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
         }
       }
@@ -42968,7 +43046,7 @@ async function systemPromptDeactivate(version2) {
           const updated = { ...d.metadata };
           delete updated.promoted_to;
           delete updated.promoted_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBack++;
         }
       }
@@ -43180,10 +43258,13 @@ async function dropMovedOut(backend, collectionName, followed, stats) {
     stats.moved++;
   }
 }
-function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
-  return withDocLock(collectionName, remoteDoc.id, () => applyRemoteDocLocked(backend, collectionName, remoteDoc, stats));
+async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
+  const after = [];
+  await withDocLock(collectionName, remoteDoc.id, () => applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, after));
+  for (const fn of after) await fn().catch((e) => process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}
+`));
 }
-async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats) {
+async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, after) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
   if (!existing) {
     const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
@@ -43214,15 +43295,15 @@ async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats) {
     if (similarLocal.length > 0) {
       const similarity = 1 - similarLocal[0].distance;
       if (similarity > getConfig().SYNC_SIMILARITY_THRESHOLD) {
-        const localDoc = similarLocal[0];
-        const localRelated = Array.isArray(localDoc.metadata.related_ids) ? localDoc.metadata.related_ids : [];
-        if (!localRelated.includes(remoteDoc.id)) {
-          localRelated.push(remoteDoc.id);
-          await updateDocument2(collectionName, localDoc.id, { ...localDoc.metadata, related_ids: localRelated });
-        }
-        await backend.addRelatedIds(remoteDoc.id, [localDoc.id]).catch((e) => {
-          process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}
-`);
+        const localId = similarLocal[0].id;
+        after.push(async () => {
+          await withDocLock(collectionName, localId, async () => {
+            const [cur] = await getDocumentsByIds2(collectionName, [localId]);
+            if (!cur) return;
+            const related = Array.isArray(cur.metadata.related_ids) ? [...cur.metadata.related_ids] : [];
+            if (!related.includes(remoteDoc.id)) await patchDocument(collectionName, localId, { related_ids: [...related, remoteDoc.id] });
+          });
+          await backend.addRelatedIds(remoteDoc.id, [localId]);
         });
         stats.linked++;
       }
@@ -44183,7 +44264,7 @@ async function clearSelectedForManifest(manifestVersion) {
           const updated = { ...d.metadata };
           delete updated.selected_for;
           delete updated.selected_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           cleared++;
         }
       }
@@ -44471,17 +44552,13 @@ async function adapterPromote(args) {
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
         if (d.metadata.verification_last_result === "passed") {
-          await updateDocument2(c.name, d.id, {
-            ...d.metadata,
-            promoted_to: target,
-            promoted_at: now
-          });
+          await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
         } else {
           const updated = { ...d.metadata };
           delete updated.selected_for;
           delete updated.selected_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBackSelections++;
         }
       }
@@ -44513,7 +44590,7 @@ async function adapterDemote(adapterId) {
           const updated = { ...d.metadata };
           delete updated.promoted_to;
           delete updated.promoted_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBack++;
         }
       }
@@ -44606,7 +44683,7 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
         verification_last_result: item.passed ? "passed" : "failed"
       };
       try {
-        await updateDocument2(found.collection, mem.id, updated);
+        await patchDocument(found.collection, mem.id, metadataDelta(found.metadata, updated));
       } catch (e) {
         process.stderr.write(`[yapa-verify] Metadata update failed for ${mem.id}: ${e}
 `);

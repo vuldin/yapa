@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createLocalStore } from '../store/local-adapter.js';
 import { setStore, resetStore } from '../store/index.js';
 import { storeMemory } from '../memory/store.js';
-import { recallMemory } from '../memory/recall.js';
+import { recallMemory, settleRecallBoosts } from '../memory/recall.js';
 import { getDocumentsByIds } from '../store/index.js';
 import { janitorSweep, findDuplicatePairs } from './janitor.js';
 
@@ -18,6 +18,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await settleRecallBoosts();
   resetStore();
   await rm(dir, { recursive: true, force: true });
 });

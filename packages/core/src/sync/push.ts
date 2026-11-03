@@ -302,8 +302,8 @@ async function applyPushed(
   // A re-push of an edited doc matches its own remote row; never self-link.
   const match = similar.find(s => s.id !== doc.id);
   if (!match) {
-    await writeIfUnchanged(collection, doc, cur => ({ ...stripLocalOnly(cur), is_synced: true }));
-    stats.pushed++;
+    // Edited meanwhile: not counted, it goes out on the next push.
+    if (await writeIfUnchanged(collection, doc, cur => ({ ...stripLocalOnly(cur), is_synced: true }))) stats.pushed++;
     return;
   }
   // Found a similar doc: link both ways (both are kept; the link records the relationship).
@@ -379,9 +379,16 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
   const suggested = Number(suggestedId?.split('-').pop());
   const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
   const newId = `${me}-${n}`;
-  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
-  await addDocument(collection, newId, doc.content, metadata);
-  await deleteDocument(collection, doc.id);
+  // Under the old id's lock, from the task as it is now: an edit made while
+  // the upsert was out is carried over, not dropped with the old id.
+  const metadata = await withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds(collection, [doc.id]);
+    const src = cur ?? doc;
+    const m = { ...src.metadata, id: newId, rekeyed_from: doc.id };
+    await addDocument(collection, newId, src.content, m);
+    await deleteDocument(collection, doc.id);
+    return m;
+  });
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}\n`);
   return { ...doc, id: newId, metadata };
 }

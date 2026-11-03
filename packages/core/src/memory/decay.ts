@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, updateDocumentsBatch, listCollections } from '../store/index.js';
+import { getDocumentsByFilter, patchDocuments, listCollections } from '../store/index.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
 const DECAY_SENTINEL_ID = '__decay_sentinel__';
@@ -37,7 +37,7 @@ export async function runDecaySweep(now: number = Math.floor(Date.now() / 1000))
 
       // Batch: one store mutation per collection (single HTTP request on
       // ChromaDB, single file flush on the local store) instead of N rewrites.
-      const updates: Array<{ id: string; metadata: Record<string, any> }> = [];
+      const updates: Array<{ id: string; patch: Record<string, any> }> = [];
       for (const doc of docs) {
         const anchor = typeof doc.metadata.decayed_at === 'number' ? doc.metadata.decayed_at : fallbackAnchor;
         const days = (now - anchor) / DAY;
@@ -49,13 +49,11 @@ export async function runDecaySweep(now: number = Math.floor(Date.now() / 1000))
           sector: doc.metadata.sector ?? 'episodic',
         };
         const decayed = applyDecay(lifecycleMeta, days);
-        updates.push({
-          id: doc.id,
-          metadata: { ...doc.metadata, salience: decayed.salience, decayed_at: now },
-        });
+        updates.push({ id: doc.id, patch: { salience: decayed.salience, decayed_at: now } });
       }
       if (updates.length > 0) {
-        await updateDocumentsBatch(collection.name, updates);
+        // Patches: a sweep never writes back the rest of a doc it read earlier.
+        await patchDocuments(collection.name, updates);
         decayedCount += updates.length;
       }
     } catch {

@@ -7,7 +7,7 @@
  *
  * @module @yapa/core/memory/update
  */
-import { addDocument, getDocumentsByFilter, getDocumentsByIds, listCollections, updateDocument } from '../store/index.js';
+import { addDocument, getDocumentsByFilter, getDocumentsByIds, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
@@ -78,7 +78,9 @@ export async function updateMemory(id: string, patch: MemoryUpdate, collection?:
         // addDocument upserts and re-embeds: the note is part of what recall finds.
         await addDocument(found.collection, d.id, note?.trim() ? `${text}\n\n${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata);
       } else {
-        await updateDocument(found.collection, d.id, metadata);
+        // As a patch: a field written meanwhile without this lock (a recall
+        // boost) is kept too.
+        await patchDocument(found.collection, d.id, metadataDelta(d.metadata, metadata));
       }
     }
     return metadata;

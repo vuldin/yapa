@@ -144,4 +144,14 @@ describe('local store', () => {
     await procA.deleteCollection('shared');
     expect(await procB.getCollectionCount('shared')).toBe(0);
   });
+
+  it('patchDocuments merges into the metadata as it is now; null removes a key; missing ids are skipped', async () => {
+    await store.createCollection('patching');
+    await store.addDocument('patching', 'p1', 'patched doc', { a: 1, b: 'two', tags: ['x'], gone: 'soon' });
+    await store.patchDocuments('patching', [{ id: 'p1', patch: { b: 'three', gone: null } }, { id: 'nope', patch: { a: 9 } }]);
+    const [d] = await store.getDocumentsByIds('patching', ['p1']);
+    expect(d.metadata).toMatchObject({ a: 1, b: 'three', tags: ['x'] });
+    expect('gone' in d.metadata).toBe(false);
+    expect(await store.getDocumentsByIds('patching', ['nope'])).toEqual([]);
+  });
 });

@@ -1,6 +1,6 @@
 import { getConfig } from '../config.js';
 import { captureNudge, recordForTask, validateLearned, type FollowUp, type LearnedItem, type Recorded } from './close.js';
-import { updateDocument, getDocumentsByIds, listCollections, addDocument } from '../store/index.js';
+import { getDocumentsByIds, listCollections, addDocument, metadataDelta, patchDocument } from '../store/index.js';
 import { fromChroma } from '../metadata-adapter.js';
 import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
@@ -99,6 +99,9 @@ export async function updateTask(
       ...updates,
       updated_at: Math.floor(Date.now() / 1000),
     };
+    // First completion wins, judged on the task as it is now (two sessions
+    // completing it at once keep the earlier close time).
+    if (updates.completed_at != null && cur.metadata.completed_at != null) updatedMetadata.completed_at = cur.metadata.completed_at;
     if (hasStructuralChange) updatedMetadata.is_synced = false;
     // A reason belongs to the block: leaving blocked clears it ('' because a store update merges keys).
     if (updates.status !== undefined && updates.status !== 'blocked' && updates.blockedReason === undefined && cur.metadata.blockedReason) {
@@ -114,7 +117,9 @@ export async function updateTask(
     if (updates.title !== undefined && updates.title !== cur.content) {
       await addDocument(t.collection, t.id, updates.title, updatedMetadata);
     } else {
-      await updateDocument(t.collection, t.id, updatedMetadata);
+      // As a patch over the task as it is now: a field written meanwhile
+      // without this lock (a boost, a push marker) is kept too.
+      await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
     return cur.metadata.status as string | undefined;
   });

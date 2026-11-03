@@ -3,7 +3,7 @@ import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 import { artifactPath } from '../buckets/artifacts.js';
 import { FireworksBackend } from './fireworks.js';
 import {
@@ -257,7 +257,7 @@ export async function clearSelectedForManifest(manifestVersion: number): Promise
           const updated = { ...d.metadata };
           delete updated.selected_for;
           delete updated.selected_at;
-          await updateDocument(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           cleared++;
         }
       }

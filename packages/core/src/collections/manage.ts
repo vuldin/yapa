@@ -1,7 +1,9 @@
 import { getConfig } from '../config.js';
 import { queueSyncDeletes, addLocalTombstones } from '../sync/deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions } from '../sync/sentinel.js';
+import { withDocLock } from '../doc-lock.js';
 import {
+  addDocument,
   addDocumentsBatch,
   deleteDocument,
   getDocumentsByFilter,
@@ -193,7 +195,20 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
       throw new Error(`Merge verification failed: "${into}" holds ${landed.length} of ${ids.length} moved docs (count ${before} -> ${after}); "${from}" was left intact`);
     }
 
-    for (const id of ids) await deleteDocument(from, id);
+    // Each source doc leaves under its lock, and one edited since it was
+    // copied (an update that landed mid-merge) is copied again first.
+    const copied = new Map(docs.map(d => [d.id, JSON.stringify([d.content, d.metadata])]));
+    for (const id of ids) {
+      await withDocLock(from, id, async () => {
+        const [cur] = await getDocumentsByIds(from, [id]);
+        if (cur && JSON.stringify([cur.content, cur.metadata]) !== copied.get(id)) {
+          const metadata: Record<string, any> = { ...cur.metadata, is_synced: false };
+          delete metadata.remote_checked_at;
+          await addDocument(into, id, cur.content, metadata);
+        }
+        await deleteDocument(from, id);
+      });
+    }
     const left = await getCollectionCount(from);
     if (left !== 0) throw new Error(`"${from}" still holds ${left} document(s) after the move; it was not deleted`);
   }
