@@ -21,6 +21,14 @@ import { join as pathJoin } from "path";
 function list(value) {
   return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
 }
+function normalizeCollectionMap(entries) {
+  return entries.map((entry) => {
+    const eq = entry.lastIndexOf("=");
+    if (eq < 0) return entry.trim();
+    const path = entry.slice(0, eq).trim().replace(/^~(?=\/|$)/, homedir2()).replace(/(.)\/+$/, "$1");
+    return `${path}=${entry.slice(eq + 1).trim()}`;
+  }).filter(Boolean);
+}
 function get(env, key, fallback = "") {
   const pick = (v) => v === void 0 || v === "" ? void 0 : v;
   return pick(env[`YAPA_${key}`]) ?? pick(env[key]) ?? fallback;
@@ -58,6 +66,7 @@ function createConfig(env = process.env) {
     USERNAME: env.YAPA_USERNAME || osUsername(),
     PROJECT_ROOTS: list(get(env, "PROJECT_ROOTS", "")).map((r) => r.replace(/^~(?=\/|$)/, homedir2()).replace(/\/+$/, "")),
     CUSTOMERS: list(get(env, "CUSTOMERS", "")),
+    COLLECTION_MAP: normalizeCollectionMap(list(get(env, "COLLECTION_MAP", ""))),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
@@ -1111,46 +1120,100 @@ var init_lifecycle = __esm({
   }
 });
 
-// packages/core/src/scope.ts
-async function detectCollection(cwd, roots = getConfig().PROJECT_ROOTS, customers = getConfig().CUSTOMERS) {
-  if (!cwd) return { collection: "global" };
-  for (const rawRoot of roots) {
-    const root = rawRoot.replace(/\/+$/, "");
-    if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
-    const relative = cwd.slice(root.length).replace(/^\/+/, "");
-    const segment = relative.split("/")[0];
-    if (!segment || segment.startsWith(".")) return { collection: "global" };
-    const existing = (await listCollections2().catch(() => [])).map((c) => c.name);
-    const hasCustomer = existing.includes(`customer-${segment}`);
-    const hasProject = existing.includes(`project-${segment}`);
-    if (hasCustomer && hasProject) {
-      return {
-        collection: `project-${segment}`,
-        ambiguous: [`project-${segment}`, `customer-${segment}`]
-      };
-    }
-    if (hasCustomer) return { collection: `customer-${segment}` };
-    if (hasProject) return { collection: `project-${segment}` };
-    if (customers.includes(segment)) return { collection: `customer-${segment}` };
-    return { collection: `project-${segment}` };
+// packages/core/src/sync/sentinel.ts
+async function getSyncPullTimestamp() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_pull_sentinel" }
+    }, 1);
+    if (results.length === 0) return 0;
+    return results[0].metadata.last_pull ?? 0;
+  } catch {
+    return 0;
   }
-  return { collection: "global" };
 }
-var init_scope = __esm({
-  "packages/core/src/scope.ts"() {
+async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
+    type: "sync_pull_sentinel",
+    last_pull: at
+  });
+}
+async function getSyncSubscriptions() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_subscriptions" }
+    }, 1);
+    if (results.length === 0) return [];
+    const raw = results[0].metadata.collections;
+    if (!raw) return [];
+    return raw.split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function updateSyncSubscriptions(collections) {
+  await getOrCreateCollection2("global");
+  const deduped = [...new Set(collections)].sort();
+  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
+    type: "sync_subscriptions",
+    collections: deduped.join(",")
+  });
+}
+async function getCollectionRedirects() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "collection_redirects" }
+    }, 1);
+    if (results.length === 0) return {};
+    const raw = results[0].metadata.redirects ?? {};
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === "string"));
+  } catch {
+    return {};
+  }
+}
+async function writeCollectionRedirects(redirects) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", COLLECTION_REDIRECTS_ID, "collection redirects", {
+    type: "collection_redirects",
+    redirects
+    // stored as JSON by the adapters
+  });
+}
+async function addCollectionRedirect(from, into) {
+  if (from === into || from === "global") return;
+  const redirects = await getCollectionRedirects();
+  redirects[from] = into;
+  delete redirects[into];
+  await writeCollectionRedirects(redirects);
+}
+async function clearCollectionRedirect(name) {
+  const redirects = await getCollectionRedirects();
+  if (!(name in redirects)) return;
+  delete redirects[name];
+  await writeCollectionRedirects(redirects);
+}
+function resolveCollectionRedirect(name, redirects) {
+  let current = name;
+  const seen = /* @__PURE__ */ new Set([name]);
+  while (Object.prototype.hasOwnProperty.call(redirects, current)) {
+    const next = redirects[current];
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+    current = next;
+  }
+  return current === name ? { collection: name } : { collection: current, redirectedFrom: name };
+}
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID;
+var init_sentinel = __esm({
+  "packages/core/src/sync/sentinel.ts"() {
     "use strict";
-    init_config();
     init_store();
-  }
-});
-
-// packages/core/src/memory/archive.ts
-function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
-  return { ...metadata, ...extra, archived: true, updated_at: now, is_synced: false };
-}
-var init_archive = __esm({
-  "packages/core/src/memory/archive.ts"() {
-    "use strict";
+    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
+    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
+    COLLECTION_REDIRECTS_ID = "__collection_redirects__";
   }
 });
 
@@ -1166,6 +1229,86 @@ function assertWritable(id, metadata) {
 }
 var init_syncable = __esm({
   "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/scope.ts
+function matchCollectionMap(cwd, entries) {
+  let best;
+  for (const entry of entries) {
+    const eq = entry.lastIndexOf("=");
+    if (eq < 0) continue;
+    const path = entry.slice(0, eq).trim().replace(/(.)\/+$/, "$1");
+    const collection = entry.slice(eq + 1).trim();
+    if (!path || !collection) continue;
+    const prefix = path.endsWith("/") ? path : `${path}/`;
+    if (cwd !== path && !cwd.startsWith(prefix)) continue;
+    if (!best || path.length > best.path.length) best = { path, collection };
+  }
+  return best?.collection;
+}
+async function detectCollection(cwd, roots = getConfig().PROJECT_ROOTS, customers = getConfig().CUSTOMERS, map = getConfig().COLLECTION_MAP) {
+  if (!cwd) return { collection: "global" };
+  const mapped = matchCollectionMap(cwd, map);
+  if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
+  for (const rawRoot of roots) {
+    const root = rawRoot.replace(/\/+$/, "");
+    if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
+    const relative = cwd.slice(root.length).replace(/^\/+/, "");
+    const segment = relative.split("/")[0];
+    if (!segment || segment.startsWith(".")) return { collection: "global" };
+    const existing = (await listCollections2().catch(() => [])).map((c) => c.name);
+    const redirects = await getCollectionRedirects();
+    const known = (name) => existing.includes(name) || Object.prototype.hasOwnProperty.call(redirects, name);
+    const hasCustomer = known(`customer-${segment}`);
+    const hasProject = known(`project-${segment}`);
+    if (hasCustomer && hasProject) {
+      return follow({
+        collection: `project-${segment}`,
+        ambiguous: [`project-${segment}`, `customer-${segment}`]
+      }, redirects);
+    }
+    if (hasCustomer) return follow({ collection: `customer-${segment}` }, redirects);
+    if (hasProject) return follow({ collection: `project-${segment}` }, redirects);
+    if (customers.includes(segment)) return follow({ collection: `customer-${segment}` }, redirects);
+    return follow({ collection: `project-${segment}` }, redirects);
+  }
+  return { collection: "global" };
+}
+function scopeNotes(d) {
+  const notes = [];
+  if (d.collection !== "global" && !isSyncableCollection(d.collection)) notes.push("(local only, never synced)");
+  if (d.redirectedFrom) notes.push(`(merged from \`${d.redirectedFrom}\`)`);
+  return notes.length ? ` ${notes.join(" ")}` : "";
+}
+function follow(d, redirects) {
+  const { collection, redirectedFrom } = resolveCollectionRedirect(d.collection, redirects);
+  const out = { ...d, collection };
+  if (redirectedFrom) out.redirectedFrom = redirectedFrom;
+  if (d.ambiguous) {
+    const [a, b] = d.ambiguous.map((n) => resolveCollectionRedirect(n, redirects).collection);
+    if (a === b) delete out.ambiguous;
+    else out.ambiguous = [a, b];
+  }
+  return out;
+}
+var init_scope = __esm({
+  "packages/core/src/scope.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_sentinel();
+    init_syncable();
+  }
+});
+
+// packages/core/src/memory/archive.ts
+function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
+  return { ...metadata, ...extra, archived: true, updated_at: now, is_synced: false };
+}
+var init_archive = __esm({
+  "packages/core/src/memory/archive.ts"() {
     "use strict";
   }
 });
@@ -1493,6 +1636,9 @@ var init_filters = __esm({
 });
 
 // packages/core/src/memory/recall.ts
+function isFenced(collection) {
+  return !!collection && collection !== "global" && !isSyncableCollection(collection);
+}
 async function recallMemory(query, options = {}) {
   const nResults = options.nResults ?? 5;
   const includePromoted = options.include_promoted ?? false;
@@ -1506,7 +1652,7 @@ async function recallMemory(query, options = {}) {
     const extra = options.crossCollection ?? 0;
     if (extra > 0) {
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
-      const others = (await queryAllCollections2(query, nResults + extra * 4, filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true).slice(0, extra);
+      const others = (await queryAllCollections2(query, nResults + extra * 4, filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
       results = [...results, ...others];
     }
   } else {
@@ -1548,6 +1694,7 @@ var init_recall = __esm({
     "use strict";
     init_store();
     init_config();
+    init_syncable();
     init_lifecycle();
     init_filters();
   }
@@ -3471,56 +3618,6 @@ var init_coordination = __esm({
   }
 });
 
-// packages/core/src/sync/sentinel.ts
-async function getSyncPullTimestamp() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_pull_sentinel" }
-    }, 1);
-    if (results.length === 0) return 0;
-    return results[0].metadata.last_pull ?? 0;
-  } catch {
-    return 0;
-  }
-}
-async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
-  await getOrCreateCollection2("global");
-  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
-    type: "sync_pull_sentinel",
-    last_pull: at
-  });
-}
-async function getSyncSubscriptions() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_subscriptions" }
-    }, 1);
-    if (results.length === 0) return [];
-    const raw = results[0].metadata.collections;
-    if (!raw) return [];
-    return raw.split(",").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-async function updateSyncSubscriptions(collections) {
-  await getOrCreateCollection2("global");
-  const deduped = [...new Set(collections)].sort();
-  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
-    type: "sync_subscriptions",
-    collections: deduped.join(",")
-  });
-}
-var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID;
-var init_sentinel = __esm({
-  "packages/core/src/sync/sentinel.ts"() {
-    "use strict";
-    init_store();
-    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
-    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
-  }
-});
-
 // packages/core/src/sync/push.ts
 import { createHash } from "node:crypto";
 function emptyPushStats() {
@@ -3648,7 +3745,8 @@ async function pushAll() {
     try {
       const existing = await getSyncSubscriptions();
       const existingSet = new Set(existing);
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
+      const redirects = await getCollectionRedirects();
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !(c in redirects));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }
@@ -4655,6 +4753,7 @@ async function listCollectionsWithCounts() {
 }
 async function createNewCollection(name) {
   await createCollection2(name);
+  await clearCollectionRedirect(name);
 }
 async function removeCollection(name, opts = {}) {
   if (isSyncable2(name) && !opts.force && opts.confirm !== name) {
@@ -4705,8 +4804,19 @@ async function mergeCollections(from, into, opts = {}) {
     byType[t] = (byType[t] ?? 0) + 1;
   }
   const me = getConfig().USERNAME;
-  const teammateRowsKept = isSyncable2(from) && !isSyncable2(into) ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
-  const result = { from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept };
+  const sharedToPrivate = isSyncable2(from) && !isSyncable2(into);
+  const teammateRowsKept = sharedToPrivate ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
+  const ownRowsRetracted = sharedToPrivate ? docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.is_synced === true && (!d.metadata.origin_user || d.metadata.origin_user === me)).length : 0;
+  const result = {
+    from,
+    into,
+    moved: docs.length,
+    byType,
+    dryRun: !!opts.dryRun,
+    sourceRemoved: false,
+    teammateRowsKept,
+    ownRowsRetracted
+  };
   if (opts.dryRun) return result;
   if (docs.length > 0) {
     const before = await getCollectionCount2(into);
@@ -4728,7 +4838,36 @@ async function mergeCollections(from, into, opts = {}) {
   }
   await removeCollection(from);
   result.sourceRemoved = true;
+  await addCollectionRedirect(from, into);
   return result;
+}
+function mergeReportLines(r) {
+  const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
+  const sharedToPrivate = isSyncable2(r.from) && !isSyncable2(r.into);
+  const docs = (n) => `${n} doc${n === 1 ? "" : "s"}`;
+  if (r.dryRun) {
+    const lines2 = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
+    if (sharedToPrivate && r.ownRowsRetracted > 0) {
+      lines2.push(`${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push.`);
+    }
+    if (sharedToPrivate && r.teammateRowsKept > 0) {
+      lines2.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
+    }
+    return lines2;
+  }
+  const lines = [`Moved ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}) and removed the empty "${r.from}".`];
+  if (sharedToPrivate) {
+    if (r.ownRowsRetracted > 0) {
+      lines.push(`${r.ownRowsRetracted} of your docs will be removed from the shared copy (retracted) at the next push.`);
+    }
+    if (r.teammateRowsKept > 0) {
+      lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
+    }
+  }
+  if (isSyncable2(r.from)) {
+    lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
+  }
+  return lines;
 }
 var isSyncable2, CollectionDeleteRefusedError, MERGE_BATCH;
 var init_manage = __esm({
@@ -6314,7 +6453,8 @@ async function pullFromRemote() {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const mine = (await backend.collectionsForUser()).filter(isSyncableCollection);
+      const redirects = await getCollectionRedirects();
+      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !(c in redirects));
       const subs = await getSyncSubscriptions();
       const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -8202,6 +8342,7 @@ __export(src_exports, {
   adapterPromote: () => adapterPromote,
   addAdapter: () => addAdapter,
   addClaimNotice: () => addClaimNotice,
+  addCollectionRedirect: () => addCollectionRedirect,
   addDependency: () => addDependency,
   addDocument: () => addDocument2,
   addDocumentsBatch: () => addDocumentsBatch2,
@@ -8236,6 +8377,7 @@ __export(src_exports, {
   claimsApply: () => claimsApply,
   claimsFor: () => claimsFor,
   classifyMemories: () => classifyMemories,
+  clearCollectionRedirect: () => clearCollectionRedirect,
   clearEmbeddingMemo: () => clearEmbeddingMemo,
   clearPendingDeletes: () => clearPendingDeletes,
   clearSelectedForManifest: () => clearSelectedForManifest,
@@ -8291,6 +8433,7 @@ __export(src_exports, {
   generateEmbeddingsBatch: () => generateEmbeddingsBatch,
   getAdapter: () => getAdapter,
   getCollectionCount: () => getCollectionCount2,
+  getCollectionRedirects: () => getCollectionRedirects,
   getConfig: () => getConfig,
   getCurationModel: () => getCurationModel,
   getCurationState: () => getCurationState,
@@ -8343,9 +8486,12 @@ __export(src_exports, {
   loadManifestSplit: () => loadManifestSplit,
   markDecayRun: () => markDecayRun,
   markUpdateNotified: () => markUpdateNotified,
+  matchCollectionMap: () => matchCollectionMap,
   mergeCollections: () => mergeCollections,
+  mergeReportLines: () => mergeReportLines,
   nextTasks: () => nextTasks,
   nextVersion: () => nextVersion,
+  normalizeCollectionMap: () => normalizeCollectionMap,
   normalizeTyped: () => normalizeTyped,
   normalizedSalience: () => normalizedSalience,
   noteInstalledVersion: () => noteInstalledVersion,
@@ -8403,12 +8549,14 @@ __export(src_exports, {
   resetConfig: () => resetConfig,
   resetDeviceId: () => resetDeviceId,
   resetStore: () => resetStore,
+  resolveCollectionRedirect: () => resolveCollectionRedirect,
   resolveConflict: () => resolveConflict,
   resolveSyncUsername: () => resolveSyncUsername,
   retryUnsharedClaims: () => retryUnsharedClaims,
   routeMemory: () => routeMemory,
   runDecaySweep: () => runDecaySweep,
   scheduleSyncSoon: () => scheduleSyncSoon,
+  scopeNotes: () => scopeNotes,
   searchTasks: () => searchTasks,
   sessionsHoldingLeases: () => sessionsHoldingLeases,
   setConfig: () => setConfig,
@@ -8953,7 +9101,7 @@ function context(event, lines) {
   emit({ hookSpecificOutput: { hookEventName: event, additionalContext: lines.join("\n") } });
 }
 function scopeLine(d) {
-  if (!d.ambiguous) return `**Scope:** \`${d.collection}\``;
+  if (!d.ambiguous) return `**Scope:** \`${d.collection}\`${scopeNotes(d)}`;
   return `**Scope:** AMBIGUOUS \u2014 both \`${d.ambiguous[0]}\` and \`${d.ambiguous[1]}\` exist for this folder. Ask the user which collection to use BEFORE storing anything. (Reads here default to \`${d.collection}\`.)`;
 }
 function attribution(metadata) {
@@ -8968,6 +9116,7 @@ async function freshenFromRemote(collection, opts = {}) {
   if (!isSyncConfigured(config)) return 0;
   if (!isSyncableCollection(collection)) return 0;
   try {
+    if (collection in await getCollectionRedirects()) return 0;
     const followed = (await getSyncSubscriptions()).includes(collection);
     if (opts.gate && followed && !shouldPull(collection)) return 0;
     const since = followed ? Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS) : 0;

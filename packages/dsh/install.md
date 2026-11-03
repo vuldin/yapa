@@ -46,6 +46,8 @@ dsh plugin --profile web add link:/absolute/path/to/yapa/packages/dsh
         # customers: [acme]                   # folder names under projectRoots that are
                                               # customers (→ customer-{name}); all other
                                               # folders default to project-{name}
+        # collectionMap: ['~/projects/acme=private-acme']  # folder → collection,
+                                              # checked first; longest path wins
         # syncEnabled: false
         # syncDatabaseUrl: postgres://…    # optional remote sync
 ```
@@ -67,6 +69,9 @@ Plugin-only knobs (layer 2/3 only): `projectRoots`, `customers` (folder names
 under a project root that are customers — they get `customer-{name}` scope;
 every other folder defaults to `project-{name}`; if both collections exist for
 a folder the injected scope is flagged ambiguous and the agent asks),
+`collectionMap` (`path=collection` entries, `~` expanded, checked before
+`projectRoots`; the longest matching path wins; the way to give a folder a
+`private-*`/`local-*` scope),
 `injectRecall`, `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
 `decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
 reminders), `captureCompaction` (harness compaction summaries are stored as

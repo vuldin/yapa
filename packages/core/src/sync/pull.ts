@@ -2,7 +2,7 @@ import { getConfig } from '../config.js';
 import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument } from '../store/index.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type RemoteDeletion, type RemoteDocument, type SyncBackend } from './backend.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects } from './sentinel.js';
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
 
@@ -54,7 +54,10 @@ export async function pullFromRemote(): Promise<PullStats> {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const mine = (await backend.collectionsForUser()).filter(isSyncable);
+      // A collection merged away here stays away, even though the remote
+      // still lists it for this user (teammates' rows, or rows not yet moved).
+      const redirects = await getCollectionRedirects();
+      const mine = (await backend.collectionsForUser()).filter(c => isSyncable(c) && !(c in redirects));
       const subs = await getSyncSubscriptions();
       const add = mine.filter(c => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);

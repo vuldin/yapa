@@ -50,6 +50,12 @@
       "description": "Comma-separated folder names under a project root that are customers (customer-{name} instead of project-{name}).",
       "default": ""
     },
+    "collection_map": {
+      "type": "string",
+      "title": "Folder to collection map",
+      "description": "Comma-separated path=collection entries, e.g. ~/work/acme=private-acme. A session in that folder (or below it) uses that collection; the longest matching path wins, ahead of project roots. This is how a folder gets a private-* or local-* collection, which never syncs.",
+      "default": ""
+    },
     "sync_enabled": {
       "type": "boolean",
       "title": "Team sync",

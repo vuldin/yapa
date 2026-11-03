@@ -36,7 +36,7 @@ import {
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
-import { detectCollection, type CollectionDetection } from './scope.js';
+import { detectCollection, scopeNotes, type CollectionDetection } from './scope.js';
 
 interface AgentState {
   /** Cache of the detected collection for this agent's session. */
@@ -88,7 +88,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       states.set(agent.id, state);
 
       const detection = state.detection
-        ?? (state.detection = await detectCollection(agent.session.header.cwd, resolved.projectRoots, resolved.customers));
+        ?? (state.detection = await detectCollection(agent.session.header.cwd, resolved.projectRoots, resolved.customers, resolved.collectionMap));
       const collection = detection.collection;
 
       // The newest direct human prompt claimed for this step, if any.
@@ -113,7 +113,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
           `_(Recalls/tasks below default to \`${collection}\` until the user answers.)_`,
         );
       } else {
-        lines.push(`**Scope:** \`${collection}\``);
+        lines.push(`**Scope:** \`${collection}\`${scopeNotes(detection)}`);
       }
 
       if (captureNotice) lines.push('', `## Auto-capture\n${captureNotice}`);

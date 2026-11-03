@@ -5,12 +5,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./store/index.js', () => ({
   listCollections: vi.fn(),
 }));
+// Merge redirects come from a sentinel doc in the store: stub the reader.
+vi.mock('./sync/sentinel.js', async importOriginal => ({
+  ...(await importOriginal<any>()),
+  getCollectionRedirects: vi.fn(),
+}));
 
 import { listCollections } from './store/index.js';
-import { detectCollection } from './scope.js';
+import { getCollectionRedirects, resolveCollectionRedirect } from './sync/sentinel.js';
+import { detectCollection, matchCollectionMap, scopeNotes } from './scope.js';
 import { setConfig, resetConfig, createConfig } from './config.js';
 
 const mocked = vi.mocked(listCollections);
+const redirects = vi.mocked(getCollectionRedirects);
 const ROOTS = ['/home/u/projects'];
 
 /** Shorthand: a collections list carrying just the given names. */
@@ -20,6 +27,8 @@ const cols = (...names: string[]) => names.map(name => ({ name })) as any;
 beforeEach(() => {
   mocked.mockReset();
   mocked.mockResolvedValue(cols());
+  redirects.mockReset();
+  redirects.mockResolvedValue({});
 });
 
 describe('detectCollection', () => {
@@ -94,5 +103,85 @@ describe('detectCollection', () => {
     } finally {
       resetConfig();
     }
+  });
+});
+
+describe('detectCollection: collection_map', () => {
+  const MAP = ['/home/u/work/acme=private-acme', '/home/u/work/acme/shared=project-acme', '/home/u/projects/dsh=local-dsh'];
+
+  it('a mapped folder (and anything below it) wins over project roots, never ambiguous', async () => {
+    mocked.mockResolvedValue(cols('customer-dsh', 'project-dsh'));
+    const d = await detectCollection('/home/u/projects/dsh/src', ROOTS, [], MAP);
+    expect(d).toEqual({ collection: 'local-dsh', mapped: true });
+    expect((await detectCollection('/home/u/work/acme', ROOTS, [], MAP)).collection).toBe('private-acme');
+  });
+
+  it('the longest matching path wins, whatever the entry order', async () => {
+    expect((await detectCollection('/home/u/work/acme/shared/docs', ROOTS, [], MAP)).collection).toBe('project-acme');
+    expect((await detectCollection('/home/u/work/acme/shared/docs', ROOTS, [], [...MAP].reverse())).collection).toBe('project-acme');
+    expect((await detectCollection('/home/u/work/acme/other', ROOTS, [], MAP)).collection).toBe('private-acme');
+  });
+
+  it('matches on path boundaries only, and falls back to roots otherwise', async () => {
+    expect((await detectCollection('/home/u/work/acme-old', ROOTS, [], MAP)).collection).toBe('global');
+    const d = await detectCollection('/home/u/projects/dshx', ROOTS, [], MAP);
+    expect(d).toEqual({ collection: 'project-dshx' });
+  });
+
+  it('ignores malformed entries and tolerates trailing slashes', () => {
+    expect(matchCollectionMap('/a/b', ['x', '=private-x', '/a/b='])).toBeUndefined();
+    expect(matchCollectionMap('/a/b/c', ['/a/b/=private-b'])).toBe('private-b');
+    expect(matchCollectionMap('/anything', ['/=local-root'])).toBe('local-root');
+  });
+
+  it('reads YAPA_COLLECTION_MAP, with ~ expanded', async () => {
+    setConfig(createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/=private-acme, /srv/x=local-x' }));
+    try {
+      expect(createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/=private-acme' }).COLLECTION_MAP).toEqual([`${process.env.HOME}/work/acme=private-acme`]);
+      expect((await detectCollection(`${process.env.HOME}/work/acme/src`)).collection).toBe('private-acme');
+      expect((await detectCollection('/srv/x')).collection).toBe('local-x');
+    } finally {
+      resetConfig();
+    }
+  });
+});
+
+describe('detectCollection: merge redirects', () => {
+  it('follows a redirect from the folder\'s collection and reports where it came from', async () => {
+    redirects.mockResolvedValue({ 'project-acme': 'private-acme' });
+    expect(await detectCollection('/home/u/projects/acme', ROOTS)).toEqual({ collection: 'private-acme', redirectedFrom: 'project-acme' });
+  });
+
+  it('keeps a merged-away customer- folder sticky, then follows it', async () => {
+    redirects.mockResolvedValue({ 'customer-acme': 'private-acme' });
+    expect((await detectCollection('/home/u/projects/acme', ROOTS)).collection).toBe('private-acme');
+  });
+
+  it('follows mapped collections and chains, and stops at a cycle', async () => {
+    redirects.mockResolvedValue({ 'private-a': 'private-b', 'private-b': 'private-c' });
+    expect(await detectCollection('/w/a', ROOTS, [], ['/w/a=private-a'])).toEqual({ collection: 'private-c', mapped: true, redirectedFrom: 'private-a' });
+    expect(resolveCollectionRedirect('x', { x: 'y', y: 'x' })).toEqual({ collection: 'y', redirectedFrom: 'x' });
+    expect(resolveCollectionRedirect('x', { x: 'x' })).toEqual({ collection: 'x' });
+    expect(resolveCollectionRedirect('z', { x: 'y' })).toEqual({ collection: 'z' });
+  });
+
+  it('resolves both ambiguity candidates, and drops the ambiguity when they meet', async () => {
+    mocked.mockResolvedValue(cols('customer-acme', 'project-acme'));
+    redirects.mockResolvedValue({ 'customer-acme': 'project-acme' });
+    expect(await detectCollection('/home/u/projects/acme', ROOTS)).toEqual({ collection: 'project-acme' });
+  });
+
+  it('never redirects global', async () => {
+    redirects.mockResolvedValue({ global: 'private-x' });
+    expect((await detectCollection('/elsewhere', ROOTS)).collection).toBe('global');
+  });
+});
+
+describe('scopeNotes', () => {
+  it('flags local-only scopes (not global) and redirects', () => {
+    expect(scopeNotes({ collection: 'project-acme' })).toBe('');
+    expect(scopeNotes({ collection: 'global' })).toBe('');
+    expect(scopeNotes({ collection: 'private-acme', mapped: true })).toBe(' (local only, never synced)');
+    expect(scopeNotes({ collection: 'private-acme', redirectedFrom: 'project-acme' })).toBe(' (local only, never synced) (merged from `project-acme`)');
   });
 });

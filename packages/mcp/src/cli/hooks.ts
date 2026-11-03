@@ -13,10 +13,12 @@ import {
   listCollections,
   collectionSize,
   detectCollection,
+  scopeNotes,
   pullCollection,
   getSyncPullTimestamp,
   getSyncSubscriptions,
   updateSyncSubscriptions,
+  getCollectionRedirects,
   isSyncConfigured,
   resolveSyncUsername,
   captureTurn,
@@ -95,7 +97,7 @@ function context(event: string, lines: string[]): void {
 
 /** The `**Scope:**` line for emitted context, flagging ambiguity if present. */
 function scopeLine(d: CollectionDetection): string {
-  if (!d.ambiguous) return `**Scope:** \`${d.collection}\``;
+  if (!d.ambiguous) return `**Scope:** \`${d.collection}\`${scopeNotes(d)}`;
   return `**Scope:** AMBIGUOUS — both \`${d.ambiguous[0]}\` and \`${d.ambiguous[1]}\` exist for this folder. Ask the user which collection to use BEFORE storing anything. (Reads here default to \`${d.collection}\`.)`;
 }
 
@@ -121,6 +123,8 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
   // global/private-*/local-* never sync: skip the sign-in and the request.
   if (!isSyncableCollection(collection)) return 0;
   try {
+    // Merged away on this machine: teammates' rows must not bring it back.
+    if (collection in await getCollectionRedirects()) return 0;
     // First visit to a shared collection (a teammate's project folder, or one
     // named in the prompt): pull its whole history, then follow it so the
     // background sync keeps it current. Subscribe only after the backfill

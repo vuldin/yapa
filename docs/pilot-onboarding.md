@@ -60,6 +60,7 @@ from a shell: `claude plugin configure yapa@yapa`). Set:
 | `storage` | `local` (default; no server needed) |
 | `project_roots` | folders whose subfolders are customers/projects, e.g. `~/work/projects` |
 | `customers` | subfolder names under those roots that are customers, e.g. `acme,globex` |
+| `collection_map` | optional: `path=collection` entries for folders that need a specific collection, e.g. `~/work/projects/acme-notes=private-acme` (checked before `project_roots`; the only way to get a private scope) |
 | `username` | leave as is; with the sync service your name comes from your Google account |
 | `response_capture` | on by default: after each turn, saves typed findings and records answers to open decisions and questions; `false` turns it off |
 | `remote_name` | the team remote's name, shown on the status line (`yapa@v<version> <-> <REMOTE_NAME>`) |

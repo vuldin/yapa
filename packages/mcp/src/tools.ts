@@ -73,6 +73,8 @@ import {
   getDeviceId,
   recallMemory,
   mergeCollections,
+  mergeReportLines,
+  clearCollectionRedirect,
   removeCollection,
   removeDependency,
   runDecaySweep,
@@ -1434,7 +1436,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'collection_merge',
-    'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the emptied `from`. Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.',
+    'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR shared copies of the moved docs; teammates\' docs stay shared in `from`. Afterwards `from` redirects to `into` on this machine (its folder scopes to `into`, sync does not bring it back; `sync subscribe` follows it again). Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.',
     {
       from: z.string().describe('Collection to merge (removed afterwards)'),
       into: z.string().describe('Existing collection that receives every document'),
@@ -1443,14 +1445,7 @@ export function registerTools(server: McpServer): void {
     async ({ from, into, dry_run }) => {
       const r = await mergeCollections(from, into, { dryRun: dry_run });
       if (!r.dryRun) recordLastWrite(into);
-      const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
-      const lines = r.dryRun
-        ? [`Dry run: would move ${r.moved} document(s) from "${from}" into "${into}" (${types}), then remove "${from}". Nothing changed.`]
-        : [`Moved ${r.moved} document(s) from "${from}" into "${into}" (${types}) and removed the empty "${from}".`];
-      if (r.teammateRowsKept > 0) {
-        lines.push(`${r.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${from}" on the sync service.`);
-      }
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      return { content: [{ type: 'text' as const, text: mergeReportLines(r).join('\n') }] };
     },
   );
 
@@ -1589,6 +1584,8 @@ export function registerTools(server: McpServer): void {
             }
             const existing = await getSyncSubscriptions();
             await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
+            // Asked for by name: a collection merged away here is followed again.
+            for (const name of valid) await clearCollectionRedirect(name);
             for (const name of valid) await getOrCreateCollection(name);
             // Backfill full history: a regular cycle only pulls docs newer than
             // the shared last-pull timestamp, so a new subscription would start empty.

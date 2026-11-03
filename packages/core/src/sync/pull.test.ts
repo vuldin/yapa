@@ -19,7 +19,7 @@ import { PostgresBackend } from './postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
 import { pullFromRemote, pullCollection } from './pull.js';
 import { isSyncableCollection } from './syncable.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions, addCollectionRedirect } from './sentinel.js';
 import { removeCollection } from '../collections/manage.js';
 import { getPendingDeletes, getLocalTombstones } from './deletes.js';
 import { addLocalTombstone } from './deletes.js';
@@ -195,6 +195,23 @@ describe('recovery after a wiped store', () => {
       mockedRemote.mockClear();
       await pullFromRemote(); // normal pulls skip own-device echoes again
       expect(mockedRemote.mock.calls.every(c => !c[3]?.includeOwnDevice)).toBe(true);
+    } finally {
+      setStore(createLocalStore(dir));
+      await rm(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it('never re-subscribes a collection merged away on this machine', async () => {
+    const fresh = await mkdtemp(join(tmpdir(), 'yapa-pull-fresh-'));
+    setStore(createLocalStore(fresh));
+    try {
+      await addCollectionRedirect('project-merged', 'private-merged');
+      vi.mocked(getRemoteCollectionsForUser).mockResolvedValueOnce(['customer-kept', 'project-merged']);
+      mockedRemote.mockImplementation(async () => []);
+      await pullFromRemote();
+      expect(await getSyncSubscriptions()).toEqual(['customer-kept']);
+      expect(mockedRemote.mock.calls.some(c => c[0] === 'project-merged')).toBe(false);
+      expect((await getStore().listCollections()).some(c => c.name === 'project-merged')).toBe(false);
     } finally {
       setStore(createLocalStore(dir));
       await rm(fresh, { recursive: true, force: true });

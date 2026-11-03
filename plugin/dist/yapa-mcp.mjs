@@ -7270,6 +7270,14 @@ import { join as pathJoin } from "path";
 function list(value) {
   return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
 }
+function normalizeCollectionMap(entries) {
+  return entries.map((entry) => {
+    const eq = entry.lastIndexOf("=");
+    if (eq < 0) return entry.trim();
+    const path = entry.slice(0, eq).trim().replace(/^~(?=\/|$)/, homedir2()).replace(/(.)\/+$/, "$1");
+    return `${path}=${entry.slice(eq + 1).trim()}`;
+  }).filter(Boolean);
+}
 function get(env, key, fallback = "") {
   const pick2 = (v) => v === void 0 || v === "" ? void 0 : v;
   return pick2(env[`YAPA_${key}`]) ?? pick2(env[key]) ?? fallback;
@@ -7307,6 +7315,7 @@ function createConfig(env = process.env) {
     USERNAME: env.YAPA_USERNAME || osUsername(),
     PROJECT_ROOTS: list(get(env, "PROJECT_ROOTS", "")).map((r) => r.replace(/^~(?=\/|$)/, homedir2()).replace(/\/+$/, "")),
     CUSTOMERS: list(get(env, "CUSTOMERS", "")),
+    COLLECTION_MAP: normalizeCollectionMap(list(get(env, "COLLECTION_MAP", ""))),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
@@ -8287,6 +8296,92 @@ var init_store = __esm({
     updateDocumentsBatch2 = (collection, entries) => getStore().updateDocumentsBatch(collection, entries);
     deleteDocument2 = (collection, id) => getStore().deleteDocument(collection, id);
     findAndDeleteDocument2 = (id) => getStore().findAndDeleteDocument(id);
+  }
+});
+
+// packages/core/src/sync/sentinel.ts
+async function getSyncPullTimestamp() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_pull_sentinel" }
+    }, 1);
+    if (results.length === 0) return 0;
+    return results[0].metadata.last_pull ?? 0;
+  } catch {
+    return 0;
+  }
+}
+async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
+    type: "sync_pull_sentinel",
+    last_pull: at
+  });
+}
+async function getSyncSubscriptions() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "sync_subscriptions" }
+    }, 1);
+    if (results.length === 0) return [];
+    const raw = results[0].metadata.collections;
+    if (!raw) return [];
+    return raw.split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function updateSyncSubscriptions(collections) {
+  await getOrCreateCollection2("global");
+  const deduped = [...new Set(collections)].sort();
+  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
+    type: "sync_subscriptions",
+    collections: deduped.join(",")
+  });
+}
+async function getCollectionRedirects() {
+  try {
+    const results = await getDocumentsByFilter2("global", {
+      type: { $eq: "collection_redirects" }
+    }, 1);
+    if (results.length === 0) return {};
+    const raw = results[0].metadata.redirects ?? {};
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === "string"));
+  } catch {
+    return {};
+  }
+}
+async function writeCollectionRedirects(redirects) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", COLLECTION_REDIRECTS_ID, "collection redirects", {
+    type: "collection_redirects",
+    redirects
+    // stored as JSON by the adapters
+  });
+}
+async function addCollectionRedirect(from, into) {
+  if (from === into || from === "global") return;
+  const redirects = await getCollectionRedirects();
+  redirects[from] = into;
+  delete redirects[into];
+  await writeCollectionRedirects(redirects);
+}
+async function clearCollectionRedirect(name) {
+  const redirects = await getCollectionRedirects();
+  if (!(name in redirects)) return;
+  delete redirects[name];
+  await writeCollectionRedirects(redirects);
+}
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID;
+var init_sentinel = __esm({
+  "packages/core/src/sync/sentinel.ts"() {
+    "use strict";
+    init_store();
+    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
+    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
+    COLLECTION_REDIRECTS_ID = "__collection_redirects__";
   }
 });
 
@@ -9638,56 +9733,6 @@ var init_coordination = __esm({
   }
 });
 
-// packages/core/src/sync/sentinel.ts
-async function getSyncPullTimestamp() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_pull_sentinel" }
-    }, 1);
-    if (results.length === 0) return 0;
-    return results[0].metadata.last_pull ?? 0;
-  } catch {
-    return 0;
-  }
-}
-async function updateSyncPullTimestamp(at = Math.floor(Date.now() / 1e3)) {
-  await getOrCreateCollection2("global");
-  await addDocument2("global", SYNC_PULL_SENTINEL_ID, "sync pull sentinel", {
-    type: "sync_pull_sentinel",
-    last_pull: at
-  });
-}
-async function getSyncSubscriptions() {
-  try {
-    const results = await getDocumentsByFilter2("global", {
-      type: { $eq: "sync_subscriptions" }
-    }, 1);
-    if (results.length === 0) return [];
-    const raw = results[0].metadata.collections;
-    if (!raw) return [];
-    return raw.split(",").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-async function updateSyncSubscriptions(collections) {
-  await getOrCreateCollection2("global");
-  const deduped = [...new Set(collections)].sort();
-  await addDocument2("global", SYNC_SUBSCRIPTIONS_ID, "sync subscriptions", {
-    type: "sync_subscriptions",
-    collections: deduped.join(",")
-  });
-}
-var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID;
-var init_sentinel = __esm({
-  "packages/core/src/sync/sentinel.ts"() {
-    "use strict";
-    init_store();
-    SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
-    SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
-  }
-});
-
 // packages/core/src/sync/push.ts
 import { createHash } from "node:crypto";
 function emptyPushStats() {
@@ -9815,7 +9860,8 @@ async function pushAll() {
     try {
       const existing = await getSyncSubscriptions();
       const existingSet = new Set(existing);
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c));
+      const redirects = await getCollectionRedirects();
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !(c in redirects));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }
@@ -39862,6 +39908,8 @@ function detectSector(content) {
 // packages/core/src/scope.ts
 init_config();
 init_store();
+init_sentinel();
+init_syncable();
 
 // packages/core/src/index.ts
 init_metadata_adapter();
@@ -40132,6 +40180,7 @@ async function storeMemory(content, options = {}) {
 // packages/core/src/memory/recall.ts
 init_store();
 init_config();
+init_syncable();
 
 // packages/core/src/memory/filters.ts
 init_config();
@@ -40166,6 +40215,9 @@ function rankScore(distance, salience) {
 }
 
 // packages/core/src/memory/recall.ts
+function isFenced(collection) {
+  return !!collection && collection !== "global" && !isSyncableCollection(collection);
+}
 async function recallMemory(query, options = {}) {
   const nResults = options.nResults ?? 5;
   const includePromoted = options.include_promoted ?? false;
@@ -40179,7 +40231,7 @@ async function recallMemory(query, options = {}) {
     const extra = options.crossCollection ?? 0;
     if (extra > 0) {
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
-      const others = (await queryAllCollections2(query, nResults + extra * 4, filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true).slice(0, extra);
+      const others = (await queryAllCollections2(query, nResults + extra * 4, filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
       results = [...results, ...others];
     }
   } else {
@@ -41228,6 +41280,7 @@ async function listCollectionsWithCounts() {
 }
 async function createNewCollection(name) {
   await createCollection2(name);
+  await clearCollectionRedirect(name);
 }
 var isSyncable2 = isSyncableCollection;
 var CollectionDeleteRefusedError = class extends Error {
@@ -41288,8 +41341,19 @@ async function mergeCollections(from, into, opts = {}) {
     byType[t] = (byType[t] ?? 0) + 1;
   }
   const me = getConfig().USERNAME;
-  const teammateRowsKept = isSyncable2(from) && !isSyncable2(into) ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
-  const result = { from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept };
+  const sharedToPrivate = isSyncable2(from) && !isSyncable2(into);
+  const teammateRowsKept = sharedToPrivate ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
+  const ownRowsRetracted = sharedToPrivate ? docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.is_synced === true && (!d.metadata.origin_user || d.metadata.origin_user === me)).length : 0;
+  const result = {
+    from,
+    into,
+    moved: docs.length,
+    byType,
+    dryRun: !!opts.dryRun,
+    sourceRemoved: false,
+    teammateRowsKept,
+    ownRowsRetracted
+  };
   if (opts.dryRun) return result;
   if (docs.length > 0) {
     const before = await getCollectionCount2(into);
@@ -41311,7 +41375,36 @@ async function mergeCollections(from, into, opts = {}) {
   }
   await removeCollection(from);
   result.sourceRemoved = true;
+  await addCollectionRedirect(from, into);
   return result;
+}
+function mergeReportLines(r) {
+  const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
+  const sharedToPrivate = isSyncable2(r.from) && !isSyncable2(r.into);
+  const docs = (n) => `${n} doc${n === 1 ? "" : "s"}`;
+  if (r.dryRun) {
+    const lines2 = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
+    if (sharedToPrivate && r.ownRowsRetracted > 0) {
+      lines2.push(`${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push.`);
+    }
+    if (sharedToPrivate && r.teammateRowsKept > 0) {
+      lines2.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
+    }
+    return lines2;
+  }
+  const lines = [`Moved ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}) and removed the empty "${r.from}".`];
+  if (sharedToPrivate) {
+    if (r.ownRowsRetracted > 0) {
+      lines.push(`${r.ownRowsRetracted} of your docs will be removed from the shared copy (retracted) at the next push.`);
+    }
+    if (r.teammateRowsKept > 0) {
+      lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
+    }
+  }
+  if (isSyncable2(r.from)) {
+    lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
+  }
+  return lines;
 }
 
 // packages/core/src/curation/index.ts
@@ -42389,7 +42482,8 @@ async function pullFromRemote() {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const mine = (await backend.collectionsForUser()).filter(isSyncableCollection);
+      const redirects = await getCollectionRedirects();
+      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !(c in redirects));
       const subs = await getSyncSubscriptions();
       const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -45362,7 +45456,7 @@ ${rec}`;
   );
   server2.tool(
     "collection_merge",
-    "Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the emptied `from`. Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.",
+    "Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR shared copies of the moved docs; teammates' docs stay shared in `from`. Afterwards `from` redirects to `into` on this machine (its folder scopes to `into`, sync does not bring it back; `sync subscribe` follows it again). Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.",
     {
       from: external_exports.string().describe("Collection to merge (removed afterwards)"),
       into: external_exports.string().describe("Existing collection that receives every document"),
@@ -45371,12 +45465,7 @@ ${rec}`;
     async ({ from, into, dry_run }) => {
       const r = await mergeCollections(from, into, { dryRun: dry_run });
       if (!r.dryRun) recordLastWrite(into);
-      const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
-      const lines = r.dryRun ? [`Dry run: would move ${r.moved} document(s) from "${from}" into "${into}" (${types}), then remove "${from}". Nothing changed.`] : [`Moved ${r.moved} document(s) from "${from}" into "${into}" (${types}) and removed the empty "${from}".`];
-      if (r.teammateRowsKept > 0) {
-        lines.push(`${r.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${from}" on the sync service.`);
-      }
-      return { content: [{ type: "text", text: lines.join("\n") }] };
+      return { content: [{ type: "text", text: mergeReportLines(r).join("\n") }] };
     }
   );
   server2.tool(
@@ -45506,6 +45595,7 @@ Last error: ${last.message}` : ""}`);
             }
             const existing = await getSyncSubscriptions();
             await updateSyncSubscriptions([.../* @__PURE__ */ new Set([...existing, ...valid])]);
+            for (const name of valid) await clearCollectionRedirect(name);
             for (const name of valid) await getOrCreateCollection2(name);
             let backfilled = 0;
             for (const name of valid) backfilled += (await pullCollection(name, 0)).pulled;

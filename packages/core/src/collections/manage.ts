@@ -1,6 +1,6 @@
 import { getConfig } from '../config.js';
 import { queueSyncDeletes, addLocalTombstones } from '../sync/deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions } from '../sync/sentinel.js';
+import { getSyncSubscriptions, updateSyncSubscriptions, addCollectionRedirect, clearCollectionRedirect } from '../sync/sentinel.js';
 import {
   addDocumentsBatch,
   deleteDocument,
@@ -11,7 +11,7 @@ import {
   deleteCollection as chromaDeleteCollection,
   getCollectionCount,
 } from '../store/index.js';
-import { isSyncableCollection } from '../sync/syncable.js';
+import { isSyncableCollection, isReadOnlyDoc } from '../sync/syncable.js';
 
 export interface CollectionInfo {
   name: string;
@@ -37,9 +37,13 @@ export async function listCollectionsWithCounts(): Promise<CollectionInfo[]> {
   return results.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Create a new collection. */
+/**
+ * Create a new collection. Creating a name that was merged away on this
+ * machine brings it back: its redirect is dropped.
+ */
 export async function createNewCollection(name: string): Promise<void> {
   await chromaCreateCollection(name);
+  await clearCollectionRedirect(name);
 }
 
 const isSyncable = isSyncableCollection;
@@ -116,6 +120,12 @@ export interface MergeResult {
    * this store keeps a personal copy).
    */
   teammateRowsKept: number;
+  /**
+   * Shared -> private merges only: your own synced docs whose shared rows the
+   * next push removes from the sync service (retracts), as for any doc moved
+   * into a private collection.
+   */
+  ownRowsRetracted: number;
 }
 
 /** Docs per target write (the store embeds each batch). */
@@ -129,7 +139,13 @@ const MERGE_BATCH = 100;
  * marked unsynced: the next push upserts it under its existing id with the
  * new collection, which the sync service applies as an in-place move (the
  * row keeps its owner and is never deleted), and other devices relocate their
- * copy on pull. Nothing is queued for remote deletion.
+ * copy on pull. Nothing is queued for remote deletion. Into a private
+ * collection, the next push instead retracts your own shared rows (push.ts
+ * retractSharedCopies); teammates' rows stay shared in `from`.
+ *
+ * Once merged, `from` redirects to `into` on this machine (a local sentinel
+ * in `global`): scope detection follows it, and sync never brings `from`
+ * back from teammates' rows. `sync subscribe from` follows it again.
  *
  * Safety rules:
  * - `into` must already exist: new collection names are confirmed with the
@@ -171,10 +187,18 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
     byType[t] = (byType[t] ?? 0) + 1;
   }
   const me = getConfig().USERNAME;
-  const teammateRowsKept = isSyncable(from) && !isSyncable(into)
+  const sharedToPrivate = isSyncable(from) && !isSyncable(into);
+  const teammateRowsKept = sharedToPrivate
     ? docs.filter(d => d.metadata.origin_user && d.metadata.origin_user !== me).length
     : 0;
-  const result: MergeResult = { from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept };
+  // What retractSharedCopies will find: your docs that reached the remote.
+  const ownRowsRetracted = sharedToPrivate
+    ? docs.filter(d => !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata)
+      && d.metadata.is_synced === true && (!d.metadata.origin_user || d.metadata.origin_user === me)).length
+    : 0;
+  const result: MergeResult = {
+    from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept, ownRowsRetracted,
+  };
   if (opts.dryRun) return result;
 
   if (docs.length > 0) {
@@ -201,5 +225,43 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
   // service holds no rows in it once the moved docs are pushed.
   await removeCollection(from);
   result.sourceRemoved = true;
+  // Teammates' rows keep `from` alive remotely: without this, the next prompt
+  // in its folder (or a recovery pull) would recreate and re-follow it.
+  await addCollectionRedirect(from, into);
   return result;
+}
+
+/**
+ * The user-facing report of a merge, shared by the MCP and DSH tools. For a
+ * shared -> private merge it spells out what happens on the sync service:
+ * your shared rows are retracted at the next push, teammates' rows stay
+ * shared in `from`, and `from` is not followed again unless asked.
+ */
+export function mergeReportLines(r: MergeResult): string[] {
+  const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
+  const sharedToPrivate = isSyncable(r.from) && !isSyncable(r.into);
+  const docs = (n: number) => `${n} doc${n === 1 ? '' : 's'}`;
+  if (r.dryRun) {
+    const lines = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
+    if (sharedToPrivate && r.ownRowsRetracted > 0) {
+      lines.push(`${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push.`);
+    }
+    if (sharedToPrivate && r.teammateRowsKept > 0) {
+      lines.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
+    }
+    return lines;
+  }
+  const lines = [`Moved ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}) and removed the empty "${r.from}".`];
+  if (sharedToPrivate) {
+    if (r.ownRowsRetracted > 0) {
+      lines.push(`${r.ownRowsRetracted} of your docs will be removed from the shared copy (retracted) at the next push.`);
+    }
+    if (r.teammateRowsKept > 0) {
+      lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
+    }
+  }
+  if (isSyncable(r.from)) {
+    lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
+  }
+  return lines;
 }

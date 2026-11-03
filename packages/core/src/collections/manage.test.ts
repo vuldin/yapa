@@ -14,15 +14,15 @@ vi.mock('../sync/postgres.js', () => ({
   getRemoteOwnersByIds: vi.fn(async () => new Map()),
 }));
 
-import { upsertRemoteDocument, deleteRemoteDocuments } from '../sync/postgres.js';
+import { upsertRemoteDocument, deleteRemoteDocuments, getRemoteOwnersByIds } from '../sync/postgres.js';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setSyncBackend } from '../sync/backend.js';
 import { PostgresBackend } from '../sync/postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds, getDocumentsByFilter } from '../store/index.js';
 import { getPendingDeletes, getLocalTombstones } from '../sync/deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions } from '../sync/sentinel.js';
+import { getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects, addCollectionRedirect, clearCollectionRedirect } from '../sync/sentinel.js';
 import { pushToRemote } from '../sync/push.js';
-import { mergeCollections, removeCollection, CollectionDeleteRefusedError } from './manage.js';
+import { mergeCollections, mergeReportLines, removeCollection, createNewCollection, CollectionDeleteRefusedError } from './manage.js';
 
 let dir: string;
 const names = async () => (await getStore().listCollections()).map(c => c.name);
@@ -124,6 +124,78 @@ describe('mergeCollections', () => {
     await getStore().addDocument('customer-dup', 'mem-1', 'same id, other doc', { type: 'memory' });
     await expect(mergeCollections('customer-dup', 'customer-new')).rejects.toThrow(/already holds 1 id/);
     expect((await all('customer-dup')).map(d => d.id)).toEqual(['mem-1']);
+  });
+});
+
+describe('mergeCollections: shared -> private', () => {
+  const seed = async () => {
+    const store = getStore();
+    await store.createCollection('project-acme');
+    await store.createCollection('private-acme');
+    await store.addDocument('project-acme', 'sp-mine', 'acme runs 5 brokers', {
+      type: 'memory', origin_user: 'tester', created_at: 1_800_000_000, is_synced: true,
+    });
+    await store.addDocument('project-acme', 'sp-mine-local', 'acme draft, never pushed', {
+      type: 'memory', origin_user: 'tester', created_at: 1_800_000_050, is_synced: false,
+    });
+    await store.addDocument('project-acme', 'sp-theirs', 'teammate note on acme tiered storage', {
+      type: 'memory', origin_user: 'teammate', created_at: 1_800_000_100, is_synced: true,
+    });
+    await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'project-acme']);
+  };
+
+  it('reports what happens remotely, records a redirect, and unsubscribes the source', async () => {
+    await seed();
+    const dry = await mergeCollections('project-acme', 'private-acme', { dryRun: true });
+    expect(dry).toMatchObject({ ownRowsRetracted: 1, teammateRowsKept: 1, dryRun: true });
+    expect(await getCollectionRedirects()).not.toHaveProperty('project-acme');
+
+    const r = await mergeCollections('project-acme', 'private-acme');
+    expect(r).toMatchObject({ moved: 3, ownRowsRetracted: 1, teammateRowsKept: 1, sourceRemoved: true });
+    expect((await getCollectionRedirects())['project-acme']).toBe('private-acme');
+    expect(await getSyncSubscriptions()).not.toContain('project-acme');
+
+    const text = mergeReportLines(r).join('\n');
+    expect(text).toMatch(/1 of your docs will be removed from the shared copy \(retracted\) at the next push/);
+    expect(text).toMatch(/1 teammates' docs stay shared in "project-acme"/);
+    expect(text).toMatch(/"project-acme" won't come back here \(sync subscribe project-acme to follow it again\)/);
+  });
+
+  it('the next push retracts only your shared copies', async () => {
+    const remote = new Map([
+      ['sp-mine', { owner: 'tester', createdAt: 1_800_000_000 }],
+      ['sp-theirs', { owner: 'teammate', createdAt: 1_800_000_100 }],
+    ]);
+    // Every private collection is checked; answer for the ids each one asks about.
+    vi.mocked(getRemoteOwnersByIds).mockImplementation(async (ids: string[]) =>
+      new Map(ids.filter(id => remote.has(id)).map(id => [id, remote.get(id)!])));
+    vi.mocked(deleteRemoteDocuments).mockClear();
+    vi.mocked(upsertRemoteDocument).mockClear();
+    await pushToRemote();
+    expect(deleteRemoteDocuments).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deleteRemoteDocuments).mock.calls[0][0]).toEqual(['sp-mine']);
+    expect(vi.mocked(upsertRemoteDocument).mock.calls.map(c => (c[0] as any).id)).not.toContain('sp-theirs');
+  });
+
+  it('push auto-subscribe never re-follows a redirected name', async () => {
+    // Something recreated the source locally and wrote to it.
+    await getStore().createCollection('project-acme');
+    await getStore().addDocument('project-acme', 'sp-new', 'a new note', { type: 'memory', origin_user: 'tester', is_synced: false });
+    await pushToRemote();
+    expect(await getSyncSubscriptions()).not.toContain('project-acme');
+    await getStore().deleteCollection('project-acme');
+  });
+
+  it('a later merge of the target keeps the chain, and creating a merged name again drops its redirect', async () => {
+    await addCollectionRedirect('private-acme', 'private-acme2');
+    expect(await getCollectionRedirects()).toMatchObject({ 'project-acme': 'private-acme', 'private-acme': 'private-acme2' });
+    await addCollectionRedirect('private-acme2', 'private-acme'); // merged back: private-acme is live again
+    expect(await getCollectionRedirects()).not.toHaveProperty('private-acme');
+    await createNewCollection('project-acme');
+    expect(await getCollectionRedirects()).not.toHaveProperty('project-acme');
+    await clearCollectionRedirect('private-acme2');
+    await clearCollectionRedirect('never-there');
+    expect(await getCollectionRedirects()).not.toHaveProperty('private-acme2');
   });
 });
 

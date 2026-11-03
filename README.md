@@ -98,6 +98,7 @@ Configure options, or `claude plugin configure yapa`):
 | `chroma_url` | `http://localhost:8000` | ChromaDB server when `storage` is `chroma` |
 | `project_roots` | _(empty)_ | Comma-separated folders whose subfolders map to `project-{name}` / `customer-{name}` collections |
 | `customers` | _(empty)_ | Folder names under a root that are customers |
+| `collection_map` | _(empty)_ | Comma-separated `path=collection` entries, e.g. `~/work/acme=private-acme`: a session in that folder (or below) uses that collection, ahead of `project_roots` (see [Private collections](#private-collections)) |
 | `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
 | `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
 | `remote_name` | _(empty)_ | Your team's sync remote's name on the status line: `yapa@v<version> <-> <name>` (see [The status line](#sync-health-in-the-status-line)) |
@@ -306,6 +307,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_USERNAME` | Username for task ID prefixes and sync attribution | OS login name |
 | `YAPA_PROJECT_ROOTS` | Comma/colon-separated folders whose first-level subfolders become `project-{name}` (or `customer-{name}`) scopes | _(none: everything is `global`)_ |
 | `YAPA_CUSTOMERS` | Folder names under a project root that map to `customer-{name}` | _(none)_ |
+| `YAPA_COLLECTION_MAP` | Comma-separated `path=collection` entries (`~` expanded). The longest path holding the cwd wins, before `YAPA_PROJECT_ROOTS`; the only way a folder gets a `private-*`/`local-*` scope | _(none)_ |
 | `YAPA_EMBEDDING_PROVIDER` | Embedding provider — `chromadb` is in-process MiniLM (zero-config, no server call); `fireworks`/`openai`/`voyage`/`ollama` use HTTP APIs | `chromadb` |
 | `YAPA_SALIENCE_DECAY_RATE` | Per-day decay multiplier for episodic memories (semantic: its square root) | `0.98` |
 | `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.15` |
@@ -455,6 +457,12 @@ Deleting **your own** memory or task queues the deletion for the remote database
 Collections prefixed with `private-` or `local-`, and `global`, are never synced. Use these for personal notes, credentials, or anything that should stay on one machine.
 
 A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved, restored, or synced by an older YAPA version), the next sync deletes its shared row. Only the same doc is removed (matched by id and creation time), never a different shared task that happens to reuse the id. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
+
+**A folder with a private collection.** `project_roots` only produces `project-*` and `customer-*` scopes. To give a folder a private one, map it with `collection_map` (`YAPA_COLLECTION_MAP`): `~/work/acme=private-acme,~/work/acme/shared-docs=project-acme`. A session in a mapped folder, or anywhere below it, uses that collection; the longest matching path wins, and the map is checked before `project_roots`. The hooks (session start, prompt recall, response capture, compaction capture) and the DSH plugin all follow it, and the scope line says so: ``**Scope:** `private-acme` (local only, never synced)``.
+
+**The recall fence.** The prompt hook adds a few strongly relevant hits from other collections. Those extras never come from a `private-*` or `local-*` collection, so a private note does not surface while you work in a shared project. Recall in the private collection itself (its folder, or `memory_recall` with that `collection`) finds it as usual, and so does `memory_recall` with no collection (an explicit search of everything). `global` is not fenced.
+
+**Moving a shared collection into a private one.** `collection_merge from=project-acme into=private-acme` moves every doc. At the next push your own shared rows are retracted; teammates' docs stay shared in `project-acme`, and you keep a private copy. The merge also leaves a local redirect `project-acme -> private-acme` (in `global`, never synced): a session in the old folder scopes to `private-acme` (the scope line notes "merged from `project-acme`"), and neither the prompt hook, a recovery pull nor push auto-subscribe brings `project-acme` back from teammates' rows. `sync subscribe project-acme` follows it again and drops the redirect.
 
 ### Testing sync
 

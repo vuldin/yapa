@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Folder to collection map (`collection_map`, `YAPA_COLLECTION_MAP`).** Comma-separated `path=collection` entries, `~` expanded, e.g. `~/work/acme=private-acme`. A session in a mapped folder, or below it, uses that collection; the longest matching path wins (on path boundaries), ahead of `project_roots`, and a mapped scope is never ambiguous. It is the only way a folder gets a `private-*` or `local-*` scope, so Stop and PostCompact capture no longer write a private project's notes into a shared collection. The scope line reads ``**Scope:** `private-acme` (local only, never synced)``. The DSH plugin takes the same option as `collectionMap`.
+- **Recall fence.** Cross-collection recall extras (the prompt hook's hits from other collections) never come from `private-*`/`local-*` collections. Recalling in that collection, or with no collection at all, still finds them; `global` is unchanged.
+- **Merging a shared collection into a private one says what happens remotely.** `collection_merge` (and DSH `yapa_collection_merge`) reports how many of your docs the next push retracts from the shared copy, how many teammates' docs stay shared in the source, and that the source won't come back. The description no longer claims nothing is deleted remotely.
+
+### Fixes
+- **A merged collection stays merged.** A merge records a local redirect `from -> into` (in `global`, never synced). Scope detection follows it, so the old folder lands in the target (the scope line notes "merged from ..."), and the prompt hook's pull, recovery pull and push auto-subscribe no longer recreate and re-follow the source from teammates' rows. `sync subscribe` on the old name, or `collection_create` of it, drops the redirect.
+
 ## 1.9.0 (2026-11-02)
 
 The status line now names the collection this session last wrote to.

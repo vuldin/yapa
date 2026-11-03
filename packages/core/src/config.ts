@@ -69,6 +69,13 @@ export interface YapaConfig {
   PROJECT_ROOTS: string[];
   /** Folder names under a project root that are customers (→ customer-{name}). */
   CUSTOMERS: string[];
+  /**
+   * Explicit folder → collection entries, `path=collection` (e.g.
+   * `~/work/acme=private-acme`), `~` expanded. Checked before PROJECT_ROOTS:
+   * the longest matching path wins. The only way a folder gets a
+   * `private-*`/`local-*` scope automatically.
+   */
+  COLLECTION_MAP: string[];
 
   // Contradiction detection
   CONTRADICTION_DISTANCE_THRESHOLD: number;
@@ -194,6 +201,21 @@ function list(value: string): string[] {
 }
 
 /**
+ * Tidy `path=collection` entries: trim both sides, expand a leading `~` and
+ * drop trailing slashes on the path. Entries without `=` are kept as-is
+ * (scope detection ignores them), so a typo stays visible in the config.
+ * Shared with hosts that take the map from their own settings (DSH).
+ */
+export function normalizeCollectionMap(entries: string[]): string[] {
+  return entries.map(entry => {
+    const eq = entry.lastIndexOf('=');
+    if (eq < 0) return entry.trim();
+    const path = entry.slice(0, eq).trim().replace(/^~(?=\/|$)/, homedir()).replace(/(.)\/+$/, '$1');
+    return `${path}=${entry.slice(eq + 1).trim()}`;
+  }).filter(Boolean);
+}
+
+/**
  * Read `YAPA_<key>` first, then bare `<key>`, then the fallback. Empty strings
  * count as unset: Claude Code substitutes "" for plugin options the user never
  * configured, which must not override the defaults.
@@ -246,6 +268,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     PROJECT_ROOTS: list(get(env, 'PROJECT_ROOTS', '')).map(r => r.replace(/^~(?=\/|$)/, homedir()).replace(/\/+$/, '')),
     CUSTOMERS: list(get(env, 'CUSTOMERS', '')),
+    COLLECTION_MAP: normalizeCollectionMap(list(get(env, 'COLLECTION_MAP', ''))),
 
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, 'CONTRADICTION_DISTANCE_THRESHOLD', '0.25')),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, 'CONTRADICTION_MAX_RESULTS', '3'), 10),

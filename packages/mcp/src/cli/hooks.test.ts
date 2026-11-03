@@ -457,3 +457,65 @@ describe('waiting on you', () => {
     expect(section).toContain('1 item(s) wait on anyone');
   });
 });
+
+describe('collection_map: a folder with a private collection', () => {
+  const cwd = () => join(dir, 'work', 'acme-private', 'src');
+  const mapped = () => configure({ YAPA_COLLECTION_MAP: `${join(dir, 'work', 'acme-private')}=private-acme`, YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' });
+
+  it('every hook scopes to the mapped collection and never contacts the remote', async () => {
+    mapped();
+    await storeMemory('acme private: the staging password rotates on Mondays', { collection: 'private-acme', salience: 3 });
+
+    capture();
+    await sessionStart({ session_id: 'm1', cwd: cwd(), source: 'startup' });
+    expect(restore().hookSpecificOutput.additionalContext).toContain('**Scope:** `private-acme` (local only, never synced)');
+
+    capture();
+    await userPromptSubmit({ session_id: 'm1', cwd: cwd(), prompt: 'when does the acme staging password rotate?' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('**Scope:** `private-acme` (local only, never synced)');
+    expect(ctx).toMatch(/rotates on Mondays/);
+    expect(pullCollection).not.toHaveBeenCalled();
+
+    captureTurn.mockResolvedValueOnce({ stored: 0, skipped: 0, superseded: 0 });
+    await stop({ session_id: 'm1', cwd: cwd(), last_assistant_message: 'It rotates every Monday at 09:00 UTC. '.repeat(10) });
+    expect(captureTurn.mock.calls[0][0]).toMatchObject({ collection: 'private-acme' });
+
+    await postCompact({ session_id: 'm1', cwd: cwd(), compact_summary: 'Decided: acme private notes stay local.', trigger: 'auto' });
+    const all = await listMemories({ collection: 'private-acme', limit: 50 });
+    expect(all.some(m => m.content.includes('acme private notes stay local'))).toBe(true);
+    expect(pullCollection).not.toHaveBeenCalled();
+  });
+
+  it("a private note never surfaces in another folder's recall", async () => {
+    mapped();
+    capture();
+    await userPromptSubmit({ session_id: 'm2', cwd: join(dir, 'proj', 'acme'), prompt: 'when does the acme staging password rotate?' });
+    expect(JSON.stringify(restore())).not.toContain('rotates on Mondays');
+  });
+});
+
+describe('after merging a shared collection into a private one', () => {
+  it('a prompt in the old folder lands in the target and neither recreates nor re-follows the source', async () => {
+    const core = await import('@yapa/core');
+    await storeMemory('acme-legacy build uses gradle 8', { collection: 'project-acme-legacy', salience: 3 });
+    await core.createNewCollection('private-acme-legacy');
+    await core.updateSyncSubscriptions([...(await core.getSyncSubscriptions()), 'project-acme-legacy']);
+    await core.mergeCollections('project-acme-legacy', 'private-acme-legacy');
+
+    capture();
+    await userPromptSubmit({ session_id: 'r1', cwd: join(dir, 'proj', 'acme-legacy'), prompt: 'which gradle does acme-legacy build with?' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('**Scope:** `private-acme-legacy` (local only, never synced) (merged from `project-acme-legacy`)');
+    expect(ctx).toMatch(/gradle 8/);
+    capture();
+    await sessionStart({ session_id: 'r1', cwd: join(dir, 'proj', 'acme-legacy'), source: 'startup' });
+    restore();
+
+    expect(pullCollection).not.toHaveBeenCalled();
+    expect(await freshenFromRemote('project-acme-legacy')).toBe(0);
+    expect(pullCollection).not.toHaveBeenCalled();
+    expect((await core.listCollections()).map(c => c.name)).not.toContain('project-acme-legacy');
+    expect(await core.getSyncSubscriptions()).not.toContain('project-acme-legacy');
+  });
+});

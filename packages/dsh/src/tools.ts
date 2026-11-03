@@ -30,6 +30,7 @@ import {
   listMemories,
   listTasks,
   mergeCollections,
+  mergeReportLines,
   parseRelativeDate,
   recallMemory,
   removeCollection,
@@ -53,6 +54,7 @@ import {
   recordForTask,
   requestDecision,
   validateLearned,
+  type MergeResult,
 } from '@yapa/core';
 
 const text = (t: string): ContentBlock[] => [{ type: 'text', text: t }];
@@ -1127,8 +1129,11 @@ export function registerTools(ctx: Context): void {
     name: 'yapa_collection_merge',
     description:
       'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) '
-      + 'with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the '
-      + 'emptied `from`. Use this, never yapa_collection_delete, to combine or rename collections. Create `into` '
+      + 'with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates '
+      + 'and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR '
+      + 'shared copies of the moved docs; teammates\' docs stay shared in `from`. Afterwards `from` redirects to `into` '
+      + 'on this machine (its folder scopes to `into`, sync does not bring it back; `yapa_sync subscribe` follows it '
+      + 'again). Use this, never yapa_collection_delete, to combine or rename collections. Create `into` '
       + 'first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared '
       + 'merges. Pass dry_run to see counts first.',
     parameters: {
@@ -1148,19 +1153,10 @@ export function registerTools(ctx: Context): void {
           dryRun: { type: 'boolean', required: true },
           sourceRemoved: { type: 'boolean', required: true },
           teammateRowsKept: { type: 'integer', required: true },
+          ownRowsRetracted: { type: 'integer', required: true },
         },
       },
-      render: (_args, v) => {
-        const types = Object.entries(v.byType as Record<string, number>)
-          .sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
-        const lines = v.dryRun
-          ? [`Dry run: would move ${v.moved} document(s) from "${v.from}" into "${v.into}" (${types}), then remove "${v.from}". Nothing changed.`]
-          : [`Moved ${v.moved} document(s) from "${v.from}" into "${v.into}" (${types}) and removed the empty "${v.from}".`];
-        if (v.teammateRowsKept > 0) {
-          lines.push(`${v.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${v.from}" on the sync service.`);
-        }
-        return text(lines.join('\n'));
-      },
+      render: (_args, v) => text(mergeReportLines(v as MergeResult).join('\n')),
     },
     async execute(args) {
       return await mergeCollections(args.from, args.into, { dryRun: args.dry_run });
