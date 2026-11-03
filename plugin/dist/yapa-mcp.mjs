@@ -3271,8 +3271,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path) {
-      let input2 = path;
+    function removeDotSegments(path2) {
+      let input2 = path2;
       const output2 = [];
       let nextSlash = -1;
       let len = 0;
@@ -3346,11 +3346,11 @@ var require_utils = __commonJS({
       }
       return output2.join("");
     }
-    function removeDotSegmentsRelative(path) {
-      if (path === "" || path[0] === "/") {
-        return removeDotSegments(path);
+    function removeDotSegmentsRelative(path2) {
+      if (path2 === "" || path2[0] === "/") {
+        return removeDotSegments(path2);
       }
-      const segments = path.split("/");
+      const segments = path2.split("/");
       const last = segments.length - 1;
       const output2 = [];
       let trailingDirectory = false;
@@ -3713,8 +3713,8 @@ var require_schemes = __commonJS({
       }
       if (wsComponent.resourceName) {
         const queryIndex = wsComponent.resourceName.indexOf("?");
-        const path = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
-        wsComponent.path = path && path !== "/" ? path : void 0;
+        const path2 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
+        wsComponent.path = path2 && path2 !== "/" ? path2 : void 0;
         wsComponent.query = queryIndex === -1 ? void 0 : wsComponent.resourceName.slice(queryIndex + 1);
         wsComponent.resourceName = void 0;
       }
@@ -7264,19 +7264,62 @@ var require_dist = __commonJS({
   }
 });
 
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+function looksPrivateButShared(name) {
+  return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
+}
+function isReadOnlyDoc(metadata) {
+  return metadata?.read_only === true;
+}
+function assertWritable(id, metadata) {
+  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
+}
+var init_syncable = __esm({
+  "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
 // packages/core/src/config.ts
 import { homedir as homedir2, tmpdir, userInfo } from "os";
-import { join as pathJoin } from "path";
+import path, { join as pathJoin } from "path";
 function list(value) {
   return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
 }
-function normalizeCollectionMap(entries) {
-  return entries.map((entry) => {
+function splitCollectionMap(value) {
+  return value.split(/[;\n]/).map((v) => v.trim()).filter(Boolean);
+}
+function warnOnce(message) {
+  if (warned.has(message)) return;
+  warned.add(message);
+  process.stderr.write(`[yapa] ${message}
+`);
+}
+function normalizeCollectionMap(entries, pathImpl = path) {
+  const out = [];
+  for (const raw of entries) {
+    const entry = raw.trim();
+    if (!entry) continue;
     const eq = entry.lastIndexOf("=");
-    if (eq < 0) return entry.trim();
-    const path = entry.slice(0, eq).trim().replace(/^~(?=\/|$)/, homedir2()).replace(/(.)\/+$/, "$1");
-    return `${path}=${entry.slice(eq + 1).trim()}`;
-  }).filter(Boolean);
+    const dir = eq < 0 ? "" : entry.slice(0, eq).trim().replace(/^~(?=[\\/]|$)/, homedir2());
+    const collection = eq < 0 ? "" : entry.slice(eq + 1).trim();
+    if (!dir || !collection) {
+      warnOnce(`collection_map: ignoring "${entry}" (expected path=collection; separate entries with ";")`);
+      continue;
+    }
+    if (!pathImpl.isAbsolute(dir)) {
+      warnOnce(`collection_map: ignoring "${entry}" (the path must be absolute or start with ~)`);
+      continue;
+    }
+    if (looksPrivateButShared(collection)) {
+      warnOnce(`collection_map: "${collection}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`);
+    }
+    out.push(`${pathImpl.resolve(dir)}=${collection}`);
+  }
+  return out;
 }
 function get(env, key, fallback = "") {
   const pick2 = (v) => v === void 0 || v === "" ? void 0 : v;
@@ -7315,7 +7358,7 @@ function createConfig(env = process.env) {
     USERNAME: env.YAPA_USERNAME || osUsername(),
     PROJECT_ROOTS: list(get(env, "PROJECT_ROOTS", "")).map((r) => r.replace(/^~(?=\/|$)/, homedir2()).replace(/\/+$/, "")),
     CUSTOMERS: list(get(env, "CUSTOMERS", "")),
-    COLLECTION_MAP: normalizeCollectionMap(list(get(env, "COLLECTION_MAP", ""))),
+    COLLECTION_MAP: normalizeCollectionMap(splitCollectionMap(get(env, "COLLECTION_MAP", ""))),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
@@ -7423,16 +7466,18 @@ function getEmbeddingModel(config2 = getConfig()) {
       return "";
   }
 }
-var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, CHUNK_SIZE, CHUNK_OVERLAP, active;
+var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, CHUNK_SIZE, CHUNK_OVERLAP, warned, active;
 var init_config = __esm({
   "packages/core/src/config.ts"() {
     "use strict";
+    init_syncable();
     SALIENCE_START = 1;
     SALIENCE_BOOST_ON_ACCESS = 0.1;
     SALIENCE_FLOOR = 0.05;
     SALIENCE_MAX = 5;
     CHUNK_SIZE = 2e3;
     CHUNK_OVERLAP = 200;
+    warned = /* @__PURE__ */ new Set();
   }
 });
 
@@ -7699,8 +7744,8 @@ function toCosineDistance(distance, space) {
 function spaceOf(collection) {
   return collection?.configuration_json?.hnsw?.space ?? collection?.metadata?.["hnsw:space"] ?? "l2";
 }
-async function chromaFetch(path, init) {
-  const response = await fetch(`${apiBase()}${path}`, {
+async function chromaFetch(path2, init) {
+  const response = await fetch(`${apiBase()}${path2}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers }
   });
@@ -8370,9 +8415,27 @@ async function addCollectionRedirect(from, into) {
 }
 async function clearCollectionRedirect(name) {
   const redirects = await getCollectionRedirects();
-  if (!(name in redirects)) return;
+  if (!Object.hasOwn(redirects, name)) return;
   delete redirects[name];
   await writeCollectionRedirects(redirects);
+}
+function resolveCollectionRedirect(name, redirects) {
+  let current = name;
+  const seen = /* @__PURE__ */ new Set([name]);
+  while (Object.hasOwn(redirects, current)) {
+    const next = redirects[current];
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+    current = next;
+  }
+  return current === name ? { collection: name } : { collection: current, redirectedFrom: name };
+}
+async function resolveWriteCollection(name) {
+  if (name === "global") return { collection: name };
+  return resolveCollectionRedirect(name, await getCollectionRedirects());
+}
+function redirectNote(w) {
+  return w.redirectedFrom ? `"${w.redirectedFrom}" was merged into "${w.collection}" on this machine, so this was written to "${w.collection}".` : "";
 }
 var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID;
 var init_sentinel = __esm({
@@ -8382,22 +8445,6 @@ var init_sentinel = __esm({
     SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
     COLLECTION_REDIRECTS_ID = "__collection_redirects__";
-  }
-});
-
-// packages/core/src/sync/syncable.ts
-function isSyncableCollection(name) {
-  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
-}
-function isReadOnlyDoc(metadata) {
-  return metadata?.read_only === true;
-}
-function assertWritable(id, metadata) {
-  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
-}
-var init_syncable = __esm({
-  "packages/core/src/sync/syncable.ts"() {
-    "use strict";
   }
 });
 
@@ -8489,18 +8536,18 @@ function healthStatusFor(code) {
   if (code === "unreachable") return "unreachable";
   return "error";
 }
-function readSyncHealth(path = getConfig().SYNC_HEALTH_FILE) {
-  if (!path) return void 0;
+function readSyncHealth(path2 = getConfig().SYNC_HEALTH_FILE) {
+  if (!path2) return void 0;
   try {
-    const h = JSON.parse(readFileSync2(path, "utf-8"));
+    const h = JSON.parse(readFileSync2(path2, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
   }
 }
-function recordSyncHealth(update, now = Date.now(), path = getConfig().SYNC_HEALTH_FILE) {
-  if (!path) return void 0;
-  const prev = readSyncHealth(path);
+function recordSyncHealth(update, now = Date.now(), path2 = getConfig().SYNC_HEALTH_FILE) {
+  if (!path2) return void 0;
+  const prev = readSyncHealth(path2);
   const config2 = getConfig();
   const next = { status: update.status, at: now, interval_ms: config2.SYNC_INTERVAL_MS, label: config2.STATUS_LABEL };
   if (config2.REMOTE_NAME) next.remote = config2.REMOTE_NAME;
@@ -8516,21 +8563,21 @@ function recordSyncHealth(update, now = Date.now(), path = getConfig().SYNC_HEAL
     if ("message" in update && update.message) next.message = update.message.slice(0, 300);
   }
   try {
-    mkdirSync2(dirname(path), { recursive: true, mode: 448 });
-    const tmp = `${path}.${process.pid}.tmp`;
+    mkdirSync2(dirname(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync2(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync(tmp, path);
+    renameSync(tmp, path2);
   } catch {
   }
   return next;
 }
-function recordUnpushed(unpushed, path = getConfig().SYNC_HEALTH_FILE) {
-  const prev = readSyncHealth(path);
+function recordUnpushed(unpushed, path2 = getConfig().SYNC_HEALTH_FILE) {
+  const prev = readSyncHealth(path2);
   if (!prev || prev.unpushed === unpushed) return;
   try {
-    const tmp = `${path}.${process.pid}.tmp`;
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync2(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
-    renameSync(tmp, path);
+    renameSync(tmp, path2);
   } catch {
   }
 }
@@ -8551,27 +8598,27 @@ function getDeviceId() {
   const config2 = getConfig();
   if (config2.DEVICE_ID) return config2.DEVICE_ID;
   if (cached2?.path === config2.DEVICE_ID_PATH) return cached2.id;
-  const path = config2.DEVICE_ID_PATH;
+  const path2 = config2.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync3(path, "utf-8").trim();
+    id = readFileSync3(path2, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync3(dirname2(path), { recursive: true });
-      writeFileSync3(path, `${id}
+      mkdirSync3(dirname2(path2), { recursive: true });
+      writeFileSync3(path2, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync3(path, "utf-8").trim() || id;
+        id = readFileSync3(path2, "utf-8").trim() || id;
       } catch {
       }
     }
   }
-  cached2 = { path, id };
+  cached2 = { path: path2, id };
   return id;
 }
 var cached2;
@@ -8818,8 +8865,8 @@ var init_http_backend = __esm({
         if (!quiet || isSignedOutError(err)) noteSyncError(err);
         throw err;
       }
-      async request(method, path, opts = {}) {
-        const url2 = `${this.target}${path}`;
+      async request(method, path2, opts = {}) {
+        const url2 = `${this.target}${path2}`;
         const idemKey = opts.idempotent ? randomUUID2() : void 0;
         const body = opts.body === void 0 ? void 0 : JSON.stringify(opts.body);
         for (let attempt = 0; ; attempt++) {
@@ -9573,7 +9620,8 @@ async function getNextTaskId() {
   }
   return `${getConfig().USERNAME}-${maxId + 1}`;
 }
-async function createTask(title, options = {}, collection = "global") {
+async function createTask(title, options = {}, requested = "global") {
+  const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection2(collection);
   const id = await getNextTaskId();
   const now = Math.floor(Date.now() / 1e3);
@@ -9613,6 +9661,7 @@ var init_create = __esm({
     init_config();
     init_store();
     init_backend();
+    init_sentinel();
     PRIORITY_SALIENCE = {
       critical: 3,
       high: 2.5,
@@ -9861,7 +9910,7 @@ async function pushAll() {
       const existing = await getSyncSubscriptions();
       const existingSet = new Set(existing);
       const redirects = await getCollectionRedirects();
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !(c in redirects));
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !Object.hasOwn(redirects, c));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }
@@ -10618,8 +10667,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path, errorMaps, issueData } = params;
-  const fullPath = [...path, ...issueData.path || []];
+  const { data, path: path2, errorMaps, issueData } = params;
+  const fullPath = [...path2, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -10734,11 +10783,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path, key) {
+  constructor(parent, value, path2, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path;
+    this._path = path2;
     this._key = key;
   }
   get path() {
@@ -14693,10 +14742,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path) {
-  if (!path)
+function getElementAtPath(obj, path2) {
+  if (!path2)
     return obj;
-  return path.reduce((acc, key) => acc?.[key], obj);
+  return path2.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -15036,11 +15085,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path, issues) {
+function prefixIssues(path2, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path);
+    iss.path.unshift(path2);
     return iss;
   });
 }
@@ -15502,16 +15551,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path = []) => {
+  const processError = (error63, path2 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else {
-        const fullpath = [...path, ...issue2.path];
+        const fullpath = [...path2, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -15550,17 +15599,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path = []) => {
+  const processError = (error63, path2 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else {
-        const fullpath = [...path, ...issue2.path];
+        const fullpath = [...path2, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -15599,8 +15648,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path) {
+  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path2) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -31151,11 +31200,11 @@ function normalizeObjectSchema(schema) {
   }
   return void 0;
 }
-function getDotPath(path) {
-  if (path.length === 0) {
+function getDotPath(path2) {
+  if (path2.length === 0) {
     return "object root";
   }
-  return path.reduce((acc, seg, index) => {
+  return path2.reduce((acc, seg, index) => {
     if (index === 0) {
       return String(seg);
     }
@@ -33382,13 +33431,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path = ref.slice(1).split("/").filter(Boolean);
-  if (path.length === 0) {
+  const path2 = ref.slice(1).split("/").filter(Boolean);
+  if (path2.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path[0] === defsKey) {
-    const key = path[1] === void 0 ? void 0 : decodeJSONPointerSegment(path[1]);
+  if (path2[0] === defsKey) {
+    const key = path2[1] === void 0 ? void 0 : decodeJSONPointerSegment(path2[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -40075,6 +40124,7 @@ async function linkMemoryToTasks(memoryId, taskIds) {
 }
 
 // packages/core/src/memory/store.ts
+init_sentinel();
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
     id: c.id,
@@ -40111,7 +40161,7 @@ async function archiveSuperseded(collection, oldId, newId) {
   }
 }
 async function storeMemory(content, options = {}) {
-  const collection = options.collection ?? "global";
+  const { collection } = await resolveWriteCollection(options.collection ?? "global");
   const typed = options.typed ? normalizeTyped(options.typed) : {};
   await getOrCreateCollection2(collection);
   if (options.supersedes) {
@@ -40404,6 +40454,7 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
 // packages/core/src/memory/compact.ts
 init_config();
 init_store();
+init_sentinel();
 async function collectionSize(collection) {
   try {
     const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e4);
@@ -40451,6 +40502,7 @@ async function suggestCompaction(collection) {
   return groups;
 }
 async function applyCompaction(input2) {
+  input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
   const stored = await storeMemory(input2.summary, {
     collection: input2.collection,
     salience: 2,
@@ -40489,10 +40541,11 @@ async function applyCompaction(input2) {
 init_config();
 init_store();
 import { randomBytes } from "crypto";
+init_sentinel();
 var SESSION_ID = process.env.YAPA_SESSION_ID ?? `${Date.now()}-${randomBytes(4).toString("hex")}`;
 var DRAFT_TYPE = "journal_draft";
 async function journalAppend(entry, collection, sessionId) {
-  const col = collection ?? "global";
+  const { collection: col } = await resolveWriteCollection(collection ?? "global");
   const sid = sessionId ?? SESSION_ID;
   await getOrCreateCollection2(col);
   const now = Math.floor(Date.now() / 1e3);
@@ -40525,7 +40578,7 @@ async function listSessionDrafts(collection, sessionId) {
   }
 }
 async function journalConsolidate(input2 = {}) {
-  const col = input2.collection ?? "global";
+  const { collection: col } = await resolveWriteCollection(input2.collection ?? "global");
   const sid = input2.sessionId ?? SESSION_ID;
   const drafts = await listSessionDrafts(col, sid);
   if (drafts.length === 0) return null;
@@ -40825,6 +40878,7 @@ init_claim();
 
 // packages/core/src/tasks/waiting.ts
 init_store();
+init_syncable();
 var list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 var firstLine = (s) => {
   const line = s.split("\n").find((l) => l.trim()) ?? "";
@@ -41309,6 +41363,8 @@ async function removeCollection(name, opts = {}) {
     const real = docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft");
     await queueSyncDeletes(real.filter((d) => !d.metadata.origin_user || d.metadata.origin_user === me).map((d) => d.id), name);
     await addLocalTombstones(real.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).map((d) => d.id));
+  }
+  if (isSyncable2(name)) {
     const subs = await getSyncSubscriptions();
     if (subs.includes(name)) await updateSyncSubscriptions(subs.filter((s) => s !== name));
   }
@@ -41317,6 +41373,9 @@ async function removeCollection(name, opts = {}) {
 var MERGE_BATCH = 100;
 async function mergeCollections(from, into, opts = {}) {
   if (from === into) throw new Error("Source and target are the same collection");
+  if (from === "global") {
+    throw new Error(`Refused: "global" cannot be merged into another collection. It holds this machine's sync state (subscriptions, pull point, merge redirects). Move specific memories with memory_store instead.`);
+  }
   const names = new Set((await listCollections2()).map((c) => c.name));
   if (!names.has(from)) throw new Error(`Collection "${from}" not found`);
   if (!names.has(into)) {
@@ -41343,7 +41402,7 @@ async function mergeCollections(from, into, opts = {}) {
   const me = getConfig().USERNAME;
   const sharedToPrivate = isSyncable2(from) && !isSyncable2(into);
   const teammateRowsKept = sharedToPrivate ? docs.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).length : 0;
-  const ownRowsRetracted = sharedToPrivate ? docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && d.metadata.is_synced === true && (!d.metadata.origin_user || d.metadata.origin_user === me)).length : 0;
+  const ownRowsRetracted = sharedToPrivate ? docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number(d.metadata.created_at) > 0).length : 0;
   const result = {
     from,
     into,
@@ -41385,7 +41444,7 @@ function mergeReportLines(r) {
   if (r.dryRun) {
     const lines2 = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
     if (sharedToPrivate && r.ownRowsRetracted > 0) {
-      lines2.push(`${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push.`);
+      lines2.push(`Up to ${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
     }
     if (sharedToPrivate && r.teammateRowsKept > 0) {
       lines2.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
@@ -41395,7 +41454,7 @@ function mergeReportLines(r) {
   const lines = [`Moved ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}) and removed the empty "${r.from}".`];
   if (sharedToPrivate) {
     if (r.ownRowsRetracted > 0) {
-      lines.push(`${r.ownRowsRetracted} of your docs will be removed from the shared copy (retracted) at the next push.`);
+      lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
     }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
@@ -41403,6 +41462,9 @@ function mergeReportLines(r) {
   }
   if (isSyncable2(r.from)) {
     lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
+    lines.push(
+      `This redirect is for this machine only. Another device of yours still follows "${r.from}": run the same merge there` + (sharedToPrivate ? ` too. Until then it drops its unedited copies of your retracted docs when the retraction reaches it, and a copy it edited can be pushed back into "${r.from}".` : " too.")
+    );
   }
   return lines;
 }
@@ -41993,6 +42055,7 @@ init_config();
 init_store();
 init_config();
 init_syncable();
+init_sentinel();
 var MemoryNotFoundError = class extends Error {
   constructor(id) {
     super(`memory ${id} not found`);
@@ -42000,7 +42063,7 @@ var MemoryNotFoundError = class extends Error {
   }
 };
 async function locate(id, collection) {
-  const names = collection ? [collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const names = collection ? [(await resolveWriteCollection(collection)).collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
   for (const name of names) {
     const [doc] = await getDocumentsByIds2(name, [id]).catch(() => []);
     if (doc) return { collection: name, doc };
@@ -42070,9 +42133,9 @@ function nextVersion(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path = join4(dir, filename);
-  writeFileSync6(path, content);
-  return path;
+  const path2 = join4(dir, filename);
+  writeFileSync6(path2, content);
+  return path2;
 }
 function artifactPath(kind, filename) {
   return join4(artifactDir(kind), filename);
@@ -42482,8 +42545,8 @@ async function pullFromRemote() {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const redirects = await getCollectionRedirects();
-      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !(c in redirects));
+      const redirects2 = await getCollectionRedirects();
+      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !Object.hasOwn(redirects2, c));
       const subs = await getSyncSubscriptions();
       const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -42499,14 +42562,15 @@ async function pullFromRemote() {
   }
   const collections = await listCollections2();
   const localCollectionNames = new Set(collections.map((c) => c.name));
+  const redirects = await getCollectionRedirects();
   const pullCollectionNames = [];
   for (const col of collections) {
-    if (isSyncableCollection(col.name)) pullCollectionNames.push(col.name);
+    if (isSyncableCollection(col.name) && !Object.hasOwn(redirects, col.name)) pullCollectionNames.push(col.name);
   }
   const backfill = /* @__PURE__ */ new Set();
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncableCollection(sub)) {
+    if (!localCollectionNames.has(sub) && isSyncableCollection(sub) && !Object.hasOwn(redirects, sub)) {
       await getOrCreateCollection2(sub);
       pullCollectionNames.push(sub);
       backfill.add(sub);
@@ -42726,19 +42790,19 @@ function paths(config2 = getConfig()) {
     pulls: join5(dir, `sync-pulls-${key}.json`)
   };
 }
-function readJson(path) {
+function readJson(path2) {
   try {
-    return JSON.parse(readFileSync8(path, "utf-8"));
+    return JSON.parse(readFileSync8(path2, "utf-8"));
   } catch {
     return void 0;
   }
 }
-function writeJson(path, value) {
+function writeJson(path2, value) {
   try {
-    mkdirSync7(dirname4(path), { recursive: true, mode: 448 });
-    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    mkdirSync7(dirname4(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     writeFileSync7(tmp, JSON.stringify(value) + "\n", { mode: 384 });
-    renameSync3(tmp, path);
+    renameSync3(tmp, path2);
   } catch {
   }
 }
@@ -42840,41 +42904,41 @@ function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
   return health ? join6(dirname5(health), "update-check.json") : void 0;
 }
-function readUpdateState(path = updateStatePath()) {
-  if (!path) return void 0;
+function readUpdateState(path2 = updateStatePath()) {
+  if (!path2) return void 0;
   try {
-    const s = JSON.parse(readFileSync9(path, "utf-8"));
+    const s = JSON.parse(readFileSync9(path2, "utf-8"));
     return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
   } catch {
     return void 0;
   }
 }
-function writeUpdateState(s, path = updateStatePath()) {
-  if (!path) return;
+function writeUpdateState(s, path2 = updateStatePath()) {
+  if (!path2) return;
   try {
-    mkdirSync8(dirname5(path), { recursive: true, mode: 448 });
-    const tmp = `${path}.${process.pid}.tmp`;
+    mkdirSync8(dirname5(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync8(tmp, JSON.stringify(s) + "\n", { mode: 384 });
-    renameSync4(tmp, path);
+    renameSync4(tmp, path2);
   } catch {
   }
 }
-function noteInstalledVersion(current, path = updateStatePath()) {
-  if (!path) return void 0;
-  const prev = readUpdateState(path);
+function noteInstalledVersion(current, path2 = updateStatePath()) {
+  if (!path2) return void 0;
+  const prev = readUpdateState(path2);
   if (prev && prev.current === current) return prev;
   const next = { current, checked_at: prev?.checked_at ?? 0 };
   if (prev?.latest && compareVersions(prev.latest, current) > 0) next.latest = prev.latest;
   if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
-  writeUpdateState(next, path);
+  writeUpdateState(next, path2);
   return next;
 }
 async function checkForUpdate(current, opts = {}) {
   const config2 = getConfig();
-  const path = opts.path ?? updateStatePath();
-  if (!config2.UPDATE_CHECK || !path || !config2.UPDATE_SOURCE) return void 0;
+  const path2 = opts.path ?? updateStatePath();
+  if (!config2.UPDATE_CHECK || !path2 || !config2.UPDATE_SOURCE) return void 0;
   const now = opts.now ?? Date.now();
-  const prev = noteInstalledVersion(current, path);
+  const prev = noteInstalledVersion(current, path2);
   if (!opts.force && prev && prev.checked_at > 0 && now - prev.checked_at < UPDATE_CHECK_INTERVAL_MS) return prev;
   let released;
   try {
@@ -42889,7 +42953,7 @@ async function checkForUpdate(current, opts = {}) {
   const next = { current, checked_at: now };
   if (compareVersions(released, current) > 0) next.latest = released;
   if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
-  writeUpdateState(next, path);
+  writeUpdateState(next, path2);
   return next;
 }
 var timer2;
@@ -43305,10 +43369,10 @@ function ensureDir() {
 }
 function load() {
   ensureDir();
-  const path = registryPath();
-  if (!existsSync3(path)) return { version: 1, adapters: [] };
+  const path2 = registryPath();
+  if (!existsSync3(path2)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync10(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync10(path2, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -43452,8 +43516,8 @@ function extractJsonArray2(raw) {
   }
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
-function readManifestSource(path) {
-  const content = readFileSync11(path, "utf-8");
+function readManifestSource(path2) {
+  const content = readFileSync11(path2, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -44080,6 +44144,7 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
 
 // packages/core/src/memory/external.ts
 init_store();
+init_sentinel();
 
 // packages/core/src/last-write.ts
 init_config();
@@ -44325,14 +44390,16 @@ ${result.instructions}`
     async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       let result;
+      const target = await resolveWriteCollection(collection ?? "global");
       try {
-        result = await storeMemory(content, { tags, salience, sector, collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
-        recordLastWrite(collection ?? "global");
+        result = await storeMemory(content, { tags, salience, sector, collection: target.collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
+        recordLastWrite(target.collection);
       } catch (e) {
         return typedError(e);
       }
       const label = typed.kind ? ` ${typedLabel({ status: void 0, ...typed })}` : "";
       const lines = [`Stored memory: ${result.ids.join(", ")}${label}`];
+      if (target.redirectedFrom) lines.push(redirectNote(target));
       if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
         lines.push("", `\u26A0 Potential conflicts (${result.potential_conflicts.length}):`);
@@ -44456,10 +44523,12 @@ ${r.content}`
     async ({ id, collection, note, tags, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       try {
-        const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, collection);
+        const target = collection ? await resolveWriteCollection(collection) : void 0;
+        const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, target?.collection);
         recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
-        return { content: [{ type: "text", text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ""}` }] };
+        const moved = target?.redirectedFrom ? ` (${redirectNote(target)})` : "";
+        return { content: [{ type: "text", text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ""}${moved}` }] };
       } catch (e) {
         return typedError(e);
       }
@@ -44515,12 +44584,15 @@ ${r.content}`
       tags: external_exports.array(external_exports.string()).optional().describe("Additional tags for the summary (the `compacted` tag is always added)")
     },
     async ({ collection, member_ids, summary, tags }) => {
-      const result = await applyCompaction({ collection, member_ids, summary, tags });
-      recordLastWrite(collection);
+      const target = await resolveWriteCollection(collection);
+      const result = await applyCompaction({ collection: target.collection, member_ids, summary, tags });
+      recordLastWrite(target.collection);
+      const moved = target.redirectedFrom ? `
+${redirectNote(target)}` : "";
       return {
         content: [{
           type: "text",
-          text: `Compaction applied. Summary: ${result.summary_id}. Archived: ${result.archived_ids.length}/${member_ids.length}.`
+          text: `Compaction applied. Summary: ${result.summary_id}. Archived: ${result.archived_ids.length}/${member_ids.length}.${moved}`
         }]
       };
     }
@@ -44533,9 +44605,12 @@ ${r.content}`
       collection: external_exports.string().optional().describe('Collection to scope the draft to. Defaults to "global".')
     },
     async ({ entry, collection }) => {
-      const id = await journalAppend(entry, collection);
-      recordLastWrite(collection ?? "global");
-      return { content: [{ type: "text", text: `Journal draft saved: ${id}` }] };
+      const target = await resolveWriteCollection(collection ?? "global");
+      const id = await journalAppend(entry, target.collection);
+      recordLastWrite(target.collection);
+      const moved = target.redirectedFrom ? `
+${redirectNote(target)}` : "";
+      return { content: [{ type: "text", text: `Journal draft saved: ${id}${moved}` }] };
     }
   );
   server2.tool(
@@ -44546,8 +44621,9 @@ ${r.content}`
       summary: external_exports.string().optional().describe("Optional final summary text. If omitted, the consolidated content is the concatenation of all drafts in chronological order.")
     },
     async ({ collection, summary }) => {
-      const result = await journalConsolidate({ collection, summary });
-      recordLastWrite(collection ?? "global");
+      const target = await resolveWriteCollection(collection ?? "global");
+      const result = await journalConsolidate({ collection: target.collection, summary });
+      recordLastWrite(target.collection);
       if (!result) {
         return { content: [{ type: "text", text: "No journal drafts found for this session \u2014 nothing to consolidate." }] };
       }
@@ -45070,6 +45146,7 @@ ${r.content}`
     },
     async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? void 0 : void 0;
+      const target = await resolveWriteCollection(collection ?? "global");
       const id = await createTask(title, {
         priority,
         due_date,
@@ -45080,10 +45157,12 @@ ${r.content}`
         is_recurring,
         recurrence_pattern,
         claim_scope
-      }, collection ?? "global");
-      recordLastWrite(collection ?? "global");
+      }, target.collection);
+      recordLastWrite(target.collection);
       let text = `Created task ${id}: "${title}"`;
       if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
+      if (target.redirectedFrom) text += `
+${redirectNote(target)}`;
       return { content: [{ type: "text", text }] };
     }
   );
@@ -45456,7 +45535,7 @@ ${rec}`;
   );
   server2.tool(
     "collection_merge",
-    "Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR shared copies of the moved docs; teammates' docs stay shared in `from`. Afterwards `from` redirects to `into` on this machine (its folder scopes to `into`, sync does not bring it back; `sync subscribe` follows it again). Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.",
+    "Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR shared copies of the moved docs; teammates' docs stay shared in `from`. Afterwards `from` redirects to `into` on this machine only (its folder scopes to `into`, writes naming `from` land in `into`, sync does not bring it back; `sync subscribe` follows it again); run the same merge on the user's other devices too. Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges, and refuses `global` as the source. Pass dry_run to see counts first.",
     {
       from: external_exports.string().describe("Collection to merge (removed afterwards)"),
       into: external_exports.string().describe("Existing collection that receives every document"),

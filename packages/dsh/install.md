@@ -69,9 +69,11 @@ Plugin-only knobs (layer 2/3 only): `projectRoots`, `customers` (folder names
 under a project root that are customers — they get `customer-{name}` scope;
 every other folder defaults to `project-{name}`; if both collections exist for
 a folder the injected scope is flagged ambiguous and the agent asks),
-`collectionMap` (`path=collection` entries, `~` expanded, checked before
-`projectRoots`; the longest matching path wins; the way to give a folder a
-`private-*`/`local-*` scope),
+`collectionMap` (`path=collection` entries, one per list item, `~` expanded,
+checked before `projectRoots`; the longest matching path wins; the way to
+give a folder a `private-*`/`local-*` scope; relative paths and entries
+without `=` are ignored with a warning, and a broad entry such as
+`~=local-me` overrides every project root below it),
 `injectRecall`, `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
 `decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
 reminders), `captureCompaction` (harness compaction summaries are stored as

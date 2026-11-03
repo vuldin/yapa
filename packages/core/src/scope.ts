@@ -31,10 +31,12 @@
  *
  * @module @yapa/core/scope
  */
+import path from 'node:path';
+import { realpathSync } from 'node:fs';
 import { getConfig } from './config.js';
 import { listCollections } from './store/index.js';
 import { getCollectionRedirects, resolveCollectionRedirect } from './sync/sentinel.js';
-import { isSyncableCollection } from './sync/syncable.js';
+import { isSyncableCollection, looksPrivateButShared } from './sync/syncable.js';
 
 /** Outcome of scope inference for one session cwd. */
 export interface CollectionDetection {
@@ -59,22 +61,46 @@ export interface CollectionDetection {
   redirectedFrom?: string;
 }
 
+/** Path handling for `matchCollectionMap`; tests pass `path.win32` and a stub realpath. */
+export interface PathOptions {
+  path?: typeof path;
+  /** The real path of an existing path, else undefined. */
+  realpath?: (p: string) => string | undefined;
+}
+
+const realpathOrUndefined = (p: string): string | undefined => {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return undefined;
+  }
+};
+
 /**
- * The `COLLECTION_MAP` entry whose path holds `cwd` (path boundaries
- * respected: `/a/acme` never claims `/a/acme-old`), longest path first.
- * Entries without `=`, or with an empty side, are ignored.
+ * The `COLLECTION_MAP` entry whose path holds `cwd`, longest path first.
+ * Paths are compared resolved, on separator boundaries (`/a/acme` never
+ * claims `/a/acme-old`), case-insensitively on Windows, and through
+ * symlinks: the cwd and each entry that exists also match by their real
+ * path. Entries without `=`, with an empty side, or relative are ignored
+ * (config parsing already warned about them).
  */
-export function matchCollectionMap(cwd: string, entries: string[]): string | undefined {
-  let best: { path: string; collection: string } | undefined;
+export function matchCollectionMap(cwd: string, entries: string[], opts: PathOptions = {}): string | undefined {
+  const P = opts.path ?? path;
+  const real = opts.realpath ?? realpathOrUndefined;
+  const fold = P.sep === '\\' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const forms = (p: string) => [...new Set([p, real(p)].filter((x): x is string => !!x).map(fold))];
+  const here = forms(P.resolve(cwd));
+  const holds = (dir: string, c: string) => c === dir || c.startsWith(dir.endsWith(P.sep) ? dir : dir + P.sep);
+  let best: { length: number; collection: string } | undefined;
   for (const entry of entries) {
     const eq = entry.lastIndexOf('=');
     if (eq < 0) continue;
-    const path = entry.slice(0, eq).trim().replace(/(.)\/+$/, '$1');
+    const dir = entry.slice(0, eq).trim();
     const collection = entry.slice(eq + 1).trim();
-    if (!path || !collection) continue;
-    const prefix = path.endsWith('/') ? path : `${path}/`;
-    if (cwd !== path && !cwd.startsWith(prefix)) continue;
-    if (!best || path.length > best.path.length) best = { path, collection };
+    if (!dir || !collection || !P.isAbsolute(dir)) continue;
+    const resolved = P.resolve(dir);
+    if (!forms(resolved).some(d => here.some(c => holds(d, c)))) continue;
+    if (!best || resolved.length > best.length) best = { length: resolved.length, collection };
   }
   return best?.collection;
 }
@@ -104,7 +130,7 @@ export async function detectCollection(
     const redirects = await getCollectionRedirects();
     // A collection merged away still counts as this folder's (a customer-
     // folder stays sticky after its collection moved), and is then followed.
-    const known = (name: string) => existing.includes(name) || Object.prototype.hasOwnProperty.call(redirects, name);
+    const known = (name: string) => existing.includes(name) || Object.hasOwn(redirects, name);
     const hasCustomer = known(`customer-${segment}`);
     const hasProject = known(`project-${segment}`);
     if (hasCustomer && hasProject) {
@@ -130,6 +156,9 @@ export async function detectCollection(
 export function scopeNotes(d: CollectionDetection): string {
   const notes: string[] = [];
   if (d.collection !== 'global' && !isSyncableCollection(d.collection)) notes.push('(local only, never synced)');
+  else if (d.mapped && looksPrivateButShared(d.collection)) {
+    notes.push('(shared: this name syncs; local-only names start with lowercase `private-` or `local-`)');
+  }
   if (d.redirectedFrom) notes.push(`(merged from \`${d.redirectedFrom}\`)`);
   return notes.length ? ` ${notes.join(' ')}` : '';
 }
@@ -145,4 +174,17 @@ function follow(d: CollectionDetection, redirects: Record<string, string>): Coll
     else out.ambiguous = [a, b];
   }
   return out;
+}
+
+/**
+ * True when a detection cached by a long-lived host (the DSH injector keeps
+ * one per session) no longer matches this machine's merge redirects: its
+ * collection was merged away since, or the redirect it followed was dropped.
+ * Re-run `detectCollection` then.
+ */
+export async function isDetectionStale(d: CollectionDetection): Promise<boolean> {
+  const redirects = await getCollectionRedirects();
+  if (Object.hasOwn(redirects, d.collection)) return true;
+  if (d.redirectedFrom && !Object.hasOwn(redirects, d.redirectedFrom)) return true;
+  return !!d.ambiguous?.some(n => Object.hasOwn(redirects, n));
 }

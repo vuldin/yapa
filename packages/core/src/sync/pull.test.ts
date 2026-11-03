@@ -20,7 +20,7 @@ import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } f
 import { pullFromRemote, pullCollection } from './pull.js';
 import { isSyncableCollection } from './syncable.js';
 import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions, addCollectionRedirect } from './sentinel.js';
-import { removeCollection } from '../collections/manage.js';
+import { removeCollection, mergeCollections } from '../collections/manage.js';
 import { getPendingDeletes, getLocalTombstones } from './deletes.js';
 import { addLocalTombstone } from './deletes.js';
 
@@ -216,6 +216,43 @@ describe('recovery after a wiped store', () => {
       setStore(createLocalStore(dir));
       await rm(fresh, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a merge with sync off', () => {
+  it('unsubscribes the source, so turning sync on later never recreates it', async () => {
+    const store = getStore();
+    await store.createCollection('project-offmerge');
+    await store.createCollection('private-offmerge');
+    await store.addDocument('project-offmerge', 'off-mine', 'my note', { type: 'memory', origin_user: 'tester', created_at: 1_800_000_000 });
+    await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'project-offmerge']);
+
+    configure({ YAPA_SYNC_ENABLED: 'false' });
+    try {
+      await mergeCollections('project-offmerge', 'private-offmerge');
+    } finally {
+      configure();
+    }
+    expect(await getSyncSubscriptions()).not.toContain('project-offmerge');
+
+    // Sync on: a teammate's row in the source must not bring it back.
+    mockedRemote.mockClear();
+    mockedRemote.mockImplementation(async (col: string) =>
+      col === 'project-offmerge' ? [remote('off-theirs', 'project-offmerge', 'their note')] : []);
+    await pullFromRemote();
+    expect(mockedRemote.mock.calls.some(c => c[0] === 'project-offmerge')).toBe(false);
+    expect((await store.listCollections()).some(c => c.name === 'project-offmerge')).toBe(false);
+  });
+
+  it('a subscription left behind (an older version) is still skipped for a redirected name', async () => {
+    await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'project-leftover']);
+    await addCollectionRedirect('project-leftover', 'private-leftover');
+    mockedRemote.mockClear();
+    mockedRemote.mockImplementation(async (col: string) =>
+      col === 'project-leftover' ? [remote('left-theirs', 'project-leftover', 'their note')] : []);
+    await pullFromRemote();
+    expect(mockedRemote.mock.calls.some(c => c[0] === 'project-leftover')).toBe(false);
+    expect((await getStore().listCollections()).some(c => c.name === 'project-leftover')).toBe(false);
   });
 });
 

@@ -70,7 +70,7 @@ export * from './sync/shared-cycle.js';
 export { HttpBackend, IdTokenProvider, ServiceError } from './sync/http-backend.js';
 export { PostgresBackend } from './sync/postgres-backend.js';
 export * from './sync/pull.js';
-export { isSyncableCollection, isReadOnlyDoc, assertWritable } from './sync/syncable.js';
+export { isSyncableCollection, isReadOnlyDoc, assertWritable, looksPrivateButShared } from './sync/syncable.js';
 export * from './sync/push.js';
 export * from './sync/deletes.js';
 export * from './sync/sentinel.js';

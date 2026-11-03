@@ -1,5 +1,8 @@
 import { homedir, tmpdir, userInfo } from 'os';
-import { join as pathJoin } from 'path';
+import path, { join as pathJoin } from 'path';
+import { looksPrivateButShared } from './sync/syncable.js';
+
+type PlatformPath = typeof path;
 
 // ---------------------------------------------------------------------------
 // Static constants (not env-driven)
@@ -201,18 +204,53 @@ function list(value: string): string[] {
 }
 
 /**
- * Tidy `path=collection` entries: trim both sides, expand a leading `~` and
- * drop trailing slashes on the path. Entries without `=` are kept as-is
- * (scope detection ignores them), so a typo stays visible in the config.
- * Shared with hosts that take the map from their own settings (DSH).
+ * Split a `COLLECTION_MAP` value into entries. Entries are separated by `;`
+ * or a newline only: `,` and `:` both occur in paths (`C:\work`, `/srv/a:b`).
  */
-export function normalizeCollectionMap(entries: string[]): string[] {
-  return entries.map(entry => {
+export function splitCollectionMap(value: string): string[] {
+  return value.split(/[;\n]/).map(v => v.trim()).filter(Boolean);
+}
+
+const warned = new Set<string>();
+/** One stderr line per distinct message per process (config is rebuilt often). */
+function warnOnce(message: string): void {
+  if (warned.has(message)) return;
+  warned.add(message);
+  process.stderr.write(`[yapa] ${message}\n`);
+}
+
+/**
+ * Tidy `path=collection` entries: trim both sides, expand a leading `~` and
+ * resolve the path (`..`, duplicate and trailing separators). Entries without
+ * `=`, with an empty side, or with a relative path (it would depend on the
+ * process's cwd) are dropped with a one-time warning on stderr. A collection
+ * name that looks meant to be local-only but syncs (`Private-acme`,
+ * `privat-acme`, `local_acme`) is kept, with a one-time warning. Shared with
+ * hosts that take the map from their own settings (DSH). `pathImpl` is for
+ * tests (`path.win32`).
+ */
+export function normalizeCollectionMap(entries: string[], pathImpl: PlatformPath = path): string[] {
+  const out: string[] = [];
+  for (const raw of entries) {
+    const entry = raw.trim();
+    if (!entry) continue;
     const eq = entry.lastIndexOf('=');
-    if (eq < 0) return entry.trim();
-    const path = entry.slice(0, eq).trim().replace(/^~(?=\/|$)/, homedir()).replace(/(.)\/+$/, '$1');
-    return `${path}=${entry.slice(eq + 1).trim()}`;
-  }).filter(Boolean);
+    const dir = eq < 0 ? '' : entry.slice(0, eq).trim().replace(/^~(?=[\\/]|$)/, homedir());
+    const collection = eq < 0 ? '' : entry.slice(eq + 1).trim();
+    if (!dir || !collection) {
+      warnOnce(`collection_map: ignoring "${entry}" (expected path=collection; separate entries with ";")`);
+      continue;
+    }
+    if (!pathImpl.isAbsolute(dir)) {
+      warnOnce(`collection_map: ignoring "${entry}" (the path must be absolute or start with ~)`);
+      continue;
+    }
+    if (looksPrivateButShared(collection)) {
+      warnOnce(`collection_map: "${collection}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`);
+    }
+    out.push(`${pathImpl.resolve(dir)}=${collection}`);
+  }
+  return out;
 }
 
 /**
@@ -268,7 +306,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     PROJECT_ROOTS: list(get(env, 'PROJECT_ROOTS', '')).map(r => r.replace(/^~(?=\/|$)/, homedir()).replace(/\/+$/, '')),
     CUSTOMERS: list(get(env, 'CUSTOMERS', '')),
-    COLLECTION_MAP: normalizeCollectionMap(list(get(env, 'COLLECTION_MAP', ''))),
+    COLLECTION_MAP: normalizeCollectionMap(splitCollectionMap(get(env, 'COLLECTION_MAP', ''))),
 
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, 'CONTRADICTION_DISTANCE_THRESHOLD', '0.25')),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, 'CONTRADICTION_MAX_RESULTS', '3'), 10),

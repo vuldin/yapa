@@ -75,6 +75,8 @@ import {
   mergeCollections,
   mergeReportLines,
   clearCollectionRedirect,
+  resolveWriteCollection,
+  redirectNote,
   removeCollection,
   removeDependency,
   runDecaySweep,
@@ -225,14 +227,16 @@ export function registerTools(server: McpServer): void {
     async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       let result;
+      const target = await resolveWriteCollection(collection ?? 'global');
       try {
-        result = await storeMemory(content, { tags, salience, sector, collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
-        recordLastWrite(collection ?? 'global');
+        result = await storeMemory(content, { tags, salience, sector, collection: target.collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
+        recordLastWrite(target.collection);
       } catch (e) {
         return typedError(e);
       }
       const label = typed.kind ? ` ${typedLabel({ status: undefined, ...typed })}` : '';
       const lines = [`Stored memory: ${result.ids.join(', ')}${label}`];
+      if (target.redirectedFrom) lines.push(redirectNote(target));
       if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
         lines.push('', `⚠ Potential conflicts (${result.potential_conflicts.length}):`);
@@ -359,10 +363,12 @@ export function registerTools(server: McpServer): void {
     async ({ id, collection, note, tags, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       try {
-        const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, collection);
+        const target = collection ? await resolveWriteCollection(collection) : undefined;
+        const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, target?.collection);
         recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
-        return { content: [{ type: 'text' as const, text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ''}` }] };
+        const moved = target?.redirectedFrom ? ` (${redirectNote(target)})` : '';
+        return { content: [{ type: 'text' as const, text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ''}${moved}` }] };
       } catch (e) {
         return typedError(e);
       }
@@ -422,12 +428,14 @@ export function registerTools(server: McpServer): void {
       tags: z.array(z.string()).optional().describe('Additional tags for the summary (the `compacted` tag is always added)'),
     },
     async ({ collection, member_ids, summary, tags }) => {
-      const result = await applyCompaction({ collection, member_ids, summary, tags });
-      recordLastWrite(collection);
+      const target = await resolveWriteCollection(collection);
+      const result = await applyCompaction({ collection: target.collection, member_ids, summary, tags });
+      recordLastWrite(target.collection);
+      const moved = target.redirectedFrom ? `\n${redirectNote(target)}` : '';
       return {
         content: [{
           type: 'text' as const,
-          text: `Compaction applied. Summary: ${result.summary_id}. Archived: ${result.archived_ids.length}/${member_ids.length}.`,
+          text: `Compaction applied. Summary: ${result.summary_id}. Archived: ${result.archived_ids.length}/${member_ids.length}.${moved}`,
         }],
       };
     },
@@ -442,9 +450,11 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional().describe('Collection to scope the draft to. Defaults to "global".'),
     },
     async ({ entry, collection }) => {
-      const id = await journalAppend(entry, collection);
-      recordLastWrite(collection ?? 'global');
-      return { content: [{ type: 'text' as const, text: `Journal draft saved: ${id}` }] };
+      const target = await resolveWriteCollection(collection ?? 'global');
+      const id = await journalAppend(entry, target.collection);
+      recordLastWrite(target.collection);
+      const moved = target.redirectedFrom ? `\n${redirectNote(target)}` : '';
+      return { content: [{ type: 'text' as const, text: `Journal draft saved: ${id}${moved}` }] };
     },
   );
 
@@ -456,8 +466,9 @@ export function registerTools(server: McpServer): void {
       summary: z.string().optional().describe('Optional final summary text. If omitted, the consolidated content is the concatenation of all drafts in chronological order.'),
     },
     async ({ collection, summary }) => {
-      const result = await journalConsolidate({ collection, summary });
-      recordLastWrite(collection ?? 'global');
+      const target = await resolveWriteCollection(collection ?? 'global');
+      const result = await journalConsolidate({ collection: target.collection, summary });
+      recordLastWrite(target.collection);
       if (!result) {
         return { content: [{ type: 'text' as const, text: 'No journal drafts found for this session — nothing to consolidate.' }] };
       }
@@ -1039,13 +1050,15 @@ export function registerTools(server: McpServer): void {
     },
     async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? undefined : undefined;
+      const target = await resolveWriteCollection(collection ?? 'global');
       const id = await createTask(title, {
         priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, claim_scope,
-      }, collection ?? 'global');
-      recordLastWrite(collection ?? 'global');
+      }, target.collection);
+      recordLastWrite(target.collection);
 
       let text = `Created task ${id}: "${title}"`;
       if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
+      if (target.redirectedFrom) text += `\n${redirectNote(target)}`;
       return { content: [{ type: 'text' as const, text }] };
     },
   );
@@ -1436,7 +1449,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'collection_merge',
-    'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR shared copies of the moved docs; teammates\' docs stay shared in `from`. Afterwards `from` redirects to `into` on this machine (its folder scopes to `into`, sync does not bring it back; `sync subscribe` follows it again). Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges. Pass dry_run to see counts first.',
+    'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR shared copies of the moved docs; teammates\' docs stay shared in `from`. Afterwards `from` redirects to `into` on this machine only (its folder scopes to `into`, writes naming `from` land in `into`, sync does not bring it back; `sync subscribe` follows it again); run the same merge on the user\'s other devices too. Use this, never collection_delete, to combine or rename collections. Create `into` first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared merges, and refuses `global` as the source. Pass dry_run to see counts first.',
     {
       from: z.string().describe('Collection to merge (removed afterwards)'),
       into: z.string().describe('Existing collection that receives every document'),

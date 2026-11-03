@@ -14,6 +14,7 @@
  */
 import { getDocumentsByFilter, listCollections } from '../store/index.js';
 import { DEFAULT_STATUS, isOpenTyped, type MemoryKind } from '../memory/kinds.js';
+import { isSyncableCollection } from '../sync/syncable.js';
 
 export interface WaitingItem {
   id: string;
@@ -125,6 +126,25 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
     // Blocked tasks belong to whoever owns them.
     blocked: out.blocked.filter(i => !opts.user || i.for.includes(opts.user)).sort(oldest),
   };
+}
+
+/**
+ * The session-start fence for waiting items, like the recall fence: in a
+ * shared scope, items from `private-*`/`local-*` collections are left out
+ * (their titles would sit in front of an agent writing to a shared
+ * collection); `hidden` counts them. In `global` or a private scope nothing
+ * is fenced. The `waiting` tool itself is an explicit ask and is not fenced.
+ */
+export function fenceWaiting(w: WaitingResult, activeCollection: string): { waiting: WaitingResult; hidden: number } {
+  if (!isSyncableCollection(activeCollection)) return { waiting: w, hidden: 0 };
+  const open = (i: WaitingItem) => i.collection === 'global' || isSyncableCollection(i.collection);
+  const waiting: WaitingResult = {
+    decisions: w.decisions.filter(open),
+    questions: w.questions.filter(open),
+    actions: w.actions.filter(open),
+    blocked: w.blocked.filter(open),
+  };
+  return { waiting, hidden: waitingCount(w) - waitingCount(waiting) };
 }
 
 /** Count of items, total. */

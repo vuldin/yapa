@@ -98,6 +98,10 @@ export async function removeCollection(name: string, opts: RemoveCollectionOptio
     const real = docs.filter(d => !d.id.startsWith('__') && d.metadata.type !== 'journal_draft');
     await queueSyncDeletes(real.filter(d => !d.metadata.origin_user || d.metadata.origin_user === me).map(d => d.id), name);
     await addLocalTombstones(real.filter(d => d.metadata.origin_user && d.metadata.origin_user !== me).map(d => d.id));
+  }
+  // With sync off too: a subscription left behind would recreate the
+  // collection (and backfill it) as soon as sync is turned on.
+  if (isSyncable(name)) {
     const subs = await getSyncSubscriptions();
     if (subs.includes(name)) await updateSyncSubscriptions(subs.filter(s => s !== name));
   }
@@ -121,9 +125,11 @@ export interface MergeResult {
    */
   teammateRowsKept: number;
   /**
-   * Shared -> private merges only: your own synced docs whose shared rows the
-   * next push removes from the sync service (retracts), as for any doc moved
-   * into a private collection.
+   * Shared -> private merges only: an upper bound on your own docs whose
+   * shared rows the next push removes from the sync service (retracts), as
+   * for any doc moved into a private collection. Every doc of yours that
+   * retraction checks is counted; only those that reached the service have a
+   * row to remove.
    */
   ownRowsRetracted: number;
 }
@@ -144,13 +150,17 @@ const MERGE_BATCH = 100;
  * retractSharedCopies); teammates' rows stay shared in `from`.
  *
  * Once merged, `from` redirects to `into` on this machine (a local sentinel
- * in `global`): scope detection follows it, and sync never brings `from`
- * back from teammates' rows. `sync subscribe from` follows it again.
+ * in `global`): scope detection and writes naming `from` follow it, `from`
+ * is unsubscribed (with sync off too), and sync never brings it back from
+ * teammates' rows. `sync subscribe from` follows it again. The redirect is
+ * per machine: another device of the same user still follows `from` until
+ * it is merged there too.
  *
  * Safety rules:
  * - `into` must already exist: new collection names are confirmed with the
  *   user and created first.
- * - A private source (`private-*`, `local-*`, `global`) never merges into a
+ * - `global` is never a source: it holds this machine's sync sentinels.
+ * - A private source (`private-*`, `local-*`) never merges into a
  *   shared target: that would publish private notes to the whole team.
  * - Shared -> private is allowed: the next push retracts this user's shared
  *   copies, as for any doc moved into a private collection.
@@ -159,6 +169,11 @@ const MERGE_BATCH = 100;
  */
 export async function mergeCollections(from: string, into: string, opts: { dryRun?: boolean } = {}): Promise<MergeResult> {
   if (from === into) throw new Error('Source and target are the same collection');
+  if (from === 'global') {
+    // global holds this machine's sync state (subscriptions, pull point,
+    // merge redirects) next to its notes; moving it would lose all of that.
+    throw new Error('Refused: "global" cannot be merged into another collection. It holds this machine\'s sync state (subscriptions, pull point, merge redirects). Move specific memories with memory_store instead.');
+  }
   const names = new Set((await chromaListCollections()).map(c => c.name));
   if (!names.has(from)) throw new Error(`Collection "${from}" not found`);
   if (!names.has(into)) {
@@ -191,10 +206,12 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
   const teammateRowsKept = sharedToPrivate
     ? docs.filter(d => d.metadata.origin_user && d.metadata.origin_user !== me).length
     : 0;
-  // What retractSharedCopies will find: your docs that reached the remote.
+  // Upper bound on what retractSharedCopies removes: every doc of yours it
+  // checks (it also retracts synced docs with unpushed edits, so is_synced is
+  // no guide). Docs that never reached the service have no row to remove.
   const ownRowsRetracted = sharedToPrivate
     ? docs.filter(d => !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata)
-      && d.metadata.is_synced === true && (!d.metadata.origin_user || d.metadata.origin_user === me)).length
+      && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number(d.metadata.created_at) > 0).length
     : 0;
   const result: MergeResult = {
     from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept, ownRowsRetracted,
@@ -244,7 +261,7 @@ export function mergeReportLines(r: MergeResult): string[] {
   if (r.dryRun) {
     const lines = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
     if (sharedToPrivate && r.ownRowsRetracted > 0) {
-      lines.push(`${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push.`);
+      lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
     }
     if (sharedToPrivate && r.teammateRowsKept > 0) {
       lines.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
@@ -254,7 +271,7 @@ export function mergeReportLines(r: MergeResult): string[] {
   const lines = [`Moved ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}) and removed the empty "${r.from}".`];
   if (sharedToPrivate) {
     if (r.ownRowsRetracted > 0) {
-      lines.push(`${r.ownRowsRetracted} of your docs will be removed from the shared copy (retracted) at the next push.`);
+      lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
     }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
@@ -262,6 +279,12 @@ export function mergeReportLines(r: MergeResult): string[] {
   }
   if (isSyncable(r.from)) {
     lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
+    lines.push(
+      `This redirect is for this machine only. Another device of yours still follows "${r.from}": run the same merge there`
+      + (sharedToPrivate
+        ? ` too. Until then it drops its unedited copies of your retracted docs when the retraction reaches it, and a copy it edited can be pushed back into "${r.from}".`
+        : ' too.'),
+    );
   }
   return lines;
 }

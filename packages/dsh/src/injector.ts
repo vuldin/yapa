@@ -33,10 +33,11 @@ import {
   takeClaimNotices,
   waitingOn,
   waitingLine,
+  fenceWaiting,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
-import { detectCollection, scopeNotes, type CollectionDetection } from './scope.js';
+import { detectCollection, isDetectionStale, scopeNotes, type CollectionDetection } from './scope.js';
 
 interface AgentState {
   /** Cache of the detected collection for this agent's session. */
@@ -87,6 +88,9 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       const state = states.get(agent.id) ?? { tasksSurfaced: new Set<string>() };
       states.set(agent.id, state);
 
+      // Cached per session, but a merge since (here or in another process)
+      // moves the folder's scope: re-detect when the redirects changed.
+      if (state.detection && await isDetectionStale(state.detection)) state.detection = undefined;
       const detection = state.detection
         ?? (state.detection = await detectCollection(agent.session.header.cwd, resolved.projectRoots, resolved.customers, resolved.collectionMap));
       const collection = detection.collection;
@@ -158,17 +162,20 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         if (!state.waitingSurfaced) {
           state.waitingSurfaced = true;
           const me = getConfig().USERNAME;
-          const w = await waitingOn({ user: me }).catch(() => undefined);
+          const all = await waitingOn({ user: me }).catch(() => undefined);
           signal.throwIfAborted();
-          if (w) {
+          if (all) {
+            // In a shared scope, private-*/local-* items are only counted.
+            const { waiting: w, hidden } = fenceWaiting(all, collection);
             const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
             const mine = items.filter(i => i.for.includes(me));
             const anyone = items.filter(i => i.for.length === 0).length;
-            if (mine.length || anyone) {
+            if (mine.length || anyone || hidden) {
               lines.push('', '## Waiting on you');
               for (const i of mine.slice(0, 8)) lines.push(waitingLine(i, { collection: true }));
               if (mine.length > 8) lines.push(`- _…${mine.length - 8} more (call \`yapa_waiting\`)_`);
               if (anyone) lines.push(`- _${anyone} item(s) wait on anyone with the role (call \`yapa_waiting\`)_`);
+              if (hidden) lines.push(`- _${hidden} more in private collections, not listed in this shared scope (call \`yapa_waiting\` to see them)_`);
             }
           }
         }

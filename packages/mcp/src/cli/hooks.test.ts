@@ -11,7 +11,7 @@ const { pullCollection, captureTurn, heartbeatIfDue } = vi.hoisted(() => ({
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine } from './hooks.js';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -456,6 +456,22 @@ describe('waiting on you', () => {
     expect(section).not.toContain('Ask the vendor');
     expect(section).toContain('1 item(s) wait on anyone');
   });
+
+  it('a shared scope only counts private decisions; their own scope (and global) lists them', async () => {
+    await storeMemory('Rotate the acme private signing key now?', {
+      collection: 'private-acme-keys', typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['now', 'next week'] },
+    });
+    const shared = (await waitingLines('josh', 2000, 'project-acme')).join('\n');
+    expect(shared).not.toContain('Rotate the acme private signing key');
+    expect(shared).not.toContain('private-acme-keys');
+    expect(shared).toMatch(/1 more in private collections, not listed in this shared scope/);
+    expect(shared).toContain('Keep the old API');
+    for (const scope of ['private-acme-keys', 'global']) {
+      const lines = (await waitingLines('josh', 2000, scope)).join('\n');
+      expect(lines).toMatch(/\(private-acme-keys\) \[decision needed, for josh, new\] Rotate the acme private signing key/);
+      expect(lines).not.toContain('in private collections');
+    }
+  });
 });
 
 describe('collection_map: a folder with a private collection', () => {
@@ -465,6 +481,17 @@ describe('collection_map: a folder with a private collection', () => {
   it('every hook scopes to the mapped collection and never contacts the remote', async () => {
     mapped();
     await storeMemory('acme private: the staging password rotates on Mondays', { collection: 'private-acme', salience: 3 });
+    // Any call on the sync backend (pull, presence lease list, heartbeat) is recorded.
+    const core = await vi.importActual<any>('@yapa/core');
+    const remoteCalls: string[] = [];
+    const recorder = (prefix: string) => new Proxy({}, {
+      get: (_t, k) => (k === 'then' ? undefined : async () => { remoteCalls.push(`${prefix}${String(k)}`); throw new Error('no remote in this test'); }),
+    });
+    const coordination = recorder('coordination.');
+    core.setSyncBackend(new Proxy({}, {
+      get: (_t, k) => (k === 'then' ? undefined : k === 'kind' ? 'postgres' : k === 'coordination' ? coordination : (recorder('') as any)[k]),
+    }));
+    heartbeatIfDue.mockImplementation(core.heartbeatIfDue);
 
     capture();
     await sessionStart({ session_id: 'm1', cwd: cwd(), source: 'startup' });
@@ -485,6 +512,16 @@ describe('collection_map: a folder with a private collection', () => {
     const all = await listMemories({ collection: 'private-acme', limit: 50 });
     expect(all.some(m => m.content.includes('acme private notes stay local'))).toBe(true);
     expect(pullCollection).not.toHaveBeenCalled();
+    // Presence is skipped for a private scope, and the heartbeat ran (for
+    // real) without reaching the service: this session holds no leases.
+    expect(heartbeatIfDue).toHaveBeenCalled();
+    expect(remoteCalls).toEqual([]);
+    // The recorder does see calls: a shared folder's session start asks for presence.
+    capture();
+    await sessionStart({ session_id: 'm1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+    restore();
+    expect(remoteCalls).toContain('coordination.leaseList');
+    core.setSyncBackend(undefined);
   });
 
   it("a private note never surfaces in another folder's recall", async () => {
@@ -517,5 +554,10 @@ describe('after merging a shared collection into a private one', () => {
     expect(pullCollection).not.toHaveBeenCalled();
     expect((await core.listCollections()).map(c => c.name)).not.toContain('project-acme-legacy');
     expect(await core.getSyncSubscriptions()).not.toContain('project-acme-legacy');
+
+    // A hardcoded old name in a write follows the redirect too.
+    await storeMemory('acme-legacy: switched to gradle 9', { collection: 'project-acme-legacy' });
+    expect((await core.listCollections()).map(c => c.name)).not.toContain('project-acme-legacy');
+    expect((await listMemories({ collection: 'private-acme-legacy', limit: 50 })).some(m => m.content.includes('gradle 9'))).toBe(true);
   });
 });

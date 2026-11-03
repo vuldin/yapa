@@ -37,6 +37,7 @@ import {
   type SyncHealth,
   waitingOn,
   waitingLine,
+  fenceWaiting,
   heldKeys,
   noteInstalledVersion,
   markUpdateNotified,
@@ -124,7 +125,7 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
   if (!isSyncableCollection(collection)) return 0;
   try {
     // Merged away on this machine: teammates' rows must not bring it back.
-    if (collection in await getCollectionRedirects()) return 0;
+    if (Object.hasOwn(await getCollectionRedirects(), collection)) return 0;
     // First visit to a shared collection (a teammate's project folder, or one
     // named in the prompt): pull its whole history, then follow it so the
     // background sync keeps it current. Subscribe only after the backfill
@@ -380,22 +381,26 @@ async function findCompactionCandidates(): Promise<string[]> {
  * "## Waiting on you": decisions, questions and person-only steps that name
  * this user, across every collection, plus a count of those for anyone. Empty
  * when nothing waits (or the read is slow: session start never waits on it).
+ * In a shared `collection`, items from private-* and local-* collections are fenced out (only
+ * counted), like recall's cross-collection extras.
  */
-export async function waitingLines(user: string, budgetMs = 2000): Promise<string[]> {
+export async function waitingLines(user: string, budgetMs = 2000, collection = 'global'): Promise<string[]> {
   try {
-    const w = await Promise.race([
+    const all = await Promise.race([
       waitingOn({ user }),
       new Promise<undefined>(res => setTimeout(() => res(undefined), budgetMs).unref()),
     ]);
-    if (!w) return [];
+    if (!all) return [];
+    const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
     const mine = items.filter(i => i.for.includes(user));
     const anyone = items.filter(i => i.for.length === 0).length;
-    if (!mine.length && !anyone) return [];
+    if (!mine.length && !anyone && !hidden) return [];
     const out = ['', '## Waiting on you'];
     for (const i of mine.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
     if (mine.length > 8) out.push(`- _…${mine.length - 8} more (call \`waiting\`)_`);
     if (anyone) out.push(`- _${anyone} item(s) wait on anyone with the role (call \`waiting\`)_`);
+    if (hidden) out.push(`- _${hidden} more in private collections, not listed in this shared scope (call \`waiting\` to see them)_`);
     out.push('Tell the user about these when relevant; record a choice with `memory_update` (status accepted), never only in chat.');
     return out;
   } catch (e) {
@@ -440,7 +445,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}\n`);
   }
 
-  lines.push(...await waitingLines(getConfig().USERNAME));
+  lines.push(...await waitingLines(getConfig().USERNAME, undefined, collection));
 
   lines.push(...held.lines);
 

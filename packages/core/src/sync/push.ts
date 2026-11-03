@@ -201,7 +201,7 @@ async function pushAll(): Promise<PushStats> {
       const existingSet = new Set(existing);
       // A name merged away on this machine is never re-followed implicitly.
       const redirects = await getCollectionRedirects();
-      const newSubs = pushedCollections.filter(c => !existingSet.has(c) && !(c in redirects));
+      const newSubs = pushedCollections.filter(c => !existingSet.has(c) && !Object.hasOwn(redirects, c));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }

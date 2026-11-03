@@ -57,7 +57,7 @@ export async function pullFromRemote(): Promise<PullStats> {
       // A collection merged away here stays away, even though the remote
       // still lists it for this user (teammates' rows, or rows not yet moved).
       const redirects = await getCollectionRedirects();
-      const mine = (await backend.collectionsForUser()).filter(c => isSyncable(c) && !(c in redirects));
+      const mine = (await backend.collectionsForUser()).filter(c => isSyncable(c) && !Object.hasOwn(redirects, c));
       const subs = await getSyncSubscriptions();
       const add = mine.filter(c => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -75,16 +75,19 @@ export async function pullFromRemote(): Promise<PullStats> {
   const collections = await listCollections();
   const localCollectionNames = new Set(collections.map(c => c.name));
 
-  // Build pull list: local syncable collections + subscribed remote-only collections
+  // Build pull list: local syncable collections + subscribed remote-only collections.
+  // A name merged away on this machine is never pulled: a subscription left
+  // behind (a merge with sync off, an older version) must not recreate it.
+  const redirects = await getCollectionRedirects();
   const pullCollectionNames: string[] = [];
   for (const col of collections) {
-    if (isSyncable(col.name)) pullCollectionNames.push(col.name);
+    if (isSyncable(col.name) && !Object.hasOwn(redirects, col.name)) pullCollectionNames.push(col.name);
   }
 
   const backfill = new Set<string>();
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncable(sub)) {
+    if (!localCollectionNames.has(sub) && isSyncable(sub) && !Object.hasOwn(redirects, sub)) {
       await getOrCreateCollection(sub);
       pullCollectionNames.push(sub);
       backfill.add(sub);

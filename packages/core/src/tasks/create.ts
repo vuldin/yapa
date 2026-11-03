@@ -1,6 +1,7 @@
 import { getConfig } from '../config.js';
 import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../store/index.js';
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -101,8 +102,10 @@ export async function getNextTaskId(): Promise<string> {
 export async function createTask(
   title: string,
   options: TaskOptions = {},
-  collection: string = 'global',
+  requested: string = 'global',
 ): Promise<string> {
+  // A collection merged away here is followed, never recreated.
+  const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
   const id = await getNextTaskId();
   const now = Math.floor(Date.now() / 1000);

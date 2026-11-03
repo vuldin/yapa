@@ -53,7 +53,7 @@
     "collection_map": {
       "type": "string",
       "title": "Folder to collection map",
-      "description": "Comma-separated path=collection entries, e.g. ~/work/acme=private-acme. A session in that folder (or below it) uses that collection; the longest matching path wins, ahead of project roots. This is how a folder gets a private-* or local-* collection, which never syncs.",
+      "description": "path=collection entries separated by ; (not commas: they can be part of a path), e.g. ~/work/acme=private-acme;~/work/globex=local-globex. Paths must be absolute or start with ~. A session in that folder (or below it) uses that collection; the longest matching path wins, ahead of project roots. This is how a folder gets a private-* or local-* collection, which never syncs.",
       "default": ""
     },
     "sync_enabled": {

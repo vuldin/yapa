@@ -6,6 +6,7 @@ import { getConfig, SALIENCE_START } from '../config.js';
 import { assertWritable } from '../sync/syncable.js';
 import { normalizeTyped, type TypedFields } from './kinds.js';
 import { linkMemoryToTasks } from './links.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -117,7 +118,8 @@ export async function storeMemory(
   content: string,
   options: StoreOptions = {},
 ): Promise<StoreMemoryResult> {
-  const collection = options.collection ?? 'global';
+  // A collection merged away here is followed, never recreated.
+  const { collection } = await resolveWriteCollection(options.collection ?? 'global');
   const typed = options.typed ? normalizeTyped(options.typed) : {};
   await getOrCreateCollection(collection);
   // Superseding archives the old doc: refuse before storing anything when

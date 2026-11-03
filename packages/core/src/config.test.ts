@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { userInfo } from 'node:os';
 import { createConfig } from './config.js';
 
@@ -22,10 +22,15 @@ describe('createConfig', () => {
     expect(c.CUSTOMERS).toEqual(['acme', 'globex']);
   });
 
-  it('parses the collection map: path=collection entries, ~ expanded, trailing slashes dropped', () => {
+  it('parses the collection map: ";" or newline separated path=collection entries, ~ expanded, paths resolved', () => {
     expect(createConfig({}).COLLECTION_MAP).toEqual([]);
-    const c = createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/ = private-acme, /srv/x=local-x,typo' });
-    expect(c.COLLECTION_MAP).toEqual([`${process.env.HOME}/work/acme=private-acme`, '/srv/x=local-x', 'typo']);
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const c = createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/ = private-acme; /srv/x/../y//=local-y\n/srv/a:b,c=private-ab;typo' });
+      expect(c.COLLECTION_MAP).toEqual([`${process.env.HOME}/work/acme=private-acme`, '/srv/y=local-y', '/srv/a:b,c=private-ab']);
+    } finally {
+      err.mockRestore();
+    }
     expect(createConfig({ COLLECTION_MAP: '/a=private-a' }).COLLECTION_MAP).toEqual(['/a=private-a']);
   });
 

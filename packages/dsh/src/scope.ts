@@ -4,4 +4,4 @@
  *
  * @module yapa/scope
  */
-export { detectCollection, scopeNotes, type CollectionDetection } from '@yapa/core';
+export { detectCollection, isDetectionStale, scopeNotes, type CollectionDetection } from '@yapa/core';

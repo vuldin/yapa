@@ -13,6 +13,7 @@ import { carryTyped, normalizeTyped, type TypedFields } from './kinds.js';
 import { storeMemory } from './store.js';
 import { chunkText } from '../chunking.js';
 import { updateMemory } from './update.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 
 export interface ExternalPut {
   content: string;
@@ -33,8 +34,10 @@ export async function findExternal(collection: string, ref: string) {
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
-export async function putExternal(collection: string, ref: string, put: ExternalPut): Promise<ExternalPutResult> {
+export async function putExternal(requested: string, ref: string, put: ExternalPut): Promise<ExternalPutResult> {
   if (!ref.trim()) throw new Error('external_ref is required');
+  // A collection merged away here is followed: its records moved with it.
+  const { collection } = await resolveWriteCollection(requested);
   const typed = normalizeTyped({ ...put.typed, external_ref: ref });
   await getOrCreateCollection(collection);
   const existing = await findExternal(collection, ref);
