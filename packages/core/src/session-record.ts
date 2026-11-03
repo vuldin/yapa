@@ -71,6 +71,28 @@ export function noteSessionStarting(session: string | undefined, opts: { dir?: s
   }
 }
 
+/**
+ * Note the collection the hooks detected for `session` (session start, each
+ * prompt), so the status line can show where this session writes before it
+ * has written anything: `sessions/<id>.scope`. Written only when it changes.
+ */
+export function recordSessionScope(session: string | undefined, collection: string, opts: { dir?: string; now?: number } = {}): void {
+  const id = sessionId(session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!id || !dir || !collection) return;
+  const file = sessionRecordFile(id, dir).replace(/\.json$/, '.scope');
+  try {
+    if (JSON.parse(readFileSync(file, 'utf-8'))?.collection === collection) return;
+  } catch {
+    // none yet
+  }
+  try {
+    writeJsonAtomic(file, { collection, at: opts.now ?? Date.now() });
+  } catch {
+    // display only
+  }
+}
+
 /** Remove this server's record (call at exit), only if it is still ours. */
 export function removeSessionRecord(opts: { session?: string; dir?: string } = {}): void {
   const session = sessionId(opts.session);
@@ -91,9 +113,9 @@ export function pruneSessionRecords(dir: string = sessionRecordDir(), now = Date
   try {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
-      if (name.endsWith('.starting')) {
+      if (name.endsWith('.starting') || name.endsWith('.scope')) {
         try {
-          if (now - statSync(p).mtimeMs > 24 * 3600 * 1000) rmSync(p, { force: true });
+          if (now - statSync(p).mtimeMs > (name.endsWith('.scope') ? PRUNE_AFTER_MS : 24 * 3600 * 1000)) rmSync(p, { force: true });
         } catch {
           // gone
         }

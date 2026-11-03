@@ -42,6 +42,7 @@ import {
   noteInstalledVersion,
   markUpdateNotified,
   noteSessionStarting,
+  recordSessionScope,
   refreshSyncHealthNames,
   shouldPull,
   recordPull,
@@ -415,6 +416,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   noteSessionStarting(input.session_id);
   const detection = await detectCollection(input.cwd);
   const collection = detection.collection;
+  recordSessionScope(input.session_id, collection);
   const pulled = await freshenFromRemote(collection);
 
   const lines: string[] = [];
@@ -522,6 +524,7 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
   }
   const detection = await detectCollection(input.cwd);
   const collection = detection.collection;
+  recordSessionScope(input.session_id, collection);
   recordPrompt(input.session_id, prompt);
   await Promise.all([freshenFromRemote(collection, { gate: true }), keepLeasesAlive(input)]);
 

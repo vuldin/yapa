@@ -2663,14 +2663,14 @@ function decodeJwtPayload(token) {
   }
 }
 function runTokenCommand(cmd) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const done = (err, stdout, stderr) => {
       if (err) {
         const detail = redactTokens(String(stderr || err.message).trim().split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
         reject(new Error(`could not get a Google ID token from \`${cmd || "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`));
         return;
       }
-      resolve2(String(stdout));
+      resolve3(String(stdout));
     };
     const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
     if (cmd) exec(cmd, opts, done);
@@ -4098,7 +4098,7 @@ async function getNextTaskId(floor = 0, localOnly = false) {
   if (isSyncConfigured() && !localOnly) {
     await Promise.race([
       resolveSyncUsername(),
-      new Promise((resolve2) => setTimeout(resolve2, 3e3).unref())
+      new Promise((resolve3) => setTimeout(resolve3, 3e3).unref())
     ]).catch(() => void 0);
   }
   const collections = await listCollections2();
@@ -4122,7 +4122,7 @@ async function getNextTaskId(floor = 0, localOnly = false) {
       if (backend?.coordination) {
         const id = await Promise.race([
           backend.coordination.nextTaskId(maxId),
-          new Promise((resolve2) => setTimeout(() => resolve2(void 0), 3e3).unref())
+          new Promise((resolve3) => setTimeout(() => resolve3(void 0), 3e3).unref())
         ]);
         if (id && id.startsWith(`${getConfig().USERNAME}-`)) return id;
       }
@@ -4134,7 +4134,7 @@ async function getNextTaskId(floor = 0, localOnly = false) {
       const backend = await getSyncBackend();
       const remote = !backend ? 0 : await Promise.race([
         backend.maxTaskNumber(),
-        new Promise((resolve2) => setTimeout(() => resolve2(0), 3e3).unref())
+        new Promise((resolve3) => setTimeout(() => resolve3(0), 3e3).unref())
       ]);
       maxId = Math.max(maxId, remote);
     } catch {
@@ -5839,7 +5839,7 @@ function buildClaudeCliArgs(model, system) {
 async function callClaudeCli(model, options) {
   const system = options.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
   const prompt = options.messages.filter((m) => m.role !== "system").map((m) => m.role === "assistant" ? `Assistant: ${m.content}` : m.content).join("\n\n");
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn("claude", buildClaudeCliArgs(model, system), {
       env: { ...process.env, [HOOK_CHILD_ENV]: "1" },
       stdio: ["pipe", "pipe", "pipe"]
@@ -5862,7 +5862,7 @@ async function callClaudeCli(model, options) {
     });
     child.on("close", (code) => {
       clearTimeout(timer3);
-      if (code === 0) resolve2(out.trim());
+      if (code === 0) resolve3(out.trim());
       else reject(new Error(`claude -p exited ${code}: ${err.trim().slice(0, 300)}`));
     });
     child.stdin.end(prompt);
@@ -7892,8 +7892,8 @@ async function flushPendingSync(timeoutMs = 5e3) {
   }
   if (work.length === 0) return;
   let timer3;
-  const timeout = new Promise((resolve2) => {
-    timer3 = setTimeout(resolve2, timeoutMs);
+  const timeout = new Promise((resolve3) => {
+    timer3 = setTimeout(resolve3, timeoutMs);
   });
   await Promise.race([Promise.all(work), timeout]);
   if (timer3) clearTimeout(timer3);
@@ -8029,7 +8029,7 @@ var init_fireworks = __esm({
     init_config();
     defaultRunner = {
       async run(args) {
-        return new Promise((resolve2, reject) => {
+        return new Promise((resolve3, reject) => {
           const child = spawn2(getConfig().TRAINING_FIRECTL_PATH, args, { stdio: ["ignore", "pipe", "pipe"] });
           let stdout = "";
           let stderr = "";
@@ -8049,7 +8049,7 @@ var init_fireworks = __esm({
             }
           });
           child.on("close", (code) => {
-            resolve2({ stdout, stderr, code: code ?? -1 });
+            resolve3({ stdout, stderr, code: code ?? -1 });
           });
         });
       }
@@ -9162,6 +9162,20 @@ function noteSessionStarting(session, opts = {}) {
   } catch {
   }
 }
+function recordSessionScope(session, collection, opts = {}) {
+  const id = sessionId(session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!id || !dir || !collection) return;
+  const file = sessionRecordFile(id, dir).replace(/\.json$/, ".scope");
+  try {
+    if (JSON.parse(readFileSync17(file, "utf-8"))?.collection === collection) return;
+  } catch {
+  }
+  try {
+    writeJsonAtomic(file, { collection, at: opts.now ?? Date.now() });
+  } catch {
+  }
+}
 function removeSessionRecord(opts = {}) {
   const session = sessionId(opts.session);
   const dir = opts.dir ?? sessionRecordDir();
@@ -9178,9 +9192,9 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   try {
     for (const name of readdirSync6(dir)) {
       const p = join13(dir, name);
-      if (name.endsWith(".starting")) {
+      if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
-          if (now - statSync3(p).mtimeMs > 24 * 3600 * 1e3) rmSync6(p, { force: true });
+          if (now - statSync3(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
         } catch {
         }
         continue;
@@ -9464,6 +9478,7 @@ __export(src_exports, {
   recordForTask: () => recordForTask,
   recordLastWrite: () => recordLastWrite,
   recordPull: () => recordPull,
+  recordSessionScope: () => recordSessionScope,
   recordSessionStart: () => recordSessionStart,
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
@@ -9704,6 +9719,7 @@ __export(statusline_exports, {
   formatSince: () => formatSince,
   hasStatusLine: () => hasStatusLine,
   installStatusLine: () => installStatusLine,
+  isLocalOnly: () => isLocalOnly,
   isYapaStatusLine: () => isYapaStatusLine,
   main: () => main,
   mergeStatusLine: () => mergeStatusLine,
@@ -9711,6 +9727,7 @@ __export(statusline_exports, {
   readHealth: () => readHealth,
   readLastWrite: () => readLastWrite2,
   readSessionRecord: () => readSessionRecord,
+  readSessionScope: () => readSessionScope,
   readSessionStarting: () => readSessionStarting,
   readUpdate: () => readUpdate,
   removeStatusLine: () => removeStatusLine,
@@ -9773,7 +9790,8 @@ function renderSegment(health, now, opts = {}) {
   const head = shown + (restart ? ` ${paint("yellow", `(restart for v${restart})`)}` : "") + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
-  const tail = cleanCollection(opts.collection);
+  const name = cleanCollection(opts.collection);
+  const tail = name ? `${name}${isLocalOnly(name) ? " (local only)" : ""}` : void 0;
   const state = (tone, text) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ""}`;
   if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
@@ -9797,6 +9815,9 @@ function renderSegment(health, now, opts = {}) {
     default:
       return state("dim", "\u25CB sync status unknown");
   }
+}
+function isLocalOnly(name) {
+  return name === "global" || name.startsWith("private-") || name.startsWith("local-");
 }
 function cleanCollection(name) {
   if (typeof name !== "string") return void 0;
@@ -9856,6 +9877,18 @@ function readSessionRecord(dir, sessions) {
     }
   }
   return best;
+}
+function readSessionScope(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
+      if (typeof r?.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
+    } catch {
+    }
+  }
+  return best?.collection;
 }
 function readSessionStarting(dir, sessions) {
   let best;
@@ -10033,12 +10066,13 @@ async function main(args, self2) {
   const last = readLastWrite2(join14(dirname9(healthPath), "last-write"), ids);
   const sessionsDir = join14(dirname9(healthPath), "sessions");
   const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
+  const collection = last?.collection ?? readSessionScope(sessionsDir, ids);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
     update,
-    collection: last?.collection,
+    collection,
     session
   }) + "\n");
 }
@@ -10122,7 +10156,7 @@ function attribution(metadata) {
   return who2 && who2 !== getConfig().USERNAME ? `, by ${who2}` : "";
 }
 function withTimeout(work, ms) {
-  return Promise.race([work, new Promise((resolve2) => setTimeout(() => resolve2(void 0), ms).unref())]);
+  return Promise.race([work, new Promise((resolve3) => setTimeout(() => resolve3(void 0), ms).unref())]);
 }
 async function freshenFromRemote(collection, opts = {}) {
   const config = getConfig();
@@ -10334,6 +10368,7 @@ async function sessionStart(input2) {
   noteSessionStarting(input2.session_id);
   const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
+  recordSessionScope(input2.session_id, collection);
   const pulled = await freshenFromRemote(collection);
   const lines = [];
   if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, "");
@@ -10415,6 +10450,7 @@ async function userPromptSubmit(input2) {
   }
   const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
+  recordSessionScope(input2.session_id, collection);
   recordPrompt(input2.session_id, prompt);
   await Promise.all([freshenFromRemote(collection, { gate: true }), keepLeasesAlive(input2)]);
   const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? "\u2026" : ""}`];
@@ -10653,6 +10689,7 @@ function leaseAcquire(a) {
     noteLeaseHeld(session, r.lease.ttl_seconds);
     const verb = r.renewed ? "renewed" : prev?.reclaim ? `took over from ${prev.session} (your other session)` : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
     const local2 = coordinatedLocally(a.collection);
+    recordLastWrite(a.collection);
     return {
       exit: EXIT.ok,
       json: { ok: true, ...r, local: local2 },
@@ -10680,7 +10717,10 @@ function leaseRelease(collection, key, session, outcome) {
   return run(async () => {
     const s = session ?? defaultSession();
     const r = await (await requireCoordination()).leaseRelease(collection, key, s, outcome);
-    if (r.released) return { exit: EXIT.ok, json: { ok: true, ...r }, text: `released ${key} (${outcome ?? "done"})` };
+    if (r.released) {
+      recordLastWrite(collection);
+      return { exit: EXIT.ok, json: { ok: true, ...r }, text: `released ${key} (${outcome ?? "done"})` };
+    }
     if (r.reason === "not_held") return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${key} is not leased` };
     return { exit: EXIT.refused, json: { ok: false, ...r }, text: `${key} is not yours to release: ${describeLease(r.lease)}` };
   });
@@ -10695,6 +10735,7 @@ function leaseList(collection, includeExpired = false) {
 function counterNext(collection, name, floor) {
   return run(async () => {
     const value = await (await requireCoordination()).counterNext(collection, name, floor);
+    recordLastWrite(collection);
     return { exit: EXIT.ok, json: { ok: true, value, local: coordinatedLocally(collection) }, text: String(value) };
   });
 }
@@ -11149,6 +11190,42 @@ var init_memory = __esm({
   }
 });
 
+// packages/mcp/src/cli/scope.ts
+var scope_exports = {};
+__export(scope_exports, {
+  runScope: () => runScope,
+  scopeCwd: () => scopeCwd
+});
+import { resolve as resolve2 } from "node:path";
+async function runScope(args, cwdDefault = process.cwd()) {
+  const at = args.indexOf("--cwd");
+  const cwd = resolve2(at >= 0 && args[at + 1] ? args[at + 1] : cwdDefault);
+  const d = await detectCollection(cwd);
+  const localOnly = !isSyncableCollection(d.collection);
+  return {
+    json: {
+      ok: true,
+      cwd,
+      collection: d.collection,
+      local_only: localOnly,
+      mapped: !!d.mapped,
+      ...d.redirectedFrom ? { redirected_from: d.redirectedFrom } : {},
+      ...d.ambiguous ? { ambiguous: d.ambiguous } : {}
+    },
+    text: `${d.collection}${localOnly ? " (local only)" : ""}`
+  };
+}
+function scopeCwd(args, cwdDefault = process.cwd()) {
+  const at = args.indexOf("--cwd");
+  return resolve2(at >= 0 && args[at + 1] ? args[at + 1] : cwdDefault);
+}
+var init_scope2 = __esm({
+  "packages/mcp/src/cli/scope.ts"() {
+    "use strict";
+    init_src();
+  }
+});
+
 // packages/mcp/src/cli/index.ts
 import { dirname as dirname12, join as join17 } from "node:path";
 
@@ -11218,7 +11295,7 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n";
 var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nShared collections are coordinated by the sync service; private-*, local-* and global (and every collection with sync off) by this machine.\nExit: 0 done, 3 refused (held or overlapping), 4 unavailable (the service for a shared collection; nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
@@ -11418,6 +11495,14 @@ async function main2() {
     const r = command === "waiting" ? await m.runWaiting(args) : await m.runMemory(sub, rest);
     process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
     await exitAfterFlush(r.exit);
+  }
+  if (command === "scope") {
+    const args = [sub, ...rest].filter((a) => a !== void 0);
+    const { runScope: runScope2, scopeCwd: scopeCwd2 } = await Promise.resolve().then(() => (init_scope2(), scope_exports));
+    adoptCliEnv(scopeCwd2(args));
+    const r = await runScope2(args);
+    process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
+    await exitAfterFlush(0);
   }
   if (command === "hooks") {
     await runHooksCommand(sub, rest);

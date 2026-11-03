@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConfig, resetConfig, setConfig } from './config.js';
-import { noteSessionStarting, pruneSessionRecords, recordSessionStart, removeSessionRecord, sessionRecordDir, sessionRecordFile } from './session-record.js';
+import { noteSessionStarting, recordSessionScope, pruneSessionRecords, recordSessionStart, removeSessionRecord, sessionRecordDir, sessionRecordFile } from './session-record.js';
 import { utimesSync } from 'node:fs';
 
 let dir: string;
@@ -45,6 +45,15 @@ describe('session records', () => {
     utimesSync(f, old, old);
     pruneSessionRecords();
     expect(existsSync(f)).toBe(false);
+  });
+
+  it("records a session's detected scope, rewriting only when it changes", () => {
+    const f = join(dir, 'sessions', 'sess-4.scope');
+    recordSessionScope('sess-4', 'private-acme', { now: 1 });
+    recordSessionScope('sess-4', 'private-acme', { now: 2 });
+    expect(JSON.parse(readFileSync(f, 'utf-8'))).toEqual({ collection: 'private-acme', at: 1 });
+    recordSessionScope('sess-4', 'project-acme', { now: 3 });
+    expect(JSON.parse(readFileSync(f, 'utf-8'))).toEqual({ collection: 'project-acme', at: 3 });
   });
 
   it('does nothing without a session or a health file', () => {

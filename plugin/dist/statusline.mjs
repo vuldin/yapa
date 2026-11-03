@@ -60,7 +60,8 @@ function renderSegment(health, now, opts = {}) {
   const head = shown + (restart ? ` ${paint("yellow", `(restart for v${restart})`)}` : "") + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
-  const tail = cleanCollection(opts.collection);
+  const name = cleanCollection(opts.collection);
+  const tail = name ? `${name}${isLocalOnly(name) ? " (local only)" : ""}` : void 0;
   const state = (tone, text) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ""}`;
   if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
@@ -84,6 +85,9 @@ function renderSegment(health, now, opts = {}) {
     default:
       return state("dim", "\u25CB sync status unknown");
   }
+}
+function isLocalOnly(name) {
+  return name === "global" || name.startsWith("private-") || name.startsWith("local-");
 }
 function cleanCollection(name) {
   if (typeof name !== "string") return void 0;
@@ -145,6 +149,18 @@ function readSessionRecord(dir, sessions) {
   return best;
 }
 var SESSION_REPORT_GRACE_MS = 6e4;
+function readSessionScope(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
+      if (typeof r?.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
+    } catch {
+    }
+  }
+  return best?.collection;
+}
 function readSessionStarting(dir, sessions) {
   let best;
   for (const s of new Set(sessions)) {
@@ -322,12 +338,13 @@ async function main(args, self2) {
   const last = readLastWrite(join(dirname(healthPath), "last-write"), ids);
   const sessionsDir = join(dirname(healthPath), "sessions");
   const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
+  const collection = last?.collection ?? readSessionScope(sessionsDir, ids);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
     update,
-    collection: last?.collection,
+    collection,
     session
   }) + "\n");
 }
@@ -356,6 +373,7 @@ export {
   formatSince,
   hasStatusLine,
   installStatusLine,
+  isLocalOnly,
   isYapaStatusLine,
   main,
   mergeStatusLine,
@@ -363,6 +381,7 @@ export {
   readHealth,
   readLastWrite,
   readSessionRecord,
+  readSessionScope,
   readSessionStarting,
   readUpdate,
   removeStatusLine,
