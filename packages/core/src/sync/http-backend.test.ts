@@ -762,7 +762,7 @@ describe('coordination (leases, counters, task ids)', () => {
   it('heartbeatIfDue: no marker means no request; due renews everywhere; nothing left clears the marker', async () => {
     const { heartbeatIfDue, noteLeaseHeld, sessionsHoldingLeases } = await import('./coordination.js');
     const leaseDir = join(dir, 'leases');
-    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_LEASE_STATE_DIR: leaseDir }));
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_LEASE_STATE_DIR: leaseDir, YAPA_LOCAL_COORD_DIR: join(dir, 'coord-hb') }));
     let renewed: unknown[] = [{ key: 'k', ttl_seconds: 600 }];
     handler = s => (s.path === '/v1/leases:heartbeat' ? { json: { renewed, lost: [] } } : { status: 404, json: { error: { code: 'not_found', message: 'no' } } });
     setSyncBackend(backend());

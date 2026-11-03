@@ -136,7 +136,7 @@ export async function claimTask(id: string, collection: string, metadata: Record
     noteLeaseHeld(session, r.lease.ttl_seconds, undefined, { collection, key });
     return { kind: 'granted', id: key, collection, session, lease: r.lease, renewed: r.renewed, ...(r.took_over_from ? { tookOverFrom: r.took_over_from } : {}) };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
 }
@@ -145,6 +145,22 @@ export async function claimTask(id: string, collection: string, metadata: Record
  * Claim a key that is not a task (a cleanup item such as `cleanup:triage`):
  * the same lease, with no task status to write.
  */
+/** Busy local coordination is not "offline": nothing would ever retry it, so refuse with a clear reason. */
+export class ClaimBusyError extends Error {
+  readonly code = 'claim_busy';
+  constructor(readonly id: string, readonly collection: string, cause: string) {
+    super(`${id} was not claimed: ${cause}. Nothing changed; try again in a moment.`);
+    this.name = 'ClaimBusyError';
+  }
+}
+
+function unavailable(e: unknown, key: string, collection: string, session: string): ClaimResult {
+  // On this machine (a local-only collection, or sync off) "unavailable" can
+  // only mean its coordination lock was busy: say so instead of "not shared".
+  if (coordinatedLocally(collection)) throw new ClaimBusyError(key, collection, (e as Error).message);
+  return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+}
+
 export async function claimKey(collection: string, key: string, opts: ClaimOptions = {}): Promise<ClaimResult> {
   if (!claimsApply(collection)) return { kind: 'local', id: key };
   const session = claimSession(opts.session);
@@ -161,7 +177,7 @@ export async function claimKey(collection: string, key: string, opts: ClaimOptio
     noteLeaseHeld(session, r.lease.ttl_seconds, undefined, { collection, key });
     return { kind: 'granted', id: key, collection, session, lease: r.lease, renewed: r.renewed, ...(r.took_over_from ? { tookOverFrom: r.took_over_from } : {}) };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
 }

@@ -31,7 +31,9 @@ const KEY_RE = /^[A-Za-z0-9._:@/-]{1,200}$/;
 const SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const COUNTER_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 const OUTCOME_RE = /^[A-Za-z0-9._ :-]{0,64}$/;
-const COLLECTION_RE = /^[A-Za-z0-9@._-]{1,200}$/;
+const COLLECTION_RE = /^[A-Za-z0-9._-]{1,200}$/;
+/** Reserved counter collections (`@tasks`): reachable only through nextTaskId. */
+const RESERVED_RE = /^@[a-z]+$/;
 
 /** A bad request, reported like the service's 400 (exit 2 from `yapa coord`). */
 export class LocalCoordinationError extends Error {
@@ -115,8 +117,8 @@ function readState(file: string): CollectionState {
     return { leases: s?.leases ?? {}, counters: s?.counters ?? {} };
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { leases: {}, counters: {} };
-    // A corrupt file would silently drop every lease: refuse instead.
-    throw new Error(`local coordination state ${file} is unreadable: ${(e as Error).message}`);
+    // A corrupt file would silently drop every lease: refuse instead, and say how to recover.
+    throw new Error(`local coordination state ${file} is unreadable (${(e as Error).message}). It holds only this collection's leases and counters on this machine: move it aside (mv "${file}" "${file}.bad") to start fresh. Live claims are then forgotten, and counters restart above the floor callers pass.`);
   }
 }
 
@@ -145,8 +147,8 @@ export function createLocalCoordination(opts: LocalCoordinationOptions = {}): Co
   const clock = () => (opts.now ? opts.now() : Math.floor(Date.now() / 1000));
 
   /** Read, change and write one collection's state under its lock. */
-  function update<T>(collection: string, fn: (s: CollectionState, now: number) => { result: T; changed: boolean }): T {
-    assertMatch(collection, COLLECTION_RE, 'collection');
+  function update<T>(collection: string, fn: (s: CollectionState, now: number) => { result: T; changed: boolean }, reserved = false): T {
+    if (!(reserved && RESERVED_RE.test(collection))) assertMatch(collection, COLLECTION_RE, 'collection');
     const file = stateFile(dir(), collection);
     return withFileLockSync(lockFileFor(file), () => {
       const s = readState(file);
@@ -162,6 +164,16 @@ export function createLocalCoordination(opts: LocalCoordinationOptions = {}): Co
     } catch {
       return [];
     }
+  }
+
+  function bump(collection: string, name: string, floor: number | undefined, reserved: boolean): number {
+    assertMatch(name, COUNTER_RE, 'name');
+    const f = assertFloor(floor);
+    return update(collection, s => {
+      const value = Math.max(s.counters[name] ?? 0, f) + 1;
+      s.counters[name] = value;
+      return { result: value, changed: true };
+    }, reserved);
   }
 
   const prune = (s: CollectionState, now: number): boolean => {
@@ -186,6 +198,7 @@ export function createLocalCoordination(opts: LocalCoordinationOptions = {}): Co
       if (req.title !== undefined && req.title !== null && (typeof req.title !== 'string' || req.title.length > 300)) {
         throw bad('title must be a string of at most 300 characters');
       }
+      if (req.reclaim !== undefined && typeof req.reclaim !== 'boolean') throw bad('reclaim must be a boolean');
       const me = user();
       return update<LeaseAcquireResult>(req.collection, (s, now) => {
         prune(s, now);
@@ -211,7 +224,8 @@ export function createLocalCoordination(opts: LocalCoordinationOptions = {}): Co
           : undefined;
         const lease: StoredLease = {
           key, user: me, session, device: safeDeviceId(),
-          title: req.title ?? (renewed ? prev.title : null),
+          // As the service's COALESCE: a takeover without a title keeps the old one.
+          title: req.title ?? prev?.title ?? null,
           scope, ttl_seconds: ttl,
           acquired_at: renewed ? prev.acquired_at : now,
           heartbeat_at: now,
@@ -266,25 +280,19 @@ export function createLocalCoordination(opts: LocalCoordinationOptions = {}): Co
       const now = clock();
       const s = readState(stateFile(dir(), collection));
       const leases = Object.values(s.leases)
-        .filter(l => includeExpired ? l.expires_at >= now - EXPIRED_KEEP_SECONDS : l.expires_at > now)
+        .filter(l => includeExpired || l.expires_at > now)
         .sort((a, b) => a.acquired_at - b.acquired_at || a.key.localeCompare(b.key))
         .map(l => toLease(collection, l, now));
       return { leases, now };
     },
 
     async counterNext(collection: string, name: string, floor?: number): Promise<number> {
-      assertMatch(name, COUNTER_RE, 'name');
-      const f = assertFloor(floor);
-      return update(collection, s => {
-        const value = Math.max(s.counters[name] ?? 0, f) + 1;
-        s.counters[name] = value;
-        return { result: value, changed: true };
-      });
+      return bump(collection, name, floor, false);
     },
 
     async nextTaskId(floor?: number): Promise<string> {
       const me = user();
-      const n = await api.counterNext(TASK_COUNTER_COLLECTION, assertMatch(me, COUNTER_RE, 'username'), floor);
+      const n = bump(TASK_COUNTER_COLLECTION, assertMatch(me, COUNTER_RE, 'username'), floor, true);
       return `${me}-${n}`;
     },
   };

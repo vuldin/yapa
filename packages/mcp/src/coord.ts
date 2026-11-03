@@ -101,6 +101,13 @@ export function leaseHeartbeat(collection: string | undefined, session?: string,
     const r = await (await requireCoordination()).leaseHeartbeat(collection, s, keys);
     if (r.renewed.length) noteLeaseHeld(s, Math.min(...r.renewed.map(l => l.ttl_seconds)));
     const lost = r.lost.length ? `; LOST (taken over or released): ${r.lost.join(', ')}` : '';
+    if (r.unreachable) {
+      return {
+        exit: EXIT.unavailable,
+        json: { ok: false, unavailable: true, reason: 'unreachable', message: r.unreachable, renewed: r.renewed, lost: r.lost },
+        text: `renewed ${r.renewed.length} lease(s) on this machine for session ${s}${lost}; NOT renewed on the sync service: ${r.unreachable}`,
+      };
+    }
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `renewed ${r.renewed.length} lease(s) for session ${s}${lost}` };
   });
 }

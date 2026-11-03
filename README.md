@@ -426,6 +426,8 @@ Completing, blocking, resetting to pending or deleting the task releases the cla
 
 The state lives in `~/.local/share/yapa/coord/` (`YAPA_LOCAL_COORD_DIR`), one small file per collection, changed under a lock file that every YAPA process on the machine respects. A grant from this machine says `(this machine)`; `yapa coord` adds `"local": true` to its JSON. Shared collections with sync on still go to the service, and when it can't be reached their claims are "not shared", because a teammate may hold the work.
 
+Turning sync on or off moves shared collections between the two: a lease taken on this machine while sync was off isn't known to the service after you turn sync on (and the reverse), so finish or release claims before switching. An `in_progress` task with no claim on record (one started before 1.10, or by an older YAPA process still running) is offered again only after it has been untouched for two hours.
+
 ### Findings, decisions and what waits on people
 
 A memory can say what kind of knowledge it holds, so it can be listed, waited on and kept current:

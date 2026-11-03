@@ -154,9 +154,21 @@ describe('leases', () => {
     expect((await me.leaseList(C)).leases.map(l => l.key)).toContain('mine-a');
   });
 
-  it('refuses to guess when the state file is unreadable', async () => {
+  it('refuses to guess when the state file is unreadable, and says how to recover', async () => {
     writeFileSync(join(dir, `${encodeURIComponent(C)}.json`), '{not json');
-    await expect(me.leaseAcquire({ collection: C, key: 'k', session: 's' })).rejects.toThrow(/unreadable/);
+    await expect(me.leaseAcquire({ collection: C, key: 'k', session: 's' })).rejects.toThrow(/unreadable .*move it aside \(mv /);
+  });
+
+  it('matches the service on the edges: a takeover keeps the title, reclaim must be a boolean, @ collections are reserved', async () => {
+    await me.leaseAcquire({ collection: C, key: 'k', session: 's1', ttlSeconds: 60, title: 'the first title' });
+    now += 61;
+    expect(await other.leaseAcquire({ collection: C, key: 'k', session: 'x' })).toMatchObject({ granted: true, lease: { title: 'the first title' } });
+    await expect(me.leaseAcquire({ collection: C, key: 'k2', session: 's', reclaim: 'yes' as unknown as boolean })).rejects.toMatchObject({ status: 400 });
+    await expect(me.counterNext('@tasks', 'tester')).rejects.toMatchObject({ status: 400 });
+    expect(await me.nextTaskId()).toBe('tester-1');
+    // An expired lease stays listed with include_expired until it is pruned.
+    now += EXPIRED_KEEP_SECONDS + 3600;
+    expect((await me.leaseList(C, true)).leases.map(l => l.key)).toEqual(['k']);
   });
 });
 
@@ -204,4 +216,47 @@ describe('routing and heartbeats', () => {
       resetConfig();
     }
   });
+});
+
+describe('sync on, the service unreachable', () => {
+  const setup = async () => {
+    const { createConfig, setConfig } = await import('../config.js');
+    const { setSyncBackend } = await import('./backend.js');
+    setSyncBackend(undefined);
+    setConfig(createConfig({
+      YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'http://127.0.0.1:9',
+      YAPA_SYNC_ID_TOKEN_CMD: 'echo test-token', YAPA_SYNC_ID_TOKEN_CACHE: 'off',
+      YAPA_LOCAL_COORD_DIR: join(dir, 'coord'), YAPA_LEASE_STATE_DIR: join(dir, 'leases'),
+    }));
+    return import('./coordination.js');
+  };
+  afterEach(async () => {
+    (await import('../config.js')).resetConfig();
+    (await import('./backend.js')).setSyncBackend(undefined);
+  });
+
+  it('renews local leases, keeps the shared one watched, and retries the service on the next prompt', async () => {
+    const { heartbeatIfDue, localCoordination, noteLeaseHeld, takeClaimNotices } = await setup();
+    const { readFileSync } = await import('node:fs');
+    const marker = () => JSON.parse(readFileSync(join(dir, 'leases', 'mix.json'), 'utf-8'));
+    const t0 = Math.floor(Date.now() / 1000);
+    await localCoordination().leaseAcquire({ collection: C, key: 'local-1', session: 'mix', ttlSeconds: 7200 });
+    noteLeaseHeld('mix', 7200, t0, { collection: C, key: 'local-1' });
+    noteLeaseHeld('mix', 120, t0, { collection: 'project-acme', key: 'shared-1' }); // granted by the service earlier
+    expect(await heartbeatIfDue(['mix'], t0 + 41)).toBe(1); // the local one
+    // The failed service beat leaves the 120 s cadence and the last full beat alone...
+    expect(marker()).toMatchObject({ min_ttl: 120, last_beat: t0 });
+    expect(marker().keys).toEqual(expect.arrayContaining([`${C}\u0000local-1`, 'project-acme\u0000shared-1']));
+    // ...so the next prompt tries again, and nothing is reported lost.
+    expect(await heartbeatIfDue(['mix'], t0 + 45)).toBe(1);
+    expect(takeClaimNotices()).toEqual([]);
+  }, 30_000);
+
+  it('a heartbeat for every collection says the shared leases were not renewed', async () => {
+    const { localCoordination, requireCoordination } = await setup();
+    await localCoordination().leaseAcquire({ collection: C, key: 'local-2', session: 'all' });
+    const r = await (await requireCoordination()).leaseHeartbeat(undefined, 'all');
+    expect(r.renewed.map(l => l.key)).toEqual(['local-2']);
+    expect(r.unreachable).toBeTruthy();
+  }, 30_000);
 });

@@ -33,11 +33,16 @@ const PRIORITY_SALIENCE: Record<string, number> = {
   low: 1.5,
 };
 
-/** Get next sequential task ID for user. Format: {username}-{n} */
-export async function getNextTaskId(floor = 0): Promise<string> {
+/**
+ * Get next sequential task ID for user. Format: {username}-{n}. `localOnly`
+ * skips the service lookups (a retry after a taken id: the service, if it
+ * answered, would have skipped it already, and if it didn't, asking again
+ * only costs another timeout).
+ */
+export async function getNextTaskId(floor = 0, localOnly = false): Promise<string> {
   // With the sync service, ids must carry the server-assigned username
   // (from the Google account); learn it first, bounded like the remote max.
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     await Promise.race([
       resolveSyncUsername(),
       new Promise<void>(resolve => setTimeout(resolve, 3000).unref()),
@@ -63,7 +68,7 @@ export async function getNextTaskId(floor = 0): Promise<string> {
   // The service hands out task numbers from one atomic per-user counter,
   // floored by this store's max and its own, so two sessions (or machines)
   // of one user never mint the same id. Bounded like the lookups above.
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     try {
       const backend = await getSyncBackend();
       if (backend?.coordination) {
@@ -82,7 +87,7 @@ export async function getNextTaskId(floor = 0): Promise<string> {
   // used higher numbers on the shared database; reusing one would overwrite
   // that task remotely. Best-effort: an unreachable remote falls back to local
   // numbering (push still refuses to overwrite a different task, see sync/push.ts).
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     try {
       const backend = await getSyncBackend();
       const remote = !backend ? 0 : await Promise.race([
@@ -126,7 +131,7 @@ async function freshTaskId(): Promise<string> {
   let id = await getNextTaskId();
   for (let i = 1; i < ID_ATTEMPTS && (await idTaken(id)); i++) {
     floor = Math.max(floor, Number(id.slice(id.lastIndexOf('-') + 1)) || 0);
-    id = await getNextTaskId(floor);
+    id = await getNextTaskId(floor, true);
   }
   return id;
 }

@@ -11,7 +11,7 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
+  ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, TaskClaimedError, TypedMemoryError, updateTask, validateLearned,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
@@ -97,6 +97,9 @@ export async function runTask(sub: string | undefined, args: string[]): Promise<
   try {
     return await dispatch(sub, args);
   } catch (e) {
+    if (e instanceof ClaimBusyError) {
+      return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
+    }
     if (e instanceof TaskClaimedError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
     }
