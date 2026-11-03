@@ -11,6 +11,13 @@ describe('pluginSettingsEnv (yapa coord from a plain shell)', () => {
     expect(pluginSettingsEnv({}, settings)).toEqual({ YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://svc.example', YAPA_PROJECT_ROOTS: '~/p' });
   });
 
+  it('passes the collection map through like any other option', () => {
+    const withMap = { ...settings, pluginConfigs: { 'yapa@yapa': { options: { collection_map: '~/work/acme=private-acme' } } } };
+    expect(pluginSettingsEnv({}, withMap)).toEqual({ YAPA_COLLECTION_MAP: '~/work/acme=private-acme' });
+    expect(resolveHostEnv({ CLAUDE_PLUGIN_ROOT: '/p', CLAUDE_PLUGIN_OPTION_COLLECTION_MAP: '~/work/acme=private-acme' }, undefined).YAPA_COLLECTION_MAP)
+      .toBe('~/work/acme=private-acme');
+  });
+
   it('never overrides explicit env, and ignores a disabled or absent plugin', () => {
     expect(pluginSettingsEnv({ YAPA_SYNC_SERVICE_URL: 'http://local' }, settings).YAPA_SYNC_SERVICE_URL).toBeUndefined();
     expect(pluginSettingsEnv({}, { ...settings, enabledPlugins: { 'yapa@yapa': false } })).toEqual({});

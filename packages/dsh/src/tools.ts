@@ -30,6 +30,9 @@ import {
   listMemories,
   listTasks,
   mergeCollections,
+  mergeReportLines,
+  resolveWriteCollection,
+  redirectNote,
   parseRelativeDate,
   recallMemory,
   removeCollection,
@@ -53,6 +56,7 @@ import {
   recordForTask,
   requestDecision,
   validateLearned,
+  type MergeResult,
 } from '@yapa/core';
 
 const text = (t: string): ContentBlock[] => [{ type: 'text', text: t }];
@@ -262,6 +266,7 @@ export function registerTools(ctx: Context): void {
         properties: {
           ids: { type: 'array', required: true, items: { type: 'string' } },
           label: { type: 'string' },
+          redirect: { type: 'string' },
           conflicts: {
             type: 'array',
             items: {
@@ -279,6 +284,7 @@ export function registerTools(ctx: Context): void {
       },
       render: (_args, v) => {
         const lines = [`Stored memory: ${v.ids.join(', ')}${v.label ? ` ${v.label}` : ''}`];
+        if (v.redirect) lines.push(v.redirect);
         if (v.conflicts?.length) {
           lines.push('', `⚠ Potential conflicts (${v.conflicts.length}):`);
           for (const c of v.conflicts) {
@@ -291,17 +297,19 @@ export function registerTools(ctx: Context): void {
     },
     async execute(args) {
       const typed = pickTyped(args);
+      const target = await resolveWriteCollection(args.collection ?? 'global');
       const result = await storeMemory(args.content, {
         tags: args.tags,
         salience: args.salience,
         sector: args.sector,
-        collection: args.collection,
+        collection: target.collection,
         supersedes: args.supersedes,
         ...(Object.keys(typed).length ? { typed } : {}),
       });
       return {
         ids: result.ids,
         ...(typed.kind ? { label: typedLabel({ status: undefined, ...typed }) } : {}),
+        ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}),
         conflicts: result.potential_conflicts.map(c => ({
           id: c.id, distance: c.distance, salience: c.salience, content: c.content,
         })),
@@ -345,7 +353,7 @@ export function registerTools(ctx: Context): void {
         ...pickTyped(args),
         ...(args.note !== undefined ? { note: args.note } : {}),
         ...(args.tags ? { tags: args.tags } : {}),
-      }, args.collection);
+      }, args.collection ? (await resolveWriteCollection(args.collection)).collection : undefined);
       const label = typedLabel(r.metadata);
       return { id: r.id, collection: r.collection, ...(label ? { label } : {}) };
     },
@@ -603,7 +611,7 @@ export function registerTools(ctx: Context): void {
     },
     async execute(args) {
       const result = await applyCompaction({
-        collection: args.collection,
+        collection: (await resolveWriteCollection(args.collection)).collection,
         member_ids: args.member_ids,
         summary: args.summary,
         tags: args.tags,
@@ -629,13 +637,14 @@ export function registerTools(ctx: Context): void {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { id: { type: 'string', required: true } },
+        properties: { id: { type: 'string', required: true }, redirect: { type: 'string' } },
       },
-      render: (_args, v) => text(`Journal draft saved: ${v.id}`),
+      render: (_args, v) => text(`Journal draft saved: ${v.id}${v.redirect ? `\n${v.redirect}` : ''}`),
     },
     async execute(args, exec) {
-      const id = await journalAppend(args.entry, args.collection, exec.agent?.id);
-      return { id };
+      const target = await resolveWriteCollection(args.collection ?? 'global');
+      const id = await journalAppend(args.entry, target.collection, exec.agent?.id);
+      return { id, ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}) };
     },
     presentCall: () => ({ card: 'generic', title: 'Append journal entry', kind: 'other' }),
   }));
@@ -707,14 +716,16 @@ export function registerTools(ctx: Context): void {
           id: { type: 'string', required: true },
           title: { type: 'string', required: true },
           due_date: { type: 'number' },
+          redirect: { type: 'string' },
         },
       },
       render: (_args, v) => text(
-        `Created task ${v.id}: "${v.title}"${v.due_date ? ` (due: ${formatTaskDate(v.due_date)})` : ''}`,
+        `Created task ${v.id}: "${v.title}"${v.due_date ? ` (due: ${formatTaskDate(v.due_date)})` : ''}${v.redirect ? `\n${v.redirect}` : ''}`,
       ),
     },
     async execute(args) {
       const due_date = args.due ? parseRelativeDate(args.due) ?? undefined : undefined;
+      const target = await resolveWriteCollection(args.collection ?? 'global');
       const id = await createTask(args.title, {
         priority: args.priority,
         due_date,
@@ -724,8 +735,8 @@ export function registerTools(ctx: Context): void {
         project: args.project,
         is_recurring: args.is_recurring,
         recurrence_pattern: args.recurrence_pattern,
-      }, args.collection ?? 'global');
-      return { id, title: args.title, ...(due_date !== undefined && { due_date }) };
+      }, target.collection);
+      return { id, title: args.title, ...(due_date !== undefined && { due_date }), ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}) };
     },
     presentCall: args => ({ card: 'generic', title: `Create task: ${args.title}`, kind: 'other' }),
   }));
@@ -1127,10 +1138,14 @@ export function registerTools(ctx: Context): void {
     name: 'yapa_collection_merge',
     description:
       'Merge collection `from` into existing collection `into`: moves EVERY document (memories, tasks, journals) '
-      + 'with ids and metadata intact, syncs the move to teammates (nothing is deleted remotely), then removes the '
-      + 'emptied `from`. Use this, never yapa_collection_delete, to combine or rename collections. Create `into` '
-      + 'first (after confirming the name with the user). Refuses private (private-*/local-*/global) -> shared '
-      + 'merges. Pass dry_run to see counts first.',
+      + 'with ids and metadata intact, then removes the emptied `from`. Shared -> shared: the move syncs to teammates '
+      + 'and nothing is deleted remotely. Shared -> private (private-*/local-*): the next push removes (retracts) YOUR '
+      + 'shared copies of the moved docs; teammates\' docs stay shared in `from`. Afterwards `from` redirects to `into` '
+      + 'on this machine only (its folder scopes to `into`, writes naming `from` land in `into`, sync does not bring it '
+      + 'back; `yapa_sync subscribe` follows it again); merge on the user\'s other devices too. Use this, never '
+      + 'yapa_collection_delete, to combine or rename collections. Create `into` first (after confirming the name with '
+      + 'the user). Refuses private (private-*/local-*/global) -> shared merges, and refuses `global` as the source. '
+      + 'Pass dry_run to see counts first.',
     parameters: {
       from: { type: 'string', required: true, description: 'Collection to merge (removed afterwards)' },
       into: { type: 'string', required: true, description: 'Existing collection that receives every document' },
@@ -1148,19 +1163,10 @@ export function registerTools(ctx: Context): void {
           dryRun: { type: 'boolean', required: true },
           sourceRemoved: { type: 'boolean', required: true },
           teammateRowsKept: { type: 'integer', required: true },
+          ownRowsRetracted: { type: 'integer', required: true },
         },
       },
-      render: (_args, v) => {
-        const types = Object.entries(v.byType as Record<string, number>)
-          .sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
-        const lines = v.dryRun
-          ? [`Dry run: would move ${v.moved} document(s) from "${v.from}" into "${v.into}" (${types}), then remove "${v.from}". Nothing changed.`]
-          : [`Moved ${v.moved} document(s) from "${v.from}" into "${v.into}" (${types}) and removed the empty "${v.from}".`];
-        if (v.teammateRowsKept > 0) {
-          lines.push(`${v.teammateRowsKept} of them are teammates' docs: you now have a private copy, and their shared rows stay in "${v.from}" on the sync service.`);
-        }
-        return text(lines.join('\n'));
-      },
+      render: (_args, v) => text(mergeReportLines(v as MergeResult).join('\n')),
     },
     async execute(args) {
       return await mergeCollections(args.from, args.into, { dryRun: args.dry_run });

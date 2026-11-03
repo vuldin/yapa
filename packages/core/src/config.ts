@@ -1,5 +1,8 @@
 import { homedir, tmpdir, userInfo } from 'os';
-import { join as pathJoin } from 'path';
+import path, { join as pathJoin } from 'path';
+import { looksPrivateButShared } from './sync/syncable.js';
+
+type PlatformPath = typeof path;
 
 // ---------------------------------------------------------------------------
 // Static constants (not env-driven)
@@ -69,6 +72,13 @@ export interface YapaConfig {
   PROJECT_ROOTS: string[];
   /** Folder names under a project root that are customers (→ customer-{name}). */
   CUSTOMERS: string[];
+  /**
+   * Explicit folder → collection entries, `path=collection` (e.g.
+   * `~/work/acme=private-acme`), `~` expanded. Checked before PROJECT_ROOTS:
+   * the longest matching path wins. The only way a folder gets a
+   * `private-*`/`local-*` scope automatically.
+   */
+  COLLECTION_MAP: string[];
 
   // Contradiction detection
   CONTRADICTION_DISTANCE_THRESHOLD: number;
@@ -200,6 +210,56 @@ function list(value: string): string[] {
 }
 
 /**
+ * Split a `COLLECTION_MAP` value into entries. Entries are separated by `;`
+ * or a newline only: `,` and `:` both occur in paths (`C:\work`, `/srv/a:b`).
+ */
+export function splitCollectionMap(value: string): string[] {
+  return value.split(/[;\n]/).map(v => v.trim()).filter(Boolean);
+}
+
+const warned = new Set<string>();
+/** One stderr line per distinct message per process (config is rebuilt often). */
+function warnOnce(message: string): void {
+  if (warned.has(message)) return;
+  warned.add(message);
+  process.stderr.write(`[yapa] ${message}\n`);
+}
+
+/**
+ * Tidy `path=collection` entries: trim both sides, expand a leading `~` and
+ * resolve the path (`..`, duplicate and trailing separators). Entries without
+ * `=`, with an empty side, or with a relative path (it would depend on the
+ * process's cwd) are dropped with a one-time warning on stderr. A collection
+ * name that looks meant to be local-only but syncs (`Private-acme`,
+ * `privat-acme`, `local_acme`) is kept, with a one-time warning. Shared with
+ * hosts that take the map from their own settings (DSH). `pathImpl` is for
+ * tests (`path.win32`).
+ */
+export function normalizeCollectionMap(entries: string[], pathImpl: PlatformPath = path): string[] {
+  const out: string[] = [];
+  for (const raw of entries) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const eq = entry.lastIndexOf('=');
+    const dir = eq < 0 ? '' : entry.slice(0, eq).trim().replace(/^~(?=[\\/]|$)/, homedir());
+    const collection = eq < 0 ? '' : entry.slice(eq + 1).trim();
+    if (!dir || !collection) {
+      warnOnce(`collection_map: ignoring "${entry}" (expected path=collection; separate entries with ";")`);
+      continue;
+    }
+    if (!pathImpl.isAbsolute(dir)) {
+      warnOnce(`collection_map: ignoring "${entry}" (the path must be absolute or start with ~)`);
+      continue;
+    }
+    if (looksPrivateButShared(collection)) {
+      warnOnce(`collection_map: "${collection}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`);
+    }
+    out.push(`${pathImpl.resolve(dir)}=${collection}`);
+  }
+  return out;
+}
+
+/**
  * Read `YAPA_<key>` first, then bare `<key>`, then the fallback. Empty strings
  * count as unset: Claude Code substitutes "" for plugin options the user never
  * configured, which must not override the defaults.
@@ -252,6 +312,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     PROJECT_ROOTS: list(get(env, 'PROJECT_ROOTS', '')).map(r => r.replace(/^~(?=\/|$)/, homedir()).replace(/\/+$/, '')),
     CUSTOMERS: list(get(env, 'CUSTOMERS', '')),
+    COLLECTION_MAP: normalizeCollectionMap(splitCollectionMap(get(env, 'COLLECTION_MAP', ''))),
 
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, 'CONTRADICTION_DISTANCE_THRESHOLD', '0.25')),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, 'CONTRADICTION_MAX_RESULTS', '3'), 10),

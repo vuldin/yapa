@@ -6,7 +6,7 @@ import { generateEmbedding } from '../embeddings.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
 import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions } from './sentinel.js';
+import { getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
 import { isSyncableCollection as isSyncable, isReadOnlyDoc } from './syncable.js';
@@ -216,7 +216,9 @@ async function pushAll(): Promise<PushStats> {
     try {
       const existing = await getSyncSubscriptions();
       const existingSet = new Set(existing);
-      const newSubs = pushedCollections.filter(c => !existingSet.has(c));
+      // A name merged away on this machine is never re-followed implicitly.
+      const redirects = await getCollectionRedirects();
+      const newSubs = pushedCollections.filter(c => !existingSet.has(c) && !Object.hasOwn(redirects, c));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }

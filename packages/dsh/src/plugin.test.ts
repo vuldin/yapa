@@ -46,6 +46,13 @@ describe('resolveConfig', () => {
     expect(r.core.CHROMA_URL).toBe('http://b:2');
   });
 
+  it('resolves the collection map (~ expanded) for scope detection and the core config', () => {
+    expect(resolveConfig({}).collectionMap).toEqual([]);
+    const r = resolveConfig({ collectionMap: ['~/work/acme/=private-acme'] }, { collectionMap: ['~/work/acme=local-acme', '/srv/x=private-x'] });
+    expect(r.collectionMap).toEqual([`${process.env.HOME}/work/acme=local-acme`, '/srv/x=private-x']);
+    expect(r.core.COLLECTION_MAP).toEqual(r.collectionMap);
+  });
+
   it('ignores undefined settings fields (inherits lower layers)', () => {
     const r = resolveConfig({ username: 'ada' }, { username: undefined, chromaUrl: 'http://c:3' });
     expect(r.core.USERNAME).toBe('ada');

@@ -9,6 +9,7 @@ import {
 } from '../store/index.js';
 
 import { storeMemory } from './store.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 
 /**
  * Per-process session ID. One MCP server start = one "session" for journal
@@ -36,7 +37,8 @@ const DRAFT_TYPE = 'journal_draft';
  * e.g. the DSH plugin, pass their own per-session key).
  */
 export async function journalAppend(entry: string, collection?: string, sessionId?: string): Promise<string> {
-  const col = collection ?? 'global';
+  // A collection merged away here is followed, never recreated.
+  const { collection: col } = await resolveWriteCollection(collection ?? 'global');
   const sid = sessionId ?? SESSION_ID;
   await getOrCreateCollection(col);
 
@@ -97,7 +99,7 @@ export interface ConsolidateResult {
 export async function journalConsolidate(
   input: ConsolidateInput = {},
 ): Promise<ConsolidateResult | null> {
-  const col = input.collection ?? 'global';
+  const { collection: col } = await resolveWriteCollection(input.collection ?? 'global');
   const sid = input.sessionId ?? SESSION_ID;
   const drafts = await listSessionDrafts(col, sid);
   if (drafts.length === 0) return null;

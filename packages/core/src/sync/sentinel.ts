@@ -60,3 +60,106 @@ export async function updateSyncSubscriptions(collections: string[]): Promise<vo
     collections: deduped.join(','),
   });
 }
+
+const COLLECTION_REDIRECTS_ID = '__collection_redirects__';
+
+/**
+ * Collections merged away on this machine: `{ from: into }`. Written by
+ * `mergeCollections` and kept in `global` beside the subscriptions, so it
+ * never syncs. Scope detection follows it (a folder whose collection was
+ * merged lands in the target), and sync never re-follows a redirected name
+ * from teammates' rows: no backfill, no recovery or push auto-subscribe.
+ * An explicit `sync subscribe` (or creating the collection again) clears it.
+ */
+export async function getCollectionRedirects(): Promise<Record<string, string>> {
+  try {
+    const results = await getDocumentsByFilter('global', {
+      type: { $eq: 'collection_redirects' },
+    }, 1);
+    if (results.length === 0) return {};
+    // The store adapters decode the JSON object; accept a raw string too.
+    const raw = results[0].metadata.redirects ?? {};
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+async function writeCollectionRedirects(redirects: Record<string, string>): Promise<void> {
+  await getOrCreateCollection('global');
+  await addDocument('global', COLLECTION_REDIRECTS_ID, 'collection redirects', {
+    type: 'collection_redirects',
+    redirects, // stored as JSON by the adapters
+  });
+}
+
+/**
+ * Record that `from` was merged into `into`. `into` is live again, so a redirect away from it is dropped.
+ *
+ * Read-modify-write with no lock: two merges at the same moment in different
+ * processes can lose one redirect. A per-document lock for sentinel docs
+ * comes in a later change; merges are rare, user-driven operations.
+ */
+export async function addCollectionRedirect(from: string, into: string): Promise<void> {
+  if (from === into || from === 'global') return;
+  const redirects = await getCollectionRedirects();
+  redirects[from] = into;
+  delete redirects[into];
+  await writeCollectionRedirects(redirects);
+}
+
+/** Forget the redirect for `name` (the user wants that collection back). No-op without one. */
+export async function clearCollectionRedirect(name: string): Promise<void> {
+  const redirects = await getCollectionRedirects();
+  if (!Object.hasOwn(redirects, name)) return;
+  delete redirects[name];
+  await writeCollectionRedirects(redirects);
+}
+
+/**
+ * Where `name` lives now: follows redirect chains (a -> b -> c), stopping at
+ * a cycle. `redirectedFrom` is set when `name` itself was merged away.
+ */
+export function resolveCollectionRedirect(
+  name: string,
+  redirects: Record<string, string>,
+): { collection: string; redirectedFrom?: string } {
+  let current = name;
+  const seen = new Set<string>([name]);
+  while (Object.hasOwn(redirects, current)) {
+    const next = redirects[current];
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+    current = next;
+  }
+  return current === name ? { collection: name } : { collection: current, redirectedFrom: name };
+}
+
+/** Where a write naming `requested` lands (see `resolveWriteCollection`). */
+export interface WriteCollection {
+  collection: string;
+  /** Set when `requested` was merged away here and the write follows the redirect. */
+  redirectedFrom?: string;
+}
+
+/**
+ * The collection a user write naming `name` must go to: a collection merged
+ * away on this machine is followed to where its docs went, so a hardcoded
+ * old name (in a CLAUDE.md, a memory, a script) never recreates it and has
+ * the next push publish into it again. Used by every write entry point
+ * (memory store, task create, external put, journal); a read store failure
+ * leaves the name as is.
+ */
+export async function resolveWriteCollection(name: string): Promise<WriteCollection> {
+  if (name === 'global') return { collection: name };
+  return resolveCollectionRedirect(name, await getCollectionRedirects());
+}
+
+/** The tool-reply note for a write that followed a redirect (empty when none). */
+export function redirectNote(w: WriteCollection): string {
+  return w.redirectedFrom
+    ? `"${w.redirectedFrom}" was merged into "${w.collection}" on this machine, so this was written to "${w.collection}".`
+    : '';
+}

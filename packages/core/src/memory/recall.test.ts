@@ -68,6 +68,32 @@ describe('recallMemory cross-collection', () => {
   });
 });
 
+describe('recallMemory recall fence', () => {
+  it('never draws cross-collection extras from private-*/local-* collections; naming them, or no collection, still finds them', async () => {
+    const priv = (await storeMemory('Billing API port 8443 sits behind the internal load balancer (private acme note)', { collection: 'private-acme', salience: 2 })).ids[0];
+    const loc = (await storeMemory('Billing API port 8443 behind the internal load balancer, local scratch', { collection: 'local-scratch', salience: 2 })).ids[0];
+    const q = 'what port does the billing API use?';
+
+    const fromGlobal = await recallMemory(q, { collection: 'global', nResults: 2, crossCollection: 5, boost: false });
+    expect(fromGlobal.map(r => r.id)).not.toContain(priv);
+    expect(fromGlobal.map(r => r.id)).not.toContain(loc);
+
+    // global stays visible to other scopes.
+    const fromShared = await recallMemory(q, { collection: 'customer-acme', nResults: 1, crossCollection: 5, boost: false });
+    expect(fromShared.some(r => r.collection === 'global')).toBe(true);
+    expect(fromShared.some(r => r.collection === 'private-acme' || r.collection === 'local-scratch')).toBe(false);
+
+    // The active (named) collection is searched as usual; its extras are fenced too.
+    const inPrivate = await recallMemory(q, { collection: 'private-acme', nResults: 2, crossCollection: 5, boost: false });
+    expect(inPrivate.map(r => r.id)).toContain(priv);
+    expect(inPrivate.map(r => r.id)).not.toContain(loc);
+
+    // No collection: the caller asked for everything.
+    const everything = await recallMemory(q, { nResults: 20, boost: false });
+    expect(everything.map(r => r.id)).toEqual(expect.arrayContaining([priv, loc]));
+  });
+});
+
 describe('recall boost and concurrent edits', () => {
   it('a boost written after another session edited the memory keeps the edit', async () => {
     const id = (await storeMemory('The staging cluster runs three brokers in one zone', { collection: 'global', salience: 2 })).ids[0];

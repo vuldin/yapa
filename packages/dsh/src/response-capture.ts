@@ -160,7 +160,7 @@ async function captureTurn(
   assistantTextJoined: string,
   resolved: ResolvedConfig,
 ): Promise<void> {
-  const { collection } = await detectCollection(cwd, resolved.projectRoots, resolved.customers);
+  const { collection } = await detectCollection(cwd, resolved.projectRoots, resolved.customers, resolved.collectionMap);
   // The pipeline lives in core (shared with the Claude Code Stop hook); pass
   // this module's bindings so the plugin's collaborators stay swappable.
   const result = await coreCaptureTurn(

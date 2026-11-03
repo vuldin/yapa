@@ -11,6 +11,7 @@ import { addDocument, getDocumentsByFilter, getDocumentsByIds, listCollections, 
 import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 import { normalizeTyped, type TypedFields } from './kinds.js';
 import { linkMemoryToTasks } from './links.js';
 
@@ -37,7 +38,8 @@ export class MemoryNotFoundError extends Error {
 }
 
 async function locate(id: string, collection?: string): Promise<{ collection: string; doc: { id: string; content: string; metadata: Record<string, any> } } | null> {
-  const names = collection ? [collection] : (await listCollections().catch(() => [])).map(c => c.name);
+  // A collection merged away here is followed: the memory moved with it.
+  const names = collection ? [(await resolveWriteCollection(collection)).collection] : (await listCollections().catch(() => [])).map(c => c.name);
   for (const name of names) {
     const [doc] = await getDocumentsByIds(name, [id]).catch(() => []);
     if (doc) return { collection: name, doc };

@@ -9,6 +9,16 @@ export function isSyncableCollection(name: string): boolean {
 }
 
 /**
+ * A name that looks meant to be local-only but is not, so it syncs: a case
+ * variant (`Private-acme`, `LOCAL-x`), an underscore (`private_acme`) or a
+ * near-miss prefix (`privat-`, `priv-`, `locl-`). Used to warn about a
+ * mapped folder's collection.
+ */
+export function looksPrivateButShared(name: string): boolean {
+  return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
+}
+
+/**
  * A document the remote owns and serves with `metadata.read_only: true`
  * (docs/sync-api.md, "Read-only documents"). It is pulled like any other doc
  * but never edited, deleted, pushed or queued for a remote delete from here.

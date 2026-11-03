@@ -4,6 +4,7 @@ import { getDocumentsByFilter, getDocumentsByIds, metadataDelta, patchDocument, 
 
 import { storeMemory } from './store.js';
 import { isMemoryKind } from './kinds.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 
 export interface CompactionGroup {
   seed_id: string;
@@ -108,6 +109,8 @@ export interface ApplyCompactionResult {
  * `memory_recall` and `memory_list` by default.
  */
 export async function applyCompaction(input: ApplyCompactionInput): Promise<ApplyCompactionResult> {
+  // A collection merged away here is followed: its members moved with it.
+  input = { ...input, collection: (await resolveWriteCollection(input.collection)).collection };
   const stored = await storeMemory(input.summary, {
     collection: input.collection,
     salience: 2.0,

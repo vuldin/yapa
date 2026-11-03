@@ -5,12 +5,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./store/index.js', () => ({
   listCollections: vi.fn(),
 }));
+// Merge redirects come from a sentinel doc in the store: stub the reader.
+vi.mock('./sync/sentinel.js', async importOriginal => ({
+  ...(await importOriginal<any>()),
+  getCollectionRedirects: vi.fn(),
+}));
 
 import { listCollections } from './store/index.js';
-import { detectCollection } from './scope.js';
-import { setConfig, resetConfig, createConfig } from './config.js';
+import { getCollectionRedirects, resolveCollectionRedirect } from './sync/sentinel.js';
+import { detectCollection, matchCollectionMap, scopeNotes, isDetectionStale } from './scope.js';
+import { setConfig, resetConfig, createConfig, normalizeCollectionMap, splitCollectionMap } from './config.js';
+import { looksPrivateButShared } from './sync/syncable.js';
+import path, { join } from 'node:path';
+import { mkdtempSync, mkdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const mocked = vi.mocked(listCollections);
+const redirects = vi.mocked(getCollectionRedirects);
 const ROOTS = ['/home/u/projects'];
 
 /** Shorthand: a collections list carrying just the given names. */
@@ -20,6 +31,8 @@ const cols = (...names: string[]) => names.map(name => ({ name })) as any;
 beforeEach(() => {
   mocked.mockReset();
   mocked.mockResolvedValue(cols());
+  redirects.mockReset();
+  redirects.mockResolvedValue({});
 });
 
 describe('detectCollection', () => {
@@ -94,5 +107,174 @@ describe('detectCollection', () => {
     } finally {
       resetConfig();
     }
+  });
+});
+
+describe('detectCollection: collection_map', () => {
+  const MAP = ['/home/u/work/acme=private-acme', '/home/u/work/acme/shared=project-acme', '/home/u/projects/dsh=local-dsh'];
+
+  it('a mapped folder (and anything below it) wins over project roots, never ambiguous', async () => {
+    mocked.mockResolvedValue(cols('customer-dsh', 'project-dsh'));
+    const d = await detectCollection('/home/u/projects/dsh/src', ROOTS, [], MAP);
+    expect(d).toEqual({ collection: 'local-dsh', mapped: true });
+    expect((await detectCollection('/home/u/work/acme', ROOTS, [], MAP)).collection).toBe('private-acme');
+  });
+
+  it('the longest matching path wins, whatever the entry order', async () => {
+    expect((await detectCollection('/home/u/work/acme/shared/docs', ROOTS, [], MAP)).collection).toBe('project-acme');
+    expect((await detectCollection('/home/u/work/acme/shared/docs', ROOTS, [], [...MAP].reverse())).collection).toBe('project-acme');
+    expect((await detectCollection('/home/u/work/acme/other', ROOTS, [], MAP)).collection).toBe('private-acme');
+  });
+
+  it('matches on path boundaries only, and falls back to roots otherwise', async () => {
+    expect((await detectCollection('/home/u/work/acme-old', ROOTS, [], MAP)).collection).toBe('global');
+    const d = await detectCollection('/home/u/projects/dshx', ROOTS, [], MAP);
+    expect(d).toEqual({ collection: 'project-dshx' });
+  });
+
+  it('ignores malformed entries and tolerates trailing slashes', () => {
+    expect(matchCollectionMap('/a/b', ['x', '=private-x', '/a/b='])).toBeUndefined();
+    expect(matchCollectionMap('/a/b/c', ['/a/b/=private-b'])).toBe('private-b');
+    expect(matchCollectionMap('/anything', ['/=local-root'])).toBe('local-root');
+  });
+
+  it('reads YAPA_COLLECTION_MAP, with ~ expanded', async () => {
+    setConfig(createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/=private-acme; /srv/x=local-x' }));
+    try {
+      expect(createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/=private-acme' }).COLLECTION_MAP).toEqual([`${process.env.HOME}/work/acme=private-acme`]);
+      expect((await detectCollection(`${process.env.HOME}/work/acme/src`)).collection).toBe('private-acme');
+      expect((await detectCollection('/srv/x')).collection).toBe('local-x');
+    } finally {
+      resetConfig();
+    }
+  });
+});
+
+describe('collection_map paths', () => {
+  const noReal = { realpath: () => undefined };
+
+  it('keeps a ":" inside a path (entries split on ";" and newlines only)', async () => {
+    const map = normalizeCollectionMap(splitCollectionMap('/srv/a:b/acme=private-acme;\n/srv/c,d=local-cd'));
+    expect(map).toEqual(['/srv/a:b/acme=private-acme', '/srv/c,d=local-cd']);
+    expect(matchCollectionMap('/srv/a:b/acme/src', map, noReal)).toBe('private-acme');
+    expect(matchCollectionMap('/srv/c,d', map, noReal)).toBe('local-cd');
+    expect(matchCollectionMap('/srv/a', map, noReal)).toBeUndefined();
+  });
+
+  it('matches Windows paths on backslash boundaries, case-insensitively', () => {
+    const win = { path: path.win32, realpath: () => undefined };
+    const map = normalizeCollectionMap(splitCollectionMap('C:\\work\\acme\\=private-acme;C:\\work\\acme\\shared=project-acme'), path.win32);
+    expect(map).toEqual(['C:\\work\\acme=private-acme', 'C:\\work\\acme\\shared=project-acme']);
+    expect(matchCollectionMap('C:\\work\\acme\\src', map, win)).toBe('private-acme');
+    expect(matchCollectionMap('c:\\Work\\ACME\\src', map, win)).toBe('private-acme');
+    expect(matchCollectionMap('C:/work/acme/shared/docs', map, win)).toBe('project-acme');
+    expect(matchCollectionMap('C:\\work\\acme-old', map, win)).toBeUndefined();
+  });
+
+  it('follows symlinks on both sides: a linked cwd, or an entry naming a link', () => {
+    const links: Record<string, string> = { '/home/u/acme-link': '/data/acme', '/home/u/acme-link/src': '/data/acme/src' };
+    const realpath = (p: string) => links[p] ?? (p.startsWith('/data/') ? p : undefined);
+    expect(matchCollectionMap('/home/u/acme-link/src', ['/data/acme=private-acme'], { realpath })).toBe('private-acme');
+    expect(matchCollectionMap('/data/acme/src', ['/home/u/acme-link=private-acme'], { realpath })).toBe('private-acme');
+    expect(matchCollectionMap('/home/u/other', ['/data/acme=private-acme'], { realpath })).toBeUndefined();
+  });
+
+  it('follows a real symlinked cwd on disk', () => {
+    const base = mkdtempSync(join(tmpdir(), 'yapa-scope-'));
+    try {
+      mkdirSync(join(base, 'real', 'acme', 'src'), { recursive: true });
+      symlinkSync(join(base, 'real', 'acme'), join(base, 'link'));
+      const realBase = realpathSync(base);
+      expect(matchCollectionMap(join(base, 'link', 'src'), [`${join(realBase, 'real', 'acme')}=private-acme`])).toBe('private-acme');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('drops relative entries and entries without "=", with a warning', () => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(normalizeCollectionMap(['work/acme=private-acme', 'typo', '/ok=private-ok'])).toEqual(['/ok=private-ok']);
+      const said = err.mock.calls.map(c => String(c[0])).join('');
+      expect(said).toMatch(/ignoring "work\/acme=private-acme" \(the path must be absolute/);
+      expect(said).toMatch(/ignoring "typo" \(expected path=collection/);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('warns about a mapped name that looks private but syncs, and says so in the scope line', async () => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      normalizeCollectionMap(['/w/x=Private-acme', '/w/y=privat-acme', '/w/z=private-fine']);
+      const said = err.mock.calls.map(c => String(c[0])).join('');
+      expect(said).toMatch(/"Private-acme" is a shared collection name and syncs/);
+      expect(said).toMatch(/"privat-acme" is a shared collection name/);
+      expect(said).not.toMatch(/private-fine/);
+    } finally {
+      err.mockRestore();
+    }
+    for (const n of ['Private-acme', 'LOCAL-x', 'private_acme', 'priv-acme', 'local_x']) expect(looksPrivateButShared(n)).toBe(true);
+    for (const n of ['private-acme', 'local-x', 'project-acme', 'global', 'localization-team']) expect(looksPrivateButShared(n)).toBe(false);
+    const d = await detectCollection('/w/x', ROOTS, [], ['/w/x=Private-acme']);
+    expect(scopeNotes(d)).toMatch(/shared: this name syncs/);
+    expect(scopeNotes({ collection: 'Private-acme' })).toBe('');
+  });
+
+  it('a broad entry overrides every project root below it', async () => {
+    expect((await detectCollection('/home/u/projects/acme', ROOTS, [], ['/home/u=local-me'])).collection).toBe('local-me');
+  });
+});
+
+describe('detectCollection: merge redirects', () => {
+  it('follows a redirect from the folder\'s collection and reports where it came from', async () => {
+    redirects.mockResolvedValue({ 'project-acme': 'private-acme' });
+    expect(await detectCollection('/home/u/projects/acme', ROOTS)).toEqual({ collection: 'private-acme', redirectedFrom: 'project-acme' });
+  });
+
+  it('keeps a merged-away customer- folder sticky, then follows it', async () => {
+    redirects.mockResolvedValue({ 'customer-acme': 'private-acme' });
+    expect((await detectCollection('/home/u/projects/acme', ROOTS)).collection).toBe('private-acme');
+  });
+
+  it('follows mapped collections and chains, and stops at a cycle', async () => {
+    redirects.mockResolvedValue({ 'private-a': 'private-b', 'private-b': 'private-c' });
+    expect(await detectCollection('/w/a', ROOTS, [], ['/w/a=private-a'])).toEqual({ collection: 'private-c', mapped: true, redirectedFrom: 'private-a' });
+    expect(resolveCollectionRedirect('x', { x: 'y', y: 'x' })).toEqual({ collection: 'y', redirectedFrom: 'x' });
+    expect(resolveCollectionRedirect('x', { x: 'x' })).toEqual({ collection: 'x' });
+    expect(resolveCollectionRedirect('z', { x: 'y' })).toEqual({ collection: 'z' });
+  });
+
+  it('resolves both ambiguity candidates, and drops the ambiguity when they meet', async () => {
+    mocked.mockResolvedValue(cols('customer-acme', 'project-acme'));
+    redirects.mockResolvedValue({ 'customer-acme': 'project-acme' });
+    expect(await detectCollection('/home/u/projects/acme', ROOTS)).toEqual({ collection: 'project-acme' });
+  });
+
+  it('never redirects global', async () => {
+    redirects.mockResolvedValue({ global: 'private-x' });
+    expect((await detectCollection('/elsewhere', ROOTS)).collection).toBe('global');
+  });
+});
+
+describe('isDetectionStale (a host that caches a detection)', () => {
+  it('is stale once the collection is merged away, or the redirect it followed is dropped', async () => {
+    redirects.mockResolvedValue({});
+    expect(await isDetectionStale({ collection: 'project-acme' })).toBe(false);
+    redirects.mockResolvedValue({ 'project-acme': 'private-acme' });
+    expect(await isDetectionStale({ collection: 'project-acme' })).toBe(true);
+    expect(await isDetectionStale({ collection: 'private-acme', redirectedFrom: 'project-acme' })).toBe(false);
+    expect(await isDetectionStale({ collection: 'project-x', ambiguous: ['project-x', 'project-acme'] })).toBe(true);
+    redirects.mockResolvedValue({});
+    expect(await isDetectionStale({ collection: 'private-acme', redirectedFrom: 'project-acme' })).toBe(true);
+  });
+});
+
+describe('scopeNotes', () => {
+  it('flags local-only scopes (not global) and redirects', () => {
+    expect(scopeNotes({ collection: 'project-acme' })).toBe('');
+    expect(scopeNotes({ collection: 'global' })).toBe('');
+    expect(scopeNotes({ collection: 'private-acme', mapped: true })).toBe(' (local only, never synced)');
+    expect(scopeNotes({ collection: 'private-acme', redirectedFrom: 'project-acme' })).toBe(' (local only, never synced) (merged from `project-acme`)');
   });
 });

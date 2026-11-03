@@ -1,5 +1,6 @@
 import { metadataDelta, patchDocuments, queryDocuments, queryAllCollections } from '../store/index.js';
 import { getConfig } from '../config.js';
+import { isSyncableCollection } from '../sync/syncable.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
 import {
   passesPromotedFilter,
@@ -27,9 +28,21 @@ export interface RecallOptions {
    * With `collection` set, also return up to this many strongly relevant hits
    * from OTHER collections (closer than CROSS_COLLECTION_MAX_DISTANCE): the
    * fix for one customer's issue is often already known from another.
-   * Results carry their `collection`. Default 0.
+   * Results carry their `collection`. Default 0. Never drawn from
+   * `private-*`/`local-*` collections (the recall fence, below).
    */
   crossCollection?: number;
+}
+
+/**
+ * Recall fence: `private-*` and `local-*` collections never surface as
+ * cross-collection extras in another scope. They are still searched when
+ * they are the active `collection` (the caller named them), and a search
+ * with no collection still covers them. `global` is not fenced: it is the
+ * personal, cross-cutting scope every session draws on.
+ */
+function isFenced(collection: string | undefined): boolean {
+  return !!collection && collection !== 'global' && !isSyncableCollection(collection);
 }
 
 export interface RecallResult {
@@ -68,11 +81,15 @@ export async function recallMemory(
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
       // Over-fetch: the scope's own hits and weak matches are dropped below.
       const others = (await queryAllCollections(query, nResults + extra * 4, filter).catch(() => []))
-        .filter(r => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true)
+        .filter(r => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true
+          && !isFenced(r.collection))
         .slice(0, extra);
       results = [...results, ...others];
     }
   } else {
+    // No collection: the caller asked to search everything, so private and
+    // local collections are included. The fence only keeps them out of
+    // another scope's cross-collection extras.
     const docs = await queryAllCollections(query, nResults, filter);
     results = docs;
   }

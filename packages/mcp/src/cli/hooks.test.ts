@@ -11,7 +11,7 @@ const { pullCollection, captureTurn, heartbeatIfDue } = vi.hoisted(() => ({
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine } from './hooks.js';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -455,5 +455,109 @@ describe('waiting on you', () => {
     const section = ctx.slice(ctx.indexOf('## Waiting on you')).split('\n## ')[0];
     expect(section).not.toContain('Ask the vendor');
     expect(section).toContain('1 item(s) wait on anyone');
+  });
+
+  it('a shared scope only counts private decisions; their own scope (and global) lists them', async () => {
+    await storeMemory('Rotate the acme private signing key now?', {
+      collection: 'private-acme-keys', typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['now', 'next week'] },
+    });
+    const shared = (await waitingLines('josh', 2000, 'project-acme')).join('\n');
+    expect(shared).not.toContain('Rotate the acme private signing key');
+    expect(shared).not.toContain('private-acme-keys');
+    expect(shared).toMatch(/1 more in private collections, not listed in this shared scope/);
+    expect(shared).toContain('Keep the old API');
+    for (const scope of ['private-acme-keys', 'global']) {
+      const lines = (await waitingLines('josh', 2000, scope)).join('\n');
+      expect(lines).toMatch(/\(private-acme-keys\) \[decision needed, for josh, new\] Rotate the acme private signing key/);
+      expect(lines).not.toContain('in private collections');
+    }
+  });
+});
+
+describe('collection_map: a folder with a private collection', () => {
+  const cwd = () => join(dir, 'work', 'acme-private', 'src');
+  const mapped = () => configure({ YAPA_COLLECTION_MAP: `${join(dir, 'work', 'acme-private')}=private-acme`, YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' });
+
+  it('every hook scopes to the mapped collection and never contacts the remote', async () => {
+    mapped();
+    await storeMemory('acme private: the staging password rotates on Mondays', { collection: 'private-acme', salience: 3 });
+    // Any call on the sync backend (pull, presence lease list, heartbeat) is recorded.
+    const core = await vi.importActual<any>('@yapa/core');
+    const remoteCalls: string[] = [];
+    const recorder = (prefix: string) => new Proxy({}, {
+      get: (_t, k) => (k === 'then' ? undefined : async () => { remoteCalls.push(`${prefix}${String(k)}`); throw new Error('no remote in this test'); }),
+    });
+    const coordination = recorder('coordination.');
+    core.setSyncBackend(new Proxy({}, {
+      get: (_t, k) => (k === 'then' ? undefined : k === 'kind' ? 'postgres' : k === 'coordination' ? coordination : (recorder('') as any)[k]),
+    }));
+    heartbeatIfDue.mockImplementation(core.heartbeatIfDue);
+
+    capture();
+    await sessionStart({ session_id: 'm1', cwd: cwd(), source: 'startup' });
+    expect(restore().hookSpecificOutput.additionalContext).toContain('**Scope:** `private-acme` (local only, never synced)');
+
+    capture();
+    await userPromptSubmit({ session_id: 'm1', cwd: cwd(), prompt: 'when does the acme staging password rotate?' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('**Scope:** `private-acme` (local only, never synced)');
+    expect(ctx).toMatch(/rotates on Mondays/);
+    expect(pullCollection).not.toHaveBeenCalled();
+
+    captureTurn.mockResolvedValueOnce({ stored: 0, skipped: 0, superseded: 0 });
+    await stop({ session_id: 'm1', cwd: cwd(), last_assistant_message: 'It rotates every Monday at 09:00 UTC. '.repeat(10) });
+    expect(captureTurn.mock.calls[0][0]).toMatchObject({ collection: 'private-acme' });
+
+    await postCompact({ session_id: 'm1', cwd: cwd(), compact_summary: 'Decided: acme private notes stay local.', trigger: 'auto' });
+    const all = await listMemories({ collection: 'private-acme', limit: 50 });
+    expect(all.some(m => m.content.includes('acme private notes stay local'))).toBe(true);
+    expect(pullCollection).not.toHaveBeenCalled();
+    // Presence is skipped for a private scope, and the heartbeat ran (for
+    // real) without reaching the service: this session holds no leases.
+    expect(heartbeatIfDue).toHaveBeenCalled();
+    expect(remoteCalls).toEqual([]);
+    // The recorder does see calls: a shared folder's session start asks for presence.
+    capture();
+    await sessionStart({ session_id: 'm1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+    restore();
+    expect(remoteCalls).toContain('coordination.leaseList');
+    core.setSyncBackend(undefined);
+  });
+
+  it("a private note never surfaces in another folder's recall", async () => {
+    mapped();
+    capture();
+    await userPromptSubmit({ session_id: 'm2', cwd: join(dir, 'proj', 'acme'), prompt: 'when does the acme staging password rotate?' });
+    expect(JSON.stringify(restore())).not.toContain('rotates on Mondays');
+  });
+});
+
+describe('after merging a shared collection into a private one', () => {
+  it('a prompt in the old folder lands in the target and neither recreates nor re-follows the source', async () => {
+    const core = await import('@yapa/core');
+    await storeMemory('acme-legacy build uses gradle 8', { collection: 'project-acme-legacy', salience: 3 });
+    await core.createNewCollection('private-acme-legacy');
+    await core.updateSyncSubscriptions([...(await core.getSyncSubscriptions()), 'project-acme-legacy']);
+    await core.mergeCollections('project-acme-legacy', 'private-acme-legacy');
+
+    capture();
+    await userPromptSubmit({ session_id: 'r1', cwd: join(dir, 'proj', 'acme-legacy'), prompt: 'which gradle does acme-legacy build with?' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('**Scope:** `private-acme-legacy` (local only, never synced) (merged from `project-acme-legacy`)');
+    expect(ctx).toMatch(/gradle 8/);
+    capture();
+    await sessionStart({ session_id: 'r1', cwd: join(dir, 'proj', 'acme-legacy'), source: 'startup' });
+    restore();
+
+    expect(pullCollection).not.toHaveBeenCalled();
+    expect(await freshenFromRemote('project-acme-legacy')).toBe(0);
+    expect(pullCollection).not.toHaveBeenCalled();
+    expect((await core.listCollections()).map(c => c.name)).not.toContain('project-acme-legacy');
+    expect(await core.getSyncSubscriptions()).not.toContain('project-acme-legacy');
+
+    // A hardcoded old name in a write follows the redirect too.
+    await storeMemory('acme-legacy: switched to gradle 9', { collection: 'project-acme-legacy' });
+    expect((await core.listCollections()).map(c => c.name)).not.toContain('project-acme-legacy');
+    expect((await listMemories({ collection: 'private-acme-legacy', limit: 50 })).some(m => m.content.includes('gradle 9'))).toBe(true);
   });
 });

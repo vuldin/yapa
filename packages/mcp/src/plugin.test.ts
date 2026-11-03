@@ -25,9 +25,11 @@ describe('Claude Code plugin packaging', () => {
       const field = key.toUpperCase();
       expect(field in defaults, `${field} missing from YapaConfig`).toBe(true);
       const current = (defaults as any)[field];
+      // Options with a format of their own need a well-formed sample.
+      const formatted: Record<string, string> = { collection_map: '/x=private-x' };
       const sample = option.type === 'boolean'
         ? String(!current)
-        : option.options?.find((o: string) => o !== current) ?? 'x';
+        : formatted[key] ?? option.options?.find((o: string) => o !== current) ?? 'x';
       const parsed = (createConfig({ [`YAPA_${field}`]: sample }) as any)[field];
       expect(parsed, `YAPA_${field} not read by createConfig`).not.toEqual((defaults as any)[field]);
     }
