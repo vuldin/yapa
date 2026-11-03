@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.10.2 (2026-11-03)
+
+No false "restart" note on the status line while a resumed session's YAPA server starts.
+
+**Upgrading:** update the plugin and restart Claude Code. Nothing to deploy.
 
 ### Fixes
 - **No false "restart" note when a session resumes.** A resumed session's transcript is old, so for the few seconds before its new YAPA server reported, the status line showed `yapa (restart for v...)`. The session-start hook (which also runs on resume) now notes each start (`sessions/<id>.starting`), and the status line waits a minute from then before concluding that no new server is running.
