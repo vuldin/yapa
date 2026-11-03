@@ -538,7 +538,9 @@ shared collection and return `local_only_collection` / `invalid_collection`
 like documents do. These routes are optional for a remote: when one answers
 `404` with code `not_found` (or a cycle-fatal error), the client says that
 nothing was shared and falls back to local coordination; task ids fall back
-to `max(local max, GET /v1/me/max-task-number) + 1`.
+to the client machine's own counter, floored by `max(local max, GET
+/v1/me/max-task-number)`. Clients never send local-only collections here:
+they coordinate those on the machine itself.
 
 Validation (reference): `key` and scope entries
 `^[A-Za-z0-9._:@/-]{1,200}$`; `session` `^[A-Za-z0-9._:-]{1,128}$`; at most

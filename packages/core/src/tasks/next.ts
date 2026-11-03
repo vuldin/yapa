@@ -13,6 +13,8 @@ import { getDocumentsByFilter } from '../store/index.js';
 import { getConfig } from '../config.js';
 import { collectionSize } from '../memory/compact.js';
 import type { Lease } from '../sync/backend.js';
+import { coordinatedLocally, requireCoordination } from '../sync/coordination.js';
+import { LEASE_TTL_DEFAULT } from '../sync/local-coordination.js';
 import { claimKey, claimsFor, describeHolder, TaskClaimedError, type ClaimOptions, type ClaimResult } from './claim.js';
 import { getTask, updateTask } from './update.js';
 import { describeWaits, openWaits } from './close.js';
@@ -77,12 +79,30 @@ export interface NextResult {
 
 const norm = (x: unknown): string[] => (Array.isArray(x) ? x : (x ?? '').toString().split(',')).map(String).map(s => s.trim()).filter(Boolean);
 
+/** Keys of this machine's expired (not yet pruned) leases in `collection`. */
+async function expiredLeaseKeys(collection: string): Promise<Set<string>> {
+  try {
+    const r = await (await requireCoordination()).leaseList(collection, true);
+    return new Set(r.leases.filter(l => l.expired).map(l => l.key));
+  } catch {
+    return new Set();
+  }
+}
+
 export async function nextTasks(opts: NextOptions): Promise<NextResult> {
   const docs = await getDocumentsByFilter(opts.collection, { type: 'task' }, 5000).catch(() => []);
   const open = docs.filter(d => d.metadata.status !== 'complete');
   const byId = new Map(docs.map(d => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live: Lease[] = claims ? [...claims.values()] : [];
+  // On this machine an in_progress task with no lease may predate claims
+  // here (local-only collections and sync-off ones got them in 1.10), or come
+  // from a YAPA process that doesn't take them yet: it counts as lapsed only
+  // once its lease expired, or, with no lease on record, once it has been
+  // untouched for a default TTL.
+  const local = coordinatedLocally(opts.collection);
+  const expired = local ? await expiredLeaseKeys(opts.collection) : undefined;
+  const nowS = Math.floor(Date.now() / 1000);
 
   // Soft scope of what is live right now: the leases' own scope plus the
   // claimed tasks' claim_scope.
@@ -135,6 +155,14 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
     if (status === 'in_progress' && d.metadata.claim_unshared) {
       skipped.push({ id: d.id, reason: 'in_progress (claimed on this machine, not shared yet)' });
       continue;
+    }
+    if (status === 'in_progress' && local && !expired?.has(d.id)) {
+      const quiet = nowS - Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+      if (quiet < LEASE_TTL_DEFAULT) {
+        const left = Math.ceil((LEASE_TTL_DEFAULT - quiet) / 60);
+        skipped.push({ id: d.id, reason: `in_progress with no claim on record (started without one); offered again after ${left} min untouched` });
+        continue;
+      }
     }
     const waiting: string[] = [];
     for (const dep of norm(d.metadata.depends_on)) {

@@ -722,7 +722,18 @@ describe('coordination (leases, counters, task ids)', () => {
       return { status: 404, json: { error: { code: 'not_found', message: 'no such route' } } };
     };
     setSyncBackend(backend());
-    expect(await getNextTaskId()).toBe('tester-21');
+    const prev = getConfig();
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_SYNC_ID_TOKEN_CACHE: 'off', YAPA_LOCAL_COORD_DIR: mkdtempSync(join(tmpdir(), 'yapa-coord-')) }));
+    try {
+      expect(await getNextTaskId()).toBe('tester-21');
+      // This machine's counter remembers: a second id never repeats the first.
+      expect(await getNextTaskId()).toBe('tester-22');
+    } finally {
+      setConfig(prev);
+    }
   });
 
   it('requireCoordination: offline or an older service is "unavailable"; bad input is a real error', async () => {
@@ -751,7 +762,7 @@ describe('coordination (leases, counters, task ids)', () => {
   it('heartbeatIfDue: no marker means no request; due renews everywhere; nothing left clears the marker', async () => {
     const { heartbeatIfDue, noteLeaseHeld, sessionsHoldingLeases } = await import('./coordination.js');
     const leaseDir = join(dir, 'leases');
-    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_LEASE_STATE_DIR: leaseDir }));
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base, YAPA_LEASE_STATE_DIR: leaseDir, YAPA_LOCAL_COORD_DIR: join(dir, 'coord-hb') }));
     let renewed: unknown[] = [{ key: 'k', ttl_seconds: 600 }];
     handler = s => (s.path === '/v1/leases:heartbeat' ? { json: { renewed, lost: [] } } : { status: 404, json: { error: { code: 'not_found', message: 'no' } } });
     setSyncBackend(backend());
@@ -772,13 +783,19 @@ describe('coordination (leases, counters, task ids)', () => {
     expect(sessionsHoldingLeases()).toEqual([]);
   });
 
-  it('requireCoordination without the service says so', async () => {
-    const { requireCoordination } = await import('./coordination.js');
+  it('without the service, the service coordination says so and requireCoordination answers on this machine', async () => {
+    const { requireCoordination, serviceCoordination } = await import('./coordination.js');
     setSyncBackend(undefined);
     const prev = getConfig();
     setConfig(createConfig({ YAPA_USERNAME: 'tester' }));
-    await expect(requireCoordination()).rejects.toMatchObject({ reason: 'not_configured' });
-    setConfig(prev);
+    try {
+      await expect(serviceCoordination()).rejects.toMatchObject({ reason: 'not_configured' });
+      const r = await (await requireCoordination()).leaseAcquire({ collection: 'project-acme', key: 'k-off', session: 's' });
+      expect(r).toMatchObject({ granted: true, lease: { holder: { user: 'tester', session: 's' } } });
+      await (await requireCoordination()).leaseRelease('project-acme', 'k-off', 's');
+    } finally {
+      setConfig(prev);
+    }
   });
 });
 

@@ -12,7 +12,7 @@
  *   2  bad arguments or input the service rejected
  *   1  any other error
  */
-import { currentSession, getDeviceId, isCoordinationUnavailable, noteLeaseHeld, requireCoordination, type Lease } from '@yapa/core';
+import { coordinatedLocally, currentSession, getDeviceId, isCoordinationUnavailable, noteLeaseHeld, requireCoordination, type Lease } from '@yapa/core';
 
 // Re-exported so the CLI never imports the whole @yapa/core namespace (it would defeat tree-shaking).
 export { currentSession };
@@ -86,7 +86,12 @@ export function leaseAcquire(a: AcquireArgs): Promise<CoordResult> {
     const verb = r.renewed ? 'renewed'
       : prev?.reclaim ? `took over from ${prev.session} (your other session)`
         : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : 'granted';
-    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(', ')}, expires ${new Date(r.lease.expires_at * 1000).toISOString()}` };
+    const local = coordinatedLocally(a.collection);
+    return {
+      exit: EXIT.ok,
+      json: { ok: true, ...r, local },
+      text: `${verb} ${a.key} to session ${session}${local ? ' (this machine)' : ''}: scope ${r.lease.scope.join(', ')}, expires ${new Date(r.lease.expires_at * 1000).toISOString()}`,
+    };
   });
 }
 
@@ -96,6 +101,13 @@ export function leaseHeartbeat(collection: string | undefined, session?: string,
     const r = await (await requireCoordination()).leaseHeartbeat(collection, s, keys);
     if (r.renewed.length) noteLeaseHeld(s, Math.min(...r.renewed.map(l => l.ttl_seconds)));
     const lost = r.lost.length ? `; LOST (taken over or released): ${r.lost.join(', ')}` : '';
+    if (r.unreachable) {
+      return {
+        exit: EXIT.unavailable,
+        json: { ok: false, unavailable: true, reason: 'unreachable', message: r.unreachable, renewed: r.renewed, lost: r.lost },
+        text: `renewed ${r.renewed.length} lease(s) on this machine for session ${s}${lost}; NOT renewed on the sync service: ${r.unreachable}`,
+      };
+    }
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `renewed ${r.renewed.length} lease(s) for session ${s}${lost}` };
   });
 }
@@ -123,7 +135,7 @@ export function leaseList(collection: string, includeExpired = false): Promise<C
 export function counterNext(collection: string, name: string, floor?: number): Promise<CoordResult> {
   return run(async () => {
     const value = await (await requireCoordination()).counterNext(collection, name, floor);
-    return { exit: EXIT.ok, json: { ok: true, value }, text: String(value) };
+    return { exit: EXIT.ok, json: { ok: true, value, local: coordinatedLocally(collection) }, text: String(value) };
   });
 }
 

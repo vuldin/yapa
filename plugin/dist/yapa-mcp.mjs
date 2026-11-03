@@ -7358,6 +7358,7 @@ function createConfig(env = process.env) {
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
     // Under vitest, never the developer's real lease markers and claim notices.
     LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
+    LOCAL_COORD_DIR: get(env, "LOCAL_COORD_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-coord-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "coord")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_COORDINATE: get(env, "SYNC_COORDINATE", "true") !== "false",
@@ -8727,7 +8728,7 @@ var init_http_backend = __esm({
         const url2 = `${this.target}${path}`;
         const idemKey = opts.idempotent ? randomUUID2() : void 0;
         const body = opts.body === void 0 ? void 0 : JSON.stringify(opts.body);
-        for (let attempt = 0; ; attempt++) {
+        for (let attempt2 = 0; ; attempt2++) {
           let token;
           try {
             token = await this.tokens.get();
@@ -8760,7 +8761,7 @@ var init_http_backend = __esm({
           if (res.status === 404 && opts.allow404) return void 0;
           const apiErr = json2?.error;
           const code = apiErr?.code ?? (res.status === 401 ? "cloud_run_unauthenticated" : res.status === 403 ? "cloud_run_forbidden" : `http_${res.status}`);
-          if (res.status === 401 && attempt === 0) {
+          if (res.status === 401 && attempt2 === 0) {
             this.tokens.invalidate();
             continue;
           }
@@ -8961,8 +8962,8 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   }
   if (sslmode) return unverified;
   const hostParam = url2.searchParams.get("host");
-  const local = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url2.hostname);
-  if (local) return { connectionString, ssl: false, tls: "off" };
+  const local2 = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url2.hostname);
+  if (local2) return { connectionString, ssl: false, tls: "off" };
   return unverified;
 }
 function getSyncTlsMode() {
@@ -9424,21 +9425,620 @@ var init_backend = __esm({
   }
 });
 
+// packages/core/src/fs-lock.ts
+import { closeSync, fstatSync, fsyncSync, mkdirSync as mkdirSync5, openSync, readdirSync, readFileSync as readFileSync6, readlinkSync, renameSync as renameSync3, rmSync as rmSync2, statSync, writeSync } from "node:fs";
+import { hostname as hostname3 } from "node:os";
+import { basename, dirname as dirname4, join as join3 } from "node:path";
+function pidNamespace() {
+  try {
+    return readlinkSync("/proc/self/ns/pid");
+  } catch {
+    return "";
+  }
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function writeJsonAtomic(path, value, mode = 384) {
+  mkdirSync5(dirname4(path), { recursive: true, mode: 448 });
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    const fd = openSync(tmp, "w", mode);
+    try {
+      writeSync(fd, JSON.stringify(value) + "\n");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync3(tmp, path);
+  } catch (e) {
+    rmSync2(tmp, { force: true });
+    throw e;
+  }
+}
+function readState(lock) {
+  let fd;
+  try {
+    fd = openSync(lock, "r");
+  } catch {
+    return void 0;
+  }
+  try {
+    const st = fstatSync(fd);
+    let holder;
+    try {
+      const h = JSON.parse(readFileSync6(fd, "utf-8"));
+      if (h && typeof h.pid === "number" && typeof h.at === "number") holder = { pid: h.pid, host: String(h.host ?? ""), at: h.at };
+    } catch {
+    }
+    return { ino: st.ino, mtimeMs: st.mtimeMs, holder };
+  } finally {
+    closeSync(fd);
+  }
+}
+function tryCreate(lock) {
+  const me = { pid: process.pid, host: HOST, at: Date.now() };
+  let fd;
+  try {
+    fd = openSync(lock, "wx", 384);
+  } catch (e) {
+    if (e.code === "EEXIST") return void 0;
+    if (e.code === "ENOENT") {
+      mkdirSync5(dirname4(lock), { recursive: true, mode: 448 });
+      return tryCreate(lock);
+    }
+    throw e;
+  }
+  try {
+    writeSync(fd, JSON.stringify(me));
+  } finally {
+    closeSync(fd);
+  }
+  return me;
+}
+function stale(s, rules, now) {
+  if (!s.holder) return now - s.mtimeMs > UNREADABLE_GRACE_MS;
+  const h = s.holder;
+  if (h.at - now > rules.staleMs) return true;
+  if (h.host === HOST) return !pidAlive(h.pid) || now - h.at > rules.maxHoldMs;
+  return now - h.at > rules.staleMs;
+}
+function breakStale(lock, judged, rules) {
+  const guard = `${lock}.break`;
+  const me = tryCreate(guard);
+  if (!me) {
+    const g = readState(guard);
+    if (g && stale(g, { staleMs: BREAK_GUARD_STALE_MS, maxHoldMs: BREAK_GUARD_STALE_MS }, Date.now())) rmIfSame(guard, g);
+    return false;
+  }
+  try {
+    const now = readState(lock);
+    if (now && sameState(now, judged) && stale(now, rules, Date.now())) rmSync2(lock, { force: true });
+    return true;
+  } finally {
+    releaseIfMine(guard, me);
+  }
+}
+function rmIfSame(path, s) {
+  const now = readState(path);
+  if (now && sameState(now, s)) rmSync2(path, { force: true });
+}
+function releaseIfMine(lock, me) {
+  const h = readState(lock)?.holder;
+  if (h && h.pid === me.pid && h.at === me.at && h.host === me.host) rmSync2(lock, { force: true });
+}
+function attempt(lock, rules) {
+  const me = tryCreate(lock);
+  if (me) return { me };
+  const s = readState(lock);
+  if (!s) return {};
+  if (stale(s, rules, Date.now()) && breakStale(lock, s, rules)) {
+    const again = tryCreate(lock);
+    if (again) return { me: again };
+  }
+  return { holder: s.holder };
+}
+function withFileLockSync(lock, fn, opts = {}) {
+  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
+  const rules = { staleMs: opts.staleMs ?? DEFAULT_STALE_MS, maxHoldMs: opts.maxHoldMs ?? DEFAULT_MAX_HOLD_MS };
+  const deadline = Date.now() + waitMs;
+  let holder;
+  for (let i = 0; ; i++) {
+    const a = attempt(lock, rules);
+    if (a.me) {
+      try {
+        return fn();
+      } finally {
+        releaseIfMine(lock, a.me);
+      }
+    }
+    holder = a.holder;
+    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
+    Atomics.wait(waitCell, 0, 0, backoff(i));
+  }
+}
+function sweepLockDebris(dir, olderThanMs = 36e5, now = Date.now()) {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp|break)$/.test(name)) continue;
+      const p = join3(dir, name);
+      try {
+        if (now - statSync(p).mtimeMs > olderThanMs) rmSync2(p, { force: true });
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+var LockTimeoutError, DEFAULT_WAIT_MS, DEFAULT_STALE_MS, DEFAULT_MAX_HOLD_MS, UNREADABLE_GRACE_MS, BREAK_GUARD_STALE_MS, LOCK_HOST, HOST, sameState, backoff, waitCell, lockFileFor;
+var init_fs_lock = __esm({
+  "packages/core/src/fs-lock.ts"() {
+    "use strict";
+    LockTimeoutError = class extends Error {
+      constructor(path, holder) {
+        super(`could not take ${path} in time${holder ? ` (held by pid ${holder.pid} on ${holder.host} since ${new Date(holder.at).toISOString()})` : ""}`);
+        this.path = path;
+        this.holder = holder;
+        this.name = "LockTimeoutError";
+      }
+      path;
+      holder;
+      code = "lock_timeout";
+    };
+    DEFAULT_WAIT_MS = 5e3;
+    DEFAULT_STALE_MS = 3e4;
+    DEFAULT_MAX_HOLD_MS = 6e5;
+    UNREADABLE_GRACE_MS = 2e3;
+    BREAK_GUARD_STALE_MS = 5e3;
+    LOCK_HOST = `${hostname3()}${pidNamespace() ? `#${pidNamespace()}` : ""}`;
+    HOST = LOCK_HOST;
+    sameState = (a, b) => a.ino === b.ino && (a.holder?.pid ?? -1) === (b.holder?.pid ?? -1) && (a.holder?.at ?? -1) === (b.holder?.at ?? -1) && (a.holder?.host ?? "") === (b.holder?.host ?? "");
+    backoff = (i) => Math.min(100, 5 * 2 ** Math.min(i, 5)) * (0.5 + Math.random());
+    waitCell = new Int32Array(new SharedArrayBuffer(4));
+    lockFileFor = (file2) => join3(dirname4(file2), `${basename(file2)}.lock`);
+  }
+});
+
+// packages/core/src/sync/local-coordination.ts
+import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
+import { join as join4 } from "node:path";
+function assertMatch(v, re, what) {
+  if (typeof v !== "string" || !re.test(v)) throw bad(`${what} must match ${re.source}`);
+  return v;
+}
+function assertScope(v) {
+  if (v === void 0) return void 0;
+  if (!Array.isArray(v) || v.length > MAX_SCOPE) throw bad(`scope must be an array of at most ${MAX_SCOPE} strings`);
+  return [...new Set(v.map((s) => assertMatch(s, KEY_RE, "scope entries")))].sort();
+}
+function assertTtl(v) {
+  if (v === void 0) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < LEASE_TTL_MIN || v > LEASE_TTL_MAX) {
+    throw bad(`ttl_seconds must be an integer from ${LEASE_TTL_MIN} to ${LEASE_TTL_MAX}`);
+  }
+  return v;
+}
+function assertFloor(v) {
+  if (v === void 0 || v === null) return 0;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw bad("floor must be a non-negative integer");
+  return v;
+}
+function effectiveScope(key, scope) {
+  return [.../* @__PURE__ */ new Set([`key:${key}`, ...scope])].sort();
+}
+function localCoordinationDir() {
+  return getConfig().LOCAL_COORD_DIR;
+}
+function stateFile(dir, collection) {
+  return join4(dir, `${encodeURIComponent(collection)}.json`);
+}
+function readState2(file2) {
+  try {
+    const s = JSON.parse(readFileSync7(file2, "utf-8"));
+    return { leases: s?.leases ?? {}, counters: s?.counters ?? {} };
+  } catch (e) {
+    if (e.code === "ENOENT") return { leases: {}, counters: {} };
+    throw new Error(`local coordination state ${file2} is unreadable (${e.message}). It holds only this collection's leases and counters on this machine: move it aside (mv "${file2}" "${file2}.bad") to start fresh. Live claims are then forgotten, and counters restart above the floor callers pass.`);
+  }
+}
+function toLease(collection, l, now) {
+  return {
+    collection,
+    key: l.key,
+    holder: { user: l.user, session: l.session, device: l.device },
+    title: l.title,
+    scope: l.scope,
+    ttl_seconds: l.ttl_seconds,
+    acquired_at: l.acquired_at,
+    heartbeat_at: l.heartbeat_at,
+    expires_at: l.expires_at,
+    expired: l.expires_at <= now,
+    took_over_from: l.took_over_from
+  };
+}
+function createLocalCoordination(opts = {}) {
+  const dir = () => opts.dir ?? localCoordinationDir();
+  const user = () => opts.user ?? getConfig().USERNAME;
+  const clock = () => opts.now ? opts.now() : Math.floor(Date.now() / 1e3);
+  function update(collection, fn, reserved = false) {
+    if (!(reserved && RESERVED_RE.test(collection))) assertMatch(collection, COLLECTION_RE, "collection");
+    const file2 = stateFile(dir(), collection);
+    return withFileLockSync(lockFileFor(file2), () => {
+      const s = readState2(file2);
+      const { result, changed } = fn(s, clock());
+      if (changed) writeJsonAtomic(file2, s);
+      return result;
+    });
+  }
+  function collections() {
+    try {
+      return readdirSync2(dir()).filter((f) => f.endsWith(".json")).map((f) => decodeURIComponent(f.slice(0, -5)));
+    } catch {
+      return [];
+    }
+  }
+  function bump(collection, name, floor, reserved) {
+    assertMatch(name, COUNTER_RE, "name");
+    const f = assertFloor(floor);
+    return update(collection, (s) => {
+      const value = Math.max(s.counters[name] ?? 0, f) + 1;
+      s.counters[name] = value;
+      return { result: value, changed: true };
+    }, reserved);
+  }
+  const prune = (s, now) => {
+    let changed = false;
+    for (const [k, l] of Object.entries(s.leases)) {
+      if (l.expires_at < now - EXPIRED_KEEP_SECONDS) {
+        delete s.leases[k];
+        changed = true;
+      }
+    }
+    return changed;
+  };
+  const api = {
+    local: true,
+    async leaseAcquire(req) {
+      const key = assertMatch(req.key, KEY_RE, "key");
+      const session = assertMatch(req.session, SESSION_RE, "session");
+      const reqScope = assertScope(req.scope);
+      const reqTtl = assertTtl(req.ttlSeconds);
+      if (req.title !== void 0 && req.title !== null && (typeof req.title !== "string" || req.title.length > 300)) {
+        throw bad("title must be a string of at most 300 characters");
+      }
+      if (req.reclaim !== void 0 && typeof req.reclaim !== "boolean") throw bad("reclaim must be a boolean");
+      const me = user();
+      return update(req.collection, (s, now) => {
+        prune(s, now);
+        const prev = s.leases[key];
+        const renewed = prev !== void 0 && isMine(prev, me, session);
+        const scope = reqScope !== void 0 ? effectiveScope(key, reqScope) : renewed ? effectiveScope(key, prev.scope) : effectiveScope(key, []);
+        const ttl = reqTtl ?? (renewed ? prev.ttl_seconds : LEASE_TTL_DEFAULT);
+        const live = Object.values(s.leases).filter((l) => l.expires_at > now && (l.key === key || l.scope.some((x) => scope.includes(x))));
+        const conflicts = live.filter((l) => !isMine(l, me, session) && !(req.reclaim && l.user === me)).map((l) => ({ lease: toLease(req.collection, l, now), overlap: l.key === key ? [`key:${key}`] : l.scope.filter((x) => scope.includes(x)) }));
+        if (conflicts.length) return { result: { granted: false, conflicts }, changed: false };
+        const reclaimed = !renewed && live.some((l) => l.key === key);
+        const takeover = prev !== void 0 && !renewed ? {
+          user: prev.user,
+          session: prev.session,
+          device: prev.device,
+          expired_at: prev.expires_at,
+          acquired_at: prev.acquired_at,
+          ...reclaimed ? { reclaim: true } : {}
+        } : void 0;
+        const lease = {
+          key,
+          user: me,
+          session,
+          device: safeDeviceId(),
+          // As the service's COALESCE: a takeover without a title keeps the old one.
+          title: req.title ?? prev?.title ?? null,
+          scope,
+          ttl_seconds: ttl,
+          acquired_at: renewed ? prev.acquired_at : now,
+          heartbeat_at: now,
+          expires_at: now + ttl,
+          took_over_from: renewed ? prev.took_over_from : takeover ?? null
+        };
+        s.leases[key] = lease;
+        return {
+          result: { granted: true, lease: toLease(req.collection, lease, now), renewed, ...takeover ? { took_over_from: takeover } : {} },
+          changed: true
+        };
+      });
+    },
+    async leaseHeartbeat(collection, session, keys) {
+      assertMatch(session, SESSION_RE, "session");
+      if (keys && collection === void 0) throw bad("keys needs a collection");
+      const me = user();
+      const renewed = [];
+      for (const c of collection !== void 0 ? [collection] : collections()) {
+        renewed.push(...update(c, (s, now) => {
+          const out = [];
+          for (const l of Object.values(s.leases)) {
+            if (!isMine(l, me, session) || keys && !keys.includes(l.key)) continue;
+            l.heartbeat_at = now;
+            l.expires_at = now + l.ttl_seconds;
+            out.push(toLease(c, l, now));
+          }
+          return { result: out, changed: out.length > 0 };
+        }));
+      }
+      const lost = (keys ?? []).filter((k) => !renewed.some((l) => l.key === k));
+      return { renewed, lost };
+    },
+    async leaseRelease(collection, key, session, outcome) {
+      assertMatch(key, KEY_RE, "key");
+      assertMatch(session, SESSION_RE, "session");
+      if (outcome !== void 0) assertMatch(outcome, OUTCOME_RE, "outcome");
+      const me = user();
+      return update(collection, (s, now) => {
+        const l = s.leases[key];
+        if (!l) return { result: { released: false, reason: "not_held" }, changed: false };
+        if (!isMine(l, me, session)) return { result: { released: false, reason: "held_by_other", lease: toLease(collection, l, now) }, changed: false };
+        delete s.leases[key];
+        return { result: { released: true, lease: toLease(collection, l, now) }, changed: true };
+      });
+    },
+    async leaseList(collection, includeExpired = false) {
+      assertMatch(collection, COLLECTION_RE, "collection");
+      const now = clock();
+      const s = readState2(stateFile(dir(), collection));
+      const leases = Object.values(s.leases).filter((l) => includeExpired || l.expires_at > now).sort((a, b) => a.acquired_at - b.acquired_at || a.key.localeCompare(b.key)).map((l) => toLease(collection, l, now));
+      return { leases, now };
+    },
+    async counterNext(collection, name, floor) {
+      return bump(collection, name, floor, false);
+    },
+    async nextTaskId(floor) {
+      const me = user();
+      const n = bump(TASK_COUNTER_COLLECTION, assertMatch(me, COUNTER_RE, "username"), floor, true);
+      return `${me}-${n}`;
+    }
+  };
+  return api;
+}
+function safeDeviceId() {
+  try {
+    return getDeviceId();
+  } catch {
+    return null;
+  }
+}
+var LEASE_TTL_MIN, LEASE_TTL_MAX, LEASE_TTL_DEFAULT, MAX_SCOPE, EXPIRED_KEEP_SECONDS, TASK_COUNTER_COLLECTION, KEY_RE, SESSION_RE, COUNTER_RE, OUTCOME_RE, COLLECTION_RE, RESERVED_RE, LocalCoordinationError, bad, isMine;
+var init_local_coordination = __esm({
+  "packages/core/src/sync/local-coordination.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    init_device();
+    LEASE_TTL_MIN = 30;
+    LEASE_TTL_MAX = 24 * 3600;
+    LEASE_TTL_DEFAULT = 2 * 3600;
+    MAX_SCOPE = 64;
+    EXPIRED_KEEP_SECONDS = 7 * 24 * 3600;
+    TASK_COUNTER_COLLECTION = "@tasks";
+    KEY_RE = /^[A-Za-z0-9._:@/-]{1,200}$/;
+    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+    COUNTER_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+    OUTCOME_RE = /^[A-Za-z0-9._ :-]{0,64}$/;
+    COLLECTION_RE = /^[A-Za-z0-9._-]{1,200}$/;
+    RESERVED_RE = /^@[a-z]+$/;
+    LocalCoordinationError = class extends Error {
+      constructor(code, message) {
+        super(message);
+        this.code = code;
+        this.name = "LocalCoordinationError";
+      }
+      code;
+      status = 400;
+    };
+    bad = (message) => new LocalCoordinationError("invalid_request", message);
+    isMine = (l, user, session) => l.user === user && l.session === session;
+  }
+});
+
+// packages/core/src/sync/coordination.ts
+import { readdirSync as readdirSync3, readFileSync as readFileSync8, rmSync as rmSync3 } from "node:fs";
+import { join as join5 } from "node:path";
+function currentSession(explicit, env = process.env) {
+  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
+    if (v && SESSION_RE2.test(v)) return v;
+  }
+  return void 0;
+}
+function markerPath(session) {
+  return join5(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function readMarker(session) {
+  try {
+    return JSON.parse(readFileSync8(markerPath(session), "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeMarker(m) {
+  try {
+    writeJsonAtomic(markerPath(m.session), m);
+  } catch {
+  }
+}
+function withMarker(session, fn, fallback) {
+  try {
+    return withFileLockSync(lockFileFor(markerPath(session)), fn, { waitMs: 2e3 });
+  } catch {
+    return fallback;
+  }
+}
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
+  withMarker(session, () => {
+    const prev = readMarker(session);
+    const keys = new Set(prev?.keys ?? []);
+    if (held) keys.add(heldKey(held.collection, held.key));
+    writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
+  }, void 0);
+}
+function noteLeaseReleased(session, collection, key) {
+  withMarker(session, () => {
+    const prev = readMarker(session);
+    if (!prev?.keys) return;
+    const keys = prev.keys.filter((k) => k !== heldKey(collection, key));
+    writeMarker({ ...prev, keys });
+  }, void 0);
+}
+function noticesPath() {
+  return join5(getConfig().LEASE_STATE_DIR, "notices.state");
+}
+function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
+  try {
+    withFileLockSync(lockFileFor(noticesPath()), () => {
+      let list6 = [];
+      try {
+        list6 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+      } catch {
+      }
+      if (!Array.isArray(list6)) list6 = [];
+      if (list6.some((n) => n.text === text)) return;
+      list6.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list6.slice(-20));
+    }, { waitMs: 2e3 });
+  } catch {
+  }
+}
+async function serviceCoordination() {
+  if (!isSyncConfigured()) {
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+  }
+  const backend = await getSyncBackend();
+  if (!backend?.coordination) {
+    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
+  }
+  return wrap(backend.coordination);
+}
+function localCoordination() {
+  if (!local) {
+    const dir = getConfig().LOCAL_COORD_DIR;
+    sweepLockDebris(dir);
+    sweepLockDebris(join5(dir, "locks"));
+    sweepLockDebris(getConfig().LEASE_STATE_DIR);
+    local = guardLocal(createLocalCoordination());
+  }
+  return local;
+}
+function coordinatedLocally(collection) {
+  return !isSyncableCollection(collection) || !isSyncConfigured();
+}
+async function requireCoordination() {
+  const pick2 = async (collection) => coordinatedLocally(collection) ? localCoordination() : serviceCoordination();
+  return {
+    leaseAcquire: async (req) => (await pick2(req.collection)).leaseAcquire(req),
+    leaseHeartbeat: async (collection, session, keys) => {
+      if (collection !== void 0) return (await pick2(collection)).leaseHeartbeat(collection, session, keys);
+      const mine = await localCoordination().leaseHeartbeat(void 0, session);
+      if (!isSyncConfigured()) return mine;
+      try {
+        const theirs = await (await serviceCoordination()).leaseHeartbeat(void 0, session);
+        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
+      } catch (e) {
+        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: e.message };
+        throw e;
+      }
+    },
+    leaseRelease: async (collection, key, session, outcome) => (await pick2(collection)).leaseRelease(collection, key, session, outcome),
+    leaseList: async (collection, includeExpired) => (await pick2(collection)).leaseList(collection, includeExpired),
+    counterNext: async (collection, name, floor) => (await pick2(collection)).counterNext(collection, name, floor),
+    nextTaskId: async (floor) => (isSyncConfigured() ? serviceCoordination() : Promise.resolve(localCoordination())).then((c) => c.nextTaskId(floor))
+  };
+}
+function isCoordinationUnavailable(e) {
+  if (e instanceof CoordinationUnavailableError) return true;
+  const err = e;
+  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
+}
+function guardLocal(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (e?.code === "lock_timeout") {
+        throw new CoordinationUnavailableError("unreachable", `this machine's coordination is busy: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+function wrap(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (isCoordinationUnavailable(e)) {
+        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+var SESSION_RE2, heldKey, CoordinationUnavailableError, local;
+var init_coordination = __esm({
+  "packages/core/src/sync/coordination.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    init_backend();
+    init_local_coordination();
+    init_syncable();
+    SESSION_RE2 = /^[A-Za-z0-9._:-]{1,128}$/;
+    heldKey = (collection, key) => `${collection}\0${key}`;
+    CoordinationUnavailableError = class extends Error {
+      constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+        this.name = "CoordinationUnavailableError";
+      }
+      reason;
+      code = "coordination_unavailable";
+    };
+  }
+});
+
 // packages/core/src/tasks/create.ts
 var create_exports = {};
 __export(create_exports, {
   createTask: () => createTask,
   getNextTaskId: () => getNextTaskId
 });
-async function getNextTaskId() {
-  if (isSyncConfigured()) {
+async function getNextTaskId(floor = 0, localOnly = false) {
+  if (isSyncConfigured() && !localOnly) {
     await Promise.race([
       resolveSyncUsername(),
       new Promise((resolve) => setTimeout(resolve, 3e3).unref())
     ]).catch(() => void 0);
   }
   const collections = await listCollections2();
-  let maxId = 0;
+  let maxId = floor;
   for (const collection of collections) {
     try {
       const tasks = await getDocumentsByFilter2(collection.name, { type: "task" }, 1e3);
@@ -9452,7 +10052,7 @@ async function getNextTaskId() {
       continue;
     }
   }
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     try {
       const backend = await getSyncBackend();
       if (backend?.coordination) {
@@ -9465,7 +10065,7 @@ async function getNextTaskId() {
     } catch {
     }
   }
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     try {
       const backend = await getSyncBackend();
       const remote = !backend ? 0 : await Promise.race([
@@ -9476,11 +10076,34 @@ async function getNextTaskId() {
     } catch {
     }
   }
+  try {
+    const id = await localCoordination().nextTaskId(maxId);
+    if (id.startsWith(`${getConfig().USERNAME}-`)) return id;
+  } catch {
+  }
   return `${getConfig().USERNAME}-${maxId + 1}`;
+}
+async function idTaken(id) {
+  for (const c of await listCollections2().catch(() => [])) {
+    try {
+      if ((await getDocumentsByIds2(c.name, [id])).length) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+async function freshTaskId() {
+  let floor = 0;
+  let id = await getNextTaskId();
+  for (let i = 1; i < ID_ATTEMPTS && await idTaken(id); i++) {
+    floor = Math.max(floor, Number(id.slice(id.lastIndexOf("-") + 1)) || 0);
+    id = await getNextTaskId(floor, true);
+  }
+  return id;
 }
 async function createTask(title, options = {}, collection = "global") {
   await getOrCreateCollection2(collection);
-  const id = await getNextTaskId();
+  const id = await freshTaskId();
   const now = Math.floor(Date.now() / 1e3);
   const metadata = {
     type: "task",
@@ -9511,130 +10134,21 @@ async function createTask(title, options = {}, collection = "global") {
   await addDocument2(collection, id, title, metadata);
   return id;
 }
-var PRIORITY_SALIENCE;
+var PRIORITY_SALIENCE, ID_ATTEMPTS;
 var init_create = __esm({
   "packages/core/src/tasks/create.ts"() {
     "use strict";
     init_config();
     init_store();
     init_backend();
+    init_coordination();
     PRIORITY_SALIENCE = {
       critical: 3,
       high: 2.5,
       medium: 2,
       low: 1.5
     };
-  }
-});
-
-// packages/core/src/sync/coordination.ts
-import { mkdirSync as mkdirSync5, readdirSync, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join3 } from "node:path";
-function currentSession(explicit, env = process.env) {
-  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
-    if (v && SESSION_RE.test(v)) return v;
-  }
-  return void 0;
-}
-function markerPath(session) {
-  return join3(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
-}
-function readMarker(session) {
-  try {
-    return JSON.parse(readFileSync6(markerPath(session), "utf-8"));
-  } catch {
-    return void 0;
-  }
-}
-function writeMarker(m) {
-  try {
-    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync5(markerPath(m.session), JSON.stringify(m), { mode: 384 });
-  } catch {
-  }
-}
-function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
-  const prev = readMarker(session);
-  const keys = new Set(prev?.keys ?? []);
-  if (held) keys.add(heldKey(held.collection, held.key));
-  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
-}
-function noteLeaseReleased(session, collection, key) {
-  const prev = readMarker(session);
-  if (!prev?.keys) return;
-  const keys = prev.keys.filter((k) => k !== heldKey(collection, key));
-  writeMarker({ ...prev, keys });
-}
-function noticesPath() {
-  return join3(getConfig().LEASE_STATE_DIR, "notices.state");
-}
-function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
-  let list6 = [];
-  try {
-    list6 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
-  } catch {
-  }
-  if (!Array.isArray(list6)) list6 = [];
-  if (list6.some((n) => n.text === text)) return;
-  list6.push({ at: now, text });
-  try {
-    mkdirSync5(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync5(noticesPath(), JSON.stringify(list6.slice(-20)), { mode: 384 });
-  } catch {
-  }
-}
-async function requireCoordination() {
-  if (!isSyncConfigured()) {
-    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
-  }
-  const backend = await getSyncBackend();
-  if (!backend?.coordination) {
-    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
-  }
-  return wrap(backend.coordination);
-}
-function isCoordinationUnavailable(e) {
-  if (e instanceof CoordinationUnavailableError) return true;
-  const err = e;
-  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
-}
-function wrap(c) {
-  const guard = (fn) => async (...a) => {
-    try {
-      return await fn(...a);
-    } catch (e) {
-      if (isCoordinationUnavailable(e)) {
-        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
-      }
-      throw e;
-    }
-  };
-  return {
-    leaseAcquire: guard(c.leaseAcquire),
-    leaseHeartbeat: guard(c.leaseHeartbeat),
-    leaseRelease: guard(c.leaseRelease),
-    leaseList: guard(c.leaseList),
-    counterNext: guard(c.counterNext),
-    nextTaskId: guard(c.nextTaskId)
-  };
-}
-var SESSION_RE, heldKey, CoordinationUnavailableError;
-var init_coordination = __esm({
-  "packages/core/src/sync/coordination.ts"() {
-    "use strict";
-    init_config();
-    init_backend();
-    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-    heldKey = (collection, key) => `${collection}\0${key}`;
-    CoordinationUnavailableError = class extends Error {
-      constructor(reason, message) {
-        super(message);
-        this.reason = reason;
-        this.name = "CoordinationUnavailableError";
-      }
-      reason;
-      code = "coordination_unavailable";
-    };
+    ID_ATTEMPTS = 5;
   }
 });
 
@@ -9985,6 +10499,7 @@ var init_push = __esm({
 // packages/core/src/tasks/claim.ts
 var claim_exports = {};
 __export(claim_exports, {
+  ClaimBusyError: () => ClaimBusyError,
   TaskClaimedError: () => TaskClaimedError,
   claimKey: () => claimKey,
   claimNote: () => claimNote,
@@ -10001,8 +10516,8 @@ __export(claim_exports, {
 function claimSession(explicit) {
   return currentSession(explicit) ?? `${getDeviceId()}:${process.pid}`.replace(SESSION_SAFE, "-").slice(0, 128);
 }
-function claimsApply(collection) {
-  return isSyncableCollection(collection) && isSyncConfigured();
+function claimsApply(_collection) {
+  return true;
 }
 function utc(t, now = Math.floor(Date.now() / 1e3)) {
   const iso = new Date(t * 1e3).toISOString();
@@ -10044,7 +10559,7 @@ async function claimTask(id, collection, metadata, opts = {}) {
     return { kind: "refused", id, collection, session, conflicts: [{ lease, overlap: [`key:${id}`] }] };
   }
   let key = id;
-  if (metadata.is_synced === false) {
+  if (metadata.is_synced === false && !coordinatedLocally(collection)) {
     try {
       const r = await pushDocsNow(collection, [id]);
       key = r.renamed[id] ?? id;
@@ -10066,9 +10581,13 @@ async function claimTask(id, collection, metadata, opts = {}) {
     noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
     return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
+}
+function unavailable(e, key, collection, session) {
+  if (coordinatedLocally(collection)) throw new ClaimBusyError(key, collection, e.message);
+  return { kind: "unshared", id: key, collection, session, reason: e.message };
 }
 async function claimKey(collection, key, opts = {}) {
   if (!claimsApply(collection)) return { kind: "local", id: key };
@@ -10088,7 +10607,7 @@ async function claimKey(collection, key, opts = {}) {
     noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
     return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
 }
@@ -10171,7 +10690,7 @@ function claimNote(task, claims, mySessions = [currentSession()]) {
   if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
   return "";
 }
-var TaskClaimedError, SESSION_SAFE;
+var TaskClaimedError, SESSION_SAFE, ClaimBusyError;
 var init_claim = __esm({
   "packages/core/src/tasks/claim.ts"() {
     "use strict";
@@ -10192,6 +10711,17 @@ var init_claim = __esm({
       code = "task_claimed";
     };
     SESSION_SAFE = /[^A-Za-z0-9._:-]/g;
+    ClaimBusyError = class extends Error {
+      constructor(id, collection, cause) {
+        super(`${id} was not claimed: ${cause}. Nothing changed; try again in a moment.`);
+        this.id = id;
+        this.collection = collection;
+        this.name = "ClaimBusyError";
+      }
+      id;
+      collection;
+      code = "claim_busy";
+    };
   }
 });
 
@@ -16656,9 +17186,9 @@ var asciiTabOrNewline = /[\t\n\r]/g;
 function stripTabAndNewline(value) {
   return value.replace(asciiTabOrNewline, "");
 }
-function urlHostnameOk(url2, hostname3) {
-  hostname3.lastIndex = 0;
-  return hostname3.test(url2.hostname);
+function urlHostnameOk(url2, hostname4) {
+  hostname4.lastIndex = 0;
+  return hostname4.test(url2.hostname);
 }
 function urlProtocolOk(url2, protocol) {
   protocol.lastIndex = 0;
@@ -39710,8 +40240,9 @@ already captured in git history or in an existing memory.
 - A project's own instructions win where they keep these records elsewhere.
 
 ### Task Claims
-- In a shared collection, setting a task to \`in_progress\` claims it for
-  this session (a lease on its id); completing, blocking, resetting or
+- Setting a task to \`in_progress\` claims it for this session (a lease on
+  its id: on the sync service in a shared collection, on this machine in a
+  local-only one such as \`private-*\`); completing, blocking, resetting or
   deleting it releases the claim. Set \`in_progress\` when you start a task.
 - If the update is refused, nothing changed: tell the user who holds the
   task and since when, and offer other work. Use \`reclaim: true\` only for
@@ -40769,6 +41300,8 @@ init_claim();
 // packages/core/src/tasks/next.ts
 init_store();
 init_config();
+init_coordination();
+init_local_coordination();
 init_claim();
 
 // packages/core/src/tasks/waiting.ts
@@ -40894,12 +41427,23 @@ ${items.map((i) => waitingLine(i, opts)).join("\n")}`);
 // packages/core/src/tasks/next.ts
 var PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 var norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
+async function expiredLeaseKeys(collection) {
+  try {
+    const r = await (await requireCoordination()).leaseList(collection, true);
+    return new Set(r.leases.filter((l) => l.expired).map((l) => l.key));
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
 async function nextTasks(opts) {
   const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
   const open2 = docs.filter((d) => d.metadata.status !== "complete");
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live = claims ? [...claims.values()] : [];
+  const local2 = coordinatedLocally(opts.collection);
+  const expired = local2 ? await expiredLeaseKeys(opts.collection) : void 0;
+  const nowS = Math.floor(Date.now() / 1e3);
   const liveScope = /* @__PURE__ */ new Map();
   for (const l of live) {
     for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
@@ -40947,6 +41491,14 @@ async function nextTasks(opts) {
     if (status === "in_progress" && d.metadata.claim_unshared) {
       skipped.push({ id: d.id, reason: "in_progress (claimed on this machine, not shared yet)" });
       continue;
+    }
+    if (status === "in_progress" && local2 && !expired?.has(d.id)) {
+      const quiet = nowS - Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+      if (quiet < LEASE_TTL_DEFAULT) {
+        const left = Math.ceil((LEASE_TTL_DEFAULT - quiet) / 60);
+        skipped.push({ id: d.id, reason: `in_progress with no claim on record (started without one); offered again after ${left} min untouched` });
+        continue;
+      }
     }
     const waiting = [];
     for (const dep of norm(d.metadata.depends_on)) {
@@ -41952,10 +42504,10 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "fs";
-import { join as join4 } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync4, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
+import { join as join6 } from "path";
 function artifactDir(kind) {
-  return join4(getConfig().ARTIFACTS_DIR, kind);
+  return join6(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
@@ -41964,7 +42516,7 @@ function ensureArtifactDir(kind) {
 }
 function nextVersion(kind) {
   const dir = ensureArtifactDir(kind);
-  const files = readdirSync2(dir);
+  const files = readdirSync4(dir);
   let max = 0;
   for (const f of files) {
     const m = f.match(/^v(\d+)\./);
@@ -41977,12 +42529,12 @@ function nextVersion(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path = join4(dir, filename);
-  writeFileSync6(path, content);
+  const path = join6(dir, filename);
+  writeFileSync5(path, content);
   return path;
 }
 function artifactPath(kind, filename) {
-  return join4(artifactDir(kind), filename);
+  return join6(artifactDir(kind), filename);
 }
 
 // packages/core/src/buckets/router.ts
@@ -42532,10 +43084,10 @@ async function copiesElsewhere(id, except) {
   return out;
 }
 async function dropMovedOut(backend, collectionName, followed, stats) {
-  const local = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
-  if (local.length === 0) return;
-  const remote = await backend.collectionsByIds(local.map((d) => d.id));
-  for (const doc of local) {
+  const local2 = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
+  if (local2.length === 0) return;
+  const remote = await backend.collectionsByIds(local2.map((d) => d.id));
+  for (const doc of local2) {
     const now = remote.get(doc.id);
     if (!now || now === collectionName || followed.has(now)) continue;
     await deleteDocument2(collectionName, doc.id);
@@ -42597,10 +43149,11 @@ init_backend();
 init_health();
 
 // packages/core/src/sync/shared-cycle.ts
+init_fs_lock();
 init_config();
 import { createHash as createHash2 } from "node:crypto";
-import { closeSync, mkdirSync as mkdirSync7, openSync, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync7, writeSync } from "node:fs";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { closeSync as closeSync2, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync6, writeSync as writeSync2 } from "node:fs";
+import { dirname as dirname5, join as join7 } from "node:path";
 var DUE_FRACTION = 0.9;
 var MIN_STALE_LOCK_MS = 10 * 60 * 1e3;
 function syncTargetKey(config2 = getConfig()) {
@@ -42619,7 +43172,7 @@ function syncTargetKey(config2 = getConfig()) {
 }
 function sharedDir(config2 = getConfig()) {
   if (!config2.SYNC_COORDINATE || !config2.SYNC_HEALTH_FILE) return void 0;
-  return dirname4(config2.SYNC_HEALTH_FILE);
+  return dirname5(config2.SYNC_HEALTH_FILE);
 }
 function paths(config2 = getConfig()) {
   const dir = sharedDir(config2);
@@ -42627,34 +43180,25 @@ function paths(config2 = getConfig()) {
   const key = syncTargetKey(config2);
   return {
     dir,
-    record: join5(dir, `sync-cycle-${key}.json`),
-    lock: join5(dir, `sync-cycle-${key}.lock`),
-    pulls: join5(dir, `sync-pulls-${key}.json`)
+    record: join7(dir, `sync-cycle-${key}.json`),
+    lock: join7(dir, `sync-cycle-${key}.lock`),
+    pulls: join7(dir, `sync-pulls-${key}.json`)
   };
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync8(path, "utf-8"));
+    return JSON.parse(readFileSync10(path, "utf-8"));
   } catch {
     return void 0;
   }
 }
 function writeJson(path, value) {
   try {
-    mkdirSync7(dirname4(path), { recursive: true, mode: 448 });
+    mkdirSync7(dirname5(path), { recursive: true, mode: 448 });
     const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    writeFileSync7(tmp, JSON.stringify(value) + "\n", { mode: 384 });
-    renameSync3(tmp, path);
+    writeFileSync6(tmp, JSON.stringify(value) + "\n", { mode: 384 });
+    renameSync4(tmp, path);
   } catch {
-  }
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === "EPERM";
   }
 }
 function readCycleRecord(config2 = getConfig()) {
@@ -42676,29 +43220,29 @@ function tryAcquireCycle(opts = {}, config2 = getConfig()) {
   const alive = opts.alive ?? pidAlive;
   const staleAfter = Math.max(2 * config2.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
   const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt2 = 0; attempt2 < 2; attempt2++) {
     try {
       mkdirSync7(p.dir, { recursive: true, mode: 448 });
-      const fd = openSync(p.lock, "wx", 384);
+      const fd = openSync2(p.lock, "wx", 384);
       try {
-        writeSync(fd, JSON.stringify(body));
+        writeSync2(fd, JSON.stringify(body));
       } finally {
-        closeSync(fd);
+        closeSync2(fd);
       }
       let released = false;
       return () => {
         if (released) return;
         released = true;
         const held = readJson(p.lock);
-        if (held?.pid === process.pid && held.started_at === now) rmSync3(p.lock, { force: true });
+        if (held?.pid === process.pid && held.started_at === now) rmSync4(p.lock, { force: true });
       };
     } catch (e) {
       if (e.code !== "EEXIST") return () => {
       };
       const held = readJson(p.lock);
-      const stale = !held || !alive(held.pid) || now - held.started_at > staleAfter || held.started_at > now + 6e4;
-      if (!stale || attempt > 0) return void 0;
-      rmSync3(p.lock, { force: true });
+      const stale2 = !held || !alive(held.pid) || now - held.started_at > staleAfter || held.started_at > now + 6e4;
+      if (!stale2 || attempt2 > 0) return void 0;
+      rmSync4(p.lock, { force: true });
     }
   }
   return void 0;
@@ -42725,8 +43269,8 @@ init_sentinel();
 
 // packages/core/src/update-check.ts
 init_config();
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync9, renameSync as renameSync4, writeFileSync as writeFileSync8 } from "node:fs";
-import { dirname as dirname5, join as join6 } from "node:path";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync11, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname6, join as join8 } from "node:path";
 var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
 var FETCH_TIMEOUT_MS = 5e3;
 var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
@@ -42744,12 +43288,12 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join6(dirname5(health), "update-check.json") : void 0;
+  return health ? join8(dirname6(health), "update-check.json") : void 0;
 }
 function readUpdateState(path = updateStatePath()) {
   if (!path) return void 0;
   try {
-    const s = JSON.parse(readFileSync9(path, "utf-8"));
+    const s = JSON.parse(readFileSync11(path, "utf-8"));
     return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
   } catch {
     return void 0;
@@ -42758,10 +43302,10 @@ function readUpdateState(path = updateStatePath()) {
 function writeUpdateState(s, path = updateStatePath()) {
   if (!path) return;
   try {
-    mkdirSync8(dirname5(path), { recursive: true, mode: 448 });
+    mkdirSync8(dirname6(path), { recursive: true, mode: 448 });
     const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync8(tmp, JSON.stringify(s) + "\n", { mode: 384 });
-    renameSync4(tmp, path);
+    writeFileSync7(tmp, JSON.stringify(s) + "\n", { mode: 384 });
+    renameSync5(tmp, path);
   } catch {
   }
 }
@@ -43024,6 +43568,8 @@ async function stopSync() {
 // packages/core/src/index.ts
 init_backend();
 init_coordination();
+init_local_coordination();
+init_fs_lock();
 init_http_backend();
 init_postgres_backend();
 init_syncable();
@@ -43037,8 +43583,8 @@ init_device();
 init_config();
 init_store();
 import { createHash as createHash3 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync10, readFileSync as readFileSync12, writeFileSync as writeFileSync10 } from "fs";
-import { join as join8 } from "path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync10, readFileSync as readFileSync14, writeFileSync as writeFileSync9 } from "fs";
+import { join as join10 } from "path";
 
 // packages/core/src/training/fireworks.ts
 init_config();
@@ -43200,13 +43746,13 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync10, writeFileSync as writeFileSync9 } from "fs";
-import { join as join7 } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync12, writeFileSync as writeFileSync8 } from "fs";
+import { join as join9 } from "path";
 function registryPath() {
-  return join7(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join9(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join7(getConfig().ARTIFACTS_DIR, "adapters");
+  const dir = join9(getConfig().ARTIFACTS_DIR, "adapters");
   if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
 }
 function load() {
@@ -43214,7 +43760,7 @@ function load() {
   const path = registryPath();
   if (!existsSync3(path)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync10(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync12(path, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -43225,7 +43771,7 @@ function load() {
 }
 function save(file2) {
   ensureDir();
-  writeFileSync9(registryPath(), JSON.stringify(file2, null, 2) + "\n");
+  writeFileSync8(registryPath(), JSON.stringify(file2, null, 2) + "\n");
 }
 function addAdapter(entry) {
   const file2 = load();
@@ -43256,7 +43802,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync11 } from "fs";
+import { readFileSync as readFileSync13 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -43359,7 +43905,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path) {
-  const content = readFileSync11(path, "utf-8");
+  const content = readFileSync13(path, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -43387,7 +43933,7 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join8(getConfig().ARTIFACTS_DIR, "training-runs");
+  const dir = join10(getConfig().ARTIFACTS_DIR, "training-runs");
   if (!existsSync4(dir)) mkdirSync10(dir, { recursive: true });
   return dir;
 }
@@ -43421,8 +43967,8 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join8(dir, filename);
-  writeFileSync10(previewPath, jsonl);
+  const previewPath = join10(dir, filename);
+  writeFileSync9(previewPath, jsonl);
   return {
     manifestVersion,
     previewPath,
@@ -43438,7 +43984,7 @@ async function trainingTrigger(args) {
   if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync12(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync14(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -43990,16 +44536,16 @@ init_store();
 // packages/core/src/last-write.ts
 init_config();
 init_coordination();
-import { mkdirSync as mkdirSync11, readdirSync as readdirSync3, readFileSync as readFileSync13, renameSync as renameSync5, rmSync as rmSync4, statSync, writeFileSync as writeFileSync11 } from "node:fs";
-import { dirname as dirname6, join as join9 } from "node:path";
+import { mkdirSync as mkdirSync11, readdirSync as readdirSync5, readFileSync as readFileSync15, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname7, join as join11 } from "node:path";
 var PRUNE_AFTER_MS = 7 * 24 * 3600 * 1e3;
 var pruned = false;
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join9(dirname6(health), "last-write") : "";
+  return health ? join11(dirname7(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join9(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join11(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -44010,8 +44556,8 @@ function recordLastWrite(collection, opts = {}) {
     mkdirSync11(dir, { recursive: true, mode: 448 });
     const file2 = lastWriteFile(session, dir);
     const tmp = `${file2}.${process.pid}.tmp`;
-    writeFileSync11(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
-    renameSync5(tmp, file2);
+    writeFileSync10(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
+    renameSync6(tmp, file2);
     if (!pruned) {
       pruned = true;
       pruneLastWrites(dir, now);
@@ -44022,10 +44568,10 @@ function recordLastWrite(collection, opts = {}) {
 function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
-    for (const name of readdirSync3(dir)) {
-      const p = join9(dir, name);
+    for (const name of readdirSync5(dir)) {
+      const p = join11(dir, name);
       try {
-        if (now - statSync(p).mtimeMs > PRUNE_AFTER_MS) rmSync4(p, { force: true });
+        if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
       }
     }
@@ -44073,7 +44619,12 @@ function leaseAcquire(a) {
     const prev = r.took_over_from;
     noteLeaseHeld(session, r.lease.ttl_seconds);
     const verb = r.renewed ? "renewed" : prev?.reclaim ? `took over from ${prev.session} (your other session)` : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
-    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}` };
+    const local2 = coordinatedLocally(a.collection);
+    return {
+      exit: EXIT.ok,
+      json: { ok: true, ...r, local: local2 },
+      text: `${verb} ${a.key} to session ${session}${local2 ? " (this machine)" : ""}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}`
+    };
   });
 }
 function leaseHeartbeat(collection, session, keys) {
@@ -44082,6 +44633,13 @@ function leaseHeartbeat(collection, session, keys) {
     const r = await (await requireCoordination()).leaseHeartbeat(collection, s, keys);
     if (r.renewed.length) noteLeaseHeld(s, Math.min(...r.renewed.map((l) => l.ttl_seconds)));
     const lost = r.lost.length ? `; LOST (taken over or released): ${r.lost.join(", ")}` : "";
+    if (r.unreachable) {
+      return {
+        exit: EXIT.unavailable,
+        json: { ok: false, unavailable: true, reason: "unreachable", message: r.unreachable, renewed: r.renewed, lost: r.lost },
+        text: `renewed ${r.renewed.length} lease(s) on this machine for session ${s}${lost}; NOT renewed on the sync service: ${r.unreachable}`
+      };
+    }
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `renewed ${r.renewed.length} lease(s) for session ${s}${lost}` };
   });
 }
@@ -44104,7 +44662,7 @@ function leaseList(collection, includeExpired = false) {
 function counterNext(collection, name, floor) {
   return run(async () => {
     const value = await (await requireCoordination()).counterNext(collection, name, floor);
-    return { exit: EXIT.ok, json: { ok: true, value }, text: String(value) };
+    return { exit: EXIT.ok, json: { ok: true, value, local: coordinatedLocally(collection) }, text: String(value) };
   });
 }
 
@@ -45298,10 +45856,10 @@ ${rec}`;
   );
   server2.tool(
     "lease",
-    "Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. acquire is granted only if no live lease (anyone else's, or this user's other sessions unless reclaim) has the same key or an overlapping scope; re-acquiring your own lease renews it, keeping its scope and ttl_seconds unless you pass new ones; the answer comes from the service, not a queued push. YAPA's hooks renew this session's leases while it is active, so explicit heartbeats are rarely needed; a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.",
+    "Coordinate work between sessions and people: acquire, heartbeat, release or list leases in a collection. Shared collections are coordinated by the YAPA sync service; local-only ones (private-*, local-*, global), and every collection when sync is off, by this machine, with the same rules. acquire is granted only if no live lease (anyone else's, or this user's other sessions unless reclaim) has the same key or an overlapping scope; re-acquiring your own lease renews it, keeping its scope and ttl_seconds unless you pass new ones; the answer is immediate, not a queued push. YAPA's hooks renew this session's leases while it is active, so explicit heartbeats are rarely needed; a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). list doubles as presence (who is working on what). If the service is unreachable for a shared collection nothing is shared: say so and coordinate locally.",
     {
       action: external_exports.enum(["acquire", "heartbeat", "release", "list"]),
-      collection: external_exports.string().optional().describe("Shared collection (not global/private-*/local-*), e.g. project-acme; heartbeat without it renews the session's leases everywhere"),
+      collection: external_exports.string().optional().describe("Collection, e.g. project-acme or private-acme (this machine only); heartbeat without it renews the session's leases everywhere"),
       key: external_exports.string().optional().describe("acquire/release: what is leased, e.g. a task id or record id"),
       session: external_exports.string().optional().describe("Holder within your user; defaults to this Claude Code session (the hooks renew its leases automatically)"),
       scope: external_exports.array(external_exports.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included. Omitted on a renewal: the stored scope is kept'),
@@ -45323,9 +45881,9 @@ ${rec}`;
   );
   server2.tool(
     "counter_next",
-    "Take the next value of an atomic counter in a shared collection on the YAPA sync service (e.g. numbered record ids). Never hands out a value twice, and never one at or below floor (pass the highest id you already have).",
+    "Take the next value of an atomic counter in a collection (e.g. numbered record ids): on the YAPA sync service for a shared collection, on this machine for a local-only one (private-*, local-*, global) or with sync off. Never hands out a value twice, and never one at or below floor (pass the highest id you already have).",
     {
-      collection: external_exports.string().describe("Shared collection, e.g. project-acme"),
+      collection: external_exports.string().describe("Collection, e.g. project-acme or private-acme"),
       name: external_exports.string().describe("Counter name, e.g. RFC, INCIDENT-2026"),
       floor: external_exports.number().int().min(0).optional().describe("Highest value already in use locally")
     },

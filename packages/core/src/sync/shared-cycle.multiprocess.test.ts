@@ -84,7 +84,8 @@ describe('six servers on one machine', () => {
     const log = join(dir, 'b.log');
     // One server that "hangs" in its cycle, then dies holding the lock.
     const hung = start(log, state, 60_000);
-    await new Promise(r => setTimeout(r, 600));
+    // Wait for its cycle to start (a fixed delay is too short on a loaded machine).
+    for (let t = 0; t < 5000 && lines(log).length < 1; t += 50) await new Promise(r => setTimeout(r, 50));
     expect(lines(log).length).toBe(1);
     expect(readdirSync(state).some(f => f.endsWith('.lock'))).toBe(true);
     hung.kill('SIGKILL');
