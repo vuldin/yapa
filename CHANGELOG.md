@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 (2026-11-02)
+
+The status line now names the collection this session last wrote to.
+
+**Upgrading:** update the plugin and restart Claude Code. Nothing to deploy.
 
 ### Features
 - **The status line names the collection you last wrote to:** `yapa@v1.8.0 <-> acme ● synced 1m ago | project-acme`. Every write through the YAPA tools or the `yapa memory` / `yapa task` CLI (memories stored, updated or forgotten, tasks created, updated, claimed, completed or deleted, dependencies, journal entries, compaction, merges) notes its collection for the session in `~/.local/share/yapa/last-write/<session id>.json`; the status line reads the session id Claude Code sends it. Nothing shows before the session's first write, and sync pulls, decay and the janitor never change it. Records untouched for a week are removed.
