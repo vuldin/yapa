@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.10.3 (2026-11-03)
+
+The status line always says which collection a session writes to and whether it stays on this machine, and `yapa scope` tells a project's scripts which collection their folder uses.
+
+**Upgrading:** update the plugin and restart Claude Code. Nothing to deploy.
 
 ### Features
 - **The status line always says where a session writes, and whether that is private.** Before a session's first write it shows the collection its hooks detected for the folder (`collection_map`, then `project_roots`), so a session that only reads still shows one. A collection that never leaves this machine is tagged: `| private-acme (local only)`. Leases and counters (`lease`, `counter_next`, `yapa coord`) now count as writes.
