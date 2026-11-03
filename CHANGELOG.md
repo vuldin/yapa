@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **No false "restart" note when a session resumes.** A resumed session's transcript is old, so for the few seconds before its new YAPA server reported, the status line showed `yapa (restart for v...)`. The session-start hook (which also runs on resume) now notes each start (`sessions/<id>.starting`), and the status line waits a minute from then before concluding that no new server is running.
+
 ## 1.10.1 (2026-11-03)
 
 The status line now shows the YAPA each session actually runs, and says when a session needs a restart to load the installed one.

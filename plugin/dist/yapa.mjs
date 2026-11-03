@@ -9153,6 +9153,15 @@ function recordSessionStart(version, opts = {}) {
     return void 0;
   }
 }
+function noteSessionStarting(session, opts = {}) {
+  const id = sessionId(session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!id || !dir) return;
+  try {
+    writeJsonAtomic(sessionRecordFile(id, dir).replace(/\.json$/, ".starting"), { at: opts.now ?? Date.now() });
+  } catch {
+  }
+}
 function removeSessionRecord(opts = {}) {
   const session = sessionId(opts.session);
   const dir = opts.dir ?? sessionRecordDir();
@@ -9168,8 +9177,15 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      if (!name.endsWith(".json")) continue;
       const p = join13(dir, name);
+      if (name.endsWith(".starting")) {
+        try {
+          if (now - statSync3(p).mtimeMs > 24 * 3600 * 1e3) rmSync6(p, { force: true });
+        } catch {
+        }
+        continue;
+      }
+      if (!name.endsWith(".json")) continue;
       try {
         const r = JSON.parse(readFileSync17(p, "utf-8"));
         if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
@@ -9405,6 +9421,7 @@ __export(src_exports, {
   noteInstalledVersion: () => noteInstalledVersion,
   noteLeaseHeld: () => noteLeaseHeld,
   noteLeaseReleased: () => noteLeaseReleased,
+  noteSessionStarting: () => noteSessionStarting,
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
   openWaits: () => openWaits,
@@ -9694,6 +9711,7 @@ __export(statusline_exports, {
   readHealth: () => readHealth,
   readLastWrite: () => readLastWrite2,
   readSessionRecord: () => readSessionRecord,
+  readSessionStarting: () => readSessionStarting,
   readUpdate: () => readUpdate,
   removeStatusLine: () => removeStatusLine,
   renderSegment: () => renderSegment,
@@ -9839,9 +9857,22 @@ function readSessionRecord(dir, sessions) {
   }
   return best;
 }
-function sessionInfo(record, ageMs) {
+function readSessionStarting(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const at = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
+      if (typeof at === "number" && (best === void 0 || at > best)) best = at;
+    } catch {
+    }
+  }
+  return best;
+}
+function sessionInfo(record, ageMs, startedAt, now = Date.now()) {
   if (record) return { version: record.version };
-  if (ageMs !== void 0 && ageMs > SESSION_REPORT_GRACE_MS) return { missing: true };
+  const sinceStart = startedAt !== void 0 ? now - startedAt : ageMs;
+  if (sinceStart !== void 0 && sinceStart > SESSION_REPORT_GRACE_MS) return { missing: true };
   return void 0;
 }
 function readUpdate(path3) {
@@ -10000,7 +10031,8 @@ async function main(args, self2) {
   const info = stdinInfo(input2);
   const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
   const last = readLastWrite2(join14(dirname9(healthPath), "last-write"), ids);
-  const session = sessionInfo(readSessionRecord(join14(dirname9(healthPath), "sessions"), ids), info.ageMs);
+  const sessionsDir = join14(dirname9(healthPath), "sessions");
+  const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
@@ -10299,6 +10331,7 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
   }
 }
 async function sessionStart(input2) {
+  noteSessionStarting(input2.session_id);
   const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
   const pulled = await freshenFromRemote(collection);
