@@ -100,3 +100,4 @@ export * from './tasks/close.js';
 export * from './curation/follow-through.js';
 export * from './update-check.js';
 export * from './last-write.js';
+export { withDocLock } from './doc-lock.js';

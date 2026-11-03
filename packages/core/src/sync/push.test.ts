@@ -70,6 +70,22 @@ describe('pushToRemote over the local store', () => {
     expect(after.map(d => d.id)).toEqual(['__decay_sentinel__']); // sentinel untouched, mem-1 now synced
   });
 
+  it('a doc edited while its push ran keeps the edit and stays unsynced for the next push', async () => {
+    const store = (await import('../store/index.js')).getStore();
+    await store.addDocument('project-acme', 'mem-race', 'the cache is 4 GB', { type: 'memory', is_synced: false, updated_at: 1 });
+    // Another session edits it while the remote is answering.
+    vi.mocked(upsertRemoteDocument).mockImplementationOnce(async () => {
+      await store.updateDocument('project-acme', 'mem-race', { type: 'memory', is_synced: false, updated_at: 2, tags: ['edited'] });
+    });
+    await pushToRemote();
+    const [after] = await getDocumentsByIds('project-acme', ['mem-race']);
+    expect(after.metadata).toMatchObject({ is_synced: false, updated_at: 2, tags: ['edited'] });
+    // The next push sends the edited version and marks it synced.
+    await pushToRemote();
+    expect((vi.mocked(upsertRemoteDocument).mock.calls.at(-1)![0] as any)).toMatchObject({ id: 'mem-race' });
+    expect((await getDocumentsByIds('project-acme', ['mem-race']))[0].metadata).toMatchObject({ is_synced: true, tags: ['edited'] });
+  });
+
   it('links instead of duplicating when the remote has a similar doc', async () => {
     vi.mocked(findSimilarRemote).mockResolvedValueOnce([{ id: 'remote-9' } as any]);
     const store = (await import('../store/index.js')).getStore();

@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getDocumentsByIds } from '../store/index.js';
 import { storeMemory } from './store.js';
-import { recallMemory } from './recall.js';
+import { recallMemory, settleRecallBoosts } from './recall.js';
+import { updateMemory } from './update.js';
 
 let dir: string;
 let portId: string;
 let lunchId: string;
 const sal = async (id: string) => (await getDocumentsByIds('global', [id]))[0].metadata.salience;
-const settle = () => new Promise(r => setTimeout(r, 50)); // boosts are written fire-and-forget
+const settle = () => settleRecallBoosts(); // boosts are written fire-and-forget
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'yapa-recall-'));
@@ -21,7 +22,8 @@ beforeAll(async () => {
   lunchId = (await storeMemory('Team lunch is on Fridays at the taco place', { collection: 'global', salience: 2 })).ids[0];
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await settleRecallBoosts();
   rmSync(dir, { recursive: true, force: true });
   resetStore();
   resetConfig();
@@ -65,3 +67,17 @@ describe('recallMemory cross-collection', () => {
     expect(foreign[0].distance).toBeLessThan(0.45);
   });
 });
+
+describe('recall boost and concurrent edits', () => {
+  it('a boost written after another session edited the memory keeps the edit', async () => {
+    const id = (await storeMemory('The staging cluster runs three brokers in one zone', { collection: 'global', salience: 2 })).ids[0];
+    await recallMemory('The staging cluster runs three brokers in one zone', { collection: 'global', nResults: 1 });
+    // The boost is still being written: another session edits the memory meanwhile.
+    await updateMemory(id, { tags: ['edited-elsewhere'] }, 'global');
+    await settleRecallBoosts();
+    const [d] = await getDocumentsByIds('global', [id]);
+    expect(d.metadata.tags).toEqual(['edited-elsewhere']);
+    expect(d.metadata.salience).toBeGreaterThan(2);
+  });
+});
+

@@ -11,7 +11,7 @@
  * sync is back, and a clash found then is reported on the next prompt.
  */
 import { getConfig } from '../config.js';
-import { getDocumentsByFilter, getDocumentsByIds, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, getDocumentsByIds, listCollections, patchDocument } from '../store/index.js';
 import { getDeviceId } from '../sync/device.js';
 import { isSyncConfigured, type Lease } from '../sync/backend.js';
 import {
@@ -238,9 +238,8 @@ export async function retryUnsharedClaims(): Promise<{ granted: number; refused:
         continue;
       }
       if (r.kind === 'unshared' || r.kind === 'local') return out; // still offline: try again later
-      const [cur] = await getDocumentsByIds(col.name, [r.id]).catch(() => []);
-      // '' rather than a deleted key: a store update merges metadata keys.
-      if (cur) await updateDocument(col.name, r.id, { ...cur.metadata, claim_unshared: '' });
+      // Only the marker: the rest of the task is left as it is now.
+      await patchDocument(col.name, r.id, { claim_unshared: '' }).catch(() => undefined);
       if (r.kind === 'granted') {
         out.granted++;
       } else {

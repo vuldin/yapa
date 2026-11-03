@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 
 import { CLASSIFIER_PROMPT_VERSION, classifyMemories } from './classifier.js';
 
@@ -84,7 +84,7 @@ export async function curationCycle(): Promise<CurationStats | null> {
             if (result.rationale) updated.classification_rationale = result.rationale;
 
             try {
-              await updateDocument(c.name, doc.id, updated);
+              await patchDocument(c.name, doc.id, metadataDelta(doc.metadata, updated));
               stats.scored++;
             } catch (e) {
               process.stderr.write(`[yapa-curation] Update error for ${doc.id}: ${e}\n`);

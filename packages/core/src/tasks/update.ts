@@ -1,7 +1,8 @@
 import { getConfig } from '../config.js';
 import { captureNudge, recordForTask, validateLearned, type FollowUp, type LearnedItem, type Recorded } from './close.js';
-import { updateDocument, getDocumentsByIds, listCollections, addDocument } from '../store/index.js';
+import { getDocumentsByIds, listCollections, addDocument, metadataDelta, patchDocument } from '../store/index.js';
 import { fromChroma } from '../metadata-adapter.js';
+import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
@@ -45,6 +46,8 @@ export interface TaskUpdateResult {
   id: string;
   claim?: ClaimResult;
   release?: ReleaseResult;
+  /** The status the task had just before this update was written (read under the lock). */
+  previousStatus?: string;
 }
 
 /** Caller context for an update: who is acting, and claim options for a move to in_progress. */
@@ -85,28 +88,42 @@ export async function updateTask(
   const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
-  const updatedMetadata: Record<string, any> = {
-    ...task.metadata,
-    ...updates,
-    updated_at: Math.floor(Date.now() / 1000),
-  };
-  if (hasStructuralChange) updatedMetadata.is_synced = false;
-  // A reason belongs to the block: leaving blocked clears it ('' because a store update merges keys).
-  if (updates.status !== undefined && updates.status !== 'blocked' && updates.blockedReason === undefined && task.metadata.blockedReason) {
-    updatedMetadata.blockedReason = '';
-  }
-  // Local-only marker: an offline claim to retry once sync is back.
-  if (result.claim?.kind === 'unshared') updatedMetadata.claim_unshared = result.claim.session;
-  // Cleared with '' rather than deleted: a store update merges metadata keys.
-  else if (updates.status !== undefined && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = '';
+  // The write itself, under the task's lock and over the task as it is now:
+  // another session's change since the read above is kept, not reverted.
+  const t = task;
+  const prev = await withDocLock(t.collection, t.id, async () => {
+    const cur = (await getDocumentsByIds(t.collection, [t.id]))[0];
+    if (!cur) throw new Error(`Task ${t.id} not found`);
+    const updatedMetadata: Record<string, any> = {
+      ...cur.metadata,
+      ...updates,
+      updated_at: Math.floor(Date.now() / 1000),
+    };
+    // First completion wins, judged on the task as it is now (two sessions
+    // completing it at once keep the earlier close time).
+    if (updates.completed_at != null && cur.metadata.completed_at != null) updatedMetadata.completed_at = cur.metadata.completed_at;
+    if (hasStructuralChange) updatedMetadata.is_synced = false;
+    // A reason belongs to the block: leaving blocked clears it ('' because a store update merges keys).
+    if (updates.status !== undefined && updates.status !== 'blocked' && updates.blockedReason === undefined && cur.metadata.blockedReason) {
+      updatedMetadata.blockedReason = '';
+    }
+    // Local-only marker: an offline claim to retry once sync is back.
+    if (result.claim?.kind === 'unshared') updatedMetadata.claim_unshared = result.claim.session;
+    // Cleared with '' rather than deleted: a store update merges metadata keys.
+    else if (updates.status !== undefined && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = '';
 
-  // The title is the document content (what search embeds): rewrite the doc
-  // so the embedding follows, instead of only the metadata copy.
-  if (updates.title !== undefined && updates.title !== task.title) {
-    await addDocument(task.collection, task.id, updates.title, updatedMetadata);
-  } else {
-    await updateDocument(task.collection, task.id, updatedMetadata);
-  }
+    // The title is the document content (what search embeds): rewrite the doc
+    // so the embedding follows, instead of only the metadata copy.
+    if (updates.title !== undefined && updates.title !== cur.content) {
+      await addDocument(t.collection, t.id, updates.title, updatedMetadata);
+    } else {
+      // As a patch over the task as it is now: a field written meanwhile
+      // without this lock (a boost, a push marker) is kept too.
+      await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
+    }
+    return cur.metadata.status as string | undefined;
+  });
+  result.previousStatus = prev;
 
   // A granted claim is visible to teammates at once, not after the debounce.
   if (result.claim?.kind === 'granted') {
@@ -144,15 +161,16 @@ export async function completeTask(
     completionUpdates.duration_minutes = durationMinutes;
   }
 
-  const { release } = await updateTask(id, completionUpdates, ctx);
+  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
   const recorded = record.learned?.length || record.follow_ups?.length
     ? await recordForTask({ id: task.id, collection: task.collection }, record)
     : undefined;
   const nudge = captureNudge(task.id, task.metadata, recorded);
   const extras = { ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
 
-  // Handle recurring tasks
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
+  // Handle recurring tasks: once, by whichever completion found it still open
+  // (two sessions completing it at once must not create two next occurrences).
+  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== 'complete') {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1000),
       task.metadata.recurrence_pattern,

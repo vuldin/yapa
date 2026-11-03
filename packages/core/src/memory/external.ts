@@ -8,6 +8,7 @@
  *
  * @module @yapa/core/memory/external
  */
+import { withDocLock } from '../doc-lock.js';
 import { getDocumentsByFilter, getOrCreateCollection } from '../store/index.js';
 import { carryTyped, normalizeTyped, type TypedFields } from './kinds.js';
 import { storeMemory } from './store.js';
@@ -37,6 +38,12 @@ export async function putExternal(collection: string, ref: string, put: External
   if (!ref.trim()) throw new Error('external_ref is required');
   const typed = normalizeTyped({ ...put.typed, external_ref: ref });
   await getOrCreateCollection(collection);
+  // Find-or-create under the ref's lock: two sessions putting one ref at once
+  // make one memory, not two.
+  return withDocLock(collection, `external_ref:${ref}`, () => putLocked(collection, ref, put, typed));
+}
+
+async function putLocked(collection: string, ref: string, put: ExternalPut, typed: ReturnType<typeof normalizeTyped>): Promise<ExternalPutResult> {
   const existing = await findExternal(collection, ref);
   if (!existing) {
     const r = await storeMemory(put.content, { collection, tags: put.tags, typed });

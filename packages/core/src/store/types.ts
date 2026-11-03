@@ -75,6 +75,15 @@ export interface VectorStore {
     collection: string,
     entries: Array<{ id: string; metadata: Record<string, any> }>,
   ): Promise<void>;
+  /**
+   * Merge each `patch` into its document's metadata as it is now: named keys
+   * are set, a `null` value removes the key, every other key is kept. Ids
+   * that don't exist are skipped. For writers that change a few fields
+   * (salience boosts, archiving, tags): unlike `updateDocument` with a copy
+   * read earlier, it can't revert another session's change to other fields.
+   * One request (Chroma) or one flush (local store).
+   */
+  patchDocuments(collection: string, entries: Array<{ id: string; patch: Record<string, any> }>): Promise<void>;
   deleteDocument(collection: string, id: string): Promise<void>;
   /** Cross-collection delete; resolves to the collection that held the id. */
   findAndDeleteDocument(id: string): Promise<string>;

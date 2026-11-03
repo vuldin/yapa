@@ -1,4 +1,4 @@
-import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 import { getAdapter, updateAdapter } from './registry.js';
 
 const MAX_PER_COLLECTION = 2000;
@@ -58,17 +58,13 @@ export async function adapterPromote(args: PromoteArgs): Promise<PromoteResult> 
         if (d.metadata.selected_for !== target) continue;
 
         if (d.metadata.verification_last_result === 'passed') {
-          await updateDocument(c.name, d.id, {
-            ...d.metadata,
-            promoted_to: target,
-            promoted_at: now,
-          });
+          await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
         } else {
           const updated = { ...d.metadata };
           delete updated.selected_for;
           delete updated.selected_at;
-          await updateDocument(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBackSelections++;
         }
       }
@@ -109,7 +105,7 @@ export async function adapterDemote(adapterId: string): Promise<DemoteResult> {
           const updated = { ...d.metadata };
           delete updated.promoted_to;
           delete updated.promoted_at;
-          await updateDocument(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBack++;
         }
       }

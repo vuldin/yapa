@@ -1,4 +1,4 @@
-import { queryDocuments, queryAllCollections, updateDocument } from '../store/index.js';
+import { metadataDelta, patchDocuments, queryDocuments, queryAllCollections } from '../store/index.js';
 import { getConfig } from '../config.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
 import {
@@ -105,6 +105,7 @@ export async function recallMemory(
   // use, and boosting it fed a rich-get-richer loop: higher salience → ranked
   // higher → surfaced more → boosted more.
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
+  const boosts = new Map<string, Array<{ id: string; patch: Record<string, any> }>>();
   for (const r of results) {
     if (options.boost === false || r.distance >= boostMaxDistance) continue;
     if (r.collection) {
@@ -115,9 +116,25 @@ export async function recallMemory(
         sector: r.metadata.sector ?? 'episodic',
       };
       const boosted = touchDocument(lifecycleMeta);
-      updateDocument(r.collection, r.id, { ...r.metadata, ...boosted }).catch(() => {});
+      // Only the boosted fields, merged into the doc as it is now: writing
+      // back this query-time copy would revert another session's edit.
+      const patch = metadataDelta(r.metadata, { ...r.metadata, ...boosted });
+      if (Object.keys(patch).length) boosts.set(r.collection, [...(boosts.get(r.collection) ?? []), { id: r.id, patch }]);
     }
   }
+  // Not awaited (recall stays fast); one patch per collection.
+  for (const [collection, entries] of boosts) track(patchDocuments(collection, entries).catch(() => {}));
 
   return results;
+}
+
+const pendingBoosts = new Set<Promise<void>>();
+function track(p: Promise<void>): void {
+  pendingBoosts.add(p);
+  p.finally(() => pendingBoosts.delete(p));
+}
+
+/** Wait for salience boosts still being written (before exiting, or removing a test store). */
+export async function settleRecallBoosts(): Promise<void> {
+  while (pendingBoosts.size) await Promise.all([...pendingBoosts]);
 }
