@@ -12,7 +12,7 @@
  *   2  bad arguments or input the service rejected
  *   1  any other error
  */
-import { coordinatedLocally, currentSession, getDeviceId, isCoordinationUnavailable, noteLeaseHeld, requireCoordination, type Lease } from '@yapa/core';
+import { coordinatedLocally, currentSession, getDeviceId, isCoordinationUnavailable, noteLeaseHeld, recordLastWrite, requireCoordination, type Lease } from '@yapa/core';
 
 // Re-exported so the CLI never imports the whole @yapa/core namespace (it would defeat tree-shaking).
 export { currentSession };
@@ -87,6 +87,7 @@ export function leaseAcquire(a: AcquireArgs): Promise<CoordResult> {
       : prev?.reclaim ? `took over from ${prev.session} (your other session)`
         : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : 'granted';
     const local = coordinatedLocally(a.collection);
+    recordLastWrite(a.collection);
     return {
       exit: EXIT.ok,
       json: { ok: true, ...r, local },
@@ -116,7 +117,10 @@ export function leaseRelease(collection: string, key: string, session?: string, 
   return run(async () => {
     const s = session ?? defaultSession();
     const r = await (await requireCoordination()).leaseRelease(collection, key, s, outcome);
-    if (r.released) return { exit: EXIT.ok, json: { ok: true, ...r }, text: `released ${key} (${outcome ?? 'done'})` };
+    if (r.released) {
+      recordLastWrite(collection);
+      return { exit: EXIT.ok, json: { ok: true, ...r }, text: `released ${key} (${outcome ?? 'done'})` };
+    }
     if (r.reason === 'not_held') return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${key} is not leased` };
     return { exit: EXIT.refused, json: { ok: false, ...r }, text: `${key} is not yours to release: ${describeLease(r.lease)}` };
   });
@@ -135,6 +139,7 @@ export function leaseList(collection: string, includeExpired = false): Promise<C
 export function counterNext(collection: string, name: string, floor?: number): Promise<CoordResult> {
   return run(async () => {
     const value = await (await requireCoordination()).counterNext(collection, name, floor);
+    recordLastWrite(collection);
     return { exit: EXIT.ok, json: { ok: true, value, local: coordinatedLocally(collection) }, text: String(value) };
   });
 }

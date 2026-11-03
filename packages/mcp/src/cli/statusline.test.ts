@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 
 import {
   renderSegment, formatAgo, mergeStatusLine, removeStatusLine, isYapaStatusLine, encodeWrapped, installStatusLine,
-  uninstallStatusLine, hasStatusLine, readLastWrite, readSessionRecord, readSessionStarting, sessionInfo, stdinInfo, stdinSession, type HealthRecord,
+  uninstallStatusLine, hasStatusLine, readLastWrite, readSessionRecord, readSessionScope, readSessionStarting, sessionInfo, isLocalOnly, stdinInfo, stdinSession, type HealthRecord,
 } from './statusline.js';
 
 const NOW = new Date(2026, 10, 1, 15, 0).getTime();
@@ -59,6 +59,10 @@ describe('renderSegment', () => {
     expect(renderSegment(rec({}), NOW, { ...v, collection, color: true })).toMatch(/\x1b\[0m \| project-acme$/);
     expect(renderSegment(rec({}), NOW, { ...v, collection: '\x1b[31mproject-acme ' })).toBe('yapa@v1.6.0 ● synced 1m ago | [31mproject-acme');
     expect(renderSegment(rec({}), NOW, { ...v, collection: ' ' })).toBe('yapa@v1.6.0 ● synced 1m ago');
+    // A collection that never leaves this machine says so.
+    expect(renderSegment(rec({}), NOW, { ...v, collection: 'private-acme' })).toBe('yapa@v1.6.0 ● synced 1m ago | private-acme (local only)');
+    expect(renderSegment(rec({}), NOW, { ...v, collection: 'global' })).toBe('yapa@v1.6.0 ● synced 1m ago | global (local only)');
+    expect(isLocalOnly('local-x') && !isLocalOnly('project-private-x')).toBe(true);
   });
 
   it("shows this session's own YAPA, and when only a restart loads the installed one", () => {
@@ -142,6 +146,9 @@ describe('session records', () => {
       writeFileSync(join(dir, 'r.starting'), JSON.stringify({ at: 7 }));
       writeFileSync(join(dir, 'r2.starting'), JSON.stringify({ at: 9 }));
       expect(readSessionStarting(dir, ['r', 'r2', 'none'])).toBe(9);
+      writeFileSync(join(dir, 'r.scope'), JSON.stringify({ collection: 'private-a', at: 3 }));
+      writeFileSync(join(dir, 'r2.scope'), JSON.stringify({ collection: 'project-b', at: 4 }));
+      expect(readSessionScope(dir, ['r', 'r2'])).toBe('project-b');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -258,6 +265,20 @@ describe('the script as Claude Code runs it', () => {
     writeFileSync(join(d, 'sessions', 'resumed.starting'), JSON.stringify({ at: Date.now() - 2000 }));
     expect(runAs('{"session_id":"resumed","cost":{"total_duration_ms":90000000}}')).toBe('yapa@v1.6.0 <-> acme ● synced just now\n');
     rmSync(join(d, 'sessions'), { recursive: true });
+  });
+
+  it('before its first write, a session shows the collection its hooks detected; a write then wins', () => {
+    writeFileSync(join(d, 'sync-health.json'), JSON.stringify({ status: 'ok', at: Date.now(), last_ok_at: Date.now(), remote: 'acme' }));
+    mkdirSync(join(d, 'sessions'), { recursive: true });
+    mkdirSync(join(d, 'last-write'), { recursive: true });
+    writeFileSync(join(d, 'sessions', 'sc.scope'), JSON.stringify({ collection: 'private-acme', at: 1 }));
+    expect(run([], { CLAUDE_CODE_SESSION_ID: '' }).stdout).toBe('yapa@v1.6.0 <-> acme ● synced just now\n'); // session "s": nothing
+    const runAs = (sid: string) => spawnSync(process.execPath, [bundled], { input: JSON.stringify({ session_id: sid }), encoding: 'utf-8', env: { ...process.env, NO_COLOR: '1', CLAUDE_CODE_SESSION_ID: '' } }).stdout;
+    expect(runAs('sc')).toBe('yapa@v1.6.0 <-> acme ● synced just now | private-acme (local only)\n');
+    writeFileSync(join(d, 'last-write', 'sc.json'), JSON.stringify({ collection: 'project-acme', at: 2 }));
+    expect(runAs('sc')).toBe('yapa@v1.6.0 <-> acme ● synced just now | project-acme\n');
+    rmSync(join(d, 'sessions'), { recursive: true });
+    rmSync(join(d, 'last-write'), { recursive: true });
   });
 
   it('a missing record still prints a line', () => {

@@ -11,10 +11,12 @@
 // `<->` is printed as is, so a font with programming ligatures draws one
 // arrow; it appears only when the remote has a name (option remote_name).
 // After ` | ` comes the collection this session last wrote to
-// (last-write/<session>.json, packages/core last-write.ts), once it has
-// written one:
+// (last-write/<session>.json, packages/core last-write.ts), or before its
+// first write the one its hooks detected (sessions/<id>.scope), tagged
+// `(local only)` when it never leaves this machine:
 //
 //   yapa@v1.8.0 <-> acme ● synced 1m ago | project-acme
+//   yapa@v1.8.0 <-> acme ● synced 1m ago | private-acme (local only)
 //
 // SELF-CONTAINED: node built-ins only, no local imports. It is copied as a
 // single file to a stable path (~/.local/share/yapa/statusline.mjs) because
@@ -148,7 +150,9 @@ export function renderSegment(health: HealthRecord | undefined, now: number, opt
     + (remote ? ` <-> ${remote}` : '');
   const push = health?.unpushed ? ` · ${health.unpushed} to push` : '';
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : '';
-  const tail = cleanCollection(opts.collection);
+  const name = cleanCollection(opts.collection);
+  // Where this session writes, and whether that ever leaves the machine.
+  const tail = name ? `${name}${isLocalOnly(name) ? ' (local only)' : ''}` : undefined;
   const state = (tone: Tone, text: string) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ''}`;
 
   if (!health) return state('dim', '○ sync status unknown');
@@ -173,6 +177,11 @@ export function renderSegment(health: HealthRecord | undefined, now: number, opt
     default:
       return state('dim', '○ sync status unknown');
   }
+}
+
+/** Never synced (the same rule as core's isSyncableCollection; this file stays self-contained). */
+export function isLocalOnly(name: string): boolean {
+  return name === 'global' || name.startsWith('private-') || name.startsWith('local-');
 }
 
 function cleanCollection(name: unknown): string | undefined {
@@ -261,6 +270,21 @@ export function readSessionRecord(dir: string, sessions: Array<string | undefine
 
 /** A session this old without a live server record runs a YAPA too old to report one (or none). */
 export const SESSION_REPORT_GRACE_MS = 60_000;
+
+/** The collection the hooks last detected for the newest of `sessions` (sessions/<id>.scope). */
+export function readSessionScope(dir: string, sessions: Array<string | undefined>): string | undefined {
+  let best: { collection: string; at: number } | undefined;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, '_')}.scope`), 'utf-8'));
+      if (typeof r?.collection === 'string' && typeof r.at === 'number' && (!best || r.at > best.at)) best = r;
+    } catch {
+      // none
+    }
+  }
+  return best?.collection;
+}
 
 /**
  * When the newest of `sessions` was (re)started, per its session-start hook
@@ -489,9 +513,11 @@ export async function main(args: string[], self: string): Promise<void> {
   const last = readLastWrite(join(dirname(healthPath), 'last-write'), ids);
   const sessionsDir = join(dirname(healthPath), 'sessions');
   const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
+  // The collection last written to; before any write, the one the hooks detected.
+  const collection = last?.collection ?? readSessionScope(sessionsDir, ids);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
-    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection: last?.collection, session,
+    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection, session,
   }) + '\n');
 }
 

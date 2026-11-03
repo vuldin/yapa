@@ -22,8 +22,9 @@ sync health record and its daily release check (no network calls of its own):
   than the one installed (or never reported its version); restart the
   session to load it.
 - `| project-acme`: the collection this session last wrote to (a memory,
-  task, journal entry or merge through YAPA). Absent until the session's
-  first write.
+  task, journal entry, merge, lease or counter through YAPA); before its
+  first write, the collection its hooks detected for the folder.
+  `(local only)` marks one that never leaves this machine.
 
 YAPA adds it by itself at session start while the option `statusline` is on
 (the default), unless the user removed it.

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **The status line always says where a session writes, and whether that is private.** Before a session's first write it shows the collection its hooks detected for the folder (`collection_map`, then `project_roots`), so a session that only reads still shows one. A collection that never leaves this machine is tagged: `| private-acme (local only)`. Leases and counters (`lease`, `counter_next`, `yapa coord`) now count as writes.
+- **`yapa scope [--cwd DIR]`** prints the collection YAPA uses for a folder, with `local_only` and `mapped`, so a project's scripts can ask instead of naming a collection themselves. `collection_map` stays the one place a folder's collection is set.
+
 ## 1.10.2 (2026-11-03)
 
 No false "restart" note on the status line while a resumed session's YAPA server starts.

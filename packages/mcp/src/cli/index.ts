@@ -15,7 +15,8 @@ const USAGE =
   '       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n' +
   '       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n' +
   '       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n' +
-  '       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n';
+  '       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n' +
+  '       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n';
 
 const COORD_USAGE =
   'Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n' +
@@ -236,6 +237,15 @@ async function main(): Promise<void> {
     const r = command === 'waiting' ? await m.runWaiting(args) : await m.runMemory(sub, rest);
     process.stdout.write((args.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
     await exitAfterFlush(r.exit);
+  }
+  if (command === 'scope') {
+    const args = [sub, ...rest].filter((a): a is string => a !== undefined);
+    const { runScope, scopeCwd } = await import('./scope.js');
+    // The folder's own settings (a project-scoped install), read before core's config.
+    adoptCliEnv(scopeCwd(args));
+    const r = await runScope(args);
+    process.stdout.write((args.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
+    await exitAfterFlush(0);
   }
   if (command === 'hooks') {
     await runHooksCommand(sub, rest);
