@@ -1,11 +1,6 @@
 import { getConfig } from '../config.js';
 import { archivedMetadata } from './archive.js';
-import {
-  getDocumentsByFilter,
-  getDocumentsByIds,
-  queryDocuments,
-  updateDocument,
-} from '../store/index.js';
+import { getDocumentsByFilter, getDocumentsByIds, metadataDelta, patchDocument, queryDocuments } from '../store/index.js';
 
 import { storeMemory } from './store.js';
 import { isMemoryKind } from './kinds.js';
@@ -129,7 +124,7 @@ export async function applyCompaction(input: ApplyCompactionInput): Promise<Appl
     try {
       const existing = await getDocumentsByIds(input.collection, [id]);
       if (!existing.length) continue;
-      await updateDocument(input.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
+      await patchDocument(input.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
       process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}\n`);
@@ -139,10 +134,7 @@ export async function applyCompaction(input: ApplyCompactionInput): Promise<Appl
   try {
     const summaryDocs = await getDocumentsByIds(input.collection, [summaryId]);
     if (summaryDocs.length) {
-      await updateDocument(input.collection, summaryId, {
-        ...summaryDocs[0].metadata,
-        compacted_from: archivedIds,
-      });
+      await patchDocument(input.collection, summaryId, { compacted_from: archivedIds });
     }
   } catch (e) {
     process.stderr.write(`[yapa] compact: failed to set back-reference on summary: ${e}\n`);

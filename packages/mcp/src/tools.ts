@@ -1368,18 +1368,19 @@ export function registerTools(server: McpServer): void {
     },
   );
 
-  // --- Coordination (leases and counters on the sync service) ---
+  // --- Coordination (leases and counters: the sync service, or this machine) ---
   server.tool(
     'lease',
-    'Coordinate work between sessions and people through the YAPA sync service: acquire, heartbeat, release or list leases in a shared collection. '
+    'Coordinate work between sessions and people: acquire, heartbeat, release or list leases in a collection. Shared collections are coordinated by the YAPA sync service; '
+      + 'local-only ones (private-*, local-*, global), and every collection when sync is off, by this machine, with the same rules. '
       + 'acquire is granted only if no live lease (anyone else\'s, or this user\'s other sessions unless reclaim) has the same key or an overlapping scope; '
       + 're-acquiring your own lease renews it, keeping its scope and ttl_seconds unless you pass new ones; '
-      + 'the answer comes from the service, not a queued push. YAPA\'s hooks renew this session\'s leases while it is active, so explicit heartbeats are rarely needed; '
+      + 'the answer is immediate, not a queued push. YAPA\'s hooks renew this session\'s leases while it is active, so explicit heartbeats are rarely needed; '
       + 'a lease lapses ttl_seconds after the session goes quiet, and an expired lease can be taken over (recorded). '
-      + 'list doubles as presence (who is working on what). If the service is unreachable nothing is shared: say so and coordinate locally.',
+      + 'list doubles as presence (who is working on what). If the service is unreachable for a shared collection nothing is shared: say so and coordinate locally.',
     {
       action: z.enum(['acquire', 'heartbeat', 'release', 'list']),
-      collection: z.string().optional().describe('Shared collection (not global/private-*/local-*), e.g. project-acme; heartbeat without it renews the session\'s leases everywhere'),
+      collection: z.string().optional().describe('Collection, e.g. project-acme or private-acme (this machine only); heartbeat without it renews the session\'s leases everywhere'),
       key: z.string().optional().describe('acquire/release: what is leased, e.g. a task id or record id'),
       session: z.string().optional().describe('Holder within your user; defaults to this Claude Code session (the hooks renew its leases automatically)'),
       scope: z.array(z.string()).optional().describe('acquire: what the work touches, e.g. ["doc:runbook","res:staging-cluster"]; key:<key> is always included. Omitted on a renewal: the stored scope is kept'),
@@ -1405,10 +1406,10 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'counter_next',
-    'Take the next value of an atomic counter in a shared collection on the YAPA sync service (e.g. numbered record ids). '
+    'Take the next value of an atomic counter in a collection (e.g. numbered record ids): on the YAPA sync service for a shared collection, on this machine for a local-only one (private-*, local-*, global) or with sync off. '
       + 'Never hands out a value twice, and never one at or below floor (pass the highest id you already have).',
     {
-      collection: z.string().describe('Shared collection, e.g. project-acme'),
+      collection: z.string().describe('Collection, e.g. project-acme or private-acme'),
       name: z.string().describe('Counter name, e.g. RFC, INCIDENT-2026'),
       floor: z.number().int().min(0).optional().describe('Highest value already in use locally'),
     },

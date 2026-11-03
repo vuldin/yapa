@@ -57,9 +57,22 @@ vi.mock('../sync/coordination.js', async importOriginal => {
   const real = await importOriginal<typeof import('../sync/coordination.js')>();
   return {
     ...real,
+    // Routed like the real one: local-only collections (and every one with
+    // sync off) on this machine, the rest on the fake service.
     requireCoordination: async () => {
-      if (!reachable) throw new real.CoordinationUnavailableError('unreachable', 'YAPA sync service could not coordinate: offline');
-      return fakeCoordination;
+      const svc = () => {
+        if (!reachable) throw new real.CoordinationUnavailableError('unreachable', 'YAPA sync service could not coordinate: offline');
+        return fakeCoordination;
+      };
+      const pick = (c: string) => (real.coordinatedLocally(c) ? real.localCoordination() : svc());
+      return {
+        leaseAcquire: async (req: LeaseAcquireRequest) => pick(req.collection).leaseAcquire(req),
+        leaseRelease: async (c: string, k: string, s: string, o?: string) => pick(c).leaseRelease(c, k, s, o),
+        leaseList: async (c: string, inc?: boolean) => pick(c).leaseList(c, inc),
+        leaseHeartbeat: async () => svc().leaseHeartbeat(),
+        counterNext: async () => svc().counterNext(),
+        nextTaskId: async () => svc().nextTaskId(),
+      };
     },
   };
 });
@@ -80,7 +93,7 @@ beforeAll(async () => {
   process.env.YAPA_SESSION = 'sess-a'; // currentSession() reads the env, ahead of CLAUDE_CODE_SESSION_ID
   setConfig(createConfig({
     YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://sync.example.test',
-    YAPA_LEASE_STATE_DIR: join(dir, 'leases'),
+    YAPA_LEASE_STATE_DIR: join(dir, 'leases'), YAPA_LOCAL_COORD_DIR: join(dir, 'coord'),
   }));
   setStore(createLocalStore(join(dir, 'store')));
 });
@@ -197,11 +210,82 @@ describe('task claims', () => {
     expect(notices[0]).toMatch(new RegExp(`alex .* claimed ${b}`));
   });
 
-  it('local-only collections never take a claim', async () => {
+  it('local-only collections are claimed on this machine: a second session is refused, the service never asked', async () => {
     const id = await createTask('personal errand', {}, 'private-me');
     const r = await updateTask(id, { status: 'in_progress' });
-    expect(r.claim?.kind).toBe('local');
+    expect(r.claim).toMatchObject({ kind: 'granted', id, collection: 'private-me', session: 'sess-a' });
+    const other = await updateTask(id, { status: 'in_progress' }, { session: 'sess-b' }).catch(e => e);
+    expect(other).toBeInstanceOf(TaskClaimedError);
+    expect(other.message).toMatch(new RegExp(`^${id} is being worked on by you \\(another session, sess-a\\) since `));
     expect(acquireCalls).toHaveLength(0);
+    expect((await claimsFor('private-me'))?.get(id)?.holder.session).toBe('sess-a');
+    // Done: the claim is released, and the next session may take it again.
+    await updateTask(id, { status: 'pending' });
+    expect((await claimsFor('private-me'))?.has(id)).toBe(false);
+    expect((await updateTask(id, { status: 'in_progress' }, { session: 'sess-b' })).claim?.kind).toBe('granted');
+    await updateTask(id, { status: 'pending' }, { session: 'sess-b' });
+  });
+
+  it('a local claim that lapsed is offered again by the ready queue', async () => {
+    const { nextTasks } = await import('./next.js');
+    const id = await createTask('lapsing errand', {}, 'private-lapse');
+    await updateTask(id, { status: 'in_progress' }, { ttlSeconds: 30 });
+    let q = await nextTasks({ collection: 'private-lapse' });
+    expect(q.claimsKnown).toBe(true);
+    expect(q.skipped.find(x => x.id === id)?.reason).toMatch(/^claimed by you \(another session, sess-a\)/);
+    // 31 seconds later, nobody renewed it.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 31_000;
+    try {
+      q = await nextTasks({ collection: 'private-lapse' });
+      expect(q.ready.find(x => x.id === id)).toMatchObject({ lapsed: true });
+      const taken = await nextTasks({ collection: 'private-lapse', claim: true, session: 'sess-b' });
+      expect(taken.claimed).toMatchObject({ kind: 'granted', id, session: 'sess-b', tookOverFrom: { session: 'sess-a' } });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('an in_progress task with no claim on record (from before claims here) is offered only after two hours untouched', async () => {
+    const { nextTasks } = await import('./next.js');
+    const { getStore } = await import('../store/index.js');
+    const id = await createTask('started before 1.10', {}, 'private-upgrade');
+    const doc = (await getTask(id))!;
+    const now = Math.floor(Date.now() / 1000);
+    await getStore().updateDocument('private-upgrade', id, { ...doc.metadata, status: 'in_progress', updated_at: now - 600 });
+    let q = await nextTasks({ collection: 'private-upgrade' });
+    expect(q.ready.find(x => x.id === id)).toBeUndefined();
+    expect(q.skipped.find(x => x.id === id)?.reason).toMatch(/^in_progress with no claim on record .*offered again after 1[01]\d min untouched$/);
+    await getStore().updateDocument('private-upgrade', id, { ...doc.metadata, status: 'in_progress', updated_at: now - 3 * 3600 });
+    q = await nextTasks({ collection: 'private-upgrade' });
+    expect(q.ready.find(x => x.id === id)).toMatchObject({ lapsed: true });
+  });
+
+  it('a busy coordination lock refuses the claim plainly (nothing changes, nothing pretends to retry)', async () => {
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { ClaimBusyError } = await import('./claim.js');
+    const { LOCK_HOST } = await import('../fs-lock.js');
+    const id = await createTask('contended', {}, 'private-busy');
+    mkdirSync(join(dir, 'coord'), { recursive: true });
+    // A live process on this host holds the collection's coordination lock.
+    writeFileSync(join(dir, 'coord', 'private-busy.json.lock'), JSON.stringify({ pid: process.ppid, host: LOCK_HOST, at: Date.now() }));
+    const e = await updateTask(id, { status: 'in_progress' }).catch(err => err);
+    expect(e).toBeInstanceOf(ClaimBusyError);
+    expect(e.message).toMatch(new RegExp(`^${id} was not claimed: this machine's coordination is busy`));
+    expect((await getTask(id))?.metadata.status).toBe('pending');
+  }, 20_000);
+
+  it('with sync off, shared collections are claimed on this machine too', async () => {
+    const prev = createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://sync.example.test', YAPA_LEASE_STATE_DIR: join(dir, 'leases'), YAPA_LOCAL_COORD_DIR: join(dir, 'coord') });
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_LEASE_STATE_DIR: join(dir, 'leases'), YAPA_LOCAL_COORD_DIR: join(dir, 'coord') }));
+    try {
+      const id = await createTask('solo work', {}, 'project-solo');
+      expect((await updateTask(id, { status: 'in_progress' })).claim?.kind).toBe('granted');
+      await expect(updateTask(id, { status: 'in_progress' }, { session: 'sess-b' })).rejects.toBeInstanceOf(TaskClaimedError);
+      expect(acquireCalls).toHaveLength(0);
+    } finally {
+      setConfig(prev);
+    }
   });
 
   it('claimNote: holder, yourself, or no live claim', async () => {

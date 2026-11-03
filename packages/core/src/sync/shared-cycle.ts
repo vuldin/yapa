@@ -18,6 +18,7 @@
  * @module @yapa/core/sync/shared-cycle
  */
 import { createHash } from 'node:crypto';
+import { pidAlive } from '../fs-lock.js';
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfig, type YapaConfig } from '../config.js';
@@ -95,17 +96,6 @@ function writeJson(path: string, value: unknown): void {
     renameSync(tmp, path);
   } catch {
     // best effort: a missing record only means an extra cycle
-  }
-}
-
-/** Is that process alive? EPERM means it exists but belongs to someone else. */
-export function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -214,3 +204,5 @@ export function recordPull(collection: string, now: number = Date.now(), config:
   next[collection] = now;
   writeJson(p.pulls, next);
 }
+
+export { pidAlive };

@@ -163,6 +163,12 @@ export interface YapaConfig {
   DEVICE_ID_PATH: string;
   /** Where this machine notes which sessions hold leases, so hooks heartbeat only when there is something to renew. */
   LEASE_STATE_DIR: string;
+  /**
+   * Leases and counters served on this machine (sync/local-coordination.ts):
+   * local-only collections, and every collection when sync is off. Also the
+   * locks of the local store's read-modify-write paths.
+   */
+  LOCAL_COORD_DIR: string;
   /** Seconds of overlap re-read on each pull so mid-pull pushes are never skipped. */
   SYNC_PULL_OVERLAP_SECONDS: number;
   /** Debounce before a write-triggered push (0 disables push-on-write). */
@@ -364,6 +370,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     DEVICE_ID_PATH: get(env, 'DEVICE_ID_PATH', pathJoin(homedir(), '.local', 'share', 'yapa', 'device-id')),
     // Under vitest, never the developer's real lease markers and claim notices.
     LEASE_STATE_DIR: get(env, 'LEASE_STATE_DIR', process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir(), '.local', 'share', 'yapa', 'leases')),
+    LOCAL_COORD_DIR: get(env, 'LOCAL_COORD_DIR', process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-coord-${process.pid}`) : pathJoin(homedir(), '.local', 'share', 'yapa', 'coord')),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, 'SYNC_PULL_OVERLAP_SECONDS', '120'), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, 'SYNC_PUSH_DEBOUNCE_MS', '2000'), 10),
     SYNC_COORDINATE: get(env, 'SYNC_COORDINATE', 'true') !== 'false',

@@ -78,6 +78,20 @@ export const updateDocumentsBatch = (
   collection: string,
   entries: Array<{ id: string; metadata: Record<string, any> }>,
 ): Promise<void> => getStore().updateDocumentsBatch(collection, entries);
+export const patchDocuments = (collection: string, entries: Array<{ id: string; patch: Record<string, any> }>): Promise<void> =>
+  entries.length ? getStore().patchDocuments(collection, entries) : Promise.resolve();
+export const patchDocument = (collection: string, id: string, patch: Record<string, any>): Promise<void> =>
+  patchDocuments(collection, [{ id, patch }]);
+
+/** The patch that turns `before` into `after`: changed or added keys, and removed keys as `null`. */
+export function metadataDelta(before: Record<string, any>, after: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  for (const [k, v] of Object.entries(after)) if (!same(before[k], v)) out[k] = v ?? null;
+  for (const k of Object.keys(before)) if (!(k in after) && before[k] != null) out[k] = null;
+  return out;
+}
+
 export const deleteDocument = (collection: string, id: string): Promise<void> =>
   getStore().deleteDocument(collection, id);
 export const findAndDeleteDocument = (id: string): Promise<string> => getStore().findAndDeleteDocument(id);

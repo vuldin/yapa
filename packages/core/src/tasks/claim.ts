@@ -11,11 +11,11 @@
  * sync is back, and a clash found then is reported on the next prompt.
  */
 import { getConfig } from '../config.js';
-import { getDocumentsByFilter, getDocumentsByIds, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, getDocumentsByIds, listCollections, patchDocument } from '../store/index.js';
 import { getDeviceId } from '../sync/device.js';
 import { isSyncConfigured, type Lease } from '../sync/backend.js';
 import {
-  addClaimNotice, currentSession, isCoordinationUnavailable, noteLeaseHeld, noteLeaseReleased, requireCoordination,
+  addClaimNotice, coordinatedLocally, currentSession, isCoordinationUnavailable, noteLeaseHeld, noteLeaseReleased, requireCoordination,
 } from '../sync/coordination.js';
 import { pushDocsNow } from '../sync/push.js';
 import { isSyncableCollection } from '../sync/syncable.js';
@@ -59,9 +59,14 @@ export function claimSession(explicit?: string): string {
   return currentSession(explicit) ?? `${getDeviceId()}:${process.pid}`.replace(SESSION_SAFE, '-').slice(0, 128);
 }
 
-/** True when a status change on a task in `collection` goes through claims. */
-export function claimsApply(collection: string): boolean {
-  return isSyncableCollection(collection) && isSyncConfigured();
+/**
+ * True when a status change on a task in `collection` goes through claims:
+ * always since 1.10. Shared collections are claimed on the sync service;
+ * local-only ones, and every collection when sync is off, on this machine
+ * (sync/local-coordination.ts). Kept for callers and the `local` result kind.
+ */
+export function claimsApply(_collection: string): boolean {
+  return true;
 }
 
 function utc(t: number, now = Math.floor(Date.now() / 1000)): string {
@@ -110,7 +115,7 @@ export async function claimTask(id: string, collection: string, metadata: Record
     return { kind: 'refused', id, collection, session, conflicts: [{ lease, overlap: [`key:${id}`] }] };
   }
   let key = id;
-  if (metadata.is_synced === false) {
+  if (metadata.is_synced === false && !coordinatedLocally(collection)) {
     try {
       const r = await pushDocsNow(collection, [id]);
       key = r.renamed[id] ?? id;
@@ -131,7 +136,7 @@ export async function claimTask(id: string, collection: string, metadata: Record
     noteLeaseHeld(session, r.lease.ttl_seconds, undefined, { collection, key });
     return { kind: 'granted', id: key, collection, session, lease: r.lease, renewed: r.renewed, ...(r.took_over_from ? { tookOverFrom: r.took_over_from } : {}) };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
 }
@@ -140,6 +145,22 @@ export async function claimTask(id: string, collection: string, metadata: Record
  * Claim a key that is not a task (a cleanup item such as `cleanup:triage`):
  * the same lease, with no task status to write.
  */
+/** Busy local coordination is not "offline": nothing would ever retry it, so refuse with a clear reason. */
+export class ClaimBusyError extends Error {
+  readonly code = 'claim_busy';
+  constructor(readonly id: string, readonly collection: string, cause: string) {
+    super(`${id} was not claimed: ${cause}. Nothing changed; try again in a moment.`);
+    this.name = 'ClaimBusyError';
+  }
+}
+
+function unavailable(e: unknown, key: string, collection: string, session: string): ClaimResult {
+  // On this machine (a local-only collection, or sync off) "unavailable" can
+  // only mean its coordination lock was busy: say so instead of "not shared".
+  if (coordinatedLocally(collection)) throw new ClaimBusyError(key, collection, (e as Error).message);
+  return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+}
+
 export async function claimKey(collection: string, key: string, opts: ClaimOptions = {}): Promise<ClaimResult> {
   if (!claimsApply(collection)) return { kind: 'local', id: key };
   const session = claimSession(opts.session);
@@ -156,7 +177,7 @@ export async function claimKey(collection: string, key: string, opts: ClaimOptio
     noteLeaseHeld(session, r.lease.ttl_seconds, undefined, { collection, key });
     return { kind: 'granted', id: key, collection, session, lease: r.lease, renewed: r.renewed, ...(r.took_over_from ? { tookOverFrom: r.took_over_from } : {}) };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: 'unshared', id: key, collection, session, reason: (e as Error).message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
 }
@@ -217,9 +238,8 @@ export async function retryUnsharedClaims(): Promise<{ granted: number; refused:
         continue;
       }
       if (r.kind === 'unshared' || r.kind === 'local') return out; // still offline: try again later
-      const [cur] = await getDocumentsByIds(col.name, [r.id]).catch(() => []);
-      // '' rather than a deleted key: a store update merges metadata keys.
-      if (cur) await updateDocument(col.name, r.id, { ...cur.metadata, claim_unshared: '' });
+      // Only the marker: the rest of the task is left as it is now.
+      await patchDocument(col.name, r.id, { claim_unshared: '' }).catch(() => undefined);
       if (r.kind === 'granted') {
         out.granted++;
       } else {

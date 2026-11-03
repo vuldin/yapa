@@ -327,6 +327,36 @@ export async function updateDocument(
   }
 }
 
+/**
+ * Merge patches into documents' metadata in one request. Chroma's /update
+ * merges metadata keys (a null value removes one), so keys not named are
+ * kept as the server has them. toChroma drops nulls: removals are added back.
+ */
+export async function patchDocuments(
+  collectionName: string,
+  entries: Array<{ id: string; patch: Record<string, any> }>,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const collectionId = await getCollectionId(collectionName);
+  // Only ids that exist: /update must not be asked about missing ones.
+  const existing = new Set((await getDocumentsByIds(collectionName, entries.map(e => e.id))).map(d => d.id));
+  const live = entries.filter(e => existing.has(e.id));
+  if (live.length === 0) return;
+  const response = await chromaFetch(`/collections/${collectionId}/update`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ids: live.map(e => e.id),
+      metadatas: live.map(e => {
+        const removed = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v === null || v === undefined).map(([k]) => [k, null]));
+        return { ...toChroma(e.patch), ...removed };
+      }),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Patch failed: ${response.status} - ${await response.text()}`);
+  }
+}
+
 /** Batch metadata replacement in a single request. */
 export async function updateDocumentsBatch(
   collectionName: string,

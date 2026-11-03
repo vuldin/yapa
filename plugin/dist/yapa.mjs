@@ -161,6 +161,7 @@ function createConfig(env = process.env) {
     DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
     // Under vitest, never the developer's real lease markers and claim notices.
     LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
+    LOCAL_COORD_DIR: get(env, "LOCAL_COORD_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-coord-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "coord")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_COORDINATE: get(env, "SYNC_COORDINATE", "true") !== "false",
@@ -659,6 +660,26 @@ async function updateDocument(collectionName, id, metadata) {
     throw new Error(`Update failed: ${response.status} - ${await response.text()}`);
   }
 }
+async function patchDocuments(collectionName, entries) {
+  if (entries.length === 0) return;
+  const collectionId = await getCollectionId(collectionName);
+  const existing = new Set((await getDocumentsByIds(collectionName, entries.map((e) => e.id))).map((d) => d.id));
+  const live = entries.filter((e) => existing.has(e.id));
+  if (live.length === 0) return;
+  const response = await chromaFetch(`/collections/${collectionId}/update`, {
+    method: "POST",
+    body: JSON.stringify({
+      ids: live.map((e) => e.id),
+      metadatas: live.map((e) => {
+        const removed = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v === null || v === void 0).map(([k]) => [k, null]));
+        return { ...toChroma(e.patch), ...removed };
+      })
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Patch failed: ${response.status} - ${await response.text()}`);
+  }
+}
 async function updateDocumentsBatch(collectionName, entries) {
   if (entries.length === 0) return;
   const collectionId = await getCollectionId(collectionName);
@@ -785,15 +806,216 @@ var init_chroma_adapter = __esm({
       getDocumentsByIds: (col, ids) => getDocumentsByIds(col, ids),
       updateDocument: (col, id, metadata) => updateDocument(col, id, metadata),
       updateDocumentsBatch: (col, entries) => updateDocumentsBatch(col, entries),
+      patchDocuments: (col, entries) => patchDocuments(col, entries),
       deleteDocument: (col, id) => deleteDocument(col, id),
       findAndDeleteDocument: (id) => findAndDeleteDocument(id)
     };
   }
 });
 
+// packages/core/src/fs-lock.ts
+import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync as readFileSync2, readlinkSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { hostname } from "node:os";
+import { basename, dirname, join as join2 } from "node:path";
+function pidNamespace() {
+  try {
+    return readlinkSync("/proc/self/ns/pid");
+  } catch {
+    return "";
+  }
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function writeJsonAtomic(path3, value, mode = 384) {
+  mkdirSync(dirname(path3), { recursive: true, mode: 448 });
+  const tmp = `${path3}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    const fd = openSync(tmp, "w", mode);
+    try {
+      writeSync(fd, JSON.stringify(value) + "\n");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path3);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+function readState(lock) {
+  let fd;
+  try {
+    fd = openSync(lock, "r");
+  } catch {
+    return void 0;
+  }
+  try {
+    const st = fstatSync(fd);
+    let holder;
+    try {
+      const h = JSON.parse(readFileSync2(fd, "utf-8"));
+      if (h && typeof h.pid === "number" && typeof h.at === "number") holder = { pid: h.pid, host: String(h.host ?? ""), at: h.at };
+    } catch {
+    }
+    return { ino: st.ino, mtimeMs: st.mtimeMs, holder };
+  } finally {
+    closeSync(fd);
+  }
+}
+function tryCreate(lock) {
+  const me = { pid: process.pid, host: HOST, at: Date.now() };
+  let fd;
+  try {
+    fd = openSync(lock, "wx", 384);
+  } catch (e) {
+    if (e.code === "EEXIST") return void 0;
+    if (e.code === "ENOENT") {
+      mkdirSync(dirname(lock), { recursive: true, mode: 448 });
+      return tryCreate(lock);
+    }
+    throw e;
+  }
+  try {
+    writeSync(fd, JSON.stringify(me));
+  } finally {
+    closeSync(fd);
+  }
+  return me;
+}
+function stale(s, rules, now) {
+  if (!s.holder) return now - s.mtimeMs > UNREADABLE_GRACE_MS;
+  const h = s.holder;
+  if (h.at - now > rules.staleMs) return true;
+  if (h.host === HOST) return !pidAlive(h.pid) || now - h.at > rules.maxHoldMs;
+  return now - h.at > rules.staleMs;
+}
+function breakStale(lock, judged, rules) {
+  const guard = `${lock}.break`;
+  const me = tryCreate(guard);
+  if (!me) {
+    const g = readState(guard);
+    if (g && stale(g, { staleMs: BREAK_GUARD_STALE_MS, maxHoldMs: BREAK_GUARD_STALE_MS }, Date.now())) rmIfSame(guard, g);
+    return false;
+  }
+  try {
+    const now = readState(lock);
+    if (now && sameState(now, judged) && stale(now, rules, Date.now())) rmSync(lock, { force: true });
+    return true;
+  } finally {
+    releaseIfMine(guard, me);
+  }
+}
+function rmIfSame(path3, s) {
+  const now = readState(path3);
+  if (now && sameState(now, s)) rmSync(path3, { force: true });
+}
+function releaseIfMine(lock, me) {
+  const h = readState(lock)?.holder;
+  if (h && h.pid === me.pid && h.at === me.at && h.host === me.host) rmSync(lock, { force: true });
+}
+function attempt(lock, rules) {
+  const me = tryCreate(lock);
+  if (me) return { me };
+  const s = readState(lock);
+  if (!s) return {};
+  if (stale(s, rules, Date.now()) && breakStale(lock, s, rules)) {
+    const again = tryCreate(lock);
+    if (again) return { me: again };
+  }
+  return { holder: s.holder };
+}
+async function withFileLock(lock, fn, opts = {}) {
+  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
+  const rules = { staleMs: opts.staleMs ?? DEFAULT_STALE_MS, maxHoldMs: opts.maxHoldMs ?? DEFAULT_MAX_HOLD_MS };
+  const deadline = Date.now() + waitMs;
+  let holder;
+  for (let i = 0; ; i++) {
+    const a = attempt(lock, rules);
+    if (a.me) {
+      try {
+        return await fn();
+      } finally {
+        releaseIfMine(lock, a.me);
+      }
+    }
+    holder = a.holder;
+    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
+    await sleep(backoff(i));
+  }
+}
+function withFileLockSync(lock, fn, opts = {}) {
+  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
+  const rules = { staleMs: opts.staleMs ?? DEFAULT_STALE_MS, maxHoldMs: opts.maxHoldMs ?? DEFAULT_MAX_HOLD_MS };
+  const deadline = Date.now() + waitMs;
+  let holder;
+  for (let i = 0; ; i++) {
+    const a = attempt(lock, rules);
+    if (a.me) {
+      try {
+        return fn();
+      } finally {
+        releaseIfMine(lock, a.me);
+      }
+    }
+    holder = a.holder;
+    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
+    Atomics.wait(waitCell, 0, 0, backoff(i));
+  }
+}
+function sweepLockDebris(dir, olderThanMs = 36e5, now = Date.now()) {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp|break)$/.test(name)) continue;
+      const p = join2(dir, name);
+      try {
+        if (now - statSync(p).mtimeMs > olderThanMs) rmSync(p, { force: true });
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+var LockTimeoutError, DEFAULT_WAIT_MS, DEFAULT_STALE_MS, DEFAULT_MAX_HOLD_MS, UNREADABLE_GRACE_MS, BREAK_GUARD_STALE_MS, LOCK_HOST, HOST, sameState, sleep, backoff, waitCell, lockFileFor;
+var init_fs_lock = __esm({
+  "packages/core/src/fs-lock.ts"() {
+    "use strict";
+    LockTimeoutError = class extends Error {
+      constructor(path3, holder) {
+        super(`could not take ${path3} in time${holder ? ` (held by pid ${holder.pid} on ${holder.host} since ${new Date(holder.at).toISOString()})` : ""}`);
+        this.path = path3;
+        this.holder = holder;
+        this.name = "LockTimeoutError";
+      }
+      path;
+      holder;
+      code = "lock_timeout";
+    };
+    DEFAULT_WAIT_MS = 5e3;
+    DEFAULT_STALE_MS = 3e4;
+    DEFAULT_MAX_HOLD_MS = 6e5;
+    UNREADABLE_GRACE_MS = 2e3;
+    BREAK_GUARD_STALE_MS = 5e3;
+    LOCK_HOST = `${hostname()}${pidNamespace() ? `#${pidNamespace()}` : ""}`;
+    HOST = LOCK_HOST;
+    sameState = (a, b) => a.ino === b.ino && (a.holder?.pid ?? -1) === (b.holder?.pid ?? -1) && (a.holder?.at ?? -1) === (b.holder?.at ?? -1) && (a.holder?.host ?? "") === (b.holder?.host ?? "");
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    backoff = (i) => Math.min(100, 5 * 2 ** Math.min(i, 5)) * (0.5 + Math.random());
+    waitCell = new Int32Array(new SharedArrayBuffer(4));
+    lockFileFor = (file) => join2(dirname(file), `${basename(file)}.lock`);
+  }
+});
+
 // packages/core/src/store/local-adapter.ts
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join as join2 } from "node:path";
+import { mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join as join3 } from "node:path";
 function embedderId() {
   return `${getConfig().EMBEDDING_PROVIDER}:${getEmbeddingModel() || "default"}`;
 }
@@ -827,14 +1049,24 @@ function matchesFilter(metadata, filter) {
 function createLocalStore(rootDir) {
   const cache = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
+  const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
-  const fileFor = (name) => join2(rootDir, `${encodeURIComponent(name)}.json`);
+  const fileFor = (name) => join3(rootDir, `${encodeURIComponent(name)}.json`);
   async function readFromDisk(name) {
     try {
-      const parsed = JSON.parse(await readFile(fileFor(name), "utf-8"));
+      const fh = await open(fileFor(name), "r");
+      let raw;
+      let id;
+      try {
+        id = identity(await fh.stat({ bigint: true }));
+        raw = await fh.readFile("utf-8");
+      } finally {
+        await fh.close();
+      }
+      const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
       cache.set(name, parsed);
-      cacheMtimes.set(name, (await stat(fileFor(name))).mtimeMs);
+      cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
@@ -849,8 +1081,8 @@ function createLocalStore(rootDir) {
     const cached2 = cache.get(name);
     if (!cached2) return readFromDisk(name);
     try {
-      const st = await stat(fileFor(name));
-      if (st.mtimeMs > (cacheMtimes.get(name) ?? 0)) return readFromDisk(name);
+      const st = await stat(fileFor(name), { bigint: true });
+      if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
         cache.delete(name);
@@ -861,24 +1093,38 @@ function createLocalStore(rootDir) {
     }
     return cached2;
   }
-  async function loadOrCreate(name) {
-    return await load2(name) ?? {
-      version: 1,
-      name,
-      created: (/* @__PURE__ */ new Date()).toISOString(),
-      docs: {}
-    };
+  const fresh = (name) => ({ version: 1, name, created: (/* @__PURE__ */ new Date()).toISOString(), docs: {} });
+  async function writeAtomic(cf) {
+    await mkdir(rootDir, { recursive: true });
+    const file = fileFor(cf.name);
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(cf));
+      await rename(tmp, file);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+    cache.set(cf.name, cf);
+    cacheMtimes.set(cf.name, identity(await stat(file, { bigint: true })));
   }
-  function persist(cf) {
-    const prev = writeChains.get(cf.name) ?? Promise.resolve();
+  function mutate(name, apply) {
+    const prev = writeChains.get(name) ?? Promise.resolve();
     const next = prev.then(async () => {
       await mkdir(rootDir, { recursive: true });
-      const tmp = `${fileFor(cf.name)}.tmp`;
-      await writeFile(tmp, JSON.stringify(cf));
-      await rename(tmp, fileFor(cf.name));
-      cacheMtimes.set(cf.name, (await stat(fileFor(cf.name))).mtimeMs);
+      await withFileLock(lockFileFor(fileFor(name)), async () => {
+        const cur = await load2(name);
+        try {
+          const out = apply(cur);
+          if (out) await writeAtomic(out);
+        } catch (e) {
+          cache.delete(name);
+          cacheMtimes.delete(name);
+          throw e;
+        }
+      }, { waitMs: 15e3 });
     });
-    writeChains.set(cf.name, next.catch(() => {
+    writeChains.set(name, next.catch(() => {
     }));
     return next;
   }
@@ -897,52 +1143,46 @@ function createLocalStore(rootDir) {
       return names.map((name) => ({ id: name, name }));
     },
     async createCollection(name, metadata) {
-      if (await load2(name)) throw new Error(`Collection "${name}" already exists`);
-      const cf = await loadOrCreate(name);
-      cache.set(name, cf);
-      await persist(cf);
+      await mutate(name, (cur) => {
+        if (cur) throw new Error(`Collection "${name}" already exists`);
+        return fresh(name);
+      });
     },
     async deleteCollection(name) {
+      await mkdir(rootDir, { recursive: true });
+      await withFileLock(lockFileFor(fileFor(name)), async () => {
+        await rm(fileFor(name), { force: true });
+      }, { waitMs: 15e3 });
       cache.delete(name);
+      cacheMtimes.delete(name);
       writeChains.delete(name);
-      await rm(fileFor(name), { force: true });
     },
     async getCollectionCount(name) {
       const cf = await load2(name);
       return cf ? Object.keys(cf.docs).length : 0;
     },
     async getOrCreateCollection(name) {
-      if (!await load2(name)) {
-        const cf = await loadOrCreate(name);
-        cache.set(name, cf);
-        await persist(cf);
-      }
+      if (!await load2(name)) await mutate(name, (cur) => cur ?? fresh(name));
       return name;
     },
     async addDocument(collection, id, content, metadata) {
-      const cf = await loadOrCreate(collection);
-      cache.set(collection, cf);
-      const embedding = await generateEmbedding(content);
-      cf.docs[id] = {
-        content,
-        metadata: toChroma(metadata),
-        embedding,
-        embedding_model: embedderId()
-      };
-      await persist(cf);
+      const doc = { content, metadata: toChroma(metadata), embedding: await generateEmbedding(content), embedding_model: embedderId() };
+      await mutate(collection, (cur) => {
+        const cf = cur ?? fresh(collection);
+        cf.docs[id] = doc;
+        return cf;
+      });
     },
     async addDocumentsBatch(collection, documents) {
-      const cf = await loadOrCreate(collection);
-      cache.set(collection, cf);
+      const docs = [];
       for (const d of documents) {
-        cf.docs[d.id] = {
-          content: d.content,
-          metadata: toChroma(d.metadata),
-          embedding: await generateEmbedding(d.content),
-          embedding_model: embedderId()
-        };
+        docs.push([d.id, { content: d.content, metadata: toChroma(d.metadata), embedding: await generateEmbedding(d.content), embedding_model: embedderId() }]);
       }
-      await persist(cf);
+      await mutate(collection, (cur) => {
+        const cf = cur ?? fresh(collection);
+        for (const [id, doc] of docs) cf.docs[id] = doc;
+        return cf;
+      });
     },
     async queryDocuments(collection, queryText, nResults = 5, filter) {
       const cf = await load2(collection);
@@ -990,36 +1230,56 @@ function createLocalStore(rootDir) {
       return ids.filter((id) => cf.docs[id]).map((id) => toResult(cf, id));
     },
     async updateDocument(collection, id, metadata) {
-      const cf = await load2(collection);
-      if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
-      cf.docs[id].metadata = toChroma(metadata);
-      await persist(cf);
+      await mutate(collection, (cf) => {
+        if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
+        cf.docs[id].metadata = toChroma(metadata);
+        return cf;
+      });
     },
     async updateDocumentsBatch(collection, entries) {
       if (entries.length === 0) return;
-      const cf = await load2(collection);
-      if (!cf) throw new Error(`Collection "${collection}" not found`);
-      let changed = 0;
-      for (const e of entries) {
-        if (!cf.docs[e.id]) continue;
-        cf.docs[e.id].metadata = toChroma(e.metadata);
-        changed++;
-      }
-      if (changed > 0) await persist(cf);
+      await mutate(collection, (cf) => {
+        if (!cf) throw new Error(`Collection "${collection}" not found`);
+        let changed = 0;
+        for (const e of entries) {
+          if (!cf.docs[e.id]) continue;
+          cf.docs[e.id].metadata = toChroma(e.metadata);
+          changed++;
+        }
+        return changed > 0 ? cf : false;
+      });
+    },
+    async patchDocuments(collection, entries) {
+      if (entries.length === 0) return;
+      await mutate(collection, (cf) => {
+        if (!cf) return false;
+        let changed = 0;
+        for (const e of entries) {
+          const doc = cf.docs[e.id];
+          if (!doc) continue;
+          const set = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v !== null && v !== void 0));
+          const next = { ...doc.metadata, ...toChroma(set) };
+          for (const [k, v] of Object.entries(e.patch)) if (v === null || v === void 0) delete next[k];
+          doc.metadata = next;
+          changed++;
+        }
+        return changed > 0 ? cf : false;
+      });
     },
     async deleteDocument(collection, id) {
-      const cf = await load2(collection);
-      if (!cf) return;
-      if (delete cf.docs[id]) await persist(cf);
+      await mutate(collection, (cf) => cf && cf.docs[id] && delete cf.docs[id] ? cf : false);
     },
     async findAndDeleteDocument(id) {
       for (const name of await collectionNames()) {
-        const cf = await load2(name);
-        if (cf?.docs[id]) {
+        if (!(await load2(name))?.docs[id]) continue;
+        let deleted = false;
+        await mutate(name, (cf) => {
+          if (!cf?.docs[id]) return false;
           delete cf.docs[id];
-          await persist(cf);
-          return name;
-        }
+          deleted = true;
+          return cf;
+        });
+        if (deleted) return name;
       }
       throw new Error(`Document "${id}" not found in any collection`);
     }
@@ -1030,6 +1290,7 @@ var init_local_adapter = __esm({
     "use strict";
     init_embeddings();
     init_config();
+    init_fs_lock();
     init_metadata_adapter();
   }
 });
@@ -1058,6 +1319,9 @@ __export(store_exports, {
   getOrCreateCollection: () => getOrCreateCollection2,
   getStore: () => getStore,
   listCollections: () => listCollections2,
+  metadataDelta: () => metadataDelta,
+  patchDocument: () => patchDocument,
+  patchDocuments: () => patchDocuments2,
   queryAllCollections: () => queryAllCollections2,
   queryDocuments: () => queryDocuments2,
   resetStore: () => resetStore,
@@ -1077,7 +1341,14 @@ function getStore() {
 function resetStore() {
   active2 = void 0;
 }
-var active2, listCollections2, createCollection2, deleteCollection2, getCollectionCount2, getOrCreateCollection2, addDocument2, addDocumentsBatch2, queryDocuments2, queryAllCollections2, getDocumentsByFilter2, getDocumentsByIds2, updateDocument2, updateDocumentsBatch2, deleteDocument2, findAndDeleteDocument2;
+function metadataDelta(before, after) {
+  const out = {};
+  const same2 = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  for (const [k, v] of Object.entries(after)) if (!same2(before[k], v)) out[k] = v ?? null;
+  for (const k of Object.keys(before)) if (!(k in after) && before[k] != null) out[k] = null;
+  return out;
+}
+var active2, listCollections2, createCollection2, deleteCollection2, getCollectionCount2, getOrCreateCollection2, addDocument2, addDocumentsBatch2, queryDocuments2, queryAllCollections2, getDocumentsByFilter2, getDocumentsByIds2, updateDocument2, updateDocumentsBatch2, patchDocuments2, patchDocument, deleteDocument2, findAndDeleteDocument2;
 var init_store = __esm({
   "packages/core/src/store/index.ts"() {
     "use strict";
@@ -1100,6 +1371,8 @@ var init_store = __esm({
     getDocumentsByIds2 = (collection, ids) => getStore().getDocumentsByIds(collection, ids);
     updateDocument2 = (collection, id, metadata) => getStore().updateDocument(collection, id, metadata);
     updateDocumentsBatch2 = (collection, entries) => getStore().updateDocumentsBatch(collection, entries);
+    patchDocuments2 = (collection, entries) => entries.length ? getStore().patchDocuments(collection, entries) : Promise.resolve();
+    patchDocument = (collection, id, patch) => patchDocuments2(collection, [{ id, patch }]);
     deleteDocument2 = (collection, id) => getStore().deleteDocument(collection, id);
     findAndDeleteDocument2 = (id) => getStore().findAndDeleteDocument(id);
   }
@@ -1505,6 +1778,38 @@ var init_kinds = __esm({
   }
 });
 
+// packages/core/src/doc-lock.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { join as join4 } from "node:path";
+function docLockPath(collection, id) {
+  const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
+  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
+}
+async function withDocLock(collection, id, fn) {
+  const path3 = docLockPath(collection, id);
+  const mine = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine.some((h) => h.paths.has(path3))) return fn();
+  return withFileLock(path3, async () => {
+    const me = { paths: /* @__PURE__ */ new Set([path3]), active: true };
+    try {
+      return await held.run([...mine, me], fn);
+    } finally {
+      me.active = false;
+    }
+  }, { waitMs: WAIT_MS });
+}
+var held, WAIT_MS;
+var init_doc_lock = __esm({
+  "packages/core/src/doc-lock.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    held = new AsyncLocalStorage();
+    WAIT_MS = 2e4;
+  }
+});
+
 // packages/core/src/memory/links.ts
 async function findDoc(id) {
   for (const c of await listCollections2().catch(() => [])) {
@@ -1521,16 +1826,20 @@ async function linkMemoryToTasks(memoryId, taskIds) {
       out.missing.push(tid);
       continue;
     }
-    const cur = list3(t.metadata.memory_ids);
-    if (!cur.includes(memoryId)) {
+    const present = await withDocLock(t.collection, tid, async () => {
+      const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
+      if (!fresh) return false;
+      const cur = list3(fresh.metadata.memory_ids);
+      if (cur.includes(memoryId)) return true;
       await updateDocument2(t.collection, tid, {
-        ...t.metadata,
+        ...fresh.metadata,
         memory_ids: [...cur, memoryId],
         updated_at: Math.floor(Date.now() / 1e3),
         is_synced: false
       });
-    }
-    out.linked.push(tid);
+      return true;
+    });
+    (present ? out.linked : out.missing).push(tid);
   }
   return out;
 }
@@ -1538,6 +1847,7 @@ var list3;
 var init_links = __esm({
   "packages/core/src/memory/links.ts"() {
     "use strict";
+    init_doc_lock();
     init_store();
     list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
   }
@@ -1573,7 +1883,7 @@ async function archiveSuperseded(collection, oldId, newId) {
 `);
       return;
     }
-    await updateDocument2(collection, oldId, archivedMetadata(existing[0].metadata, { superseded_by: newId }));
+    await patchDocument(collection, oldId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { superseded_by: newId })));
   } catch (e) {
     process.stderr.write(`[yapa] store: failed to archive superseded ${oldId}: ${e}
 `);
@@ -1735,6 +2045,7 @@ async function recallMemory(query, options = {}) {
     (a, b) => rankScore(a.distance, a.metadata.salience) - rankScore(b.distance, b.metadata.salience)
   );
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
+  const boosts = /* @__PURE__ */ new Map();
   for (const r of results) {
     if (options.boost === false || r.distance >= boostMaxDistance) continue;
     if (r.collection) {
@@ -1745,12 +2056,22 @@ async function recallMemory(query, options = {}) {
         sector: r.metadata.sector ?? "episodic"
       };
       const boosted = touchDocument(lifecycleMeta);
-      updateDocument2(r.collection, r.id, { ...r.metadata, ...boosted }).catch(() => {
-      });
+      const patch = metadataDelta(r.metadata, { ...r.metadata, ...boosted });
+      if (Object.keys(patch).length) boosts.set(r.collection, [...boosts.get(r.collection) ?? [], { id: r.id, patch }]);
     }
   }
+  for (const [collection, entries] of boosts) track(patchDocuments2(collection, entries).catch(() => {
+  }));
   return results;
 }
+function track(p) {
+  pendingBoosts.add(p);
+  p.finally(() => pendingBoosts.delete(p));
+}
+async function settleRecallBoosts() {
+  while (pendingBoosts.size) await Promise.all([...pendingBoosts]);
+}
+var pendingBoosts;
 var init_recall = __esm({
   "packages/core/src/memory/recall.ts"() {
     "use strict";
@@ -1759,6 +2080,7 @@ var init_recall = __esm({
     init_syncable();
     init_lifecycle();
     init_filters();
+    pendingBoosts = /* @__PURE__ */ new Set();
   }
 });
 
@@ -1953,13 +2275,10 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
           sector: doc.metadata.sector ?? "episodic"
         };
         const decayed = applyDecay(lifecycleMeta, days);
-        updates.push({
-          id: doc.id,
-          metadata: { ...doc.metadata, salience: decayed.salience, decayed_at: now }
-        });
+        updates.push({ id: doc.id, patch: { salience: decayed.salience, decayed_at: now } });
       }
       if (updates.length > 0) {
-        await updateDocumentsBatch2(collection.name, updates);
+        await patchDocuments2(collection.name, updates);
         decayedCount += updates.length;
       }
     } catch {
@@ -2053,7 +2372,7 @@ async function applyCompaction(input2) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
       if (!existing.length) continue;
-      await updateDocument2(input2.collection, id, archivedMetadata(existing[0].metadata, { compacted_into: summaryId }));
+      await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
       process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}
@@ -2063,10 +2382,7 @@ async function applyCompaction(input2) {
   try {
     const summaryDocs = await getDocumentsByIds2(input2.collection, [summaryId]);
     if (summaryDocs.length) {
-      await updateDocument2(input2.collection, summaryId, {
-        ...summaryDocs[0].metadata,
-        compacted_from: archivedIds
-      });
+      await patchDocument(input2.collection, summaryId, { compacted_from: archivedIds });
     }
   } catch (e) {
     process.stderr.write(`[yapa] compact: failed to set back-reference on summary: ${e}
@@ -2197,8 +2513,8 @@ var init_journal = __esm({
 });
 
 // packages/core/src/sync/health.ts
-import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync } from "node:fs";
+import { dirname as dirname2 } from "node:path";
 function healthStatusFor(code) {
   if (typeof code === "string" && SIGNED_OUT.has(code)) return "signed_out";
   if (code === "unreachable") return "unreachable";
@@ -2207,7 +2523,7 @@ function healthStatusFor(code) {
 function readSyncHealth(path3 = getConfig().SYNC_HEALTH_FILE) {
   if (!path3) return void 0;
   try {
-    const h = JSON.parse(readFileSync2(path3, "utf-8"));
+    const h = JSON.parse(readFileSync3(path3, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -2231,10 +2547,10 @@ function recordSyncHealth(update, now = Date.now(), path3 = getConfig().SYNC_HEA
     if ("message" in update && update.message) next.message = update.message.slice(0, 300);
   }
   try {
-    mkdirSync(dirname(path3), { recursive: true, mode: 448 });
+    mkdirSync2(dirname2(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync(tmp, path3);
+    renameSync2(tmp, path3);
   } catch {
   }
   return next;
@@ -2245,7 +2561,7 @@ function recordUnpushed(unpushed, path3 = getConfig().SYNC_HEALTH_FILE) {
   try {
     const tmp = `${path3}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
-    renameSync(tmp, path3);
+    renameSync2(tmp, path3);
   } catch {
   }
 }
@@ -2265,7 +2581,7 @@ function refreshSyncHealthNames(syncConfigured, path3 = getConfig().SYNC_HEALTH_
   try {
     const tmp = `${path3}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync(tmp, path3);
+    renameSync2(tmp, path3);
   } catch {
   }
 }
@@ -2280,8 +2596,8 @@ var init_health = __esm({
 
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
 function getDeviceId() {
   const config = getConfig();
   if (config.DEVICE_ID) return config.DEVICE_ID;
@@ -2289,19 +2605,19 @@ function getDeviceId() {
   const path3 = config.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync3(path3, "utf-8").trim();
+    id = readFileSync4(path3, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync2(dirname2(path3), { recursive: true });
+      mkdirSync3(dirname3(path3), { recursive: true });
       writeFileSync2(path3, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync3(path3, "utf-8").trim() || id;
+        id = readFileSync4(path3, "utf-8").trim() || id;
       } catch {
       }
     }
@@ -2329,8 +2645,8 @@ __export(http_backend_exports, {
   decodeJwtPayload: () => decodeJwtPayload,
   redactTokens: () => redactTokens
 });
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync3, rmSync, renameSync as renameSync2 } from "node:fs";
-import { dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
+import { dirname as dirname4 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 function redactTokens(text) {
@@ -2472,7 +2788,7 @@ var init_http_backend = __esm({
       invalidate() {
         this.token = void 0;
         this.validUntil = 0;
-        if (this.cachePath) rmSync(this.cachePath, { force: true });
+        if (this.cachePath) rmSync2(this.cachePath, { force: true });
       }
       validity(token, now) {
         const exp = Number(decodeJwtPayload(token)?.exp);
@@ -2484,7 +2800,7 @@ var init_http_backend = __esm({
       loadCached() {
         if (!this.cachePath) return false;
         try {
-          const token = readFileSync4(this.cachePath, "utf-8").trim();
+          const token = readFileSync5(this.cachePath, "utf-8").trim();
           if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
           const until = this.validity(token, this.now());
           if (this.now() >= until) return false;
@@ -2499,10 +2815,10 @@ var init_http_backend = __esm({
       saveCached(token) {
         if (!this.cachePath) return;
         try {
-          mkdirSync3(dirname3(this.cachePath), { recursive: true, mode: 448 });
+          mkdirSync4(dirname4(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
           writeFileSync3(tmp, token, { mode: 384 });
-          renameSync2(tmp, this.cachePath);
+          renameSync3(tmp, this.cachePath);
         } catch {
         }
       }
@@ -2560,7 +2876,7 @@ var init_http_backend = __esm({
         const url = `${this.target}${path3}`;
         const idemKey = opts.idempotent ? randomUUID2() : void 0;
         const body = opts.body === void 0 ? void 0 : JSON.stringify(opts.body);
-        for (let attempt = 0; ; attempt++) {
+        for (let attempt2 = 0; ; attempt2++) {
           let token;
           try {
             token = await this.tokens.get();
@@ -2593,7 +2909,7 @@ var init_http_backend = __esm({
           if (res.status === 404 && opts.allow404) return void 0;
           const apiErr = json?.error;
           const code = apiErr?.code ?? (res.status === 401 ? "cloud_run_unauthenticated" : res.status === 403 ? "cloud_run_forbidden" : `http_${res.status}`);
-          if (res.status === 401 && attempt === 0) {
+          if (res.status === 401 && attempt2 === 0) {
             this.tokens.invalidate();
             continue;
           }
@@ -2762,7 +3078,7 @@ var init_http_backend = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url;
@@ -2774,7 +3090,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -2783,7 +3099,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -2794,8 +3110,8 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   }
   if (sslmode) return unverified;
   const hostParam = url.searchParams.get("host");
-  const local = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url.hostname);
-  if (local) return { connectionString, ssl: false, tls: "off" };
+  const local2 = hostParam ? hostParam.startsWith("/") || LOCAL_HOSTS.has(hostParam) : LOCAL_HOSTS.has(url.hostname);
+  if (local2) return { connectionString, ssl: false, tls: "off" };
   return unverified;
 }
 function getSyncTlsMode() {
@@ -3267,21 +3583,526 @@ var init_backend = __esm({
   }
 });
 
+// packages/core/src/sync/local-coordination.ts
+import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
+import { join as join5 } from "node:path";
+function assertMatch(v, re, what) {
+  if (typeof v !== "string" || !re.test(v)) throw bad(`${what} must match ${re.source}`);
+  return v;
+}
+function assertScope(v) {
+  if (v === void 0) return void 0;
+  if (!Array.isArray(v) || v.length > MAX_SCOPE) throw bad(`scope must be an array of at most ${MAX_SCOPE} strings`);
+  return [...new Set(v.map((s) => assertMatch(s, KEY_RE, "scope entries")))].sort();
+}
+function assertTtl(v) {
+  if (v === void 0) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < LEASE_TTL_MIN || v > LEASE_TTL_MAX) {
+    throw bad(`ttl_seconds must be an integer from ${LEASE_TTL_MIN} to ${LEASE_TTL_MAX}`);
+  }
+  return v;
+}
+function assertFloor(v) {
+  if (v === void 0 || v === null) return 0;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw bad("floor must be a non-negative integer");
+  return v;
+}
+function effectiveScope(key, scope) {
+  return [.../* @__PURE__ */ new Set([`key:${key}`, ...scope])].sort();
+}
+function localCoordinationDir() {
+  return getConfig().LOCAL_COORD_DIR;
+}
+function stateFile(dir, collection) {
+  return join5(dir, `${encodeURIComponent(collection)}.json`);
+}
+function readState2(file) {
+  try {
+    const s = JSON.parse(readFileSync7(file, "utf-8"));
+    return { leases: s?.leases ?? {}, counters: s?.counters ?? {} };
+  } catch (e) {
+    if (e.code === "ENOENT") return { leases: {}, counters: {} };
+    throw new Error(`local coordination state ${file} is unreadable (${e.message}). It holds only this collection's leases and counters on this machine: move it aside (mv "${file}" "${file}.bad") to start fresh. Live claims are then forgotten, and counters restart above the floor callers pass.`);
+  }
+}
+function toLease(collection, l, now) {
+  return {
+    collection,
+    key: l.key,
+    holder: { user: l.user, session: l.session, device: l.device },
+    title: l.title,
+    scope: l.scope,
+    ttl_seconds: l.ttl_seconds,
+    acquired_at: l.acquired_at,
+    heartbeat_at: l.heartbeat_at,
+    expires_at: l.expires_at,
+    expired: l.expires_at <= now,
+    took_over_from: l.took_over_from
+  };
+}
+function createLocalCoordination(opts = {}) {
+  const dir = () => opts.dir ?? localCoordinationDir();
+  const user = () => opts.user ?? getConfig().USERNAME;
+  const clock = () => opts.now ? opts.now() : Math.floor(Date.now() / 1e3);
+  function update(collection, fn, reserved = false) {
+    if (!(reserved && RESERVED_RE.test(collection))) assertMatch(collection, COLLECTION_RE, "collection");
+    const file = stateFile(dir(), collection);
+    return withFileLockSync(lockFileFor(file), () => {
+      const s = readState2(file);
+      const { result, changed } = fn(s, clock());
+      if (changed) writeJsonAtomic(file, s);
+      return result;
+    });
+  }
+  function collections() {
+    try {
+      return readdirSync2(dir()).filter((f) => f.endsWith(".json")).map((f) => decodeURIComponent(f.slice(0, -5)));
+    } catch {
+      return [];
+    }
+  }
+  function bump(collection, name, floor, reserved) {
+    assertMatch(name, COUNTER_RE, "name");
+    const f = assertFloor(floor);
+    return update(collection, (s) => {
+      const value = Math.max(s.counters[name] ?? 0, f) + 1;
+      s.counters[name] = value;
+      return { result: value, changed: true };
+    }, reserved);
+  }
+  const prune = (s, now) => {
+    let changed = false;
+    for (const [k, l] of Object.entries(s.leases)) {
+      if (l.expires_at < now - EXPIRED_KEEP_SECONDS) {
+        delete s.leases[k];
+        changed = true;
+      }
+    }
+    return changed;
+  };
+  const api = {
+    local: true,
+    async leaseAcquire(req) {
+      const key = assertMatch(req.key, KEY_RE, "key");
+      const session = assertMatch(req.session, SESSION_RE, "session");
+      const reqScope = assertScope(req.scope);
+      const reqTtl = assertTtl(req.ttlSeconds);
+      if (req.title !== void 0 && req.title !== null && (typeof req.title !== "string" || req.title.length > 300)) {
+        throw bad("title must be a string of at most 300 characters");
+      }
+      if (req.reclaim !== void 0 && typeof req.reclaim !== "boolean") throw bad("reclaim must be a boolean");
+      const me = user();
+      return update(req.collection, (s, now) => {
+        prune(s, now);
+        const prev = s.leases[key];
+        const renewed = prev !== void 0 && isMine(prev, me, session);
+        const scope = reqScope !== void 0 ? effectiveScope(key, reqScope) : renewed ? effectiveScope(key, prev.scope) : effectiveScope(key, []);
+        const ttl = reqTtl ?? (renewed ? prev.ttl_seconds : LEASE_TTL_DEFAULT);
+        const live = Object.values(s.leases).filter((l) => l.expires_at > now && (l.key === key || l.scope.some((x) => scope.includes(x))));
+        const conflicts = live.filter((l) => !isMine(l, me, session) && !(req.reclaim && l.user === me)).map((l) => ({ lease: toLease(req.collection, l, now), overlap: l.key === key ? [`key:${key}`] : l.scope.filter((x) => scope.includes(x)) }));
+        if (conflicts.length) return { result: { granted: false, conflicts }, changed: false };
+        const reclaimed = !renewed && live.some((l) => l.key === key);
+        const takeover = prev !== void 0 && !renewed ? {
+          user: prev.user,
+          session: prev.session,
+          device: prev.device,
+          expired_at: prev.expires_at,
+          acquired_at: prev.acquired_at,
+          ...reclaimed ? { reclaim: true } : {}
+        } : void 0;
+        const lease = {
+          key,
+          user: me,
+          session,
+          device: safeDeviceId(),
+          // As the service's COALESCE: a takeover without a title keeps the old one.
+          title: req.title ?? prev?.title ?? null,
+          scope,
+          ttl_seconds: ttl,
+          acquired_at: renewed ? prev.acquired_at : now,
+          heartbeat_at: now,
+          expires_at: now + ttl,
+          took_over_from: renewed ? prev.took_over_from : takeover ?? null
+        };
+        s.leases[key] = lease;
+        return {
+          result: { granted: true, lease: toLease(req.collection, lease, now), renewed, ...takeover ? { took_over_from: takeover } : {} },
+          changed: true
+        };
+      });
+    },
+    async leaseHeartbeat(collection, session, keys) {
+      assertMatch(session, SESSION_RE, "session");
+      if (keys && collection === void 0) throw bad("keys needs a collection");
+      const me = user();
+      const renewed = [];
+      for (const c of collection !== void 0 ? [collection] : collections()) {
+        renewed.push(...update(c, (s, now) => {
+          const out = [];
+          for (const l of Object.values(s.leases)) {
+            if (!isMine(l, me, session) || keys && !keys.includes(l.key)) continue;
+            l.heartbeat_at = now;
+            l.expires_at = now + l.ttl_seconds;
+            out.push(toLease(c, l, now));
+          }
+          return { result: out, changed: out.length > 0 };
+        }));
+      }
+      const lost = (keys ?? []).filter((k) => !renewed.some((l) => l.key === k));
+      return { renewed, lost };
+    },
+    async leaseRelease(collection, key, session, outcome) {
+      assertMatch(key, KEY_RE, "key");
+      assertMatch(session, SESSION_RE, "session");
+      if (outcome !== void 0) assertMatch(outcome, OUTCOME_RE, "outcome");
+      const me = user();
+      return update(collection, (s, now) => {
+        const l = s.leases[key];
+        if (!l) return { result: { released: false, reason: "not_held" }, changed: false };
+        if (!isMine(l, me, session)) return { result: { released: false, reason: "held_by_other", lease: toLease(collection, l, now) }, changed: false };
+        delete s.leases[key];
+        return { result: { released: true, lease: toLease(collection, l, now) }, changed: true };
+      });
+    },
+    async leaseList(collection, includeExpired = false) {
+      assertMatch(collection, COLLECTION_RE, "collection");
+      const now = clock();
+      const s = readState2(stateFile(dir(), collection));
+      const leases = Object.values(s.leases).filter((l) => includeExpired || l.expires_at > now).sort((a, b) => a.acquired_at - b.acquired_at || a.key.localeCompare(b.key)).map((l) => toLease(collection, l, now));
+      return { leases, now };
+    },
+    async counterNext(collection, name, floor) {
+      return bump(collection, name, floor, false);
+    },
+    async nextTaskId(floor) {
+      const me = user();
+      const n = bump(TASK_COUNTER_COLLECTION, assertMatch(me, COUNTER_RE, "username"), floor, true);
+      return `${me}-${n}`;
+    }
+  };
+  return api;
+}
+function safeDeviceId() {
+  try {
+    return getDeviceId();
+  } catch {
+    return null;
+  }
+}
+var LEASE_TTL_MIN, LEASE_TTL_MAX, LEASE_TTL_DEFAULT, MAX_SCOPE, EXPIRED_KEEP_SECONDS, TASK_COUNTER_COLLECTION, KEY_RE, SESSION_RE, COUNTER_RE, OUTCOME_RE, COLLECTION_RE, RESERVED_RE, LocalCoordinationError, bad, isMine;
+var init_local_coordination = __esm({
+  "packages/core/src/sync/local-coordination.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    init_device();
+    LEASE_TTL_MIN = 30;
+    LEASE_TTL_MAX = 24 * 3600;
+    LEASE_TTL_DEFAULT = 2 * 3600;
+    MAX_SCOPE = 64;
+    EXPIRED_KEEP_SECONDS = 7 * 24 * 3600;
+    TASK_COUNTER_COLLECTION = "@tasks";
+    KEY_RE = /^[A-Za-z0-9._:@/-]{1,200}$/;
+    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+    COUNTER_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+    OUTCOME_RE = /^[A-Za-z0-9._ :-]{0,64}$/;
+    COLLECTION_RE = /^[A-Za-z0-9._-]{1,200}$/;
+    RESERVED_RE = /^@[a-z]+$/;
+    LocalCoordinationError = class extends Error {
+      constructor(code, message) {
+        super(message);
+        this.code = code;
+        this.name = "LocalCoordinationError";
+      }
+      code;
+      status = 400;
+    };
+    bad = (message) => new LocalCoordinationError("invalid_request", message);
+    isMine = (l, user, session) => l.user === user && l.session === session;
+  }
+});
+
+// packages/core/src/sync/coordination.ts
+import { readdirSync as readdirSync3, readFileSync as readFileSync8, rmSync as rmSync3 } from "node:fs";
+import { join as join6 } from "node:path";
+function currentSession(explicit, env = process.env) {
+  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
+    if (v && SESSION_RE2.test(v)) return v;
+  }
+  return void 0;
+}
+function markerPath(session) {
+  return join6(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function readMarker(session) {
+  try {
+    return JSON.parse(readFileSync8(markerPath(session), "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeMarker(m) {
+  try {
+    writeJsonAtomic(markerPath(m.session), m);
+  } catch {
+  }
+}
+function withMarker(session, fn, fallback) {
+  try {
+    return withFileLockSync(lockFileFor(markerPath(session)), fn, { waitMs: 2e3 });
+  } catch {
+    return fallback;
+  }
+}
+function heldKeys(session, collection) {
+  const prefix = heldKey(collection, "");
+  return (readMarker(session)?.keys ?? []).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+}
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held2) {
+  withMarker(session, () => {
+    const prev = readMarker(session);
+    const keys = new Set(prev?.keys ?? []);
+    if (held2) keys.add(heldKey(held2.collection, held2.key));
+    writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
+  }, void 0);
+}
+function noteLeaseReleased(session, collection, key) {
+  withMarker(session, () => {
+    const prev = readMarker(session);
+    if (!prev?.keys) return;
+    const keys = prev.keys.filter((k) => k !== heldKey(collection, key));
+    writeMarker({ ...prev, keys });
+  }, void 0);
+}
+function noteRenewed(session, renewed, now, answered = () => true, complete = true) {
+  return withMarker(session, () => {
+    const prev = readMarker(session);
+    const have = new Set(renewed.map((l) => heldKey(l.collection, l.key)));
+    const split2 = (k) => {
+      const [collection, key] = k.split("\0");
+      return { collection, key };
+    };
+    const watched = prev?.keys ?? [];
+    const lost = watched.filter((k) => !have.has(k) && answered(split2(k).collection)).map(split2);
+    const keys = watched.filter((k) => have.has(k) || !answered(split2(k).collection));
+    if (renewed.length === 0 && keys.length === 0 && complete) {
+      try {
+        rmSync3(markerPath(session), { force: true });
+      } catch {
+      }
+      return lost;
+    }
+    const ttls = renewed.map((l) => l.ttl_seconds);
+    const minTtl = complete ? ttls.length ? Math.min(...ttls) : prev?.min_ttl ?? HEARTBEAT_MAX_INTERVAL_S * 3 : Math.min(prev?.min_ttl ?? Infinity, ...ttls, HEARTBEAT_MAX_INTERVAL_S * 3);
+    writeMarker({ session, min_ttl: minTtl, last_beat: complete ? now : prev?.last_beat ?? now, ...keys.length ? { keys } : {} });
+    return lost;
+  }, []);
+}
+function sessionsHoldingLeases() {
+  try {
+    return readdirSync3(getConfig().LEASE_STATE_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
+  } catch {
+    return [];
+  }
+}
+function noticesPath() {
+  return join6(getConfig().LEASE_STATE_DIR, "notices.state");
+}
+function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
+  try {
+    withFileLockSync(lockFileFor(noticesPath()), () => {
+      let list9 = [];
+      try {
+        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+      } catch {
+      }
+      if (!Array.isArray(list9)) list9 = [];
+      if (list9.some((n) => n.text === text)) return;
+      list9.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list9.slice(-20));
+    }, { waitMs: 2e3 });
+  } catch {
+  }
+}
+function takeClaimNotices() {
+  try {
+    return withFileLockSync(lockFileFor(noticesPath()), () => {
+      let list9 = [];
+      try {
+        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+      } catch {
+        return [];
+      }
+      rmSync3(noticesPath(), { force: true });
+      return Array.isArray(list9) ? list9.map((n) => n.text) : [];
+    }, { waitMs: 2e3 });
+  } catch {
+    return [];
+  }
+}
+async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
+  let n = 0;
+  for (const session of new Set(sessions.filter((s) => !!s && SESSION_RE2.test(s)))) {
+    const m = readMarker(session);
+    if (!m) continue;
+    const interval = Math.max(10, Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.floor(m.min_ttl / 3)));
+    if (now - m.last_beat < interval) continue;
+    const renewed = [];
+    let localOk = false;
+    let serviceOk = !isSyncConfigured();
+    try {
+      renewed.push(...(await localCoordination().leaseHeartbeat(void 0, session)).renewed);
+      localOk = true;
+    } catch {
+    }
+    if (!serviceOk) {
+      try {
+        renewed.push(...(await (await serviceCoordination()).leaseHeartbeat(void 0, session)).renewed);
+        serviceOk = true;
+      } catch {
+      }
+    }
+    if (!localOk && !serviceOk) continue;
+    const answered = (c) => coordinatedLocally(c) ? localOk : serviceOk;
+    for (const l of noteRenewed(session, renewed, now, answered, localOk && serviceOk)) {
+      addClaimNotice(`Your claim on ${l.key} (${l.collection}) is no longer held: another session took it over or released it. Check \`task_list\` (id ${l.key}) or \`lease list\` before continuing that work.`, now);
+    }
+    n += renewed.length;
+  }
+  return n;
+}
+async function serviceCoordination() {
+  if (!isSyncConfigured()) {
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+  }
+  const backend = await getSyncBackend();
+  if (!backend?.coordination) {
+    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
+  }
+  return wrap(backend.coordination);
+}
+function localCoordination() {
+  if (!local) {
+    const dir = getConfig().LOCAL_COORD_DIR;
+    sweepLockDebris(dir);
+    sweepLockDebris(join6(dir, "locks"));
+    sweepLockDebris(getConfig().LEASE_STATE_DIR);
+    local = guardLocal(createLocalCoordination());
+  }
+  return local;
+}
+function resetLocalCoordination() {
+  local = void 0;
+}
+function coordinatedLocally(collection) {
+  return !isSyncableCollection(collection) || !isSyncConfigured();
+}
+async function requireCoordination() {
+  const pick = async (collection) => coordinatedLocally(collection) ? localCoordination() : serviceCoordination();
+  return {
+    leaseAcquire: async (req) => (await pick(req.collection)).leaseAcquire(req),
+    leaseHeartbeat: async (collection, session, keys) => {
+      if (collection !== void 0) return (await pick(collection)).leaseHeartbeat(collection, session, keys);
+      const mine = await localCoordination().leaseHeartbeat(void 0, session);
+      if (!isSyncConfigured()) return mine;
+      try {
+        const theirs = await (await serviceCoordination()).leaseHeartbeat(void 0, session);
+        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
+      } catch (e) {
+        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: e.message };
+        throw e;
+      }
+    },
+    leaseRelease: async (collection, key, session, outcome) => (await pick(collection)).leaseRelease(collection, key, session, outcome),
+    leaseList: async (collection, includeExpired) => (await pick(collection)).leaseList(collection, includeExpired),
+    counterNext: async (collection, name, floor) => (await pick(collection)).counterNext(collection, name, floor),
+    nextTaskId: async (floor) => (isSyncConfigured() ? serviceCoordination() : Promise.resolve(localCoordination())).then((c) => c.nextTaskId(floor))
+  };
+}
+function isCoordinationUnavailable(e) {
+  if (e instanceof CoordinationUnavailableError) return true;
+  const err = e;
+  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
+}
+function guardLocal(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (e?.code === "lock_timeout") {
+        throw new CoordinationUnavailableError("unreachable", `this machine's coordination is busy: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+function wrap(c) {
+  const guard = (fn) => async (...a) => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if (isCoordinationUnavailable(e)) {
+        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId)
+  };
+}
+var SESSION_RE2, HEARTBEAT_MAX_INTERVAL_S, heldKey, CoordinationUnavailableError, local;
+var init_coordination = __esm({
+  "packages/core/src/sync/coordination.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    init_backend();
+    init_local_coordination();
+    init_syncable();
+    SESSION_RE2 = /^[A-Za-z0-9._:-]{1,128}$/;
+    HEARTBEAT_MAX_INTERVAL_S = 300;
+    heldKey = (collection, key) => `${collection}\0${key}`;
+    CoordinationUnavailableError = class extends Error {
+      constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+        this.name = "CoordinationUnavailableError";
+      }
+      reason;
+      code = "coordination_unavailable";
+    };
+  }
+});
+
 // packages/core/src/tasks/create.ts
 var create_exports = {};
 __export(create_exports, {
   createTask: () => createTask,
   getNextTaskId: () => getNextTaskId
 });
-async function getNextTaskId() {
-  if (isSyncConfigured()) {
+async function getNextTaskId(floor = 0, localOnly = false) {
+  if (isSyncConfigured() && !localOnly) {
     await Promise.race([
       resolveSyncUsername(),
       new Promise((resolve2) => setTimeout(resolve2, 3e3).unref())
     ]).catch(() => void 0);
   }
   const collections = await listCollections2();
-  let maxId = 0;
+  let maxId = floor;
   for (const collection of collections) {
     try {
       const tasks = await getDocumentsByFilter2(collection.name, { type: "task" }, 1e3);
@@ -3295,7 +4116,7 @@ async function getNextTaskId() {
       continue;
     }
   }
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     try {
       const backend = await getSyncBackend();
       if (backend?.coordination) {
@@ -3308,7 +4129,7 @@ async function getNextTaskId() {
     } catch {
     }
   }
-  if (isSyncConfigured()) {
+  if (isSyncConfigured() && !localOnly) {
     try {
       const backend = await getSyncBackend();
       const remote = !backend ? 0 : await Promise.race([
@@ -3319,12 +4140,35 @@ async function getNextTaskId() {
     } catch {
     }
   }
+  try {
+    const id = await localCoordination().nextTaskId(maxId);
+    if (id.startsWith(`${getConfig().USERNAME}-`)) return id;
+  } catch {
+  }
   return `${getConfig().USERNAME}-${maxId + 1}`;
+}
+async function idTaken(id) {
+  for (const c of await listCollections2().catch(() => [])) {
+    try {
+      if ((await getDocumentsByIds2(c.name, [id])).length) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+async function freshTaskId() {
+  let floor = 0;
+  let id = await getNextTaskId();
+  for (let i = 1; i < ID_ATTEMPTS && await idTaken(id); i++) {
+    floor = Math.max(floor, Number(id.slice(id.lastIndexOf("-") + 1)) || 0);
+    id = await getNextTaskId(floor, true);
+  }
+  return id;
 }
 async function createTask(title, options = {}, requested = "global") {
   const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection2(collection);
-  const id = await getNextTaskId();
+  const id = await freshTaskId();
   const now = Math.floor(Date.now() / 1e3);
   const metadata = {
     type: "task",
@@ -3355,7 +4199,7 @@ async function createTask(title, options = {}, requested = "global") {
   await addDocument2(collection, id, title, metadata);
   return id;
 }
-var PRIORITY_SALIENCE;
+var PRIORITY_SALIENCE, ID_ATTEMPTS;
 var init_create = __esm({
   "packages/core/src/tasks/create.ts"() {
     "use strict";
@@ -3363,12 +4207,14 @@ var init_create = __esm({
     init_store();
     init_backend();
     init_sentinel();
+    init_coordination();
     PRIORITY_SALIENCE = {
       critical: 3,
       high: 2.5,
       medium: 2,
       low: 1.5
     };
+    ID_ATTEMPTS = 5;
   }
 });
 
@@ -3512,188 +4358,23 @@ var init_close = __esm({
   }
 });
 
-// packages/core/src/sync/coordination.ts
-import { mkdirSync as mkdirSync4, readdirSync, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { join as join3 } from "node:path";
-function currentSession(explicit, env = process.env) {
-  for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
-    if (v && SESSION_RE.test(v)) return v;
-  }
-  return void 0;
-}
-function markerPath(session) {
-  return join3(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
-}
-function readMarker(session) {
-  try {
-    return JSON.parse(readFileSync6(markerPath(session), "utf-8"));
-  } catch {
-    return void 0;
-  }
-}
-function writeMarker(m) {
-  try {
-    mkdirSync4(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync4(markerPath(m.session), JSON.stringify(m), { mode: 384 });
-  } catch {
-  }
-}
-function heldKeys(session, collection) {
-  const prefix = heldKey(collection, "");
-  return (readMarker(session)?.keys ?? []).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
-}
-function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
-  const prev = readMarker(session);
-  const keys = new Set(prev?.keys ?? []);
-  if (held) keys.add(heldKey(held.collection, held.key));
-  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
-}
-function noteLeaseReleased(session, collection, key) {
-  const prev = readMarker(session);
-  if (!prev?.keys) return;
-  const keys = prev.keys.filter((k) => k !== heldKey(collection, key));
-  writeMarker({ ...prev, keys });
-}
-function noteRenewed(session, renewed, now) {
-  const prev = readMarker(session);
-  const have = new Set(renewed.map((l) => heldKey(l.collection, l.key)));
-  const lost = (prev?.keys ?? []).filter((k) => !have.has(k)).map((k) => {
-    const [collection, key] = k.split("\0");
-    return { collection, key };
-  });
-  if (renewed.length === 0) {
-    try {
-      rmSync2(markerPath(session), { force: true });
-    } catch {
-    }
-    return lost;
-  }
-  const keys = (prev?.keys ?? []).filter((k) => have.has(k));
-  writeMarker({ session, min_ttl: Math.min(...renewed.map((l) => l.ttl_seconds)), last_beat: now, ...keys.length ? { keys } : {} });
-  return lost;
-}
-function sessionsHoldingLeases() {
-  try {
-    return readdirSync(getConfig().LEASE_STATE_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
-  } catch {
-    return [];
-  }
-}
-function noticesPath() {
-  return join3(getConfig().LEASE_STATE_DIR, "notices.state");
-}
-function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
-  let list9 = [];
-  try {
-    list9 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
-  } catch {
-  }
-  if (!Array.isArray(list9)) list9 = [];
-  if (list9.some((n) => n.text === text)) return;
-  list9.push({ at: now, text });
-  try {
-    mkdirSync4(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 448 });
-    writeFileSync4(noticesPath(), JSON.stringify(list9.slice(-20)), { mode: 384 });
-  } catch {
-  }
-}
-function takeClaimNotices() {
-  let list9 = [];
-  try {
-    list9 = JSON.parse(readFileSync6(noticesPath(), "utf-8"));
-  } catch {
-    return [];
-  }
-  try {
-    rmSync2(noticesPath(), { force: true });
-  } catch {
-  }
-  return Array.isArray(list9) ? list9.map((n) => n.text) : [];
-}
-async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
-  if (!isSyncConfigured()) return 0;
-  let n = 0;
-  for (const session of new Set(sessions.filter((s) => !!s && SESSION_RE.test(s)))) {
-    const m = readMarker(session);
-    if (!m) continue;
-    const interval = Math.max(10, Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.floor(m.min_ttl / 3)));
-    if (now - m.last_beat < interval) continue;
-    try {
-      const r = await (await requireCoordination()).leaseHeartbeat(void 0, session);
-      for (const l of noteRenewed(session, r.renewed, now)) {
-        addClaimNotice(`Your claim on ${l.key} (${l.collection}) is no longer held: another session took it over or released it. Check \`task_list\` (id ${l.key}) or \`lease list\` before continuing that work.`, now);
-      }
-      n += r.renewed.length;
-    } catch {
-    }
-  }
-  return n;
-}
-async function requireCoordination() {
-  if (!isSyncConfigured()) {
-    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
-  }
-  const backend = await getSyncBackend();
-  if (!backend?.coordination) {
-    throw new CoordinationUnavailableError("unsupported", "leases and counters need the YAPA sync service; a direct Postgres sync target has none");
-  }
-  return wrap(backend.coordination);
-}
-function isCoordinationUnavailable(e) {
-  if (e instanceof CoordinationUnavailableError) return true;
-  const err = e;
-  return isCycleFatal(e) || err?.status === 404 && err?.code === "not_found";
-}
-function wrap(c) {
-  const guard = (fn) => async (...a) => {
-    try {
-      return await fn(...a);
-    } catch (e) {
-      if (isCoordinationUnavailable(e)) {
-        throw new CoordinationUnavailableError("unreachable", `YAPA sync service could not coordinate: ${e.message}`);
-      }
-      throw e;
-    }
-  };
-  return {
-    leaseAcquire: guard(c.leaseAcquire),
-    leaseHeartbeat: guard(c.leaseHeartbeat),
-    leaseRelease: guard(c.leaseRelease),
-    leaseList: guard(c.leaseList),
-    counterNext: guard(c.counterNext),
-    nextTaskId: guard(c.nextTaskId)
-  };
-}
-var SESSION_RE, HEARTBEAT_MAX_INTERVAL_S, heldKey, CoordinationUnavailableError;
-var init_coordination = __esm({
-  "packages/core/src/sync/coordination.ts"() {
-    "use strict";
-    init_config();
-    init_backend();
-    SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-    HEARTBEAT_MAX_INTERVAL_S = 300;
-    heldKey = (collection, key) => `${collection}\0${key}`;
-    CoordinationUnavailableError = class extends Error {
-      constructor(reason, message) {
-        super(message);
-        this.reason = reason;
-        this.name = "CoordinationUnavailableError";
-      }
-      reason;
-      code = "coordination_unavailable";
-    };
-  }
-});
-
 // packages/core/src/sync/push.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 function emptyPushStats() {
   return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 function syncFingerprint(doc) {
   const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
   const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
-  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+  return createHash2("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+}
+async function writeIfUnchanged(collection, doc, metadata) {
+  return withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds2(collection, [doc.id]);
+    if (!cur || syncFingerprint(cur) !== syncFingerprint(doc)) return false;
+    await updateDocument2(collection, doc.id, metadata(cur.metadata));
+    return true;
+  });
 }
 function stripLocalOnly(metadata) {
   const out = { ...metadata };
@@ -3877,10 +4558,8 @@ async function pushBatch(backend, collection, batch, stats, allowRekey) {
 }
 async function applyPushed(backend, collection, doc, similar, stats) {
   const match = similar.find((s) => s.id !== doc.id);
-  const metadata = stripLocalOnly(doc.metadata);
   if (!match) {
-    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
-    stats.pushed++;
+    if (await writeIfUnchanged(collection, doc, (cur) => ({ ...stripLocalOnly(cur), is_synced: true }))) stats.pushed++;
     return;
   }
   try {
@@ -3890,19 +4569,21 @@ async function applyPushed(backend, collection, doc, similar, stats) {
     process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
 `);
   }
-  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
-  if (!related.includes(match.id)) related.push(match.id);
-  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  await writeIfUnchanged(collection, doc, (cur) => {
+    const related = Array.isArray(cur.related_ids) ? [...cur.related_ids] : [];
+    if (!related.includes(match.id)) related.push(match.id);
+    return { ...stripLocalOnly(cur), related_ids: related, is_synced: true };
+  });
   stats.linked++;
 }
 async function markRejected(collection, doc, code, message) {
-  await updateDocument2(collection, doc.id, {
-    ...doc.metadata,
+  await writeIfUnchanged(collection, doc, (cur) => ({
+    ...cur,
     is_synced: false,
     sync_rejected: code,
     sync_rejected_message: message.slice(0, 300),
     sync_rejected_fp: syncFingerprint(doc)
-  });
+  }));
   process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
 `);
 }
@@ -3939,9 +4620,14 @@ async function rekeyTask(collection, doc, suggestedId) {
   const suggested = Number(suggestedId?.split("-").pop());
   const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
   const newId = `${me}-${n}`;
-  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
-  await addDocument2(collection, newId, doc.content, metadata);
-  await deleteDocument2(collection, doc.id);
+  const metadata = await withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds2(collection, [doc.id]);
+    const src = cur ?? doc;
+    const m = { ...src.metadata, id: newId, rekeyed_from: doc.id };
+    await addDocument2(collection, newId, src.content, m);
+    await deleteDocument2(collection, doc.id);
+    return m;
+  });
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
 `);
   return { ...doc, id: newId, metadata };
@@ -3960,7 +4646,7 @@ async function retractSharedCopies(backend, collection) {
   const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
-  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  for (const d of unchecked) await writeIfUnchanged(collection, d, (cur) => ({ ...cur, remote_checked_at: versionOf(d) }));
   return removed;
 }
 var LOCAL_ONLY_KEYS, pushChain;
@@ -3968,6 +4654,7 @@ var init_push = __esm({
   "packages/core/src/sync/push.ts"() {
     "use strict";
     init_config();
+    init_doc_lock();
     init_store();
     init_embeddings();
     init_backend();
@@ -3983,6 +4670,7 @@ var init_push = __esm({
 // packages/core/src/tasks/claim.ts
 var claim_exports = {};
 __export(claim_exports, {
+  ClaimBusyError: () => ClaimBusyError,
   TaskClaimedError: () => TaskClaimedError,
   claimKey: () => claimKey,
   claimNote: () => claimNote,
@@ -3999,8 +4687,8 @@ __export(claim_exports, {
 function claimSession(explicit) {
   return currentSession(explicit) ?? `${getDeviceId()}:${process.pid}`.replace(SESSION_SAFE, "-").slice(0, 128);
 }
-function claimsApply(collection) {
-  return isSyncableCollection(collection) && isSyncConfigured();
+function claimsApply(_collection) {
+  return true;
 }
 function utc(t, now = Math.floor(Date.now() / 1e3)) {
   const iso = new Date(t * 1e3).toISOString();
@@ -4042,7 +4730,7 @@ async function claimTask(id, collection, metadata, opts = {}) {
     return { kind: "refused", id, collection, session, conflicts: [{ lease, overlap: [`key:${id}`] }] };
   }
   let key = id;
-  if (metadata.is_synced === false) {
+  if (metadata.is_synced === false && !coordinatedLocally(collection)) {
     try {
       const r = await pushDocsNow(collection, [id]);
       key = r.renamed[id] ?? id;
@@ -4064,9 +4752,13 @@ async function claimTask(id, collection, metadata, opts = {}) {
     noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
     return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
+}
+function unavailable(e, key, collection, session) {
+  if (coordinatedLocally(collection)) throw new ClaimBusyError(key, collection, e.message);
+  return { kind: "unshared", id: key, collection, session, reason: e.message };
 }
 async function claimKey(collection, key, opts = {}) {
   if (!claimsApply(collection)) return { kind: "local", id: key };
@@ -4086,7 +4778,7 @@ async function claimKey(collection, key, opts = {}) {
     noteLeaseHeld(session, r.lease.ttl_seconds, void 0, { collection, key });
     return { kind: "granted", id: key, collection, session, lease: r.lease, renewed: r.renewed, ...r.took_over_from ? { tookOverFrom: r.took_over_from } : {} };
   } catch (e) {
-    if (isCoordinationUnavailable(e)) return { kind: "unshared", id: key, collection, session, reason: e.message };
+    if (isCoordinationUnavailable(e)) return unavailable(e, key, collection, session);
     throw e;
   }
 }
@@ -4136,8 +4828,7 @@ async function retryUnsharedClaims() {
         continue;
       }
       if (r.kind === "unshared" || r.kind === "local") return out;
-      const [cur] = await getDocumentsByIds2(col.name, [r.id]).catch(() => []);
-      if (cur) await updateDocument2(col.name, r.id, { ...cur.metadata, claim_unshared: "" });
+      await patchDocument(col.name, r.id, { claim_unshared: "" }).catch(() => void 0);
       if (r.kind === "granted") {
         out.granted++;
       } else {
@@ -4169,7 +4860,7 @@ function claimNote(task, claims, mySessions = [currentSession()]) {
   if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
   return "";
 }
-var TaskClaimedError, SESSION_SAFE;
+var TaskClaimedError, SESSION_SAFE, ClaimBusyError;
 var init_claim = __esm({
   "packages/core/src/tasks/claim.ts"() {
     "use strict";
@@ -4190,6 +4881,17 @@ var init_claim = __esm({
       code = "task_claimed";
     };
     SESSION_SAFE = /[^A-Za-z0-9._:-]/g;
+    ClaimBusyError = class extends Error {
+      constructor(id, collection, cause) {
+        super(`${id} was not claimed: ${cause}. Nothing changed; try again in a moment.`);
+        this.id = id;
+        this.collection = collection;
+        this.name = "ClaimBusyError";
+      }
+      id;
+      collection;
+      code = "claim_busy";
+    };
   }
 });
 
@@ -4231,22 +4933,30 @@ async function updateTask(id, updates, ctx = {}) {
   }
   const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
-  const updatedMetadata = {
-    ...task.metadata,
-    ...updates,
-    updated_at: Math.floor(Date.now() / 1e3)
-  };
-  if (hasStructuralChange) updatedMetadata.is_synced = false;
-  if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && task.metadata.blockedReason) {
-    updatedMetadata.blockedReason = "";
-  }
-  if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
-  else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
-  if (updates.title !== void 0 && updates.title !== task.title) {
-    await addDocument2(task.collection, task.id, updates.title, updatedMetadata);
-  } else {
-    await updateDocument2(task.collection, task.id, updatedMetadata);
-  }
+  const t = task;
+  const prev = await withDocLock(t.collection, t.id, async () => {
+    const cur = (await getDocumentsByIds2(t.collection, [t.id]))[0];
+    if (!cur) throw new Error(`Task ${t.id} not found`);
+    const updatedMetadata = {
+      ...cur.metadata,
+      ...updates,
+      updated_at: Math.floor(Date.now() / 1e3)
+    };
+    if (updates.completed_at != null && cur.metadata.completed_at != null) updatedMetadata.completed_at = cur.metadata.completed_at;
+    if (hasStructuralChange) updatedMetadata.is_synced = false;
+    if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && cur.metadata.blockedReason) {
+      updatedMetadata.blockedReason = "";
+    }
+    if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
+    else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
+    if (updates.title !== void 0 && updates.title !== cur.content) {
+      await addDocument2(t.collection, t.id, updates.title, updatedMetadata);
+    } else {
+      await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
+    }
+    return cur.metadata.status;
+  });
+  result.previousStatus = prev;
   if (result.claim?.kind === "granted") {
     await pushDocsNow(task.collection, [task.id]).catch(() => void 0);
   }
@@ -4270,11 +4980,11 @@ async function completeTask(id, durationMinutes, ctx = {}, record = {}) {
   if (durationMinutes != null) {
     completionUpdates.duration_minutes = durationMinutes;
   }
-  const { release } = await updateTask(id, completionUpdates, ctx);
+  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
   const recorded = record.learned?.length || record.follow_ups?.length ? await recordForTask({ id: task.id, collection: task.collection }, record) : void 0;
   const nudge = captureNudge(task.id, task.metadata, recorded);
   const extras = { ...release ? { release } : {}, ...recorded ? { recorded } : {}, ...nudge ? { nudge } : {} };
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
+  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== "complete") {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
       task.metadata.recurrence_pattern
@@ -4315,6 +5025,7 @@ var init_update = __esm({
     init_config();
     init_close();
     init_store();
+    init_doc_lock();
     init_syncable();
     init_create();
     init_claim();
@@ -4338,9 +5049,9 @@ async function waitingOn(opts = {}) {
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
-    const open = tasks.filter((t) => t.metadata.status !== "complete");
+    const open2 = tasks.filter((t) => t.metadata.status !== "complete");
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -4363,7 +5074,7 @@ async function waitingOn(opts = {}) {
       };
       (m.kind === "decision" ? out.decisions : out.questions).push(item);
     }
-    for (const t of open) {
+    for (const t of open2) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
       const people = taskNeedsPeople(list5(m.tags));
@@ -4406,12 +5117,12 @@ async function waitingOn(opts = {}) {
 }
 function fenceWaiting(w, activeCollection) {
   if (!isSyncableCollection(activeCollection)) return { waiting: w, hidden: 0 };
-  const open = (i) => i.collection === "global" || isSyncableCollection(i.collection);
+  const open2 = (i) => i.collection === "global" || isSyncableCollection(i.collection);
   const waiting = {
-    decisions: w.decisions.filter(open),
-    questions: w.questions.filter(open),
-    actions: w.actions.filter(open),
-    blocked: w.blocked.filter(open)
+    decisions: w.decisions.filter(open2),
+    questions: w.questions.filter(open2),
+    actions: w.actions.filter(open2),
+    blocked: w.blocked.filter(open2)
   };
   return { waiting, hidden: waitingCount(w) - waitingCount(waiting) };
 }
@@ -4464,18 +5175,29 @@ var init_waiting = __esm({
 });
 
 // packages/core/src/tasks/next.ts
+async function expiredLeaseKeys(collection) {
+  try {
+    const r = await (await requireCoordination()).leaseList(collection, true);
+    return new Set(r.leases.filter((l) => l.expired).map((l) => l.key));
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
 async function nextTasks(opts) {
   const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
-  const open = docs.filter((d) => d.metadata.status !== "complete");
+  const open2 = docs.filter((d) => d.metadata.status !== "complete");
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live = claims ? [...claims.values()] : [];
+  const local2 = coordinatedLocally(opts.collection);
+  const expired = local2 ? await expiredLeaseKeys(opts.collection) : void 0;
+  const nowS = Math.floor(Date.now() / 1e3);
   const liveScope = /* @__PURE__ */ new Map();
   for (const l of live) {
     for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
     for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
   }
-  const openIds = new Set(open.map((d) => d.id));
+  const openIds = new Set(open2.map((d) => d.id));
   const skipped = [];
   const ready = [];
   const depCache = /* @__PURE__ */ new Map();
@@ -4484,7 +5206,7 @@ async function nextTasks(opts) {
     if (!depCache.has(id)) depCache.set(id, (await getTask(id).catch(() => null))?.metadata.status);
     return depCache.get(id);
   };
-  for (const d of open) {
+  for (const d of open2) {
     const tags = norm(d.metadata.tags);
     if (opts.tags?.length && !opts.tags.every((t) => tags.includes(t))) continue;
     if (opts.excludeTags?.some((t) => tags.includes(t))) {
@@ -4505,9 +5227,9 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ""}` });
       continue;
     }
-    const held = claims?.get(d.id);
-    if (held) {
-      skipped.push({ id: d.id, reason: `claimed by ${describeHolder(held)}` });
+    const held2 = claims?.get(d.id);
+    if (held2) {
+      skipped.push({ id: d.id, reason: `claimed by ${describeHolder(held2)}` });
       continue;
     }
     if (status === "in_progress" && !claims) {
@@ -4517,6 +5239,14 @@ async function nextTasks(opts) {
     if (status === "in_progress" && d.metadata.claim_unshared) {
       skipped.push({ id: d.id, reason: "in_progress (claimed on this machine, not shared yet)" });
       continue;
+    }
+    if (status === "in_progress" && local2 && !expired?.has(d.id)) {
+      const quiet = nowS - Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
+      if (quiet < LEASE_TTL_DEFAULT) {
+        const left = Math.ceil((LEASE_TTL_DEFAULT - quiet) / 60);
+        skipped.push({ id: d.id, reason: `in_progress with no claim on record (started without one); offered again after ${left} min untouched` });
+        continue;
+      }
     }
     const waiting = [];
     for (const dep of norm(d.metadata.depends_on)) {
@@ -4548,7 +5278,7 @@ async function nextTasks(opts) {
   const created = (id) => Number(byId.get(id)?.metadata.created_at ?? 0);
   ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
   const result = { ready, skipped, claimsKnown: claims !== void 0, cleanup: [] };
-  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open, claims);
+  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open2, claims);
   if (!opts.claim) return result;
   const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a, includeCleanup: _i, ...claimOpts } = opts;
   for (const r of ready) {
@@ -4573,11 +5303,11 @@ async function nextTasks(opts) {
   }
   return result;
 }
-async function cleanupItems(collection, open, claims) {
+async function cleanupItems(collection, open2, claims) {
   const items = [];
   const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
-  if (open.some((d) => triageTag(norm(d.metadata.tags)))) {
-    const untriaged = open.filter((d) => !triageTag(norm(d.metadata.tags))).length;
+  if (open2.some((d) => triageTag(norm(d.metadata.tags)))) {
+    const untriaged = open2.filter((d) => !triageTag(norm(d.metadata.tags))).length;
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const now = Math.floor(Date.now() / 1e3);
@@ -4598,6 +5328,8 @@ var init_next = __esm({
     init_store();
     init_config();
     init_compact();
+    init_coordination();
+    init_local_coordination();
     init_claim();
     init_update();
     init_close();
@@ -4661,6 +5393,16 @@ var init_delete = __esm({
 });
 
 // packages/core/src/tasks/dependencies.ts
+async function editEdges(id, field, edit) {
+  const t = await getTask(id);
+  if (!t) return;
+  await withDocLock(t.collection, t.id, async () => {
+    const now = await getTask(id);
+    if (!now) return;
+    const next = edit(toList(now.metadata[field]));
+    if (next) await updateTask(id, { [field]: next });
+  });
+}
 async function addDependency(taskId, dependsOnId) {
   const task = await getTask(taskId);
   const dep = await getTask(dependsOnId);
@@ -4668,17 +5410,9 @@ async function addDependency(taskId, dependsOnId) {
     throw new Error("One or both tasks not found");
   }
   assertWritable(taskId, task.metadata);
-  const taskDeps = Array.isArray(task.metadata.depends_on) ? task.metadata.depends_on : (task.metadata.depends_on ?? "").split(",").filter(Boolean);
-  if (!taskDeps.includes(dependsOnId)) {
-    taskDeps.push(dependsOnId);
-    await updateTask(taskId, { depends_on: taskDeps });
-  }
+  await editEdges(taskId, "depends_on", (cur) => cur.includes(dependsOnId) ? void 0 : [...cur, dependsOnId]);
   if (isReadOnlyDoc(dep.metadata)) return;
-  const depBlocks = Array.isArray(dep.metadata.blocks) ? dep.metadata.blocks : (dep.metadata.blocks ?? "").split(",").filter(Boolean);
-  if (!depBlocks.includes(taskId)) {
-    depBlocks.push(taskId);
-    await updateTask(dependsOnId, { blocks: depBlocks });
-  }
+  await editEdges(dependsOnId, "blocks", (cur) => cur.includes(taskId) ? void 0 : [...cur, taskId]);
 }
 async function removeDependency(taskId, dependsOnId) {
   const task = await getTask(taskId);
@@ -4687,16 +5421,10 @@ async function removeDependency(taskId, dependsOnId) {
     throw new Error("Neither task found");
   }
   if (task) {
-    const taskDeps = toList(task.metadata.depends_on);
-    if (taskDeps.includes(dependsOnId)) {
-      await updateTask(taskId, { depends_on: taskDeps.filter((id) => id !== dependsOnId) });
-    }
+    await editEdges(taskId, "depends_on", (cur) => cur.includes(dependsOnId) ? cur.filter((id) => id !== dependsOnId) : void 0);
   }
   if (dep && !isReadOnlyDoc(dep.metadata)) {
-    const depBlocks = toList(dep.metadata.blocks);
-    if (depBlocks.includes(taskId)) {
-      await updateTask(dependsOnId, { blocks: depBlocks.filter((id) => id !== taskId) });
-    }
+    await editEdges(dependsOnId, "blocks", (cur) => cur.includes(taskId) ? cur.filter((id) => id !== taskId) : void 0);
   }
 }
 var toList;
@@ -4704,6 +5432,7 @@ var init_dependencies = __esm({
   "packages/core/src/tasks/dependencies.ts"() {
     "use strict";
     init_update();
+    init_doc_lock();
     init_syncable();
     toList = (x) => Array.isArray(x) ? x : String(x ?? "").split(",").filter(Boolean);
   }
@@ -4916,7 +5645,18 @@ async function mergeCollections(from, into, opts = {}) {
     if (landed.length !== ids.length || after !== before + ids.length) {
       throw new Error(`Merge verification failed: "${into}" holds ${landed.length} of ${ids.length} moved docs (count ${before} -> ${after}); "${from}" was left intact`);
     }
-    for (const id of ids) await deleteDocument2(from, id);
+    const copied = new Map(docs.map((d) => [d.id, JSON.stringify([d.content, d.metadata])]));
+    for (const id of ids) {
+      await withDocLock(from, id, async () => {
+        const [cur] = await getDocumentsByIds2(from, [id]);
+        if (cur && JSON.stringify([cur.content, cur.metadata]) !== copied.get(id)) {
+          const metadata = { ...cur.metadata, is_synced: false };
+          delete metadata.remote_checked_at;
+          await addDocument2(into, id, cur.content, metadata);
+        }
+        await deleteDocument2(from, id);
+      });
+    }
     const left = await getCollectionCount2(from);
     if (left !== 0) throw new Error(`"${from}" still holds ${left} document(s) after the move; it was not deleted`);
   }
@@ -4963,6 +5703,7 @@ var init_manage = __esm({
     init_config();
     init_deletes();
     init_sentinel();
+    init_doc_lock();
     init_store();
     init_syncable();
     isSyncable2 = isSyncableCollection;
@@ -5313,7 +6054,7 @@ async function curationCycle() {
             };
             if (result.rationale) updated.classification_rationale = result.rationale;
             try {
-              await updateDocument2(c.name, doc.id, updated);
+              await patchDocument(c.name, doc.id, metadataDelta(doc.metadata, updated));
               stats.scored++;
             } catch (e) {
               process.stderr.write(`[yapa-curation] Update error for ${doc.id}: ${e}
@@ -5657,7 +6398,7 @@ async function findDuplicatePairs(collection, distanceThreshold) {
 async function archiveDuplicate(collection, loserId, winnerId) {
   const existing = await getDocumentsByIds2(collection, [loserId]);
   if (!existing.length) return;
-  await updateDocument2(collection, loserId, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId }));
+  await patchDocument(collection, loserId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId })));
 }
 async function janitorSweep(options = {}) {
   const stats = {
@@ -5765,21 +6506,25 @@ async function updateMemory(id, patch, collection) {
   const typed = normalizeTyped(typedPatch, found.doc.metadata);
   const now = Math.floor(Date.now() / 1e3);
   const baseId = found.doc.metadata.parent_id ?? found.doc.id;
-  const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : [found.doc];
-  let metadata = found.doc.metadata;
-  for (const [i, d] of docs.entries()) {
-    metadata = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
-    const last = i === docs.length - 1;
-    if ((note?.trim() || content !== void 0) && last) {
-      const day = new Date(now * 1e3).toISOString().slice(0, 10);
-      const text = content ?? d.content;
-      await addDocument2(found.collection, d.id, note?.trim() ? `${text}
+  const metadata = await withDocLock(found.collection, baseId, async () => {
+    const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : await getDocumentsByIds2(found.collection, [found.doc.id]);
+    if (!docs.length) throw new MemoryNotFoundError(id);
+    let metadata2 = docs[docs.length - 1].metadata;
+    for (const [i, d] of docs.entries()) {
+      metadata2 = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+      const last = i === docs.length - 1;
+      if ((note?.trim() || content !== void 0) && last) {
+        const day = new Date(now * 1e3).toISOString().slice(0, 10);
+        const text = content ?? d.content;
+        await addDocument2(found.collection, d.id, note?.trim() ? `${text}
 
-${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata);
-    } else {
-      await updateDocument2(found.collection, d.id, metadata);
+${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
+      } else {
+        await patchDocument(found.collection, d.id, metadataDelta(d.metadata, metadata2));
+      }
     }
-  }
+    return metadata2;
+  });
   if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
   return { id: baseId, collection: found.collection, metadata };
 }
@@ -5789,6 +6534,7 @@ var init_update2 = __esm({
     "use strict";
     init_store();
     init_config();
+    init_doc_lock();
     init_syncable();
     init_sentinel();
     init_kinds();
@@ -6065,10 +6811,10 @@ var init_capture = __esm({
 });
 
 // packages/core/src/buckets/artifacts.ts
-import { existsSync, mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "fs";
-import { join as join4 } from "path";
+import { existsSync, mkdirSync as mkdirSync5, readdirSync as readdirSync4, readFileSync as readFileSync9, writeFileSync as writeFileSync4 } from "fs";
+import { join as join7 } from "path";
 function artifactDir(kind) {
-  return join4(getConfig().ARTIFACTS_DIR, kind);
+  return join7(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
@@ -6077,7 +6823,7 @@ function ensureArtifactDir(kind) {
 }
 function nextVersion(kind) {
   const dir = ensureArtifactDir(kind);
-  const files = readdirSync2(dir);
+  const files = readdirSync4(dir);
   let max = 0;
   for (const f of files) {
     const m = f.match(/^v(\d+)\./);
@@ -6092,7 +6838,7 @@ function listVersions(kind) {
   const dir = artifactDir(kind);
   if (!existsSync(dir)) return [];
   const versions = /* @__PURE__ */ new Set();
-  for (const f of readdirSync2(dir)) {
+  for (const f of readdirSync4(dir)) {
     const m = f.match(/^v(\d+)\./);
     if (m) versions.add(parseInt(m[1], 10));
   }
@@ -6100,17 +6846,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path3 = join4(dir, filename);
-  writeFileSync5(path3, content);
+  const path3 = join7(dir, filename);
+  writeFileSync4(path3, content);
   return path3;
 }
 function readArtifact(kind, filename) {
-  const path3 = join4(artifactDir(kind), filename);
+  const path3 = join7(artifactDir(kind), filename);
   if (!existsSync(path3)) return null;
-  return readFileSync7(path3, "utf-8");
+  return readFileSync9(path3, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join4(artifactDir(kind), filename);
+  return join7(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -6387,7 +7133,7 @@ async function bucketRouteNow() {
       selected_at: now
     };
     try {
-      await updateDocument2(entry.collection, entry.id, updated);
+      await patchDocument(entry.collection, entry.id, metadataDelta(entry.metadata, updated));
       tagged++;
     } catch (e) {
       process.stderr.write(`[yapa-buckets] Tag error for ${entry.id}: ${e}
@@ -6454,11 +7200,7 @@ async function systemPromptActivate(version) {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
-          await updateDocument2(c.name, d.id, {
-            ...d.metadata,
-            promoted_to: target,
-            promoted_at: now
-          });
+          await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
         }
       }
@@ -6481,7 +7223,7 @@ async function systemPromptDeactivate(version) {
           const updated = { ...d.metadata };
           delete updated.promoted_to;
           delete updated.promoted_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBack++;
         }
       }
@@ -6686,10 +7428,10 @@ async function copiesElsewhere(id, except) {
   return out;
 }
 async function dropMovedOut(backend, collectionName, followed, stats) {
-  const local = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
-  if (local.length === 0) return;
-  const remote = await backend.collectionsByIds(local.map((d) => d.id));
-  for (const doc of local) {
+  const local2 = (await getDocumentsByFilter2(collectionName, {}, 1e5)).filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && d.metadata.is_synced !== false);
+  if (local2.length === 0) return;
+  const remote = await backend.collectionsByIds(local2.map((d) => d.id));
+  for (const doc of local2) {
     const now = remote.get(doc.id);
     if (!now || now === collectionName || followed.has(now)) continue;
     await deleteDocument2(collectionName, doc.id);
@@ -6697,6 +7439,12 @@ async function dropMovedOut(backend, collectionName, followed, stats) {
   }
 }
 async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
+  const after = [];
+  await withDocLock(collectionName, remoteDoc.id, () => applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, after));
+  for (const fn of after) await fn().catch((e) => process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}
+`));
+}
+async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, after) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
   if (!existing) {
     const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
@@ -6727,15 +7475,15 @@ async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
     if (similarLocal.length > 0) {
       const similarity = 1 - similarLocal[0].distance;
       if (similarity > getConfig().SYNC_SIMILARITY_THRESHOLD) {
-        const localDoc = similarLocal[0];
-        const localRelated = Array.isArray(localDoc.metadata.related_ids) ? localDoc.metadata.related_ids : [];
-        if (!localRelated.includes(remoteDoc.id)) {
-          localRelated.push(remoteDoc.id);
-          await updateDocument2(collectionName, localDoc.id, { ...localDoc.metadata, related_ids: localRelated });
-        }
-        await backend.addRelatedIds(remoteDoc.id, [localDoc.id]).catch((e) => {
-          process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}
-`);
+        const localId = similarLocal[0].id;
+        after.push(async () => {
+          await withDocLock(collectionName, localId, async () => {
+            const [cur] = await getDocumentsByIds2(collectionName, [localId]);
+            if (!cur) return;
+            const related = Array.isArray(cur.metadata.related_ids) ? [...cur.metadata.related_ids] : [];
+            if (!related.includes(remoteDoc.id)) await patchDocument(collectionName, localId, { related_ids: [...related, remoteDoc.id] });
+          });
+          await backend.addRelatedIds(remoteDoc.id, [localId]);
         });
         stats.linked++;
       }
@@ -6749,6 +7497,7 @@ var MAX_PULL_PAGES;
 var init_pull = __esm({
   "packages/core/src/sync/pull.ts"() {
     "use strict";
+    init_doc_lock();
     init_config();
     init_store();
     init_backend();
@@ -6760,9 +7509,9 @@ var init_pull = __esm({
 });
 
 // packages/core/src/sync/shared-cycle.ts
-import { createHash as createHash2 } from "node:crypto";
-import { closeSync, mkdirSync as mkdirSync6, openSync, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync6, writeSync } from "node:fs";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
+import { closeSync as closeSync2, mkdirSync as mkdirSync6, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
+import { dirname as dirname5, join as join8 } from "node:path";
 function syncTargetKey(config = getConfig()) {
   let remote = "";
   if (config.SYNC_SERVICE_URL) remote = `service:${config.SYNC_SERVICE_URL}`;
@@ -6775,11 +7524,11 @@ function syncTargetKey(config = getConfig()) {
     }
   }
   const store = config.STORAGE === "local" ? `local:${config.LOCAL_STORE_PATH}` : `chroma:${config.CHROMA_URL}`;
-  return createHash2("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
+  return createHash3("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
 }
 function sharedDir(config = getConfig()) {
   if (!config.SYNC_COORDINATE || !config.SYNC_HEALTH_FILE) return void 0;
-  return dirname4(config.SYNC_HEALTH_FILE);
+  return dirname5(config.SYNC_HEALTH_FILE);
 }
 function paths(config = getConfig()) {
   const dir = sharedDir(config);
@@ -6787,34 +7536,25 @@ function paths(config = getConfig()) {
   const key = syncTargetKey(config);
   return {
     dir,
-    record: join5(dir, `sync-cycle-${key}.json`),
-    lock: join5(dir, `sync-cycle-${key}.lock`),
-    pulls: join5(dir, `sync-pulls-${key}.json`)
+    record: join8(dir, `sync-cycle-${key}.json`),
+    lock: join8(dir, `sync-cycle-${key}.lock`),
+    pulls: join8(dir, `sync-pulls-${key}.json`)
   };
 }
 function readJson(path3) {
   try {
-    return JSON.parse(readFileSync8(path3, "utf-8"));
+    return JSON.parse(readFileSync10(path3, "utf-8"));
   } catch {
     return void 0;
   }
 }
 function writeJson(path3, value) {
   try {
-    mkdirSync6(dirname4(path3), { recursive: true, mode: 448 });
+    mkdirSync6(dirname5(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    writeFileSync6(tmp, JSON.stringify(value) + "\n", { mode: 384 });
-    renameSync3(tmp, path3);
+    writeFileSync5(tmp, JSON.stringify(value) + "\n", { mode: 384 });
+    renameSync4(tmp, path3);
   } catch {
-  }
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === "EPERM";
   }
 }
 function readCycleRecord(config = getConfig()) {
@@ -6836,29 +7576,29 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
   const alive = opts.alive ?? pidAlive;
   const staleAfter = Math.max(2 * config.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
   const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt2 = 0; attempt2 < 2; attempt2++) {
     try {
       mkdirSync6(p.dir, { recursive: true, mode: 448 });
-      const fd = openSync(p.lock, "wx", 384);
+      const fd = openSync2(p.lock, "wx", 384);
       try {
-        writeSync(fd, JSON.stringify(body));
+        writeSync2(fd, JSON.stringify(body));
       } finally {
-        closeSync(fd);
+        closeSync2(fd);
       }
       let released = false;
       return () => {
         if (released) return;
         released = true;
-        const held = readJson(p.lock);
-        if (held?.pid === process.pid && held.started_at === now) rmSync3(p.lock, { force: true });
+        const held2 = readJson(p.lock);
+        if (held2?.pid === process.pid && held2.started_at === now) rmSync4(p.lock, { force: true });
       };
     } catch (e) {
       if (e.code !== "EEXIST") return () => {
       };
-      const held = readJson(p.lock);
-      const stale = !held || !alive(held.pid) || now - held.started_at > staleAfter || held.started_at > now + 6e4;
-      if (!stale || attempt > 0) return void 0;
-      rmSync3(p.lock, { force: true });
+      const held2 = readJson(p.lock);
+      const stale2 = !held2 || !alive(held2.pid) || now - held2.started_at > staleAfter || held2.started_at > now + 6e4;
+      if (!stale2 || attempt2 > 0) return void 0;
+      rmSync4(p.lock, { force: true });
     }
   }
   return void 0;
@@ -6902,6 +7642,7 @@ var DUE_FRACTION, MIN_STALE_LOCK_MS;
 var init_shared_cycle = __esm({
   "packages/core/src/sync/shared-cycle.ts"() {
     "use strict";
+    init_fs_lock();
     init_config();
     DUE_FRACTION = 0.9;
     MIN_STALE_LOCK_MS = 10 * 60 * 1e3;
@@ -6909,8 +7650,8 @@ var init_shared_cycle = __esm({
 });
 
 // packages/core/src/update-check.ts
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, renameSync as renameSync4, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname5, join as join6 } from "node:path";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname6, join as join9 } from "node:path";
 function compareVersions(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
   const pb = SEMVER.exec(String(b ?? "").trim());
@@ -6925,12 +7666,12 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join6(dirname5(health), "update-check.json") : void 0;
+  return health ? join9(dirname6(health), "update-check.json") : void 0;
 }
 function readUpdateState(path3 = updateStatePath()) {
   if (!path3) return void 0;
   try {
-    const s = JSON.parse(readFileSync9(path3, "utf-8"));
+    const s = JSON.parse(readFileSync11(path3, "utf-8"));
     return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
   } catch {
     return void 0;
@@ -6939,10 +7680,10 @@ function readUpdateState(path3 = updateStatePath()) {
 function writeUpdateState(s, path3 = updateStatePath()) {
   if (!path3) return;
   try {
-    mkdirSync7(dirname5(path3), { recursive: true, mode: 448 });
+    mkdirSync7(dirname6(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.tmp`;
-    writeFileSync7(tmp, JSON.stringify(s) + "\n", { mode: 384 });
-    renameSync4(tmp, path3);
+    writeFileSync6(tmp, JSON.stringify(s) + "\n", { mode: 384 });
+    renameSync5(tmp, path3);
   } catch {
   }
 }
@@ -7400,13 +8141,13 @@ ${jobResult.stdout}`);
 });
 
 // packages/core/src/training/registry.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync10, writeFileSync as writeFileSync8 } from "fs";
-import { join as join7 } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync12, writeFileSync as writeFileSync7 } from "fs";
+import { join as join10 } from "path";
 function registryPath() {
-  return join7(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join10(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join7(getConfig().ARTIFACTS_DIR, "adapters");
+  const dir = join10(getConfig().ARTIFACTS_DIR, "adapters");
   if (!existsSync2(dir)) mkdirSync8(dir, { recursive: true });
 }
 function load() {
@@ -7414,7 +8155,7 @@ function load() {
   const path3 = registryPath();
   if (!existsSync2(path3)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync10(path3, "utf-8"));
+    const parsed = JSON.parse(readFileSync12(path3, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -7425,7 +8166,7 @@ function load() {
 }
 function save(file) {
   ensureDir();
-  writeFileSync8(registryPath(), JSON.stringify(file, null, 2) + "\n");
+  writeFileSync7(registryPath(), JSON.stringify(file, null, 2) + "\n");
 }
 function addAdapter(entry) {
   const file = load();
@@ -7464,7 +8205,7 @@ var init_registry = __esm({
 });
 
 // packages/core/src/training/synthesis.ts
-import { readFileSync as readFileSync11 } from "fs";
+import { readFileSync as readFileSync13 } from "fs";
 async function synthesizeMemory(memory, options = {}) {
   const caller = options.call ?? callCurationLLM;
   const userPrompt = `[MEMORY]
@@ -7539,7 +8280,7 @@ function extractJsonArray3(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path3) {
-  const content = readFileSync11(path3, "utf-8");
+  const content = readFileSync13(path3, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -7594,9 +8335,9 @@ RULES
 });
 
 // packages/core/src/training/index.ts
-import { createHash as createHash3 } from "crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync12, writeFileSync as writeFileSync9 } from "fs";
-import { join as join8 } from "path";
+import { createHash as createHash4 } from "crypto";
+import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync14, writeFileSync as writeFileSync8 } from "fs";
+import { join as join11 } from "path";
 function getBackend() {
   switch (getConfig().TRAINING_BACKEND) {
     case "fireworks":
@@ -7606,12 +8347,12 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join8(getConfig().ARTIFACTS_DIR, "training-runs");
+  const dir = join11(getConfig().ARTIFACTS_DIR, "training-runs");
   if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
-  return createHash3("sha256").update(content, "utf-8").digest("hex");
+  return createHash4("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -7640,8 +8381,8 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join8(dir, filename);
-  writeFileSync9(previewPath, jsonl);
+  const previewPath = join11(dir, filename);
+  writeFileSync8(previewPath, jsonl);
   return {
     manifestVersion,
     previewPath,
@@ -7657,7 +8398,7 @@ async function trainingTrigger(args) {
   if (!existsSync3(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync12(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync14(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -7767,7 +8508,7 @@ async function clearSelectedForManifest(manifestVersion) {
           const updated = { ...d.metadata };
           delete updated.selected_for;
           delete updated.selected_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           cleared++;
         }
       }
@@ -7959,7 +8700,7 @@ Partial coverage is a fail. Being correct on general principles but missing the 
 });
 
 // packages/core/src/training/holdout.ts
-import { readFileSync as readFileSync13 } from "fs";
+import { readFileSync as readFileSync15 } from "fs";
 function seededShuffle(items, seed) {
   const arr = items.slice();
   let h = 2166136261 >>> 0;
@@ -7999,7 +8740,7 @@ function loadManifestSplit(manifestPath, manifestVersion) {
   return splitManifest(memories, manifestVersion);
 }
 function readHoldoutFile(path3) {
-  const content = readFileSync13(path3, "utf-8");
+  const content = readFileSync15(path3, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -8111,17 +8852,13 @@ async function adapterPromote(args) {
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
         if (d.metadata.verification_last_result === "passed") {
-          await updateDocument2(c.name, d.id, {
-            ...d.metadata,
-            promoted_to: target,
-            promoted_at: now
-          });
+          await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
         } else {
           const updated = { ...d.metadata };
           delete updated.selected_for;
           delete updated.selected_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBackSelections++;
         }
       }
@@ -8153,7 +8890,7 @@ async function adapterDemote(adapterId) {
           const updated = { ...d.metadata };
           delete updated.promoted_to;
           delete updated.promoted_at;
-          await updateDocument2(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBack++;
         }
       }
@@ -8252,7 +8989,7 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
         verification_last_result: item.passed ? "passed" : "failed"
       };
       try {
-        await updateDocument2(found.collection, mem.id, updated);
+        await patchDocument(found.collection, mem.id, metadataDelta(found.metadata, updated));
       } catch (e) {
         process.stderr.write(`[yapa-verify] Metadata update failed for ${mem.id}: ${e}
 `);
@@ -8288,6 +9025,9 @@ async function putExternal(requested, ref, put) {
   const { collection } = await resolveWriteCollection(requested);
   const typed = normalizeTyped({ ...put.typed, external_ref: ref });
   await getOrCreateCollection2(collection);
+  return withDocLock(collection, `external_ref:${ref}`, () => putLocked(collection, ref, put, typed));
+}
+async function putLocked(collection, ref, put, typed) {
   const existing = await findExternal(collection, ref);
   if (!existing) {
     const r = await storeMemory(put.content, { collection, tags: put.tags, typed });
@@ -8314,6 +9054,7 @@ var same;
 var init_external = __esm({
   "packages/core/src/memory/external.ts"() {
     "use strict";
+    init_doc_lock();
     init_store();
     init_kinds();
     init_store2();
@@ -8325,14 +9066,14 @@ var init_external = __esm({
 });
 
 // packages/core/src/last-write.ts
-import { mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, renameSync as renameSync5, rmSync as rmSync4, statSync, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname6, join as join9 } from "node:path";
+import { mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
+import { dirname as dirname7, join as join12 } from "node:path";
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join9(dirname6(health), "last-write") : "";
+  return health ? join12(dirname7(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join9(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join12(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -8343,8 +9084,8 @@ function recordLastWrite(collection, opts = {}) {
     mkdirSync10(dir, { recursive: true, mode: 448 });
     const file = lastWriteFile(session, dir);
     const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync10(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
-    renameSync5(tmp, file);
+    writeFileSync9(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
+    renameSync6(tmp, file);
     if (!pruned) {
       pruned = true;
       pruneLastWrites(dir, now);
@@ -8355,7 +9096,7 @@ function recordLastWrite(collection, opts = {}) {
 function readLastWrite(session, dir = lastWriteDir()) {
   if (!dir) return void 0;
   try {
-    const r = JSON.parse(readFileSync14(lastWriteFile(session, dir), "utf-8"));
+    const r = JSON.parse(readFileSync16(lastWriteFile(session, dir), "utf-8"));
     return r && typeof r.collection === "string" && typeof r.at === "number" ? r : void 0;
   } catch {
     return void 0;
@@ -8364,10 +9105,10 @@ function readLastWrite(session, dir = lastWriteDir()) {
 function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
-    for (const name of readdirSync3(dir)) {
-      const p = join9(dir, name);
+    for (const name of readdirSync5(dir)) {
+      const p = join12(dir, name);
       try {
-        if (now - statSync(p).mtimeMs > PRUNE_AFTER_MS) rmSync4(p, { force: true });
+        if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
       }
     }
@@ -8393,6 +9134,7 @@ __export(src_exports, {
   CHUNK_SIZE: () => CHUNK_SIZE,
   CLASSIFIER_PROMPT_VERSION: () => CLASSIFIER_PROMPT_VERSION,
   CLASSIFIER_SYSTEM_PROMPT: () => CLASSIFIER_SYSTEM_PROMPT,
+  ClaimBusyError: () => ClaimBusyError,
   CollectionDeleteRefusedError: () => CollectionDeleteRefusedError,
   CoordinationUnavailableError: () => CoordinationUnavailableError,
   DECAY_INTERVAL_MS: () => DECAY_INTERVAL_MS,
@@ -8409,6 +9151,8 @@ __export(src_exports, {
   HttpBackend: () => HttpBackend,
   IdTokenProvider: () => IdTokenProvider,
   KIND_STATUSES: () => KIND_STATUSES,
+  LocalCoordinationError: () => LocalCoordinationError,
+  LockTimeoutError: () => LockTimeoutError,
   MAX_EXTRACT_CHARS: () => MAX_EXTRACT_CHARS,
   MEMORY_KINDS: () => MEMORY_KINDS,
   MemoryNotFoundError: () => MemoryNotFoundError,
@@ -8424,6 +9168,7 @@ __export(src_exports, {
   SYNTHESIS_PROMPT_VERSION: () => SYNTHESIS_PROMPT_VERSION,
   SYNTHESIS_SYSTEM_PROMPT: () => SYNTHESIS_SYSTEM_PROMPT,
   ServiceError: () => ServiceError,
+  TASK_COUNTER_COLLECTION: () => TASK_COUNTER_COLLECTION,
   TYPED_KEYS: () => TYPED_KEYS,
   TaskClaimedError: () => TaskClaimedError,
   TypedMemoryError: () => TypedMemoryError,
@@ -8479,9 +9224,11 @@ __export(src_exports, {
   completeTask: () => completeTask,
   consolidateSessionEverywhere: () => consolidateSessionEverywhere,
   consolidateStaleDrafts: () => consolidateStaleDrafts,
+  coordinatedLocally: () => coordinatedLocally,
   countUnpushed: () => countUnpushed,
   createCollection: () => createCollection2,
   createConfig: () => createConfig,
+  createLocalCoordination: () => createLocalCoordination,
   createLocalStore: () => createLocalStore,
   createNewCollection: () => createNewCollection,
   createTask: () => createTask,
@@ -8577,12 +9324,15 @@ __export(src_exports, {
   listTasks: () => listTasks,
   listVersions: () => listVersions,
   loadManifestSplit: () => loadManifestSplit,
+  localCoordination: () => localCoordination,
+  lockFileFor: () => lockFileFor,
   looksPrivateButShared: () => looksPrivateButShared,
   markDecayRun: () => markDecayRun,
   markUpdateNotified: () => markUpdateNotified,
   matchCollectionMap: () => matchCollectionMap,
   mergeCollections: () => mergeCollections,
   mergeReportLines: () => mergeReportLines,
+  metadataDelta: () => metadataDelta,
   nextTasks: () => nextTasks,
   nextVersion: () => nextVersion,
   normalizeCollectionMap: () => normalizeCollectionMap,
@@ -8605,6 +9355,8 @@ __export(src_exports, {
   parseVerifyJudge: () => parseVerifyJudge,
   passesPromotedFilter: () => passesPromotedFilter,
   passesScoreFilters: () => passesScoreFilters,
+  patchDocument: () => patchDocument,
+  patchDocuments: () => patchDocuments2,
   pidAlive: () => pidAlive,
   pruneLastWrites: () => pruneLastWrites,
   pullCollection: () => pullCollection,
@@ -8643,6 +9395,7 @@ __export(src_exports, {
   requireSyncBackend: () => requireSyncBackend,
   resetConfig: () => resetConfig,
   resetDeviceId: () => resetDeviceId,
+  resetLocalCoordination: () => resetLocalCoordination,
   resetStore: () => resetStore,
   resolveCollectionRedirect: () => resolveCollectionRedirect,
   resolveConflict: () => resolveConflict,
@@ -8654,11 +9407,13 @@ __export(src_exports, {
   scheduleSyncSoon: () => scheduleSyncSoon,
   scopeNotes: () => scopeNotes,
   searchTasks: () => searchTasks,
+  serviceCoordination: () => serviceCoordination,
   sessionsHoldingLeases: () => sessionsHoldingLeases,
   setConfig: () => setConfig,
   setHostLLMCaller: () => setHostLLMCaller,
   setStore: () => setStore,
   setSyncBackend: () => setSyncBackend,
+  settleRecallBoosts: () => settleRecallBoosts,
   sha256: () => sha256,
   shouldPull: () => shouldPull,
   shouldRunCycle: () => shouldRunCycle,
@@ -8673,6 +9428,7 @@ __export(src_exports, {
   stopUpdateChecks: () => stopUpdateChecks,
   storeMemory: () => storeMemory,
   suggestCompaction: () => suggestCompaction,
+  sweepLockDebris: () => sweepLockDebris,
   syncBackendKind: () => syncBackendKind,
   syncCycle: () => syncCycle,
   syncFingerprint: () => syncFingerprint,
@@ -8709,7 +9465,11 @@ __export(src_exports, {
   waitingLine: () => waitingLine,
   waitingOn: () => waitingOn,
   waitsOnPeople: () => waitsOnPeople,
+  withDocLock: () => withDocLock,
+  withFileLock: () => withFileLock,
+  withFileLockSync: () => withFileLockSync,
   writeArtifact: () => writeArtifact,
+  writeJsonAtomic: () => writeJsonAtomic,
   writeSystemPromptCompanion: () => writeSystemPromptCompanion,
   writeTrainingManifest: () => writeTrainingManifest
 });
@@ -8758,6 +9518,8 @@ var init_src = __esm({
     init_sync();
     init_backend();
     init_coordination();
+    init_local_coordination();
+    init_fs_lock();
     init_shared_cycle();
     init_http_backend();
     init_postgres_backend();
@@ -8788,6 +9550,7 @@ var init_src = __esm({
     init_follow_through();
     init_update_check();
     init_last_write();
+    init_doc_lock();
   }
 });
 
@@ -8826,7 +9589,7 @@ Call \`task_create\` in the active collection BEFORE starting multi-step or long
 Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.
 
 ### Task claims
-In a shared collection, setting a task to \`in_progress\` claims it for this session (a lease on its id), so teammates and your other sessions don't start the same work; leaving \`in_progress\` (complete, blocked, pending, delete) releases it. Set \`in_progress\` when you actually start a task. If the update is refused, nothing changed: tell the user who holds it and since when, and offer other work. If it names your own other session, pass \`reclaim: true\` only after the user confirms that session is finished or theirs to take over. If the reply says the claim is NOT shared (offline, signed out), tell the user others may start it too. Task lines show "claimed by <who>"; before starting a task claimed by someone else, tell the user. A "**YAPA claim:**" line in the context means a claim was taken over or clashed: pass it on to the user.
+Setting a task to \`in_progress\` claims it for this session (a lease on its id: on the sync service in a shared collection, on this machine in a local-only one such as \`private-*\`), so teammates and your other sessions don't start the same work; leaving \`in_progress\` (complete, blocked, pending, delete) releases it. Set \`in_progress\` when you actually start a task. If the update is refused, nothing changed: tell the user who holds it and since when, and offer other work. If it names your own other session, pass \`reclaim: true\` only after the user confirms that session is finished or theirs to take over. If the reply says the claim is NOT shared (offline, signed out), tell the user others may start it too. Task lines show "claimed by <who>"; before starting a task claimed by someone else, tell the user. A "**YAPA claim:**" line in the context means a claim was taken over or clashed: pass it on to the user.
 
 ### Shared work (leases)
 For other shared resources, some projects coordinate through bare YAPA leases (the \`lease\` tool, or a project script calling \`yapa coord\`). Take one only when the project's own instructions or tooling call for it, never on your own initiative. Session start lists live leases in the active collection under "Work in progress": before starting something listed there, tell the user who holds it. If an acquire is refused, say who holds the work and since when, and offer something else; don't retry in a loop. If you took over an expired lease, say whose it was. If the service is unreachable, say the work is not shared. Heartbeats are automatic while this session is active; don't schedule them.
@@ -8867,9 +9630,9 @@ __export(statusline_exports, {
   uninstallStatusLine: () => uninstallStatusLine
 });
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync15, realpathSync as realpathSync2, renameSync as renameSync6, rmSync as rmSync5, writeFileSync as writeFileSync11 } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync17, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync6, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname7, join as join10, resolve } from "node:path";
+import { dirname as dirname8, join as join13, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -8950,7 +9713,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync15(join10(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync17(join13(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -8967,7 +9730,7 @@ function stdinSession(input2) {
 }
 function readUpdate(path3) {
   try {
-    const u = JSON.parse(readFileSync15(path3, "utf-8"));
+    const u = JSON.parse(readFileSync17(path3, "utf-8"));
     return u && typeof u === "object" ? { current: typeof u.current === "string" ? u.current : void 0, latest: typeof u.latest === "string" ? u.latest : void 0 } : void 0;
   } catch {
     return void 0;
@@ -8975,7 +9738,7 @@ function readUpdate(path3) {
 }
 function readHealth(path3) {
   try {
-    const h = JSON.parse(readFileSync15(path3, "utf-8"));
+    const h = JSON.parse(readFileSync17(path3, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -9023,21 +9786,21 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join10(process.env.CLAUDE_CONFIG_DIR ?? join10(homedir3(), ".claude"), "settings.json");
+  return join13(process.env.CLAUDE_CONFIG_DIR ?? join13(homedir3(), ".claude"), "settings.json");
 }
 function readSettings(path3) {
   try {
-    return JSON.parse(readFileSync15(path3, "utf-8"));
+    return JSON.parse(readFileSync17(path3, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
   }
 }
 function writeSettings(path3, settings) {
-  mkdirSync11(dirname7(path3), { recursive: true });
+  mkdirSync11(dirname8(path3), { recursive: true });
   const tmp = `${path3}.${process.pid}.tmp`;
-  writeFileSync11(tmp, JSON.stringify(settings, null, 2) + "\n");
-  renameSync6(tmp, path3);
+  writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
+  renameSync7(tmp, path3);
 }
 function installStatusLine(script, path3 = defaultSettingsPath()) {
   writeSettings(path3, mergeStatusLine(readSettings(path3), script));
@@ -9049,7 +9812,7 @@ function uninstallStatusLine(path3 = defaultSettingsPath(), script) {
 }
 function hasStatusLine(path3 = defaultSettingsPath(), script) {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync15(path3, "utf-8")).statusLine, script);
+    return isYapaStatusLine(JSON.parse(readFileSync17(path3, "utf-8")).statusLine, script);
   } catch {
     return false;
   }
@@ -9057,29 +9820,29 @@ function hasStatusLine(path3 = defaultSettingsPath(), script) {
 function copyScript(from, to) {
   let src;
   try {
-    src = readFileSync15(from);
+    src = readFileSync17(from);
   } catch {
     return false;
   }
   try {
-    if (readFileSync15(to).equals(src)) return false;
+    if (readFileSync17(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync11(dirname7(to), { recursive: true, mode: 448 });
+  mkdirSync11(dirname8(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
-  renameSync6(tmp, to);
+  renameSync7(tmp, to);
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join10(dir, REMOVED_MARKER);
+  const p = join13(dir, REMOVED_MARKER);
   try {
     if (removed) {
       mkdirSync11(dir, { recursive: true, mode: 448 });
-      writeFileSync11(p, `${(/* @__PURE__ */ new Date()).toISOString()}
+      writeFileSync10(p, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
     } else {
-      rmSync5(p, { force: true });
+      rmSync6(p, { force: true });
     }
   } catch {
   }
@@ -9099,13 +9862,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
-    setRemovedMarker(dirname7(self2), false);
+    setRemovedMarker(dirname8(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
     process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
-    setRemovedMarker(dirname7(self2), true);
+    setRemovedMarker(dirname8(self2), true);
     return;
   }
   const input2 = await readStdin();
@@ -9116,9 +9879,9 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join10(dirname7(self2), "sync-health.json");
-  const update = readUpdate(join10(dirname7(healthPath), "update-check.json"));
-  const last = readLastWrite2(join10(dirname7(healthPath), "last-write"), [stdinSession(input2), process.env.CLAUDE_CODE_SESSION_ID]);
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join13(dirname8(self2), "sync-health.json");
+  const update = readUpdate(join13(dirname8(healthPath), "update-check.json"));
+  const last = readLastWrite2(join13(dirname8(healthPath), "last-write"), [stdinSession(input2), process.env.CLAUDE_CODE_SESSION_ID]);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
@@ -9187,9 +9950,9 @@ __export(hooks_exports, {
   userText: () => userText,
   waitingLines: () => waitingLines
 });
-import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync16, rmSync as rmSync6, writeFileSync as writeFileSync12 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync18, rmSync as rmSync7, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname8, join as join11 } from "node:path";
+import { dirname as dirname9, join as join14 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -9254,11 +10017,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join11(dirname8(health), "statusline.mjs") : void 0;
+  return health ? join14(dirname9(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
-  const here = dirname8(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join11(here, f)).find((p) => existsSync4(p));
+  const here = dirname9(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join14(here, f)).find((p) => existsSync4(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -9272,12 +10035,12 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join11(dirname8(to), "statusline-added");
-    if (existsSync4(join11(dirname8(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    const added = join14(dirname9(to), "statusline-added");
+    if (existsSync4(join14(dirname9(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
-        writeFileSync12(added, `${(/* @__PURE__ */ new Date()).toISOString()}
+        writeFileSync11(added, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
       } catch {
       }
@@ -9289,10 +10052,10 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join11(dirname8(to), "statusline-hint");
+  const marker = join14(dirname9(to), "statusline-hint");
   if (existsSync4(marker)) return void 0;
   try {
-    writeFileSync12(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
+    writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   } catch {
     return void 0;
@@ -9308,17 +10071,17 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join11(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join11(base, "sessions");
+  const base = process.env.CLAUDE_PLUGIN_DATA || join14(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join14(base, "sessions");
   mkdirSync12(dir, { recursive: true });
   return dir;
 }
-function stateFile(sessionId, kind) {
-  return join11(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+function stateFile2(sessionId, kind) {
+  return join14(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId) {
   try {
-    return JSON.parse(readFileSync16(stateFile(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync18(stateFile2(sessionId, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -9327,7 +10090,7 @@ function recordPrompt(sessionId, prompt) {
   if (!sessionId) return;
   try {
     const turn = (readTurn(sessionId)?.turn ?? 0) + 1;
-    writeFileSync12(stateFile(sessionId, "turn"), JSON.stringify({ prompt, turn }));
+    writeFileSync11(stateFile2(sessionId, "turn"), JSON.stringify({ prompt, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
@@ -9335,10 +10098,10 @@ function recordPrompt(sessionId, prompt) {
 }
 function takeNotice(sessionId) {
   if (!sessionId) return void 0;
-  const file = stateFile(sessionId, "notice");
+  const file = stateFile2(sessionId, "notice");
   try {
-    const notice = readFileSync16(file, "utf-8").trim();
-    rmSync6(file, { force: true });
+    const notice = readFileSync18(file, "utf-8").trim();
+    rmSync7(file, { force: true });
     return notice || void 0;
   } catch {
     return void 0;
@@ -9368,7 +10131,6 @@ function presenceLines(leases, now, mySessions, me) {
   return out;
 }
 async function presence(collection, input2) {
-  if (!isSyncConfigured() || !isSyncableCollection(collection)) return { lines: [] };
   try {
     const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
     if (!r) return { lines: [] };
@@ -9431,7 +10193,7 @@ async function sessionStart(input2) {
   if (update) lines.push(update);
   const notice = takeNotice(input2.session_id);
   if (notice) lines.push(`_${notice}_`);
-  const [held] = await Promise.all([presence(collection, input2), keepLeasesAlive(input2)]);
+  const [held2] = await Promise.all([presence(collection, input2), keepLeasesAlive(input2)]);
   lines.push(...claimNoticeLines());
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
@@ -9440,7 +10202,7 @@ async function sessionStart(input2) {
       for (const t of tasks.slice(0, 10)) {
         const status = t.metadata.status ?? "open";
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : "";
-        const claim = claimNote(t, held.claims, leaseSessions(input2));
+        const claim = claimNote(t, held2.claims, leaseSessions(input2));
         lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${t.title}`);
       }
       if (tasks.length > 10) lines.push(`- _\u2026${tasks.length - 10} more (call \`task_list\` for the full list)_`);
@@ -9450,7 +10212,7 @@ async function sessionStart(input2) {
 `);
   }
   lines.push(...await waitingLines(getConfig().USERNAME, void 0, collection));
-  lines.push(...held.lines);
+  lines.push(...held2.lines);
   try {
     const memories = await listMemories({ collection, limit: 5 });
     if (memories.length) {
@@ -9554,7 +10316,7 @@ async function stop(input2) {
         taskIds: heldKeys(currentSession(input2.session_id) ?? input2.session_id, collection).filter((k) => !k.startsWith("cleanup:"))
       }
     );
-    if (result.notice) writeFileSync12(stateFile(input2.session_id, "notice"), result.notice);
+    if (result.notice) writeFileSync11(stateFile2(input2.session_id, "notice"), result.notice);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -9585,7 +10347,7 @@ async function sessionEnd(input2) {
   if (!input2.session_id) return;
   for (const kind of ["turn", "notice"]) {
     try {
-      rmSync6(stateFile(input2.session_id, kind), { force: true });
+      rmSync7(stateFile2(input2.session_id, kind), { force: true });
     } catch {
     }
   }
@@ -9620,9 +10382,9 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync13, readFileSync as readFileSync17, writeFileSync as writeFileSync13 } from "node:fs";
+import { mkdirSync as mkdirSync13, readFileSync as readFileSync19, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname9, join as join12 } from "node:path";
+import { dirname as dirname10, join as join15 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -9649,14 +10411,14 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join12(process.env.CLAUDE_CONFIG_DIR ?? join12(homedir4(), ".claude"), "settings.json");
+  return join15(process.env.CLAUDE_CONFIG_DIR ?? join15(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
 function readSettings2(path3) {
   try {
-    return JSON.parse(readFileSync17(path3, "utf-8"));
+    return JSON.parse(readFileSync19(path3, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
@@ -9664,12 +10426,12 @@ function readSettings2(path3) {
 }
 function installHooks(path3 = defaultSettingsPath2(), command = selfCommand()) {
   const merged = mergeHooks(readSettings2(path3), command);
-  mkdirSync13(dirname9(path3), { recursive: true });
-  writeFileSync13(path3, JSON.stringify(merged, null, 2) + "\n");
+  mkdirSync13(dirname10(path3), { recursive: true });
+  writeFileSync12(path3, JSON.stringify(merged, null, 2) + "\n");
   return path3;
 }
 function uninstallHooks(path3 = defaultSettingsPath2()) {
-  writeFileSync13(path3, JSON.stringify(removeHooks(readSettings2(path3)), null, 2) + "\n");
+  writeFileSync12(path3, JSON.stringify(removeHooks(readSettings2(path3)), null, 2) + "\n");
   return path3;
 }
 var HOOK_EVENTS, MARKER;
@@ -9736,7 +10498,12 @@ function leaseAcquire(a) {
     const prev = r.took_over_from;
     noteLeaseHeld(session, r.lease.ttl_seconds);
     const verb = r.renewed ? "renewed" : prev?.reclaim ? `took over from ${prev.session} (your other session)` : prev ? `took over (expired lease of ${prev.user} session ${prev.session}; say so in the task notes)` : "granted";
-    return { exit: EXIT.ok, json: { ok: true, ...r }, text: `${verb} ${a.key} to session ${session}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}` };
+    const local2 = coordinatedLocally(a.collection);
+    return {
+      exit: EXIT.ok,
+      json: { ok: true, ...r, local: local2 },
+      text: `${verb} ${a.key} to session ${session}${local2 ? " (this machine)" : ""}: scope ${r.lease.scope.join(", ")}, expires ${new Date(r.lease.expires_at * 1e3).toISOString()}`
+    };
   });
 }
 function leaseHeartbeat(collection, session, keys) {
@@ -9745,6 +10512,13 @@ function leaseHeartbeat(collection, session, keys) {
     const r = await (await requireCoordination()).leaseHeartbeat(collection, s, keys);
     if (r.renewed.length) noteLeaseHeld(s, Math.min(...r.renewed.map((l) => l.ttl_seconds)));
     const lost = r.lost.length ? `; LOST (taken over or released): ${r.lost.join(", ")}` : "";
+    if (r.unreachable) {
+      return {
+        exit: EXIT.unavailable,
+        json: { ok: false, unavailable: true, reason: "unreachable", message: r.unreachable, renewed: r.renewed, lost: r.lost },
+        text: `renewed ${r.renewed.length} lease(s) on this machine for session ${s}${lost}; NOT renewed on the sync service: ${r.unreachable}`
+      };
+    }
     return { exit: EXIT.ok, json: { ok: true, ...r }, text: `renewed ${r.renewed.length} lease(s) for session ${s}${lost}` };
   });
 }
@@ -9767,7 +10541,7 @@ function leaseList(collection, includeExpired = false) {
 function counterNext(collection, name, floor) {
   return run(async () => {
     const value = await (await requireCoordination()).counterNext(collection, name, floor);
-    return { exit: EXIT.ok, json: { ok: true, value }, text: String(value) };
+    return { exit: EXIT.ok, json: { ok: true, value, local: coordinatedLocally(collection) }, text: String(value) };
   });
 }
 function nextTaskId(floor) {
@@ -9795,7 +10569,7 @@ __export(task_exports, {
   TASK_USAGE: () => TASK_USAGE,
   runTask: () => runTask
 });
-import { readFileSync as readFileSync18 } from "node:fs";
+import { readFileSync as readFileSync20 } from "node:fs";
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -9854,6 +10628,9 @@ async function runTask(sub, args) {
   try {
     return await dispatch(sub, args);
   } catch (e) {
+    if (e instanceof ClaimBusyError) {
+      return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
+    }
     if (e instanceof TaskClaimedError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
     }
@@ -9942,36 +10719,36 @@ async function dispatch(sub, args) {
       if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
       const addTags = list7(flag(args, "--tag")) ?? [];
-      const extra = {};
-      if (note) extra.notes = t.metadata.notes ? `${t.metadata.notes}
-${note}` : note;
-      if (addTags.length) {
-        const cur = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",").filter(Boolean);
-        extra.tags = [.../* @__PURE__ */ new Set([...cur, ...addTags])];
-      }
       const learned = jsonFile(flag(args, "--learned-file"), "array");
       const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
       const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
       const waitsOn = list7(flag(args, "--waits-on"));
       if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
-      if (waitsOn?.length) {
-        const cur = Array.isArray(t.metadata.waits_on) ? t.metadata.waits_on : String(t.metadata.waits_on ?? "").split(",").filter(Boolean);
-        extra.waits_on = [.../* @__PURE__ */ new Set([...cur, ...waitsOn])];
-      }
       validateLearned(learned);
+      const listOf = (v) => Array.isArray(v) ? v : String(v ?? "").split(",").filter(Boolean);
+      if (note || addTags.length || waitsOn?.length) {
+        await withDocLock(t.collection, t.id, async () => {
+          const now = await getTask(t.id) ?? t;
+          const extra = {};
+          if (note) extra.notes = now.metadata.notes ? `${now.metadata.notes}
+${note}` : note;
+          if (addTags.length) extra.tags = [.../* @__PURE__ */ new Set([...listOf(now.metadata.tags), ...addTags])];
+          if (waitsOn?.length) extra.waits_on = [.../* @__PURE__ */ new Set([...listOf(now.metadata.waits_on), ...waitsOn])];
+          await updateTask(t.id, extra, { session });
+        });
+      }
       let release;
       let recorded;
       let nudge;
       let decision;
       if (status === "complete") {
-        if (Object.keys(extra).length) await updateTask(t.id, extra, { session });
         const c = await completeTask(t.id, int(flag(args, "--duration"), "--duration"), { session }, { learned, follow_ups: followUps });
         release = c.release;
         recorded = c.recorded;
         nudge = c.nudge;
       } else {
         const reason = flag(args, "--reason");
-        const fields = { ...reason ? { blockedReason: reason } : {}, ...extra };
+        const fields = { ...reason ? { blockedReason: reason } : {} };
         if (decisionNeeded) {
           const d = await requestDecision(t.id, decisionNeeded, { session }, fields);
           release = d.release;
@@ -10007,7 +10784,7 @@ function jsonFile(path3, shape) {
   if (path3 === void 0) return void 0;
   let v;
   try {
-    v = JSON.parse(readFileSync18(path3 === "-" ? 0 : path3, "utf8"));
+    v = JSON.parse(readFileSync20(path3 === "-" ? 0 : path3, "utf8"));
   } catch (e) {
     throw new UsageError(`${path3}: ${e instanceof Error ? e.message : e}`);
   }
@@ -10219,7 +10996,7 @@ var init_memory = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname10, join as join13 } from "node:path";
+import { dirname as dirname11, join as join16 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 import { readFileSync } from "node:fs";
@@ -10288,7 +11065,7 @@ function adoptHostEnv(cwd) {
 
 // packages/mcp/src/cli/index.ts
 var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n";
-var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nExit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
+var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nShared collections are coordinated by the sync service; private-*, local-* and global (and every collection with sync off) by this machine.\nExit: 0 done, 3 refused (held or overlapping), 4 unavailable (the service for a shared collection; nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
   process.exit(2);
@@ -10364,18 +11141,18 @@ async function runStatusLineCommand(action, args) {
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path3)} (runs ${script})
 `);
-      sl.setRemovedMarker(dirname10(script), false);
+      sl.setRemovedMarker(dirname11(script), false);
       return;
     }
     case "uninstall":
       process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path3, script)}
 `);
-      if (script) sl.setRemovedMarker(dirname10(script), true);
+      if (script) sl.setRemovedMarker(dirname11(script), true);
       return;
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join13(dirname10(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join16(dirname11(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,

@@ -655,7 +655,11 @@ Coordination calls never set the "last sync error" shown by `sync status`.
 list) and `counter_next` as MCP tools, and `yapa coord ...` as a CLI for
 scripts: one JSON object on stdout; exit 0 done, 3 refused, 4 unavailable
 (nothing shared: fall back to local coordination), 2 bad input, 1 other
-error. The CLI reads the plugin's options from Claude Code `settings.json`,
+error. Local-only collections (`private-*`, `local-*`, `global`), and every
+collection when sync is off, never reach the service: the client answers
+them from this machine (`packages/core/src/sync/local-coordination.ts`, one
+file per collection under `YAPA_LOCAL_COORD_DIR`, changed under a lock file),
+with the same rules, results and exit codes. The CLI reads the plugin's options from Claude Code `settings.json`,
 so it works from a plain shell; `--session` defaults as above.
 
 ### Remote MCP (josh-313)

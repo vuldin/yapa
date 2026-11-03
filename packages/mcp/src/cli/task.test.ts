@@ -9,8 +9,8 @@ let dir: string;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'yapa-task-cli-'));
-  // No sync service: claims are local (nothing to coordinate), exit 0.
-  setConfig(createConfig({ YAPA_USERNAME: 'josh', YAPA_SYNC_ENABLED: 'false' }));
+  // No sync service: claims are coordinated on this machine.
+  setConfig(createConfig({ YAPA_USERNAME: 'josh', YAPA_SYNC_ENABLED: 'false', YAPA_LOCAL_COORD_DIR: join(dir, 'coord'), YAPA_LEASE_STATE_DIR: join(dir, 'leases') }));
   setStore(createLocalStore(join(dir, 'store')));
 });
 
@@ -31,8 +31,16 @@ describe('yapa task', () => {
     expect(next.json.skipped).toEqual([{ id: b, reason: 'tagged needs-human' }]);
 
     const claim = await runTask('claim', [a, '--session', 's1']);
-    expect(claim).toMatchObject({ exit: 0, json: { ok: true, id: a, session: 's1', claim: { kind: 'local' } } });
+    expect(claim).toMatchObject({ exit: 0, json: { ok: true, id: a, session: 's1', claim: { kind: 'granted' } } });
     expect((await getTask(a))?.metadata.status).toBe('in_progress');
+    // Another session is refused (exit 3), and nothing changes.
+    const second = await runTask('claim', [a, '--session', 's2']);
+    expect(second).toMatchObject({ exit: 3, json: { ok: false, refused: true } });
+    expect(second.text).toMatch(/is being worked on by you \(another session, s1\)/);
+    const n2 = await runTask('next', ['--collection', 'project-cli', '--claim', '--session', 's2']);
+    expect((n2.json.claimed as any)?.id).not.toBe(a);
+    expect((n2.json.skipped as any[]).find(x => x.id === a).reason).toMatch(/^claimed by you \(another session, s1\)/);
+    if ((n2.json.claimed as any)?.id) await runTask('release', [(n2.json.claimed as any).id, '--collection', 'project-cli', '--session', 's2']);
 
     const rel = await runTask('release', [a, '--status', 'pending', '--note', 'handing back', '--tag', 'spec:X', '--session', 's1']);
     expect(rel.exit).toBe(0);
@@ -92,7 +100,8 @@ describe('yapa task capture at close', () => {
 
   it('claims and releases a cleanup key as a lease only', async () => {
     const c = await runTask('claim', ['cleanup:triage', '--collection', 'project-cap']);
-    expect(c).toMatchObject({ exit: 0, json: { ok: true, id: 'cleanup:triage', claim: { kind: 'local' } } });
+    expect(c).toMatchObject({ exit: 0, json: { ok: true, id: 'cleanup:triage', claim: { kind: 'granted' } } });
+    expect((await runTask('claim', ['cleanup:triage', '--collection', 'project-cap', '--session', 'other'])).exit).toBe(3);
     expect((await runTask('claim', ['cleanup:triage'])).exit).toBe(2);
     expect((await runTask('release', ['cleanup:triage', '--collection', 'project-cap'])).exit).toBe(0);
   });

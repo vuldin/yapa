@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { getConfig } from '../config.js';
+import { withDocLock } from '../doc-lock.js';
 import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
@@ -38,6 +39,22 @@ export function syncFingerprint(doc: { content: string; metadata: Record<string,
   const skip = new Set([...LOCAL_ONLY_KEYS, 'is_synced', 'origin_device', 'remote_checked_at']);
   const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
   return createHash('sha256').update(doc.content).update('\n').update(JSON.stringify(meta)).digest('hex').slice(0, 32);
+}
+
+/**
+ * Write what a push learned about `doc` (synced, linked, refused, checked),
+ * under the doc's lock and only if it is still the version that was pushed.
+ * A doc edited while the push ran keeps the edit and stays unsynced, so the
+ * next push sends it; writing the pushed copy back would revert the edit and
+ * mark it synced, losing it locally and remotely. Returns whether it wrote.
+ */
+async function writeIfUnchanged(collection: string, doc: DocumentResult, metadata: (cur: Record<string, any>) => Record<string, any>): Promise<boolean> {
+  return withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds(collection, [doc.id]);
+    if (!cur || syncFingerprint(cur) !== syncFingerprint(doc)) return false;
+    await updateDocument(collection, doc.id, metadata(cur.metadata));
+    return true;
+  });
 }
 
 function stripLocalOnly(metadata: Record<string, any>): Record<string, any> {
@@ -286,10 +303,9 @@ async function applyPushed(
 ): Promise<void> {
   // A re-push of an edited doc matches its own remote row; never self-link.
   const match = similar.find(s => s.id !== doc.id);
-  const metadata = stripLocalOnly(doc.metadata);
   if (!match) {
-    await updateDocument(collection, doc.id, { ...metadata, is_synced: true });
-    stats.pushed++;
+    // Edited meanwhile: not counted, it goes out on the next push.
+    if (await writeIfUnchanged(collection, doc, cur => ({ ...stripLocalOnly(cur), is_synced: true }))) stats.pushed++;
     return;
   }
   // Found a similar doc: link both ways (both are kept; the link records the relationship).
@@ -299,21 +315,23 @@ async function applyPushed(
   } catch (e) {
     process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}\n`);
   }
-  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
-  if (!related.includes(match.id)) related.push(match.id);
-  await updateDocument(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  await writeIfUnchanged(collection, doc, cur => {
+    const related = Array.isArray(cur.related_ids) ? [...cur.related_ids] : [];
+    if (!related.includes(match.id)) related.push(match.id);
+    return { ...stripLocalOnly(cur), related_ids: related, is_synced: true };
+  });
   stats.linked++;
 }
 
 /** Keep a refused doc local and unsynced, flagged so it is not resent until it changes. */
 async function markRejected(collection: string, doc: DocumentResult, code: string, message: string): Promise<void> {
-  await updateDocument(collection, doc.id, {
-    ...doc.metadata,
+  await writeIfUnchanged(collection, doc, cur => ({
+    ...cur,
     is_synced: false,
     sync_rejected: code,
     sync_rejected_message: message.slice(0, 300),
     sync_rejected_fp: syncFingerprint(doc),
-  });
+  }));
   process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.\n`);
 }
 
@@ -363,9 +381,16 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
   const suggested = Number(suggestedId?.split('-').pop());
   const n = Math.max(localNext, Number.isFinite(suggested) ? suggested : 0);
   const newId = `${me}-${n}`;
-  const metadata = { ...doc.metadata, id: newId, rekeyed_from: doc.id };
-  await addDocument(collection, newId, doc.content, metadata);
-  await deleteDocument(collection, doc.id);
+  // Under the old id's lock, from the task as it is now: an edit made while
+  // the upsert was out is carried over, not dropped with the old id.
+  const metadata = await withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds(collection, [doc.id]);
+    const src = cur ?? doc;
+    const m = { ...src.metadata, id: newId, rekeyed_from: doc.id };
+    await addDocument(collection, newId, src.content, m);
+    await deleteDocument(collection, doc.id);
+    return m;
+  });
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}\n`);
   return { ...doc, id: newId, metadata };
 }
@@ -398,6 +423,6 @@ async function retractSharedCopies(backend: SyncBackend, collection: string): Pr
   });
   const removed = mine.length > 0 ? await backend.delete(mine.map(d => d.id), 'retract') : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? 'y' : 'ies'} of docs now in ${collection}\n`);
-  for (const d of unchecked) await updateDocument(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  for (const d of unchecked) await writeIfUnchanged(collection, d, cur => ({ ...cur, remote_checked_at: versionOf(d) }));
   return removed;
 }

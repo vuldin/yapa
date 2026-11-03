@@ -345,11 +345,11 @@ export function presenceLines(leases: Lease[], now: number, mySessions: Array<st
 
 /**
  * Live leases in the active collection: the presence block, plus the claims
- * by key so open tasks can say who holds them. `claims` is undefined when the
- * service could not be asked (no holders shown rather than guessed).
+ * by key so open tasks can say who holds them. `claims` is undefined when they
+ * could not be read (no holders shown rather than guessed).
  */
 async function presence(collection: string, input: BaseHookInput): Promise<{ lines: string[]; claims?: Map<string, Lease> }> {
-  if (!isSyncConfigured() || !isSyncableCollection(collection)) return { lines: [] };
+  // Shared collections ask the service; local-only ones (and all with sync off) this machine.
   try {
     const r = await withTimeout((async () => (await requireCoordination()).leaseList(collection))(), LEASE_LIST_BUDGET_MS);
     if (!r) return { lines: [] };

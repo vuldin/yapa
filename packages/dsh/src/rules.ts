@@ -59,7 +59,7 @@ Give a memory a \`kind\` when it is one of these, so it can be listed and waited
 ### Task lifecycle
 - On completion: \`yapa_task_complete\`, with \`learned\` (typed memories linked to the task) and \`follow_ups\` (new tasks) in the same call. On blocker: \`yapa_task_update\` with status \`blocked\` and a reason, or \`decision_needed\` when the blocker is a person's choice. On scope change: amend the task rather than duplicating it.
 - Triage tags: \`auto\` (an unattended session may do all of it), \`needs-human\` (a step only a person takes), \`needs:<user>\`. \`yapa_task_next\` never offers \`needs-human\` tasks.
-- Claims: in a shared collection, setting a task to \`in_progress\` claims it (a lease on its id) and leaving \`in_progress\` releases it. If the update is refused, nothing changed: tell the user who holds the task and offer other work. If the claim is NOT shared (offline), tell the user others may start it too. Pass on any "**YAPA claim:**" line in the context.
+- Claims: setting a task to \`in_progress\` claims it (a lease on its id: on the sync service in a shared collection, on this machine in a local-only one) and leaving \`in_progress\` releases it. If the update is refused, nothing changed: tell the user who holds the task and offer other work. If the claim is NOT shared (offline), tell the user others may start it too. Pass on any "**YAPA claim:**" line in the context.
 
 ### Memory compaction (not context compaction)
 When injected context flags a "compaction candidate" collection, call \`yapa_compaction_suggest\`, write a rolling summary per group, and submit via \`yapa_compaction_apply\`. This consolidates LONG-TERM memories — unrelated to harness context-window compaction.

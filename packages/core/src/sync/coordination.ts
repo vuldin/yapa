@@ -1,13 +1,19 @@
 /**
- * Leases and counters through the sync service. Callers get either the
- * service's answer or a CoordinationUnavailableError, which means "nothing
- * was shared, fall back to local coordination and say so". Other errors (bad
- * input, a local-only collection) are real errors and are thrown as they are.
+ * Leases and counters. Shared collections are coordinated by the sync
+ * service; local-only collections (`private-*`, `local-*`, `global`), and
+ * every collection when sync is off, by this machine (local-coordination.ts).
+ * Callers get one Coordination that routes each call by its collection.
+ * From the service, a CoordinationUnavailableError means "nothing was
+ * shared, fall back to local coordination and say so". Other errors (bad
+ * input) are real errors and are thrown as they are.
  */
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { getConfig } from '../config.js';
+import { lockFileFor, sweepLockDebris, withFileLockSync, writeJsonAtomic } from '../fs-lock.js';
 import { getSyncBackend, isCycleFatal, isSyncConfigured, type Coordination, type Lease } from './backend.js';
+import { createLocalCoordination } from './local-coordination.js';
+import { isSyncableCollection } from './syncable.js';
 
 const SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -66,10 +72,18 @@ function readMarker(session: string): HeldMarker | undefined {
 
 function writeMarker(m: HeldMarker): void {
   try {
-    mkdirSync(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(markerPath(m.session), JSON.stringify(m), { mode: 0o600 });
+    writeJsonAtomic(markerPath(m.session), m);
   } catch {
     // best effort: without the marker the lease simply needs explicit heartbeats
+  }
+}
+
+/** Change `session`'s marker under its lock: a hook and the server acting for one session can't drop each other's keys. */
+function withMarker<T>(session: string, fn: () => T, fallback: T): T {
+  try {
+    return withFileLockSync(lockFileFor(markerPath(session)), fn, { waitMs: 2000 });
+  } catch {
+    return fallback; // best effort, as before
   }
 }
 
@@ -85,35 +99,54 @@ export function heldKeys(session: string, collection: string): string[] {
  * a notice for the next prompt (task claims pass it).
  */
 export function noteLeaseHeld(session: string, ttlSeconds: number, now = Math.floor(Date.now() / 1000), held?: { collection: string; key: string }): void {
-  const prev = readMarker(session);
-  const keys = new Set(prev?.keys ?? []);
-  if (held) keys.add(heldKey(held.collection, held.key));
-  writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...(keys.size ? { keys: [...keys] } : {}) });
+  withMarker(session, () => {
+    const prev = readMarker(session);
+    const keys = new Set(prev?.keys ?? []);
+    if (held) keys.add(heldKey(held.collection, held.key));
+    writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...(keys.size ? { keys: [...keys] } : {}) });
+  }, undefined);
 }
 
 /** Stop watching a lease this session released (or never got). */
 export function noteLeaseReleased(session: string, collection: string, key: string): void {
-  const prev = readMarker(session);
-  if (!prev?.keys) return;
-  const keys = prev.keys.filter(k => k !== heldKey(collection, key));
-  writeMarker({ ...prev, keys });
+  withMarker(session, () => {
+    const prev = readMarker(session);
+    if (!prev?.keys) return;
+    const keys = prev.keys.filter(k => k !== heldKey(collection, key));
+    writeMarker({ ...prev, keys });
+  }, undefined);
 }
 
-/** Watched leases missing from `renewed` (taken over or released elsewhere). */
-function noteRenewed(session: string, renewed: Lease[], now: number): Array<{ collection: string; key: string }> {
-  const prev = readMarker(session);
-  const have = new Set(renewed.map(l => heldKey(l.collection, l.key)));
-  const lost = (prev?.keys ?? []).filter(k => !have.has(k)).map(k => {
-    const [collection, key] = k.split('\u0000');
-    return { collection, key };
-  });
-  if (renewed.length === 0) {
-    try { rmSync(markerPath(session), { force: true }); } catch { /* ignore */ }
+/**
+ * Watched leases missing from `renewed` (taken over or released elsewhere).
+ * `answered` says which collections the renewed list covers: a heartbeat the
+ * service could not answer says nothing about the leases it holds.
+ */
+function noteRenewed(session: string, renewed: Lease[], now: number, answered: (collection: string) => boolean = () => true, complete = true): Array<{ collection: string; key: string }> {
+  return withMarker(session, () => {
+    const prev = readMarker(session);
+    const have = new Set(renewed.map(l => heldKey(l.collection, l.key)));
+    const split = (k: string) => {
+      const [collection, key] = k.split('\u0000');
+      return { collection, key };
+    };
+    const watched = prev?.keys ?? [];
+    const lost = watched.filter(k => !have.has(k) && answered(split(k).collection)).map(split);
+    const keys = watched.filter(k => have.has(k) || !answered(split(k).collection));
+    if (renewed.length === 0 && keys.length === 0 && complete) {
+      try { rmSync(markerPath(session), { force: true }); } catch { /* ignore */ }
+      return lost;
+    }
+    // A beat one side could not answer keeps the shortest TTL known and the
+    // last full beat, so the next prompt retries the side that failed instead
+    // of waiting out the other side's (maybe much longer) interval.
+    const ttls = renewed.map(l => l.ttl_seconds);
+    const minTtl = complete
+      ? (ttls.length ? Math.min(...ttls) : prev?.min_ttl ?? HEARTBEAT_MAX_INTERVAL_S * 3)
+      : Math.min(prev?.min_ttl ?? Infinity, ...ttls, HEARTBEAT_MAX_INTERVAL_S * 3);
+    writeMarker({ session, min_ttl: minTtl, last_beat: complete ? now : prev?.last_beat ?? now, ...(keys.length ? { keys } : {}) });
     return lost;
-  }
-  const keys = (prev?.keys ?? []).filter(k => have.has(k));
-  writeMarker({ session, min_ttl: Math.min(...renewed.map(l => l.ttl_seconds)), last_beat: now, ...(keys.length ? { keys } : {}) });
-  return lost;
+  }, []);
 }
 
 /** Sessions on this machine that hold leases (for status and tests). */
@@ -144,14 +177,15 @@ function noticesPath(): string {
 
 /** Queue a one-line notice for the next prompt on this machine. */
 export function addClaimNotice(text: string, now = Math.floor(Date.now() / 1000)): void {
-  let list: ClaimNotice[] = [];
-  try { list = JSON.parse(readFileSync(noticesPath(), 'utf-8')); } catch { /* none yet */ }
-  if (!Array.isArray(list)) list = [];
-  if (list.some(n => n.text === text)) return;
-  list.push({ at: now, text });
   try {
-    mkdirSync(getConfig().LEASE_STATE_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(noticesPath(), JSON.stringify(list.slice(-20)), { mode: 0o600 });
+    withFileLockSync(lockFileFor(noticesPath()), () => {
+      let list: ClaimNotice[] = [];
+      try { list = JSON.parse(readFileSync(noticesPath(), 'utf-8')); } catch { /* none yet */ }
+      if (!Array.isArray(list)) list = [];
+      if (list.some(n => n.text === text)) return;
+      list.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list.slice(-20));
+    }, { waitMs: 2000 });
   } catch {
     // best effort
   }
@@ -159,10 +193,16 @@ export function addClaimNotice(text: string, now = Math.floor(Date.now() / 1000)
 
 /** Read and clear the queued notices. */
 export function takeClaimNotices(): string[] {
-  let list: ClaimNotice[] = [];
-  try { list = JSON.parse(readFileSync(noticesPath(), 'utf-8')); } catch { return []; }
-  try { rmSync(noticesPath(), { force: true }); } catch { /* ignore */ }
-  return Array.isArray(list) ? list.map(n => n.text) : [];
+  try {
+    return withFileLockSync(lockFileFor(noticesPath()), () => {
+      let list: ClaimNotice[] = [];
+      try { list = JSON.parse(readFileSync(noticesPath(), 'utf-8')); } catch { return []; }
+      rmSync(noticesPath(), { force: true });
+      return Array.isArray(list) ? list.map(n => n.text) : [];
+    }, { waitMs: 2000 });
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -171,22 +211,35 @@ export function takeClaimNotices(): string[] {
  * returns the number of leases renewed.
  */
 export async function heartbeatIfDue(sessions: Array<string | undefined>, now = Math.floor(Date.now() / 1000)): Promise<number> {
-  if (!isSyncConfigured()) return 0;
   let n = 0;
   for (const session of new Set(sessions.filter((s): s is string => !!s && SESSION_RE.test(s)))) {
     const m = readMarker(session);
     if (!m) continue;
     const interval = Math.max(10, Math.min(HEARTBEAT_MAX_INTERVAL_S, Math.floor(m.min_ttl / 3)));
     if (now - m.last_beat < interval) continue;
+    const renewed: Lease[] = [];
+    let localOk = false;
+    let serviceOk = !isSyncConfigured();
     try {
-      const r = await (await requireCoordination()).leaseHeartbeat(undefined, session);
-      for (const l of noteRenewed(session, r.renewed, now)) {
-        addClaimNotice(`Your claim on ${l.key} (${l.collection}) is no longer held: another session took it over or released it. Check \`task_list\` (id ${l.key}) or \`lease list\` before continuing that work.`, now);
-      }
-      n += r.renewed.length;
+      renewed.push(...(await localCoordination().leaseHeartbeat(undefined, session)).renewed);
+      localOk = true;
     } catch {
-      // offline or signed out: retry on the next prompt
+      // unreadable state: retry on the next prompt
     }
+    if (!serviceOk) {
+      try {
+        renewed.push(...(await (await serviceCoordination()).leaseHeartbeat(undefined, session)).renewed);
+        serviceOk = true;
+      } catch {
+        // offline or signed out: retry on the next prompt
+      }
+    }
+    if (!localOk && !serviceOk) continue;
+    const answered = (c: string) => (coordinatedLocally(c) ? localOk : serviceOk);
+    for (const l of noteRenewed(session, renewed, now, answered, localOk && serviceOk)) {
+      addClaimNotice(`Your claim on ${l.key} (${l.collection}) is no longer held: another session took it over or released it. Check \`task_list\` (id ${l.key}) or \`lease list\` before continuing that work.`, now);
+    }
+    n += renewed.length;
   }
   return n;
 }
@@ -202,7 +255,7 @@ export class CoordinationUnavailableError extends Error {
 }
 
 /** The service's coordination API, or a CoordinationUnavailableError. */
-export async function requireCoordination(): Promise<Coordination> {
+export async function serviceCoordination(): Promise<Coordination> {
   if (!isSyncConfigured()) {
     throw new CoordinationUnavailableError('not_configured', 'leases and counters need the YAPA sync service (sync_enabled + sync_service_url)');
   }
@@ -213,12 +266,93 @@ export async function requireCoordination(): Promise<Coordination> {
   return wrap(backend.coordination);
 }
 
+let local: Coordination | undefined;
+
+/** This machine's coordination (local-coordination.ts), for collections the service does not coordinate. */
+export function localCoordination(): Coordination {
+  if (!local) {
+    // Once per process: leftovers of crashed lock holders and failed writes.
+    const dir = getConfig().LOCAL_COORD_DIR;
+    sweepLockDebris(dir);
+    sweepLockDebris(join(dir, 'locks'));
+    sweepLockDebris(getConfig().LEASE_STATE_DIR);
+    local = guardLocal(createLocalCoordination());
+  }
+  return local;
+}
+
+/** Tests: forget the cached local coordination (it reads LOCAL_COORD_DIR at call time anyway). */
+export function resetLocalCoordination(): void {
+  local = undefined;
+}
+
+/**
+ * Is `collection` coordinated on this machine? Local-only collections always
+ * are (the service never sees them), and every collection is when sync is
+ * off. A shared collection with sync on but the service unreachable is not:
+ * a teammate may hold its work, so that stays "not shared".
+ */
+export function coordinatedLocally(collection: string): boolean {
+  return !isSyncableCollection(collection) || !isSyncConfigured();
+}
+
+/**
+ * Coordination for any collection: each call goes to this machine or to the
+ * service by its collection (coordinatedLocally). A heartbeat for every
+ * collection renews both; task ids come from the service when sync is on.
+ */
+export async function requireCoordination(): Promise<Coordination> {
+  const pick = async (collection: string) => (coordinatedLocally(collection) ? localCoordination() : serviceCoordination());
+  return {
+    leaseAcquire: async req => (await pick(req.collection)).leaseAcquire(req),
+    leaseHeartbeat: async (collection, session, keys) => {
+      if (collection !== undefined) return (await pick(collection)).leaseHeartbeat(collection, session, keys);
+      const mine = await localCoordination().leaseHeartbeat(undefined, session);
+      if (!isSyncConfigured()) return mine;
+      try {
+        const theirs = await (await serviceCoordination()).leaseHeartbeat(undefined, session);
+        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
+      } catch (e) {
+        // This machine's leases were renewed; say the service's were not.
+        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: (e as Error).message };
+        throw e;
+      }
+    },
+    leaseRelease: async (collection, key, session, outcome) => (await pick(collection)).leaseRelease(collection, key, session, outcome),
+    leaseList: async (collection, includeExpired) => (await pick(collection)).leaseList(collection, includeExpired),
+    counterNext: async (collection, name, floor) => (await pick(collection)).counterNext(collection, name, floor),
+    nextTaskId: async floor => (isSyncConfigured() ? serviceCoordination() : Promise.resolve(localCoordination())).then(c => c.nextTaskId(floor)),
+  };
+}
+
 /** True when `e` means the service could not answer (offline, signed out, throttled, an older service). */
 export function isCoordinationUnavailable(e: unknown): boolean {
   if (e instanceof CoordinationUnavailableError) return true;
   const err = e as { code?: unknown; status?: unknown };
   // 404 not_found on a coordination route: the service predates schema v3.
   return isCycleFatal(e) || (err?.status === 404 && err?.code === 'not_found');
+}
+
+/** A lock this machine could not take in time reads like an unreachable service: nothing was coordinated. */
+function guardLocal(c: Coordination): Coordination {
+  const guard = <A extends unknown[], R>(fn: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
+    try {
+      return await fn(...a);
+    } catch (e) {
+      if ((e as { code?: unknown })?.code === 'lock_timeout') {
+        throw new CoordinationUnavailableError('unreachable', `this machine's coordination is busy: ${(e as Error).message}`);
+      }
+      throw e;
+    }
+  };
+  return {
+    leaseAcquire: guard(c.leaseAcquire),
+    leaseHeartbeat: guard(c.leaseHeartbeat),
+    leaseRelease: guard(c.leaseRelease),
+    leaseList: guard(c.leaseList),
+    counterNext: guard(c.counterNext),
+    nextTaskId: guard(c.nextTaskId),
+  };
 }
 
 function wrap(c: Coordination): Coordination {

@@ -1,5 +1,5 @@
 import { getConfig } from '../config.js';
-import { getDocumentsByFilter, listCollections, updateDocument } from '../store/index.js';
+import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 
 import { nextVersion, writeArtifact } from './artifacts.js';
 import {
@@ -150,7 +150,7 @@ export async function bucketRouteNow(): Promise<BucketRouteResult> {
       selected_at: now,
     };
     try {
-      await updateDocument(entry.collection, entry.id, updated);
+      await patchDocument(entry.collection, entry.id, metadataDelta(entry.metadata, updated));
       tagged++;
     } catch (e) {
       process.stderr.write(`[yapa-buckets] Tag error for ${entry.id}: ${e}\n`);
@@ -228,11 +228,7 @@ export async function systemPromptActivate(version: number): Promise<{ promoted:
       const docs = await getDocumentsByFilter(c.name, { type: 'memory' }, MAX_PER_COLLECTION);
       for (const d of docs) {
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
-          await updateDocument(c.name, d.id, {
-            ...d.metadata,
-            promoted_to: target,
-            promoted_at: now,
-          });
+          await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
         }
       }
@@ -258,7 +254,7 @@ export async function systemPromptDeactivate(version: number): Promise<{ rolledB
           const updated = { ...d.metadata };
           delete updated.promoted_to;
           delete updated.promoted_at;
-          await updateDocument(c.name, d.id, updated);
+          await patchDocument(c.name, d.id, metadataDelta(d.metadata, updated));
           rolledBack++;
         }
       }

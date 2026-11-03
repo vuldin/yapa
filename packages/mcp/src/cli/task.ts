@@ -11,8 +11,8 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
-  recordLastWrite, releaseTaskClaim, requestDecision, TaskClaimedError, TypedMemoryError, updateTask, validateLearned,
+  ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
+  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, TaskClaimedError, TypedMemoryError, updateTask, validateLearned,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -97,6 +97,9 @@ export async function runTask(sub: string | undefined, args: string[]): Promise<
   try {
     return await dispatch(sub, args);
   } catch (e) {
+    if (e instanceof ClaimBusyError) {
+      return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
+    }
     if (e instanceof TaskClaimedError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
     }
@@ -182,35 +185,37 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       if (!t) return { exit: EXIT.error, json: { ok: false, error: 'not_found' }, text: `${positional} not found` };
       const note = flag(args, '--note');
       const addTags = list(flag(args, '--tag')) ?? [];
-      const extra: Record<string, any> = {};
-      if (note) extra.notes = t.metadata.notes ? `${t.metadata.notes}\n${note}` : note;
-      if (addTags.length) {
-        const cur = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? '').split(',').filter(Boolean);
-        extra.tags = [...new Set([...cur, ...addTags])];
-      }
       const learned = jsonFile<LearnedItem[]>(flag(args, '--learned-file'), 'array');
       const followUps = jsonFile<FollowUp[]>(flag(args, '--follow-ups-file'), 'array');
       const decisionNeeded = jsonFile<DecisionNeeded>(flag(args, '--decision-needed-file'), 'object');
       const waitsOn = list(flag(args, '--waits-on'));
       if (decisionNeeded && status !== 'pending') throw new UsageError('--decision-needed-file goes with --status pending');
-      if (waitsOn?.length) {
-        const cur = Array.isArray(t.metadata.waits_on) ? t.metadata.waits_on : String(t.metadata.waits_on ?? '').split(',').filter(Boolean);
-        extra.waits_on = [...new Set([...cur, ...waitsOn])];
-      }
       validateLearned(learned);
+      // The note, tags and waits_on are appended under the task's lock, to
+      // the task as it is now: another session's note added meanwhile stays.
+      const listOf = (v: unknown): string[] => (Array.isArray(v) ? v : String(v ?? '').split(',').filter(Boolean));
+      if (note || addTags.length || waitsOn?.length) {
+        await withDocLock(t.collection, t.id, async () => {
+          const now = (await getTask(t.id)) ?? t;
+          const extra: Record<string, any> = {};
+          if (note) extra.notes = now.metadata.notes ? `${now.metadata.notes}\n${note}` : note;
+          if (addTags.length) extra.tags = [...new Set([...listOf(now.metadata.tags), ...addTags])];
+          if (waitsOn?.length) extra.waits_on = [...new Set([...listOf(now.metadata.waits_on), ...waitsOn])];
+          await updateTask(t.id, extra, { session });
+        });
+      }
       let release;
       let recorded: { memories: string[]; follow_ups: string[] } | undefined;
       let nudge: string | undefined;
       let decision: string | undefined;
       if (status === 'complete') {
-        if (Object.keys(extra).length) await updateTask(t.id, extra, { session });
         const c = await completeTask(t.id, int(flag(args, '--duration'), '--duration'), { session }, { learned, follow_ups: followUps });
         release = c.release;
         recorded = c.recorded;
         nudge = c.nudge;
       } else {
         const reason = flag(args, '--reason');
-        const fields = { ...(reason ? { blockedReason: reason } : {}), ...extra };
+        const fields = { ...(reason ? { blockedReason: reason } : {}) };
         if (decisionNeeded) {
           const d = await requestDecision(t.id, decisionNeeded, { session }, fields);
           release = d.release;

@@ -1,5 +1,6 @@
+import { withDocLock } from '../doc-lock.js';
 import { getConfig } from '../config.js';
-import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument } from '../store/index.js';
+import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument, patchDocument } from '../store/index.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type RemoteDeletion, type RemoteDocument, type SyncBackend } from './backend.js';
 import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects } from './sentinel.js';
@@ -263,7 +264,19 @@ async function dropMovedOut(backend: SyncBackend, collectionName: string, follow
   }
 }
 
+/**
+ * Apply one remote doc under the doc's lock, deciding from the local copy as
+ * it is now (not one read before a local edit). Linking it to a similar local
+ * doc happens after the lock is released: it takes the other doc's own lock,
+ * and it makes a network call.
+ */
 async function applyRemoteDoc(backend: SyncBackend, collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
+  const after: Array<() => Promise<void>> = [];
+  await withDocLock(collectionName, remoteDoc.id, () => applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, after));
+  for (const fn of after) await fn().catch(e => process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}\n`));
+}
+
+async function applyRemoteDocLocked(backend: SyncBackend, collectionName: string, remoteDoc: RemoteDocument, stats: PullStats, after: Array<() => Promise<void>>): Promise<void> {
   const [existing] = await getDocumentsByIds(collectionName, [remoteDoc.id]).catch(() => []);
 
   if (!existing) {
@@ -306,14 +319,16 @@ async function applyRemoteDoc(backend: SyncBackend, collectionName: string, remo
       // Cosine distance: similarity = 1 - distance
       const similarity = 1 - similarLocal[0].distance;
       if (similarity > getConfig().SYNC_SIMILARITY_THRESHOLD) {
-        const localDoc = similarLocal[0];
-        const localRelated = Array.isArray(localDoc.metadata.related_ids) ? localDoc.metadata.related_ids : [];
-        if (!localRelated.includes(remoteDoc.id)) {
-          localRelated.push(remoteDoc.id);
-          await updateDocument(collectionName, localDoc.id, { ...localDoc.metadata, related_ids: localRelated });
-        }
-        await backend.addRelatedIds(remoteDoc.id, [localDoc.id]).catch(e => {
-          process.stderr.write(`[yapa-sync] Link error for ${remoteDoc.id}: ${e}\n`);
+        const localId = similarLocal[0].id;
+        after.push(async () => {
+          // The local doc's own lock, over its metadata as it is now.
+          await withDocLock(collectionName, localId, async () => {
+            const [cur] = await getDocumentsByIds(collectionName, [localId]);
+            if (!cur) return;
+            const related = Array.isArray(cur.metadata.related_ids) ? [...cur.metadata.related_ids] : [];
+            if (!related.includes(remoteDoc.id)) await patchDocument(collectionName, localId, { related_ids: [...related, remoteDoc.id] });
+          });
+          await backend.addRelatedIds(remoteDoc.id, [localId]);
         });
         stats.linked++;
       }

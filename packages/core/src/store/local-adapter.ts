@@ -1,7 +1,7 @@
 /**
  * Embedded, serverless VectorStore: one JSON file per collection under a
- * root directory, atomic writes (tmp + rename), per-collection write chains,
- * and brute-force cosine search — sufficient well past yapa's personal-memory
+ * root directory, atomic writes (a uniquely named tmp file + rename), and
+ * brute-force cosine search — sufficient well past yapa's personal-memory
  * scale (thousands of 384-dim vectors scan in single-digit milliseconds).
  *
  * Distances are cosine (1 − cos) in [0, 2], matching the chroma adapter's
@@ -12,13 +12,20 @@
  * records are shape-compatible with ChromaDB in both directions (import,
  * sync, and a possible future migration).
  *
+ * Several processes share one store (each Claude Code session's MCP server,
+ * the hooks, the CLI). Every mutation therefore runs under the collection
+ * file's lock (fs-lock.ts) against a fresh read of the file, so one process
+ * never writes back a copy that lacks another's change. Embeddings are
+ * computed before the lock is taken, keeping it to a read and a write.
+ *
  * @module @yapa/core/store/local-adapter
  */
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { generateEmbedding } from '../embeddings.js';
 import { getConfig, getEmbeddingModel } from '../config.js';
+import { lockFileFor, withFileLock } from '../fs-lock.js';
 import { toChroma, fromChroma } from '../metadata-adapter.js';
 import type {
   Collection,
@@ -82,18 +89,34 @@ function matchesFilter(metadata: Record<string, any>, filter: Record<string, any
 
 export function createLocalStore(rootDir: string): VectorStore {
   const cache = new Map<string, CollectionFile>();
-  /** mtime of the file as of our last read or write (per collection). */
-  const cacheMtimes = new Map<string, number>();
+  /**
+   * Identity of the file as of our last read or write (per collection): its
+   * inode and mtime. Every write is a rename of a new file, so a new inode
+   * means someone wrote; mtime alone misses writes within one clock tick.
+   */
+  const cacheMtimes = new Map<string, string>();
+  const identity = (st: { ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint }) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = new Map<string, Promise<void>>();
 
   const fileFor = (name: string) => join(rootDir, `${encodeURIComponent(name)}.json`);
 
   async function readFromDisk(name: string): Promise<CollectionFile | undefined> {
     try {
-      const parsed = JSON.parse(await readFile(fileFor(name), 'utf-8')) as CollectionFile;
+      // Read and stat one open file: a rename in between can't pair this
+      // content with the next file's identity.
+      const fh = await open(fileFor(name), 'r');
+      let raw: string;
+      let id: string;
+      try {
+        id = identity(await fh.stat({ bigint: true }));
+        raw = await fh.readFile('utf-8');
+      } finally {
+        await fh.close();
+      }
+      const parsed = JSON.parse(raw) as CollectionFile;
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
       cache.set(name, parsed);
-      cacheMtimes.set(name, (await stat(fileFor(name))).mtimeMs);
+      cacheMtimes.set(name, id);
       return parsed;
     } catch (e: any) {
       if (e?.code === 'ENOENT') {
@@ -106,19 +129,17 @@ export function createLocalStore(rootDir: string): VectorStore {
   }
 
   /**
-   * Load a collection, reloading from disk when another process rewrote the
-   * file since our last read/write. One user may run several DSH processes
-   * against the same store (GUI + headless); this keeps every reader/writer
-   * current. Writes are atomic renames, so a mid-write reader sees either
-   * whole revision; the residual same-instant writer race is documented in
-   * the module notes.
+   * Load a collection for reading, reloading from disk when another process
+   * rewrote the file since our last read or write. Writes are atomic renames,
+   * so a reader sees one whole revision or the next. Writers don't use this:
+   * they go through mutate(), which re-reads under the lock.
    */
   async function load(name: string): Promise<CollectionFile | undefined> {
     const cached = cache.get(name);
     if (!cached) return readFromDisk(name);
     try {
-      const st = await stat(fileFor(name));
-      if (st.mtimeMs > (cacheMtimes.get(name) ?? 0)) return readFromDisk(name);
+      const st = await stat(fileFor(name), { bigint: true });
+      if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e: any) {
       if (e?.code === 'ENOENT') {
         cache.delete(name);
@@ -130,27 +151,52 @@ export function createLocalStore(rootDir: string): VectorStore {
     return cached;
   }
 
-  async function loadOrCreate(name: string): Promise<CollectionFile> {
-    return (await load(name)) ?? {
-      version: 1,
-      name,
-      created: new Date().toISOString(),
-      docs: {},
-    };
+  const fresh = (name: string): CollectionFile => ({ version: 1, name, created: new Date().toISOString(), docs: {} });
+
+  async function writeAtomic(cf: CollectionFile): Promise<void> {
+    await mkdir(rootDir, { recursive: true });
+    const file = fileFor(cf.name);
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(cf));
+      await rename(tmp, file);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+    cache.set(cf.name, cf);
+    // Our own write's mtime, taken under the lock: nobody else wrote since.
+    cacheMtimes.set(cf.name, identity(await stat(file, { bigint: true })));
   }
 
-  /** Serialize writes per collection; atomic publish via tmp + rename. */
-  function persist(cf: CollectionFile): Promise<void> {
-    const prev = writeChains.get(cf.name) ?? Promise.resolve();
+  /**
+   * Change one collection: in this process one change at a time per
+   * collection, and across processes under the file's lock, always applied
+   * to the file as it is on disk now. `apply` gets the current file
+   * (undefined: none yet) and returns the file to write, or false to write
+   * nothing.
+   */
+  function mutate(name: string, apply: (cf: CollectionFile | undefined) => CollectionFile | false): Promise<void> {
+    const prev = writeChains.get(name) ?? Promise.resolve();
     const next = prev.then(async () => {
       await mkdir(rootDir, { recursive: true });
-      const tmp = `${fileFor(cf.name)}.tmp`;
-      await writeFile(tmp, JSON.stringify(cf));
-      await rename(tmp, fileFor(cf.name));
-      // Track our own write's mtime so the next load() doesn't re-read it.
-      cacheMtimes.set(cf.name, (await stat(fileFor(cf.name))).mtimeMs);
+      await withFileLock(lockFileFor(fileFor(name)), async () => {
+        // Under the lock, the cache is current exactly when the file's
+        // identity still matches it (nobody else can write meanwhile).
+        const cur = await load(name);
+        try {
+          const out = apply(cur);
+          if (out) await writeAtomic(out);
+        } catch (e) {
+          // apply changes the cached object in place: drop it so readers
+          // reload what is really on disk.
+          cache.delete(name);
+          cacheMtimes.delete(name);
+          throw e;
+        }
+      }, { waitMs: 15_000 });
     });
-    writeChains.set(cf.name, next.catch(() => {}));
+    writeChains.set(name, next.catch(() => {}));
     return next;
   }
 
@@ -175,16 +221,20 @@ export function createLocalStore(rootDir: string): VectorStore {
     },
 
     async createCollection(name: string, metadata?: Record<string, any>): Promise<void> {
-      if (await load(name)) throw new Error(`Collection "${name}" already exists`);
-      const cf = await loadOrCreate(name);
-      cache.set(name, cf);
-      await persist(cf);
+      await mutate(name, cur => {
+        if (cur) throw new Error(`Collection "${name}" already exists`);
+        return fresh(name);
+      });
     },
 
     async deleteCollection(name: string): Promise<void> {
+      await mkdir(rootDir, { recursive: true });
+      await withFileLock(lockFileFor(fileFor(name)), async () => {
+        await rm(fileFor(name), { force: true });
+      }, { waitMs: 15_000 });
       cache.delete(name);
+      cacheMtimes.delete(name);
       writeChains.delete(name);
-      await rm(fileFor(name), { force: true });
     },
 
     async getCollectionCount(name: string): Promise<number> {
@@ -193,39 +243,29 @@ export function createLocalStore(rootDir: string): VectorStore {
     },
 
     async getOrCreateCollection(name: string): Promise<string> {
-      if (!(await load(name))) {
-        const cf = await loadOrCreate(name);
-        cache.set(name, cf);
-        await persist(cf);
-      }
+      if (!(await load(name))) await mutate(name, cur => cur ?? fresh(name));
       return name;
     },
 
     async addDocument(collection: string, id: string, content: string, metadata: Record<string, any>): Promise<void> {
-      const cf = await loadOrCreate(collection);
-      cache.set(collection, cf);
-      const embedding = await generateEmbedding(content);
-      cf.docs[id] = {
-        content,
-        metadata: toChroma(metadata),
-        embedding,
-        embedding_model: embedderId(),
-      };
-      await persist(cf);
+      const doc: LocalDoc = { content, metadata: toChroma(metadata), embedding: await generateEmbedding(content), embedding_model: embedderId() };
+      await mutate(collection, cur => {
+        const cf = cur ?? fresh(collection);
+        cf.docs[id] = doc;
+        return cf;
+      });
     },
 
     async addDocumentsBatch(collection, documents): Promise<void> {
-      const cf = await loadOrCreate(collection);
-      cache.set(collection, cf);
+      const docs: Array<[string, LocalDoc]> = [];
       for (const d of documents) {
-        cf.docs[d.id] = {
-          content: d.content,
-          metadata: toChroma(d.metadata),
-          embedding: await generateEmbedding(d.content),
-          embedding_model: embedderId(),
-        };
+        docs.push([d.id, { content: d.content, metadata: toChroma(d.metadata), embedding: await generateEmbedding(d.content), embedding_model: embedderId() }]);
       }
-      await persist(cf);
+      await mutate(collection, cur => {
+        const cf = cur ?? fresh(collection);
+        for (const [id, doc] of docs) cf.docs[id] = doc;
+        return cf;
+      });
     },
 
     async queryDocuments(collection, queryText, nResults = 5, filter): Promise<QueryResult[]> {
@@ -278,39 +318,60 @@ export function createLocalStore(rootDir: string): VectorStore {
     },
 
     async updateDocument(collection, id, metadata): Promise<void> {
-      const cf = await load(collection);
-      if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
-      cf.docs[id].metadata = toChroma(metadata);
-      await persist(cf);
+      await mutate(collection, cf => {
+        if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
+        cf.docs[id].metadata = toChroma(metadata);
+        return cf;
+      });
     },
 
     async updateDocumentsBatch(collection, entries): Promise<void> {
       if (entries.length === 0) return;
-      const cf = await load(collection);
-      if (!cf) throw new Error(`Collection "${collection}" not found`);
-      let changed = 0;
-      for (const e of entries) {
-        if (!cf.docs[e.id]) continue;
-        cf.docs[e.id].metadata = toChroma(e.metadata);
-        changed++;
-      }
-      if (changed > 0) await persist(cf); // one flush for the whole sweep
+      await mutate(collection, cf => {
+        if (!cf) throw new Error(`Collection "${collection}" not found`);
+        let changed = 0;
+        for (const e of entries) {
+          if (!cf.docs[e.id]) continue;
+          cf.docs[e.id].metadata = toChroma(e.metadata);
+          changed++;
+        }
+        return changed > 0 ? cf : false; // one flush for the whole sweep
+      });
+    },
+
+    async patchDocuments(collection, entries): Promise<void> {
+      if (entries.length === 0) return;
+      await mutate(collection, cf => {
+        if (!cf) return false;
+        let changed = 0;
+        for (const e of entries) {
+          const doc = cf.docs[e.id];
+          if (!doc) continue;
+          const set = Object.fromEntries(Object.entries(e.patch).filter(([, v]) => v !== null && v !== undefined));
+          const next = { ...doc.metadata, ...toChroma(set) };
+          for (const [k, v] of Object.entries(e.patch)) if (v === null || v === undefined) delete next[k];
+          doc.metadata = next;
+          changed++;
+        }
+        return changed > 0 ? cf : false;
+      });
     },
 
     async deleteDocument(collection, id): Promise<void> {
-      const cf = await load(collection);
-      if (!cf) return;
-      if (delete cf.docs[id]) await persist(cf);
+      await mutate(collection, cf => (cf && cf.docs[id] && delete cf.docs[id] ? cf : false));
     },
 
     async findAndDeleteDocument(id): Promise<string> {
       for (const name of await collectionNames()) {
-        const cf = await load(name);
-        if (cf?.docs[id]) {
+        if (!(await load(name))?.docs[id]) continue;
+        let deleted = false;
+        await mutate(name, cf => {
+          if (!cf?.docs[id]) return false;
           delete cf.docs[id];
-          await persist(cf);
-          return name;
-        }
+          deleted = true;
+          return cf;
+        });
+        if (deleted) return name;
       }
       throw new Error(`Document "${id}" not found in any collection`);
     },
