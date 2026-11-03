@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Upgrading:** restart every Claude Code session after updating. Older YAPA processes don't take the new locks.
+
+### Features
+- **Local-only collections coordinate on this machine.** `private-*`, `local-*` and `global` (and every collection while sync is off) now get what the sync service gives shared ones, served from `~/.local/share/yapa/coord/` (`YAPA_LOCAL_COORD_DIR`) under a lock file every YAPA process respects:
+  - **Claims:** `task_update` to `in_progress`, `task_next` with `claim` and `yapa task claim` refuse a second session with the holder and since when, and a claim that lapsed is offered again by `task_next`. Until now claims were skipped there, so two sessions could both start the same task.
+  - **Leases:** `lease` and `yapa coord acquire|heartbeat|release|list` work with the service's rules (key and scope overlap, TTL, reclaim, takeovers); they used to fail with `local_only_collection`. The hooks renew local leases, also with sync off. A local grant says `(this machine)`, and `yapa coord` adds `"local": true`.
+  - **Counters and task ids:** `counter_next` / `yapa coord counter-next` never repeat a value, and task ids minted without the service come from a counter on this machine instead of "highest seen + 1", so two sessions can no longer mint the same id and overwrite each other's task. `task_create` also skips an id some document already uses.
+- **Session-start presence** lists live claims in a local-only collection too.
+
+### Fixes
+- Lease markers and claim notices are written atomically under a lock, so a hook and the MCP server acting for one session can't drop each other's watched leases or notices.
+
 ## 1.9.0 (2026-11-02)
 
 The status line now names the collection this session last wrote to.

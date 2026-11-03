@@ -406,15 +406,25 @@ You can also trigger a sync manually with `sync` (`action: 'now'`), check status
 
 ### Task claims
 
-Writes reach the remote seconds after they happen, but a status change is still an ordinary last-writer-wins write: two people could both mark the same task `in_progress` and neither would know. So in a shared collection, setting a task to `in_progress` **claims** it first, through a lease on its id that the sync service grants atomically:
+Writes reach the remote seconds after they happen, but a status change is still an ordinary last-writer-wins write: two people could both mark the same task `in_progress` and neither would know. So setting a task to `in_progress` **claims** it first, through a lease on its id that is granted atomically: by the sync service in a shared collection, and by this machine in a local-only one (`private-*`, `local-*`, `global`) or with sync off (see [Local-only collections](#local-only-collections-on-this-machine)):
 
 - **Granted:** the status changes and is pushed at once. Teammates' task lists, session-start context and `task_next` show `claimed by you (this session) since 09:12 UTC`.
 - **Refused:** someone else (or another of your own sessions) holds it. Nothing changes, and the reply names the holder and since when. For your own other session (after `--resume`, say), `task_update` with `reclaim: true` takes it over once you confirm.
-- **Not shared** (offline, signed out): the status changes locally and the reply says others may start it too. The claim is retried when sync is back; if someone claimed the task meanwhile, the next prompt says so.
+- **Not shared** (a shared collection while offline or signed out): the status changes locally and the reply says others may start it too. The claim is retried when sync is back; if someone claimed the task meanwhile, the next prompt says so.
 
 Completing, blocking, resetting to pending or deleting the task releases the claim. The hooks renew this session's claims while it is active, and a claim lapses one TTL (2 h by default) after the session goes quiet. Its task then shows `no live claim` and is offered again by `task_next`. If another session takes a claim over, the next prompt says so.
 
 `task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
+
+### Local-only collections on this machine
+
+`private-*`, `local-*` and `global` never leave your machine, and every collection stays local while sync is off. Coordination works there too, served by this machine instead of the sync service, with the same rules and answers:
+
+- **Claims** (`task_update` to `in_progress`, `task_next` with `claim`, `yapa task claim`): a second session is refused with the holder and since when, and a claim that lapsed is offered again by `task_next`.
+- **Leases** (`lease`, `yapa coord acquire|heartbeat|release|list`): keys, scope overlap, TTLs, reclaim and takeovers behave as on the service. The hooks renew this session's local leases too.
+- **Counters** (`counter_next`, `yapa coord counter-next`) never hand out a value twice, and **task ids** never repeat between sessions on this machine, online or not.
+
+The state lives in `~/.local/share/yapa/coord/` (`YAPA_LOCAL_COORD_DIR`), one small file per collection, changed under a lock file that every YAPA process on the machine respects. A grant from this machine says `(this machine)`; `yapa coord` adds `"local": true` to its JSON. Shared collections with sync on still go to the service, and when it can't be reached their claims are "not shared", because a teammate may hold the work.
 
 ### Findings, decisions and what waits on people
 

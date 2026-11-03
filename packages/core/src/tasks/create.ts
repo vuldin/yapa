@@ -1,6 +1,7 @@
 import { getConfig } from '../config.js';
-import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../store/index.js';
+import { addDocument, getOrCreateCollection, getDocumentsByFilter, getDocumentsByIds, listCollections } from '../store/index.js';
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
+import { localCoordination } from '../sync/coordination.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -33,7 +34,7 @@ const PRIORITY_SALIENCE: Record<string, number> = {
 };
 
 /** Get next sequential task ID for user. Format: {username}-{n} */
-export async function getNextTaskId(): Promise<string> {
+export async function getNextTaskId(floor = 0): Promise<string> {
   // With the sync service, ids must carry the server-assigned username
   // (from the Google account); learn it first, bounded like the remote max.
   if (isSyncConfigured()) {
@@ -43,7 +44,7 @@ export async function getNextTaskId(): Promise<string> {
     ]).catch(() => undefined);
   }
   const collections = await listCollections();
-  let maxId = 0;
+  let maxId = floor;
 
   for (const collection of collections) {
     try {
@@ -94,7 +95,40 @@ export async function getNextTaskId(): Promise<string> {
     }
   }
 
+  // This machine's counter (sync/local-coordination.ts), floored by every
+  // number seen: two sessions here never get the same id, online or not.
+  try {
+    const id = await localCoordination().nextTaskId(maxId);
+    if (id.startsWith(`${getConfig().USERNAME}-`)) return id;
+  } catch {
+    // coordination state busy or unreadable: plain max + 1
+  }
   return `${getConfig().USERNAME}-${maxId + 1}`;
+}
+
+/** Is `id` already a document in any collection? (an older YAPA process, or another machine offline, may have used it) */
+async function idTaken(id: string): Promise<boolean> {
+  for (const c of await listCollections().catch(() => [])) {
+    try {
+      if ((await getDocumentsByIds(c.name, [id])).length) return true;
+    } catch {
+      // unreadable collection: not evidence either way
+    }
+  }
+  return false;
+}
+
+const ID_ATTEMPTS = 5;
+
+/** A task id no document uses yet: getNextTaskId, skipping any number found taken. */
+async function freshTaskId(): Promise<string> {
+  let floor = 0;
+  let id = await getNextTaskId();
+  for (let i = 1; i < ID_ATTEMPTS && (await idTaken(id)); i++) {
+    floor = Math.max(floor, Number(id.slice(id.lastIndexOf('-') + 1)) || 0);
+    id = await getNextTaskId(floor);
+  }
+  return id;
 }
 
 /** Create a new task. Returns the task ID. */
@@ -104,7 +138,7 @@ export async function createTask(
   collection: string = 'global',
 ): Promise<string> {
   await getOrCreateCollection(collection);
-  const id = await getNextTaskId();
+  const id = await freshTaskId();
   const now = Math.floor(Date.now() / 1000);
 
   const metadata: Record<string, any> = {

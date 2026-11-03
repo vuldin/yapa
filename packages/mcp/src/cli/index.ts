@@ -25,7 +25,8 @@ const COORD_USAGE =
   '       yapa coord counter-next --collection C --name N [--floor N]\n' +
   '       yapa coord task-id   [--floor N]\n' +
   '--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\n' +
-  'Exit: 0 done, 3 refused (held or overlapping), 4 service unavailable (nothing shared: fall back locally),\n' +
+  'Shared collections are coordinated by the sync service; private-*, local-* and global (and every collection with sync off) by this machine.\n' +
+  'Exit: 0 done, 3 refused (held or overlapping), 4 unavailable (the service for a shared collection; nothing shared: fall back locally),\n' +
   '      2 bad arguments, 1 other error.\n';
 
 function usage(): never {

@@ -15,7 +15,7 @@ import { getDocumentsByFilter, getDocumentsByIds, listCollections, updateDocumen
 import { getDeviceId } from '../sync/device.js';
 import { isSyncConfigured, type Lease } from '../sync/backend.js';
 import {
-  addClaimNotice, currentSession, isCoordinationUnavailable, noteLeaseHeld, noteLeaseReleased, requireCoordination,
+  addClaimNotice, coordinatedLocally, currentSession, isCoordinationUnavailable, noteLeaseHeld, noteLeaseReleased, requireCoordination,
 } from '../sync/coordination.js';
 import { pushDocsNow } from '../sync/push.js';
 import { isSyncableCollection } from '../sync/syncable.js';
@@ -59,9 +59,14 @@ export function claimSession(explicit?: string): string {
   return currentSession(explicit) ?? `${getDeviceId()}:${process.pid}`.replace(SESSION_SAFE, '-').slice(0, 128);
 }
 
-/** True when a status change on a task in `collection` goes through claims. */
-export function claimsApply(collection: string): boolean {
-  return isSyncableCollection(collection) && isSyncConfigured();
+/**
+ * True when a status change on a task in `collection` goes through claims:
+ * always since 1.10. Shared collections are claimed on the sync service;
+ * local-only ones, and every collection when sync is off, on this machine
+ * (sync/local-coordination.ts). Kept for callers and the `local` result kind.
+ */
+export function claimsApply(_collection: string): boolean {
+  return true;
 }
 
 function utc(t: number, now = Math.floor(Date.now() / 1000)): string {
@@ -110,7 +115,7 @@ export async function claimTask(id: string, collection: string, metadata: Record
     return { kind: 'refused', id, collection, session, conflicts: [{ lease, overlap: [`key:${id}`] }] };
   }
   let key = id;
-  if (metadata.is_synced === false) {
+  if (metadata.is_synced === false && !coordinatedLocally(collection)) {
     try {
       const r = await pushDocsNow(collection, [id]);
       key = r.renamed[id] ?? id;

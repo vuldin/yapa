@@ -425,8 +425,9 @@ Now execute these steps in order, without asking anything else:
    - A project's own instructions win where they keep these records elsewhere.
 
    ### Task Claims
-   - In a shared collection, setting a task to `in_progress` claims it for
-     this session (a lease on its id); completing, blocking, resetting or
+   - Setting a task to `in_progress` claims it for this session (a lease on
+     its id: on the sync service in a shared collection, on this machine in a
+     local-only one such as `private-*`); completing, blocking, resetting or
      deleting it releases the claim. Set `in_progress` when you start a task.
    - If the update is refused, nothing changed: tell the user who holds the
      task and since when, and offer other work. Use `reclaim: true` only for

@@ -117,7 +117,7 @@ describe('triage and cleanup in the ready queue', () => {
     expect(next.cleanup[0].count).toBe(1);
 
     next = await nextTasks({ collection: T, autoOnly: true, claim: true });
-    expect(next.claimed).toEqual({ kind: 'local', id: 'cleanup:triage' });
+    expect(next.claimed).toMatchObject({ kind: 'granted', id: 'cleanup:triage', collection: T });
 
     next = await nextTasks({ collection: T });
     expect(next.ready.map(t => t.id)).toEqual([untagged]);
