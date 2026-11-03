@@ -145,9 +145,22 @@ function readSessionRecord(dir, sessions) {
   return best;
 }
 var SESSION_REPORT_GRACE_MS = 6e4;
-function sessionInfo(record, ageMs) {
+function readSessionStarting(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const at = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
+      if (typeof at === "number" && (best === void 0 || at > best)) best = at;
+    } catch {
+    }
+  }
+  return best;
+}
+function sessionInfo(record, ageMs, startedAt, now = Date.now()) {
   if (record) return { version: record.version };
-  if (ageMs !== void 0 && ageMs > SESSION_REPORT_GRACE_MS) return { missing: true };
+  const sinceStart = startedAt !== void 0 ? now - startedAt : ageMs;
+  if (sinceStart !== void 0 && sinceStart > SESSION_REPORT_GRACE_MS) return { missing: true };
   return void 0;
 }
 function readUpdate(path) {
@@ -307,7 +320,8 @@ async function main(args, self2) {
   const info = stdinInfo(input);
   const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
   const last = readLastWrite(join(dirname(healthPath), "last-write"), ids);
-  const session = sessionInfo(readSessionRecord(join(dirname(healthPath), "sessions"), ids), info.ageMs);
+  const sessionsDir = join(dirname(healthPath), "sessions");
+  const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
@@ -349,6 +363,7 @@ export {
   readHealth,
   readLastWrite,
   readSessionRecord,
+  readSessionStarting,
   readUpdate,
   removeStatusLine,
   renderSegment,

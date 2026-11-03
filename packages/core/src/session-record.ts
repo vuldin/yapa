@@ -54,6 +54,23 @@ export function recordSessionStart(version: string, opts: { session?: string; di
   }
 }
 
+/**
+ * Note that `session` (re)started just now (the session-start hook, which
+ * also runs on resume). The status line measures its grace period for the
+ * server's record from this moment: a resumed session's transcript is old,
+ * but its new server needs a few seconds to start and report.
+ */
+export function noteSessionStarting(session: string | undefined, opts: { dir?: string; now?: number } = {}): void {
+  const id = sessionId(session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!id || !dir) return;
+  try {
+    writeJsonAtomic(sessionRecordFile(id, dir).replace(/\.json$/, '.starting'), { at: opts.now ?? Date.now() });
+  } catch {
+    // display only
+  }
+}
+
 /** Remove this server's record (call at exit), only if it is still ours. */
 export function removeSessionRecord(opts: { session?: string; dir?: string } = {}): void {
   const session = sessionId(opts.session);
@@ -73,8 +90,16 @@ export function pruneSessionRecords(dir: string = sessionRecordDir(), now = Date
   if (!dir) return;
   try {
     for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.json')) continue;
       const p = join(dir, name);
+      if (name.endsWith('.starting')) {
+        try {
+          if (now - statSync(p).mtimeMs > 24 * 3600 * 1000) rmSync(p, { force: true });
+        } catch {
+          // gone
+        }
+        continue;
+      }
+      if (!name.endsWith('.json')) continue;
       try {
         const r = JSON.parse(readFileSync(p, 'utf-8')) as SessionRecord;
         if (!pidAlive(r.pid) || now - statSync(p).mtimeMs > PRUNE_AFTER_MS) rmSync(p, { force: true });

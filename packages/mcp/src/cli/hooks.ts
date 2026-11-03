@@ -41,6 +41,7 @@ import {
   heldKeys,
   noteInstalledVersion,
   markUpdateNotified,
+  noteSessionStarting,
   refreshSyncHealthNames,
   shouldPull,
   recordPull,
@@ -410,6 +411,8 @@ export async function waitingLines(user: string, budgetMs = 2000, collection = '
 }
 
 export async function sessionStart(input: SessionStartInput): Promise<void> {
+  // First: the status line waits for this session's server to report from now (also on resume).
+  noteSessionStarting(input.session_id);
   const detection = await detectCollection(input.cwd);
   const collection = detection.collection;
   const pulled = await freshenFromRemote(collection);

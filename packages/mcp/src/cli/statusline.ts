@@ -262,10 +262,33 @@ export function readSessionRecord(dir: string, sessions: Array<string | undefine
 /** A session this old without a live server record runs a YAPA too old to report one (or none). */
 export const SESSION_REPORT_GRACE_MS = 60_000;
 
-/** What to tell renderSegment about this session's own server. */
-export function sessionInfo(record: SessionRecord | undefined, ageMs: number | undefined): RenderOptions['session'] {
+/**
+ * When the newest of `sessions` was (re)started, per its session-start hook
+ * (sessions/<id>.starting, written by YAPA 1.10.2 and later). Epoch ms.
+ */
+export function readSessionStarting(dir: string, sessions: Array<string | undefined>): number | undefined {
+  let best: number | undefined;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const at = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, '_')}.starting`), 'utf-8'))?.at;
+      if (typeof at === 'number' && (best === undefined || at > best)) best = at;
+    } catch {
+      // none
+    }
+  }
+  return best;
+}
+
+/**
+ * What to tell renderSegment about this session's own server. Without a
+ * record, the session gets a grace period from its last (re)start, when its
+ * hook noted one; else from its age (an old session's hooks note nothing).
+ */
+export function sessionInfo(record: SessionRecord | undefined, ageMs: number | undefined, startedAt?: number, now = Date.now()): RenderOptions['session'] {
   if (record) return { version: record.version };
-  if (ageMs !== undefined && ageMs > SESSION_REPORT_GRACE_MS) return { missing: true };
+  const sinceStart = startedAt !== undefined ? now - startedAt : ageMs;
+  if (sinceStart !== undefined && sinceStart > SESSION_REPORT_GRACE_MS) return { missing: true };
   return undefined;
 }
 
@@ -464,7 +487,8 @@ export async function main(args: string[], self: string): Promise<void> {
   const info = stdinInfo(input);
   const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
   const last = readLastWrite(join(dirname(healthPath), 'last-write'), ids);
-  const session = sessionInfo(readSessionRecord(join(dirname(healthPath), 'sessions'), ids), info.ageMs);
+  const sessionsDir = join(dirname(healthPath), 'sessions');
+  const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection: last?.collection, session,

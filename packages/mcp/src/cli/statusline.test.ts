@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 
 import {
   renderSegment, formatAgo, mergeStatusLine, removeStatusLine, isYapaStatusLine, encodeWrapped, installStatusLine,
-  uninstallStatusLine, hasStatusLine, readLastWrite, readSessionRecord, sessionInfo, stdinInfo, stdinSession, type HealthRecord,
+  uninstallStatusLine, hasStatusLine, readLastWrite, readSessionRecord, readSessionStarting, sessionInfo, stdinInfo, stdinSession, type HealthRecord,
 } from './statusline.js';
 
 const NOW = new Date(2026, 10, 1, 15, 0).getTime();
@@ -135,6 +135,13 @@ describe('session records', () => {
       expect(sessionInfo(undefined, 10_000)).toBeUndefined(); // just started: its server may not have reported yet
       expect(sessionInfo(undefined, 120_000)).toEqual({ missing: true });
       expect(sessionInfo(undefined, undefined)).toBeUndefined();
+      // Resumed: the session is old, but it restarted 5 s ago and its new server hasn't reported yet.
+      const now = 1_000_000_000;
+      expect(sessionInfo(undefined, 9e9, now - 5000, now)).toBeUndefined();
+      expect(sessionInfo(undefined, 9e9, now - 120_000, now)).toEqual({ missing: true });
+      writeFileSync(join(dir, 'r.starting'), JSON.stringify({ at: 7 }));
+      writeFileSync(join(dir, 'r2.starting'), JSON.stringify({ at: 9 }));
+      expect(readSessionStarting(dir, ['r', 'r2', 'none'])).toBe(9);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -247,6 +254,9 @@ describe('the script as Claude Code runs it', () => {
     expect(runAs('{"session_id":"old"}')).toBe('yapa@v1.5.0 (restart for v1.6.0) <-> acme ● synced just now\n');
     expect(runAs('{"session_id":"unreported","cost":{"total_duration_ms":120000}}')).toBe('yapa (restart for v1.6.0) <-> acme ● synced just now\n');
     expect(runAs('{"session_id":"fresh","cost":{"total_duration_ms":3000}}')).toBe('yapa@v1.6.0 <-> acme ● synced just now\n');
+    // A resumed session: hours old, restarted a moment ago, its server not up yet.
+    writeFileSync(join(d, 'sessions', 'resumed.starting'), JSON.stringify({ at: Date.now() - 2000 }));
+    expect(runAs('{"session_id":"resumed","cost":{"total_duration_ms":90000000}}')).toBe('yapa@v1.6.0 <-> acme ● synced just now\n');
     rmSync(join(d, 'sessions'), { recursive: true });
   });
 

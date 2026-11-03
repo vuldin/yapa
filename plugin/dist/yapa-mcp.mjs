@@ -44953,8 +44953,15 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      if (!name.endsWith(".json")) continue;
       const p = join13(dir, name);
+      if (name.endsWith(".starting")) {
+        try {
+          if (now - statSync3(p).mtimeMs > 24 * 3600 * 1e3) rmSync6(p, { force: true });
+        } catch {
+        }
+        continue;
+      }
+      if (!name.endsWith(".json")) continue;
       try {
         const r = JSON.parse(readFileSync16(p, "utf-8"));
         if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });

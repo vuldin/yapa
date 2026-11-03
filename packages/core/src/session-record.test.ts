@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConfig, resetConfig, setConfig } from './config.js';
-import { pruneSessionRecords, recordSessionStart, removeSessionRecord, sessionRecordDir, sessionRecordFile } from './session-record.js';
+import { noteSessionStarting, pruneSessionRecords, recordSessionStart, removeSessionRecord, sessionRecordDir, sessionRecordFile } from './session-record.js';
+import { utimesSync } from 'node:fs';
 
 let dir: string;
 beforeEach(() => {
@@ -34,6 +35,16 @@ describe('session records', () => {
     pruneSessionRecords();
     expect(existsSync(join(dir, 'sessions', 'gone.json'))).toBe(false);
     expect(existsSync(file)).toBe(true);
+  });
+
+  it('the session-start hook notes each (re)start; day-old notes are pruned', () => {
+    noteSessionStarting('sess-3', { now: 42 });
+    const f = join(dir, 'sessions', 'sess-3.starting');
+    expect(JSON.parse(readFileSync(f, 'utf-8'))).toEqual({ at: 42 });
+    const old = (Date.now() - 2 * 24 * 3600_000) / 1000;
+    utimesSync(f, old, old);
+    pruneSessionRecords();
+    expect(existsSync(f)).toBe(false);
   });
 
   it('does nothing without a session or a health file', () => {
