@@ -68,7 +68,7 @@ vi.mock('../sync/coordination.js', async importOriginal => {
       return {
         leaseAcquire: async (req: LeaseAcquireRequest) => pick(req.collection).leaseAcquire(req),
         leaseRelease: async (c: string, k: string, s: string, o?: string) => pick(c).leaseRelease(c, k, s, o),
-        leaseList: async (c: string) => pick(c).leaseList(c),
+        leaseList: async (c: string, inc?: boolean) => pick(c).leaseList(c, inc),
         leaseHeartbeat: async () => svc().leaseHeartbeat(),
         counterNext: async () => svc().counterNext(),
         nextTaskId: async () => svc().nextTaskId(),
@@ -245,6 +245,35 @@ describe('task claims', () => {
       Date.now = realNow;
     }
   });
+
+  it('an in_progress task with no claim on record (from before claims here) is offered only after two hours untouched', async () => {
+    const { nextTasks } = await import('./next.js');
+    const { getStore } = await import('../store/index.js');
+    const id = await createTask('started before 1.10', {}, 'private-upgrade');
+    const doc = (await getTask(id))!;
+    const now = Math.floor(Date.now() / 1000);
+    await getStore().updateDocument('private-upgrade', id, { ...doc.metadata, status: 'in_progress', updated_at: now - 600 });
+    let q = await nextTasks({ collection: 'private-upgrade' });
+    expect(q.ready.find(x => x.id === id)).toBeUndefined();
+    expect(q.skipped.find(x => x.id === id)?.reason).toMatch(/^in_progress with no claim on record .*offered again after 1[01]\d min untouched$/);
+    await getStore().updateDocument('private-upgrade', id, { ...doc.metadata, status: 'in_progress', updated_at: now - 3 * 3600 });
+    q = await nextTasks({ collection: 'private-upgrade' });
+    expect(q.ready.find(x => x.id === id)).toMatchObject({ lapsed: true });
+  });
+
+  it('a busy coordination lock refuses the claim plainly (nothing changes, nothing pretends to retry)', async () => {
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { ClaimBusyError } = await import('./claim.js');
+    const { LOCK_HOST } = await import('../fs-lock.js');
+    const id = await createTask('contended', {}, 'private-busy');
+    mkdirSync(join(dir, 'coord'), { recursive: true });
+    // A live process on this host holds the collection's coordination lock.
+    writeFileSync(join(dir, 'coord', 'private-busy.json.lock'), JSON.stringify({ pid: process.ppid, host: LOCK_HOST, at: Date.now() }));
+    const e = await updateTask(id, { status: 'in_progress' }).catch(err => err);
+    expect(e).toBeInstanceOf(ClaimBusyError);
+    expect(e.message).toMatch(new RegExp(`^${id} was not claimed: this machine's coordination is busy`));
+    expect((await getTask(id))?.metadata.status).toBe('pending');
+  }, 20_000);
 
   it('with sync off, shared collections are claimed on this machine too', async () => {
     const prev = createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://sync.example.test', YAPA_LEASE_STATE_DIR: join(dir, 'leases'), YAPA_LOCAL_COORD_DIR: join(dir, 'coord') });

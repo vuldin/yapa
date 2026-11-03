@@ -143,8 +143,12 @@ export type LeaseReleaseResult =
 
 export interface Coordination {
   leaseAcquire(req: LeaseAcquireRequest): Promise<LeaseAcquireResult>;
-  /** No collection: renew the session's leases in every collection. */
-  leaseHeartbeat(collection: string | undefined, session: string, keys?: string[]): Promise<{ renewed: Lease[]; lost: string[] }>;
+  /**
+   * No collection: renew the session's leases in every collection. `unreachable`
+   * set: the sync service could not be asked, so only this machine's leases
+   * were renewed (the message says why).
+   */
+  leaseHeartbeat(collection: string | undefined, session: string, keys?: string[]): Promise<{ renewed: Lease[]; lost: string[]; unreachable?: string }>;
   leaseRelease(collection: string, key: string, session: string, outcome?: string): Promise<LeaseReleaseResult>;
   leaseList(collection: string, includeExpired?: boolean): Promise<{ leases: Lease[]; now: number }>;
   /** Next value strictly above the last one handed out and above `floor`. */

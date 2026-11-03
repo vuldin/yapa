@@ -10,6 +10,7 @@
   - **Leases:** `lease` and `yapa coord acquire|heartbeat|release|list` work with the service's rules (key and scope overlap, TTL, reclaim, takeovers); they used to fail with `local_only_collection`. The hooks renew local leases, also with sync off. A local grant says `(this machine)`, and `yapa coord` adds `"local": true`.
   - **Counters and task ids:** `counter_next` / `yapa coord counter-next` never repeat a value, and task ids minted without the service come from a counter on this machine instead of "highest seen + 1", so two sessions can no longer mint the same id and overwrite each other's task. `task_create` also skips an id some document already uses.
 - **Session-start presence** lists live claims in a local-only collection too.
+- **After upgrading:** an `in_progress` task in a local-only collection (or any, with sync off) has no claim on record yet, so `task_next` offers it again only once it has been untouched for two hours, not at once. A busy lock on this machine refuses a claim plainly ("try again"), and `yapa task` exits 4. An unreadable coordination file names the command that moves it aside. A heartbeat the service can't answer is retried on the next prompt and reported as "NOT renewed on the sync service".
 
 ### Fixes
 - Lease markers and claim notices are written atomically under a lock, so a hook and the MCP server acting for one session can't drop each other's watched leases or notices.

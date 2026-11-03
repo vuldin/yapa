@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -7,21 +7,31 @@ import { basename, dirname, join } from 'node:path';
  * hooks, the CLI): the exclusion behind local leases, counters, task ids and
  * read-modify-write paths of the local store.
  *
- * Taken with O_CREAT|O_EXCL and holding `{pid, host, at}`. A holder whose pid
- * is gone, or that has held it longer than `staleMs`, is taken over by
- * renaming its lock aside (only one process can win that rename) and creating
- * a fresh one. Critical sections are short (a file read and write), so a
- * holder past `staleMs` is stuck, not slow.
+ * Taken with O_CREAT|O_EXCL and holding `{pid, host, at}`, where host is the
+ * hostname plus this process's pid namespace (containers sharing a home dir
+ * and hostname don't judge each other's pids). A holder is stale when its
+ * pid is gone (same host), when it has held the lock longer than `maxHoldMs`
+ * (a reused pid, or a stuck process), or, for a holder on another host,
+ * longer than `staleMs`.
  *
- * Unlike the sync-cycle lock (sync/shared-cycle.ts), this one fails closed:
- * when it cannot be had within `waitMs` the caller gets LockTimeoutError.
+ * Breaking a stale lock happens only under a second lock, `<lock>.break`,
+ * and only after checking, under it, that the lock file is still the very
+ * one judged stale (same inode and holder). Without that, two breakers that
+ * judged the same stale file could each move one aside, the second moving
+ * the live lock the first had just created, and both would hold it.
+ *
+ * It fails closed: when the lock cannot be had within `waitMs` the caller
+ * gets LockTimeoutError. (Unlike the sync-cycle lock in sync/shared-cycle.ts,
+ * which only paces sync timers.)
  */
 
 export interface LockOptions {
   /** How long to wait for a held lock (ms). Default 5000. */
   waitMs?: number;
-  /** A holder older than this is taken over (ms). Default 30000. */
+  /** A holder on another host older than this is taken over (ms). Default 30000. */
   staleMs?: number;
+  /** A live holder on this host older than this is taken over (ms). Default 600000. */
+  maxHoldMs?: number;
 }
 
 export class LockTimeoutError extends Error {
@@ -41,9 +51,22 @@ export interface LockHolder {
 
 const DEFAULT_WAIT_MS = 5000;
 const DEFAULT_STALE_MS = 30_000;
+const DEFAULT_MAX_HOLD_MS = 600_000;
 /** A lock file without a readable holder is that young only between create and write. */
 const UNREADABLE_GRACE_MS = 2000;
-const HOST = hostname();
+/** Breaking takes microseconds: a break guard older than this was left by a crash. */
+const BREAK_GUARD_STALE_MS = 5000;
+
+function pidNamespace(): string {
+  try {
+    return readlinkSync('/proc/self/ns/pid');
+  } catch {
+    return '';
+  }
+}
+/** How this process names its host in a lock: hostname plus pid namespace. */
+export const LOCK_HOST = `${hostname()}${pidNamespace() ? `#${pidNamespace()}` : ''}`;
+const HOST = LOCK_HOST;
 
 /** Is that process alive? EPERM means it exists but belongs to someone else. */
 export function pidAlive(pid: number): boolean {
@@ -56,12 +79,22 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** Write JSON through a uniquely named temp file and a rename: readers never see half a file. */
+/**
+ * Write JSON through a uniquely named temp file, flushed to disk, and a
+ * rename: readers never see half a file, and a crash right after leaves the
+ * old or the new file, not an empty one.
+ */
 export function writeJsonAtomic(path: string, value: unknown, mode = 0o600): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify(value) + '\n', { mode });
+    const fd = openSync(tmp, 'w', mode);
+    try {
+      writeSync(fd, JSON.stringify(value) + '\n');
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, path);
   } catch (e) {
     rmSync(tmp, { force: true });
@@ -69,12 +102,32 @@ export function writeJsonAtomic(path: string, value: unknown, mode = 0o600): voi
   }
 }
 
-function readHolder(lock: string): LockHolder | undefined {
+/** The lock file as it is: its inode, holder (if readable) and mtime. */
+interface LockState {
+  ino: number;
+  mtimeMs: number;
+  holder?: LockHolder;
+}
+
+function readState(lock: string): LockState | undefined {
+  let fd: number;
   try {
-    const h = JSON.parse(readFileSync(lock, 'utf-8'));
-    return h && typeof h.pid === 'number' && typeof h.at === 'number' ? { pid: h.pid, host: String(h.host ?? ''), at: h.at } : undefined;
+    fd = openSync(lock, 'r');
   } catch {
-    return undefined;
+    return undefined; // gone
+  }
+  try {
+    const st = fstatSync(fd);
+    let holder: LockHolder | undefined;
+    try {
+      const h = JSON.parse(readFileSync(fd, 'utf-8'));
+      if (h && typeof h.pid === 'number' && typeof h.at === 'number') holder = { pid: h.pid, host: String(h.host ?? ''), at: h.at };
+    } catch {
+      // mid-create, or garbage
+    }
+    return { ino: st.ino, mtimeMs: st.mtimeMs, holder };
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -100,43 +153,62 @@ function tryCreate(lock: string): LockHolder | undefined {
   return me;
 }
 
-function isStale(lock: string, staleMs: number, now: number): { stale: boolean; holder?: LockHolder } {
-  const holder = readHolder(lock);
-  if (!holder) {
-    try {
-      return { stale: now - statSync(lock).mtimeMs > UNREADABLE_GRACE_MS };
-    } catch {
-      return { stale: false }; // gone: the next try creates it
-    }
-  }
-  // Another host's pid means nothing here (a shared home dir): age only.
-  const dead = holder.host === HOST && !pidAlive(holder.pid);
-  return { stale: dead || now - holder.at > staleMs || holder.at - now > staleMs, holder };
+interface StaleRules {
+  staleMs: number;
+  maxHoldMs: number;
 }
 
-/** Move a stale lock aside; only one of several racing takers wins the rename. */
-function breakStale(lock: string): void {
-  const aside = `${lock}.stale.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
-  try {
-    renameSync(lock, aside);
-    rmSync(aside, { force: true });
-  } catch {
-    // someone else broke it first
+function stale(s: LockState, rules: StaleRules, now: number): boolean {
+  if (!s.holder) return now - s.mtimeMs > UNREADABLE_GRACE_MS;
+  const h = s.holder;
+  if (h.at - now > rules.staleMs) return true; // dated in the future: a broken clock or file
+  if (h.host === HOST) return !pidAlive(h.pid) || now - h.at > rules.maxHoldMs;
+  return now - h.at > rules.staleMs;
+}
+
+const sameState = (a: LockState, b: LockState) =>
+  a.ino === b.ino && (a.holder?.pid ?? -1) === (b.holder?.pid ?? -1) && (a.holder?.at ?? -1) === (b.holder?.at ?? -1) && (a.holder?.host ?? '') === (b.holder?.host ?? '');
+
+/**
+ * Remove `lock` if it is still exactly the stale file `judged`, under the
+ * break guard. Returns false when another process is breaking it right now.
+ */
+function breakStale(lock: string, judged: LockState, rules: StaleRules): boolean {
+  const guard = `${lock}.break`;
+  const me = tryCreate(guard);
+  if (!me) {
+    // A guard left by a breaker that crashed mid-break is removed by age.
+    const g = readState(guard);
+    if (g && stale(g, { staleMs: BREAK_GUARD_STALE_MS, maxHoldMs: BREAK_GUARD_STALE_MS }, Date.now())) rmIfSame(guard, g);
+    return false;
   }
+  try {
+    const now = readState(lock);
+    if (now && sameState(now, judged) && stale(now, rules, Date.now())) rmSync(lock, { force: true });
+    return true;
+  } finally {
+    releaseIfMine(guard, me);
+  }
+}
+
+/** Remove `path` if it still has the inode and holder of `s` (best effort). */
+function rmIfSame(path: string, s: LockState): void {
+  const now = readState(path);
+  if (now && sameState(now, s)) rmSync(path, { force: true });
 }
 
 function releaseIfMine(lock: string, me: LockHolder): void {
-  const h = readHolder(lock);
+  const h = readState(lock)?.holder;
   if (h && h.pid === me.pid && h.at === me.at && h.host === me.host) rmSync(lock, { force: true });
 }
 
 /** One attempt to take the lock (breaking a stale one). */
-function attempt(lock: string, staleMs: number): { me?: LockHolder; holder?: LockHolder } {
+function attempt(lock: string, rules: StaleRules): { me?: LockHolder; holder?: LockHolder } {
   const me = tryCreate(lock);
   if (me) return { me };
-  const s = isStale(lock, staleMs, Date.now());
-  if (s.stale) {
-    breakStale(lock);
+  const s = readState(lock);
+  if (!s) return {}; // released meanwhile: the next try creates it
+  if (stale(s, rules, Date.now()) && breakStale(lock, s, rules)) {
     const again = tryCreate(lock);
     if (again) return { me: again };
   }
@@ -149,11 +221,11 @@ const backoff = (i: number) => Math.min(100, 5 * 2 ** Math.min(i, 5)) * (0.5 + M
 /** Run `fn` holding the lock file `lock` (created beside, dirs made as needed). */
 export async function withFileLock<T>(lock: string, fn: () => Promise<T> | T, opts: LockOptions = {}): Promise<T> {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
-  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
+  const rules = { staleMs: opts.staleMs ?? DEFAULT_STALE_MS, maxHoldMs: opts.maxHoldMs ?? DEFAULT_MAX_HOLD_MS };
   const deadline = Date.now() + waitMs;
   let holder: LockHolder | undefined;
   for (let i = 0; ; i++) {
-    const a = attempt(lock, staleMs);
+    const a = attempt(lock, rules);
     if (a.me) {
       try {
         return await fn();
@@ -172,11 +244,11 @@ const waitCell = new Int32Array(new SharedArrayBuffer(4));
 /** withFileLock for synchronous callers (short sections only: it blocks the event loop while waiting). */
 export function withFileLockSync<T>(lock: string, fn: () => T, opts: LockOptions = {}): T {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
-  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
+  const rules = { staleMs: opts.staleMs ?? DEFAULT_STALE_MS, maxHoldMs: opts.maxHoldMs ?? DEFAULT_MAX_HOLD_MS };
   const deadline = Date.now() + waitMs;
   let holder: LockHolder | undefined;
   for (let i = 0; ; i++) {
-    const a = attempt(lock, staleMs);
+    const a = attempt(lock, rules);
     if (a.me) {
       try {
         return fn();
@@ -194,7 +266,7 @@ export function withFileLockSync<T>(lock: string, fn: () => T, opts: LockOptions
 export function sweepLockDebris(dir: string, olderThanMs = 3600_000, now = Date.now()): void {
   try {
     for (const name of readdirSync(dir)) {
-      if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp)$/.test(name)) continue;
+      if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp|break)$/.test(name)) continue;
       const p = join(dir, name);
       try {
         if (now - statSync(p).mtimeMs > olderThanMs) rmSync(p, { force: true });

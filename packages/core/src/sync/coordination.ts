@@ -10,7 +10,7 @@
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { getConfig } from '../config.js';
-import { lockFileFor, withFileLockSync, writeJsonAtomic } from '../fs-lock.js';
+import { lockFileFor, sweepLockDebris, withFileLockSync, writeJsonAtomic } from '../fs-lock.js';
 import { getSyncBackend, isCycleFatal, isSyncConfigured, type Coordination, type Lease } from './backend.js';
 import { createLocalCoordination } from './local-coordination.js';
 import { isSyncableCollection } from './syncable.js';
@@ -137,8 +137,14 @@ function noteRenewed(session: string, renewed: Lease[], now: number, answered: (
       try { rmSync(markerPath(session), { force: true }); } catch { /* ignore */ }
       return lost;
     }
-    const minTtl = renewed.length ? Math.min(...renewed.map(l => l.ttl_seconds)) : prev?.min_ttl ?? HEARTBEAT_MAX_INTERVAL_S * 3;
-    writeMarker({ session, min_ttl: minTtl, last_beat: now, ...(keys.length ? { keys } : {}) });
+    // A beat one side could not answer keeps the shortest TTL known and the
+    // last full beat, so the next prompt retries the side that failed instead
+    // of waiting out the other side's (maybe much longer) interval.
+    const ttls = renewed.map(l => l.ttl_seconds);
+    const minTtl = complete
+      ? (ttls.length ? Math.min(...ttls) : prev?.min_ttl ?? HEARTBEAT_MAX_INTERVAL_S * 3)
+      : Math.min(prev?.min_ttl ?? Infinity, ...ttls, HEARTBEAT_MAX_INTERVAL_S * 3);
+    writeMarker({ session, min_ttl: minTtl, last_beat: complete ? now : prev?.last_beat ?? now, ...(keys.length ? { keys } : {}) });
     return lost;
   }, []);
 }
@@ -264,7 +270,15 @@ let local: Coordination | undefined;
 
 /** This machine's coordination (local-coordination.ts), for collections the service does not coordinate. */
 export function localCoordination(): Coordination {
-  return (local ??= guardLocal(createLocalCoordination()));
+  if (!local) {
+    // Once per process: leftovers of crashed lock holders and failed writes.
+    const dir = getConfig().LOCAL_COORD_DIR;
+    sweepLockDebris(dir);
+    sweepLockDebris(join(dir, 'locks'));
+    sweepLockDebris(getConfig().LEASE_STATE_DIR);
+    local = guardLocal(createLocalCoordination());
+  }
+  return local;
 }
 
 /** Tests: forget the cached local coordination (it reads LOCAL_COORD_DIR at call time anyway). */
@@ -299,7 +313,8 @@ export async function requireCoordination(): Promise<Coordination> {
         const theirs = await (await serviceCoordination()).leaseHeartbeat(undefined, session);
         return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
       } catch (e) {
-        if (mine.renewed.length && isCoordinationUnavailable(e)) return mine;
+        // This machine's leases were renewed; say the service's were not.
+        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: (e as Error).message };
         throw e;
       }
     },
