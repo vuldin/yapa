@@ -7,6 +7,7 @@
  *
  * @module @yapa/core/memory/links
  */
+import { withDocLock } from '../doc-lock.js';
 import { getDocumentsByIds, listCollections, updateDocument } from '../store/index.js';
 
 const list = (v: unknown): string[] =>
@@ -33,15 +34,20 @@ export async function linkMemoryToTasks(memoryId: string, taskIds: string[]): Pr
       out.missing.push(tid);
       continue;
     }
-    const cur = list(t.metadata.memory_ids);
-    if (!cur.includes(memoryId)) {
+    // Under the task's lock, onto its metadata as it is now: writing back the
+    // copy found above would revert a status or claim set meanwhile.
+    await withDocLock(t.collection, tid, async () => {
+      const fresh = (await getDocumentsByIds(t.collection, [tid]))[0];
+      if (!fresh) return;
+      const cur = list(fresh.metadata.memory_ids);
+      if (cur.includes(memoryId)) return;
       await updateDocument(t.collection, tid, {
-        ...t.metadata,
+        ...fresh.metadata,
         memory_ids: [...cur, memoryId],
         updated_at: Math.floor(Date.now() / 1000),
         is_synced: false,
       });
-    }
+    });
     out.linked.push(tid);
   }
   return out;

@@ -1,3 +1,4 @@
+import { withDocLock } from '../doc-lock.js';
 import { getConfig } from '../config.js';
 import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument } from '../store/index.js';
 
@@ -257,7 +258,12 @@ async function dropMovedOut(backend: SyncBackend, collectionName: string, follow
   }
 }
 
-async function applyRemoteDoc(backend: SyncBackend, collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
+/** Apply one remote doc under the doc's lock, deciding from the local copy as it is now (not one read before a local edit). */
+function applyRemoteDoc(backend: SyncBackend, collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
+  return withDocLock(collectionName, remoteDoc.id, () => applyRemoteDocLocked(backend, collectionName, remoteDoc, stats));
+}
+
+async function applyRemoteDocLocked(backend: SyncBackend, collectionName: string, remoteDoc: RemoteDocument, stats: PullStats): Promise<void> {
   const [existing] = await getDocumentsByIds(collectionName, [remoteDoc.id]).catch(() => []);
 
   if (!existing) {

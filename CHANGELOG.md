@@ -13,6 +13,11 @@
 
 ### Fixes
 - Lease markers and claim notices are written atomically under a lock, so a hook and the MCP server acting for one session can't drop each other's watched leases or notices.
+- **No lost writes between sessions on one machine.**
+  - **Embedded store** (`storage: local`): every change now happens under its collection file's lock, against a fresh read. Two sessions writing at once could lose one's change, or crash on a shared temp file.
+  - **Read-modify-writes** (both stores): `task_update`, task dependencies, links from memories to tasks, `memory_update` notes, `yapa task release` notes and tags, and `yapa memory put` now run under a per-document lock and merge into the current document. Concurrent edits all land, and a ref put twice at once makes one memory.
+  - **Push:** it marks a doc synced only if the doc is unchanged since it was pushed. An edit made during a push stays unsynced and goes out next, instead of being reverted.
+  - **Recurring tasks:** completing one twice at once creates its next occurrence once.
 
 ## 1.9.0 (2026-11-02)
 

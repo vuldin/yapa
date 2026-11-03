@@ -738,9 +738,173 @@ var init_chroma_adapter = __esm({
   }
 });
 
+// packages/core/src/fs-lock.ts
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync as readFileSync2, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { hostname } from "node:os";
+import { basename, dirname, join as join2 } from "node:path";
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function writeJsonAtomic(path, value, mode = 384) {
+  mkdirSync(dirname(path), { recursive: true, mode: 448 });
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(value) + "\n", { mode });
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+function readHolder(lock) {
+  try {
+    const h = JSON.parse(readFileSync2(lock, "utf-8"));
+    return h && typeof h.pid === "number" && typeof h.at === "number" ? { pid: h.pid, host: String(h.host ?? ""), at: h.at } : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function tryCreate(lock) {
+  const me = { pid: process.pid, host: HOST, at: Date.now() };
+  let fd;
+  try {
+    fd = openSync(lock, "wx", 384);
+  } catch (e) {
+    if (e.code === "EEXIST") return void 0;
+    if (e.code === "ENOENT") {
+      mkdirSync(dirname(lock), { recursive: true, mode: 448 });
+      return tryCreate(lock);
+    }
+    throw e;
+  }
+  try {
+    writeSync(fd, JSON.stringify(me));
+  } finally {
+    closeSync(fd);
+  }
+  return me;
+}
+function isStale(lock, staleMs, now) {
+  const holder = readHolder(lock);
+  if (!holder) {
+    try {
+      return { stale: now - statSync(lock).mtimeMs > UNREADABLE_GRACE_MS };
+    } catch {
+      return { stale: false };
+    }
+  }
+  const dead = holder.host === HOST && !pidAlive(holder.pid);
+  return { stale: dead || now - holder.at > staleMs || holder.at - now > staleMs, holder };
+}
+function breakStale(lock) {
+  const aside = `${lock}.stale.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    renameSync(lock, aside);
+    rmSync(aside, { force: true });
+  } catch {
+  }
+}
+function releaseIfMine(lock, me) {
+  const h = readHolder(lock);
+  if (h && h.pid === me.pid && h.at === me.at && h.host === me.host) rmSync(lock, { force: true });
+}
+function attempt(lock, staleMs) {
+  const me = tryCreate(lock);
+  if (me) return { me };
+  const s = isStale(lock, staleMs, Date.now());
+  if (s.stale) {
+    breakStale(lock);
+    const again = tryCreate(lock);
+    if (again) return { me: again };
+  }
+  return { holder: s.holder };
+}
+async function withFileLock(lock, fn, opts = {}) {
+  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
+  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
+  const deadline = Date.now() + waitMs;
+  let holder;
+  for (let i = 0; ; i++) {
+    const a = attempt(lock, staleMs);
+    if (a.me) {
+      try {
+        return await fn();
+      } finally {
+        releaseIfMine(lock, a.me);
+      }
+    }
+    holder = a.holder;
+    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
+    await sleep(backoff(i));
+  }
+}
+function withFileLockSync(lock, fn, opts = {}) {
+  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
+  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
+  const deadline = Date.now() + waitMs;
+  let holder;
+  for (let i = 0; ; i++) {
+    const a = attempt(lock, staleMs);
+    if (a.me) {
+      try {
+        return fn();
+      } finally {
+        releaseIfMine(lock, a.me);
+      }
+    }
+    holder = a.holder;
+    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
+    Atomics.wait(waitCell, 0, 0, backoff(i));
+  }
+}
+function sweepLockDebris(dir, olderThanMs = 36e5, now = Date.now()) {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp)$/.test(name)) continue;
+      const p = join2(dir, name);
+      try {
+        if (now - statSync(p).mtimeMs > olderThanMs) rmSync(p, { force: true });
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+var LockTimeoutError, DEFAULT_WAIT_MS, DEFAULT_STALE_MS, UNREADABLE_GRACE_MS, HOST, sleep, backoff, waitCell, lockFileFor;
+var init_fs_lock = __esm({
+  "packages/core/src/fs-lock.ts"() {
+    "use strict";
+    LockTimeoutError = class extends Error {
+      constructor(path, holder) {
+        super(`could not take ${path} in time${holder ? ` (held by pid ${holder.pid} on ${holder.host} since ${new Date(holder.at).toISOString()})` : ""}`);
+        this.path = path;
+        this.holder = holder;
+        this.name = "LockTimeoutError";
+      }
+      path;
+      holder;
+      code = "lock_timeout";
+    };
+    DEFAULT_WAIT_MS = 5e3;
+    DEFAULT_STALE_MS = 3e4;
+    UNREADABLE_GRACE_MS = 2e3;
+    HOST = hostname();
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    backoff = (i) => Math.min(100, 5 * 2 ** Math.min(i, 5)) * (0.5 + Math.random());
+    waitCell = new Int32Array(new SharedArrayBuffer(4));
+    lockFileFor = (file) => join2(dirname(file), `${basename(file)}.lock`);
+  }
+});
+
 // packages/core/src/store/local-adapter.ts
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join as join2 } from "node:path";
+import { mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join as join3 } from "node:path";
 function embedderId() {
   return `${getConfig().EMBEDDING_PROVIDER}:${getEmbeddingModel() || "default"}`;
 }
@@ -774,14 +938,24 @@ function matchesFilter(metadata, filter) {
 function createLocalStore(rootDir) {
   const cache = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
+  const identity = (st) => `${st.ino}:${st.mtimeMs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
-  const fileFor = (name) => join2(rootDir, `${encodeURIComponent(name)}.json`);
+  const fileFor = (name) => join3(rootDir, `${encodeURIComponent(name)}.json`);
   async function readFromDisk(name) {
     try {
-      const parsed = JSON.parse(await readFile(fileFor(name), "utf-8"));
+      const fh = await open(fileFor(name), "r");
+      let raw;
+      let id;
+      try {
+        id = identity(await fh.stat());
+        raw = await fh.readFile("utf-8");
+      } finally {
+        await fh.close();
+      }
+      const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
       cache.set(name, parsed);
-      cacheMtimes.set(name, (await stat(fileFor(name))).mtimeMs);
+      cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
@@ -797,7 +971,7 @@ function createLocalStore(rootDir) {
     if (!cached2) return readFromDisk(name);
     try {
       const st = await stat(fileFor(name));
-      if (st.mtimeMs > (cacheMtimes.get(name) ?? 0)) return readFromDisk(name);
+      if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
         cache.delete(name);
@@ -808,24 +982,32 @@ function createLocalStore(rootDir) {
     }
     return cached2;
   }
-  async function loadOrCreate(name) {
-    return await load2(name) ?? {
-      version: 1,
-      name,
-      created: (/* @__PURE__ */ new Date()).toISOString(),
-      docs: {}
-    };
+  const fresh = (name) => ({ version: 1, name, created: (/* @__PURE__ */ new Date()).toISOString(), docs: {} });
+  async function writeAtomic(cf) {
+    await mkdir(rootDir, { recursive: true });
+    const file = fileFor(cf.name);
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(cf));
+      await rename(tmp, file);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+    cache.set(cf.name, cf);
+    cacheMtimes.set(cf.name, identity(await stat(file)));
   }
-  function persist(cf) {
-    const prev = writeChains.get(cf.name) ?? Promise.resolve();
+  function mutate(name, apply) {
+    const prev = writeChains.get(name) ?? Promise.resolve();
     const next = prev.then(async () => {
       await mkdir(rootDir, { recursive: true });
-      const tmp = `${fileFor(cf.name)}.tmp`;
-      await writeFile(tmp, JSON.stringify(cf));
-      await rename(tmp, fileFor(cf.name));
-      cacheMtimes.set(cf.name, (await stat(fileFor(cf.name))).mtimeMs);
+      await withFileLock(lockFileFor(fileFor(name)), async () => {
+        const cur = await readFromDisk(name);
+        const out = apply(cur);
+        if (out) await writeAtomic(out);
+      }, { waitMs: 15e3 });
     });
-    writeChains.set(cf.name, next.catch(() => {
+    writeChains.set(name, next.catch(() => {
     }));
     return next;
   }
@@ -844,52 +1026,46 @@ function createLocalStore(rootDir) {
       return names.map((name) => ({ id: name, name }));
     },
     async createCollection(name, metadata) {
-      if (await load2(name)) throw new Error(`Collection "${name}" already exists`);
-      const cf = await loadOrCreate(name);
-      cache.set(name, cf);
-      await persist(cf);
+      await mutate(name, (cur) => {
+        if (cur) throw new Error(`Collection "${name}" already exists`);
+        return fresh(name);
+      });
     },
     async deleteCollection(name) {
+      await mkdir(rootDir, { recursive: true });
+      await withFileLock(lockFileFor(fileFor(name)), async () => {
+        await rm(fileFor(name), { force: true });
+      }, { waitMs: 15e3 });
       cache.delete(name);
+      cacheMtimes.delete(name);
       writeChains.delete(name);
-      await rm(fileFor(name), { force: true });
     },
     async getCollectionCount(name) {
       const cf = await load2(name);
       return cf ? Object.keys(cf.docs).length : 0;
     },
     async getOrCreateCollection(name) {
-      if (!await load2(name)) {
-        const cf = await loadOrCreate(name);
-        cache.set(name, cf);
-        await persist(cf);
-      }
+      if (!await load2(name)) await mutate(name, (cur) => cur ?? fresh(name));
       return name;
     },
     async addDocument(collection, id, content, metadata) {
-      const cf = await loadOrCreate(collection);
-      cache.set(collection, cf);
-      const embedding = await generateEmbedding(content);
-      cf.docs[id] = {
-        content,
-        metadata: toChroma(metadata),
-        embedding,
-        embedding_model: embedderId()
-      };
-      await persist(cf);
+      const doc = { content, metadata: toChroma(metadata), embedding: await generateEmbedding(content), embedding_model: embedderId() };
+      await mutate(collection, (cur) => {
+        const cf = cur ?? fresh(collection);
+        cf.docs[id] = doc;
+        return cf;
+      });
     },
     async addDocumentsBatch(collection, documents) {
-      const cf = await loadOrCreate(collection);
-      cache.set(collection, cf);
+      const docs = [];
       for (const d of documents) {
-        cf.docs[d.id] = {
-          content: d.content,
-          metadata: toChroma(d.metadata),
-          embedding: await generateEmbedding(d.content),
-          embedding_model: embedderId()
-        };
+        docs.push([d.id, { content: d.content, metadata: toChroma(d.metadata), embedding: await generateEmbedding(d.content), embedding_model: embedderId() }]);
       }
-      await persist(cf);
+      await mutate(collection, (cur) => {
+        const cf = cur ?? fresh(collection);
+        for (const [id, doc] of docs) cf.docs[id] = doc;
+        return cf;
+      });
     },
     async queryDocuments(collection, queryText, nResults = 5, filter) {
       const cf = await load2(collection);
@@ -937,36 +1113,39 @@ function createLocalStore(rootDir) {
       return ids.filter((id) => cf.docs[id]).map((id) => toResult(cf, id));
     },
     async updateDocument(collection, id, metadata) {
-      const cf = await load2(collection);
-      if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
-      cf.docs[id].metadata = toChroma(metadata);
-      await persist(cf);
+      await mutate(collection, (cf) => {
+        if (!cf?.docs[id]) throw new Error(`Document "${id}" not found in collection "${collection}"`);
+        cf.docs[id].metadata = toChroma(metadata);
+        return cf;
+      });
     },
     async updateDocumentsBatch(collection, entries) {
       if (entries.length === 0) return;
-      const cf = await load2(collection);
-      if (!cf) throw new Error(`Collection "${collection}" not found`);
-      let changed = 0;
-      for (const e of entries) {
-        if (!cf.docs[e.id]) continue;
-        cf.docs[e.id].metadata = toChroma(e.metadata);
-        changed++;
-      }
-      if (changed > 0) await persist(cf);
+      await mutate(collection, (cf) => {
+        if (!cf) throw new Error(`Collection "${collection}" not found`);
+        let changed = 0;
+        for (const e of entries) {
+          if (!cf.docs[e.id]) continue;
+          cf.docs[e.id].metadata = toChroma(e.metadata);
+          changed++;
+        }
+        return changed > 0 ? cf : false;
+      });
     },
     async deleteDocument(collection, id) {
-      const cf = await load2(collection);
-      if (!cf) return;
-      if (delete cf.docs[id]) await persist(cf);
+      await mutate(collection, (cf) => cf && cf.docs[id] && delete cf.docs[id] ? cf : false);
     },
     async findAndDeleteDocument(id) {
       for (const name of await collectionNames()) {
-        const cf = await load2(name);
-        if (cf?.docs[id]) {
+        if (!(await load2(name))?.docs[id]) continue;
+        let deleted = false;
+        await mutate(name, (cf) => {
+          if (!cf?.docs[id]) return false;
           delete cf.docs[id];
-          await persist(cf);
-          return name;
-        }
+          deleted = true;
+          return cf;
+        });
+        if (deleted) return name;
       }
       throw new Error(`Document "${id}" not found in any collection`);
     }
@@ -977,6 +1156,7 @@ var init_local_adapter = __esm({
     "use strict";
     init_embeddings();
     init_config();
+    init_fs_lock();
     init_metadata_adapter();
   }
 });
@@ -1302,6 +1482,31 @@ var init_kinds = __esm({
   }
 });
 
+// packages/core/src/doc-lock.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { join as join4 } from "node:path";
+function docLockPath(collection, id) {
+  const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
+  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
+}
+async function withDocLock(collection, id, fn) {
+  const path = docLockPath(collection, id);
+  const mine = held.getStore();
+  if (mine?.has(path)) return fn();
+  return withFileLock(path, () => held.run(/* @__PURE__ */ new Set([...mine ?? [], path]), fn), { waitMs: WAIT_MS });
+}
+var held, WAIT_MS;
+var init_doc_lock = __esm({
+  "packages/core/src/doc-lock.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    held = new AsyncLocalStorage();
+    WAIT_MS = 2e4;
+  }
+});
+
 // packages/core/src/memory/links.ts
 async function findDoc(id) {
   for (const c of await listCollections2().catch(() => [])) {
@@ -1318,15 +1523,18 @@ async function linkMemoryToTasks(memoryId, taskIds) {
       out.missing.push(tid);
       continue;
     }
-    const cur = list3(t.metadata.memory_ids);
-    if (!cur.includes(memoryId)) {
+    await withDocLock(t.collection, tid, async () => {
+      const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
+      if (!fresh) return;
+      const cur = list3(fresh.metadata.memory_ids);
+      if (cur.includes(memoryId)) return;
       await updateDocument2(t.collection, tid, {
-        ...t.metadata,
+        ...fresh.metadata,
         memory_ids: [...cur, memoryId],
         updated_at: Math.floor(Date.now() / 1e3),
         is_synced: false
       });
-    }
+    });
     out.linked.push(tid);
   }
   return out;
@@ -1335,6 +1543,7 @@ var list3;
 var init_links = __esm({
   "packages/core/src/memory/links.ts"() {
     "use strict";
+    init_doc_lock();
     init_store();
     list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
   }
@@ -1986,8 +2195,8 @@ var init_journal = __esm({
 });
 
 // packages/core/src/sync/health.ts
-import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname2 } from "node:path";
 function healthStatusFor(code) {
   if (typeof code === "string" && SIGNED_OUT.has(code)) return "signed_out";
   if (code === "unreachable") return "unreachable";
@@ -1996,7 +2205,7 @@ function healthStatusFor(code) {
 function readSyncHealth(path = getConfig().SYNC_HEALTH_FILE) {
   if (!path) return void 0;
   try {
-    const h = JSON.parse(readFileSync2(path, "utf-8"));
+    const h = JSON.parse(readFileSync3(path, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -2020,10 +2229,10 @@ function recordSyncHealth(update, now = Date.now(), path = getConfig().SYNC_HEAL
     if ("message" in update && update.message) next.message = update.message.slice(0, 300);
   }
   try {
-    mkdirSync(dirname(path), { recursive: true, mode: 448 });
+    mkdirSync2(dirname2(path), { recursive: true, mode: 448 });
     const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync(tmp, path);
+    writeFileSync2(tmp, JSON.stringify(next) + "\n", { mode: 384 });
+    renameSync2(tmp, path);
   } catch {
   }
   return next;
@@ -2033,8 +2242,8 @@ function recordUnpushed(unpushed, path = getConfig().SYNC_HEALTH_FILE) {
   if (!prev || prev.unpushed === unpushed) return;
   try {
     const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
-    renameSync(tmp, path);
+    writeFileSync2(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
+    renameSync2(tmp, path);
   } catch {
   }
 }
@@ -2053,8 +2262,8 @@ function refreshSyncHealthNames(syncConfigured, path = getConfig().SYNC_HEALTH_F
   else delete next.remote;
   try {
     const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync(tmp, path);
+    writeFileSync2(tmp, JSON.stringify(next) + "\n", { mode: 384 });
+    renameSync2(tmp, path);
   } catch {
   }
 }
@@ -2069,8 +2278,8 @@ var init_health = __esm({
 
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
 function getDeviceId() {
   const config = getConfig();
   if (config.DEVICE_ID) return config.DEVICE_ID;
@@ -2078,19 +2287,19 @@ function getDeviceId() {
   const path = config.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync3(path, "utf-8").trim();
+    id = readFileSync4(path, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync2(dirname2(path), { recursive: true });
-      writeFileSync2(path, `${id}
+      mkdirSync3(dirname3(path), { recursive: true });
+      writeFileSync3(path, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync3(path, "utf-8").trim() || id;
+        id = readFileSync4(path, "utf-8").trim() || id;
       } catch {
       }
     }
@@ -2118,8 +2327,8 @@ __export(http_backend_exports, {
   decodeJwtPayload: () => decodeJwtPayload,
   redactTokens: () => redactTokens
 });
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync3, rmSync, renameSync as renameSync2 } from "node:fs";
-import { dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, mkdirSync as mkdirSync4, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
+import { dirname as dirname4 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 function redactTokens(text) {
@@ -2261,7 +2470,7 @@ var init_http_backend = __esm({
       invalidate() {
         this.token = void 0;
         this.validUntil = 0;
-        if (this.cachePath) rmSync(this.cachePath, { force: true });
+        if (this.cachePath) rmSync2(this.cachePath, { force: true });
       }
       validity(token, now) {
         const exp = Number(decodeJwtPayload(token)?.exp);
@@ -2273,7 +2482,7 @@ var init_http_backend = __esm({
       loadCached() {
         if (!this.cachePath) return false;
         try {
-          const token = readFileSync4(this.cachePath, "utf-8").trim();
+          const token = readFileSync5(this.cachePath, "utf-8").trim();
           if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
           const until = this.validity(token, this.now());
           if (this.now() >= until) return false;
@@ -2288,10 +2497,10 @@ var init_http_backend = __esm({
       saveCached(token) {
         if (!this.cachePath) return;
         try {
-          mkdirSync3(dirname3(this.cachePath), { recursive: true, mode: 448 });
+          mkdirSync4(dirname4(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
-          writeFileSync3(tmp, token, { mode: 384 });
-          renameSync2(tmp, this.cachePath);
+          writeFileSync4(tmp, token, { mode: 384 });
+          renameSync3(tmp, this.cachePath);
         } catch {
         }
       }
@@ -2551,7 +2760,7 @@ var init_http_backend = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url;
@@ -2563,7 +2772,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -2572,7 +2781,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -3056,173 +3265,9 @@ var init_backend = __esm({
   }
 });
 
-// packages/core/src/fs-lock.ts
-import { closeSync, mkdirSync as mkdirSync4, openSync, readdirSync, readFileSync as readFileSync6, renameSync as renameSync3, rmSync as rmSync2, statSync, writeFileSync as writeFileSync4, writeSync } from "node:fs";
-import { hostname } from "node:os";
-import { basename, dirname as dirname4, join as join3 } from "node:path";
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === "EPERM";
-  }
-}
-function writeJsonAtomic(path, value, mode = 384) {
-  mkdirSync4(dirname4(path), { recursive: true, mode: 448 });
-  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-  try {
-    writeFileSync4(tmp, JSON.stringify(value) + "\n", { mode });
-    renameSync3(tmp, path);
-  } catch (e) {
-    rmSync2(tmp, { force: true });
-    throw e;
-  }
-}
-function readHolder(lock) {
-  try {
-    const h = JSON.parse(readFileSync6(lock, "utf-8"));
-    return h && typeof h.pid === "number" && typeof h.at === "number" ? { pid: h.pid, host: String(h.host ?? ""), at: h.at } : void 0;
-  } catch {
-    return void 0;
-  }
-}
-function tryCreate(lock) {
-  const me = { pid: process.pid, host: HOST, at: Date.now() };
-  let fd;
-  try {
-    fd = openSync(lock, "wx", 384);
-  } catch (e) {
-    if (e.code === "EEXIST") return void 0;
-    if (e.code === "ENOENT") {
-      mkdirSync4(dirname4(lock), { recursive: true, mode: 448 });
-      return tryCreate(lock);
-    }
-    throw e;
-  }
-  try {
-    writeSync(fd, JSON.stringify(me));
-  } finally {
-    closeSync(fd);
-  }
-  return me;
-}
-function isStale(lock, staleMs, now) {
-  const holder = readHolder(lock);
-  if (!holder) {
-    try {
-      return { stale: now - statSync(lock).mtimeMs > UNREADABLE_GRACE_MS };
-    } catch {
-      return { stale: false };
-    }
-  }
-  const dead = holder.host === HOST && !pidAlive(holder.pid);
-  return { stale: dead || now - holder.at > staleMs || holder.at - now > staleMs, holder };
-}
-function breakStale(lock) {
-  const aside = `${lock}.stale.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
-  try {
-    renameSync3(lock, aside);
-    rmSync2(aside, { force: true });
-  } catch {
-  }
-}
-function releaseIfMine(lock, me) {
-  const h = readHolder(lock);
-  if (h && h.pid === me.pid && h.at === me.at && h.host === me.host) rmSync2(lock, { force: true });
-}
-function attempt(lock, staleMs) {
-  const me = tryCreate(lock);
-  if (me) return { me };
-  const s = isStale(lock, staleMs, Date.now());
-  if (s.stale) {
-    breakStale(lock);
-    const again = tryCreate(lock);
-    if (again) return { me: again };
-  }
-  return { holder: s.holder };
-}
-async function withFileLock(lock, fn, opts = {}) {
-  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
-  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
-  const deadline = Date.now() + waitMs;
-  let holder;
-  for (let i = 0; ; i++) {
-    const a = attempt(lock, staleMs);
-    if (a.me) {
-      try {
-        return await fn();
-      } finally {
-        releaseIfMine(lock, a.me);
-      }
-    }
-    holder = a.holder;
-    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
-    await sleep(backoff(i));
-  }
-}
-function withFileLockSync(lock, fn, opts = {}) {
-  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
-  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
-  const deadline = Date.now() + waitMs;
-  let holder;
-  for (let i = 0; ; i++) {
-    const a = attempt(lock, staleMs);
-    if (a.me) {
-      try {
-        return fn();
-      } finally {
-        releaseIfMine(lock, a.me);
-      }
-    }
-    holder = a.holder;
-    if (Date.now() >= deadline) throw new LockTimeoutError(lock, holder);
-    Atomics.wait(waitCell, 0, 0, backoff(i));
-  }
-}
-function sweepLockDebris(dir, olderThanMs = 36e5, now = Date.now()) {
-  try {
-    for (const name of readdirSync(dir)) {
-      if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp)$/.test(name)) continue;
-      const p = join3(dir, name);
-      try {
-        if (now - statSync(p).mtimeMs > olderThanMs) rmSync2(p, { force: true });
-      } catch {
-      }
-    }
-  } catch {
-  }
-}
-var LockTimeoutError, DEFAULT_WAIT_MS, DEFAULT_STALE_MS, UNREADABLE_GRACE_MS, HOST, sleep, backoff, waitCell, lockFileFor;
-var init_fs_lock = __esm({
-  "packages/core/src/fs-lock.ts"() {
-    "use strict";
-    LockTimeoutError = class extends Error {
-      constructor(path, holder) {
-        super(`could not take ${path} in time${holder ? ` (held by pid ${holder.pid} on ${holder.host} since ${new Date(holder.at).toISOString()})` : ""}`);
-        this.path = path;
-        this.holder = holder;
-        this.name = "LockTimeoutError";
-      }
-      path;
-      holder;
-      code = "lock_timeout";
-    };
-    DEFAULT_WAIT_MS = 5e3;
-    DEFAULT_STALE_MS = 3e4;
-    UNREADABLE_GRACE_MS = 2e3;
-    HOST = hostname();
-    sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    backoff = (i) => Math.min(100, 5 * 2 ** Math.min(i, 5)) * (0.5 + Math.random());
-    waitCell = new Int32Array(new SharedArrayBuffer(4));
-    lockFileFor = (file) => join3(dirname4(file), `${basename(file)}.lock`);
-  }
-});
-
 // packages/core/src/sync/local-coordination.ts
 import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 function assertMatch(v, re, what) {
   if (typeof v !== "string" || !re.test(v)) throw bad(`${what} must match ${re.source}`);
   return v;
@@ -3251,7 +3296,7 @@ function localCoordinationDir() {
   return getConfig().LOCAL_COORD_DIR;
 }
 function stateFile(dir, collection) {
-  return join4(dir, `${encodeURIComponent(collection)}.json`);
+  return join5(dir, `${encodeURIComponent(collection)}.json`);
 }
 function readState(file) {
   try {
@@ -3455,7 +3500,7 @@ var init_local_coordination = __esm({
 
 // packages/core/src/sync/coordination.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync8, rmSync as rmSync3 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 function currentSession(explicit, env = process.env) {
   for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
     if (v && SESSION_RE2.test(v)) return v;
@@ -3463,7 +3508,7 @@ function currentSession(explicit, env = process.env) {
   return void 0;
 }
 function markerPath(session) {
-  return join5(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join6(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function readMarker(session) {
   try {
@@ -3489,11 +3534,11 @@ function heldKeys(session, collection) {
   const prefix = heldKey(collection, "");
   return (readMarker(session)?.keys ?? []).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
 }
-function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held) {
+function noteLeaseHeld(session, ttlSeconds, now = Math.floor(Date.now() / 1e3), held2) {
   withMarker(session, () => {
     const prev = readMarker(session);
     const keys = new Set(prev?.keys ?? []);
-    if (held) keys.add(heldKey(held.collection, held.key));
+    if (held2) keys.add(heldKey(held2.collection, held2.key));
     writeMarker({ session, min_ttl: Math.min(prev?.min_ttl ?? ttlSeconds, ttlSeconds), last_beat: now, ...keys.size ? { keys: [...keys] } : {} });
   }, void 0);
 }
@@ -3536,7 +3581,7 @@ function sessionsHoldingLeases() {
   }
 }
 function noticesPath() {
-  return join5(getConfig().LEASE_STATE_DIR, "notices.state");
+  return join6(getConfig().LEASE_STATE_DIR, "notices.state");
 }
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
@@ -4030,14 +4075,22 @@ var init_sentinel = __esm({
 });
 
 // packages/core/src/sync/push.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 function emptyPushStats() {
   return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 function syncFingerprint(doc) {
   const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
   const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
-  return createHash("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+  return createHash2("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+}
+async function writeIfUnchanged(collection, doc, metadata) {
+  return withDocLock(collection, doc.id, async () => {
+    const [cur] = await getDocumentsByIds2(collection, [doc.id]);
+    if (!cur || syncFingerprint(cur) !== syncFingerprint(doc)) return false;
+    await updateDocument2(collection, doc.id, metadata(cur.metadata));
+    return true;
+  });
 }
 function stripLocalOnly(metadata) {
   const out = { ...metadata };
@@ -4220,9 +4273,8 @@ async function pushBatch(backend, collection, batch, stats, allowRekey) {
 }
 async function applyPushed(backend, collection, doc, similar, stats) {
   const match = similar.find((s) => s.id !== doc.id);
-  const metadata = stripLocalOnly(doc.metadata);
   if (!match) {
-    await updateDocument2(collection, doc.id, { ...metadata, is_synced: true });
+    await writeIfUnchanged(collection, doc, (cur) => ({ ...stripLocalOnly(cur), is_synced: true }));
     stats.pushed++;
     return;
   }
@@ -4233,19 +4285,21 @@ async function applyPushed(backend, collection, doc, similar, stats) {
     process.stderr.write(`[yapa-sync] Link error for ${doc.id} -> ${match.id}: ${e}
 `);
   }
-  const related = Array.isArray(metadata.related_ids) ? [...metadata.related_ids] : [];
-  if (!related.includes(match.id)) related.push(match.id);
-  await updateDocument2(collection, doc.id, { ...metadata, related_ids: related, is_synced: true });
+  await writeIfUnchanged(collection, doc, (cur) => {
+    const related = Array.isArray(cur.related_ids) ? [...cur.related_ids] : [];
+    if (!related.includes(match.id)) related.push(match.id);
+    return { ...stripLocalOnly(cur), related_ids: related, is_synced: true };
+  });
   stats.linked++;
 }
 async function markRejected(collection, doc, code, message) {
-  await updateDocument2(collection, doc.id, {
-    ...doc.metadata,
+  await writeIfUnchanged(collection, doc, (cur) => ({
+    ...cur,
     is_synced: false,
     sync_rejected: code,
     sync_rejected_message: message.slice(0, 300),
     sync_rejected_fp: syncFingerprint(doc)
-  });
+  }));
   process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
 `);
 }
@@ -4303,7 +4357,7 @@ async function retractSharedCopies(backend, collection) {
   const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
-  for (const d of unchecked) await updateDocument2(collection, d.id, { ...d.metadata, remote_checked_at: versionOf(d) });
+  for (const d of unchecked) await writeIfUnchanged(collection, d, (cur) => ({ ...cur, remote_checked_at: versionOf(d) }));
   return removed;
 }
 var LOCAL_ONLY_KEYS, pushChain;
@@ -4311,6 +4365,7 @@ var init_push = __esm({
   "packages/core/src/sync/push.ts"() {
     "use strict";
     init_config();
+    init_doc_lock();
     init_store();
     init_embeddings();
     init_backend();
@@ -4574,22 +4629,29 @@ async function updateTask(id, updates, ctx = {}) {
   }
   const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
-  const updatedMetadata = {
-    ...task.metadata,
-    ...updates,
-    updated_at: Math.floor(Date.now() / 1e3)
-  };
-  if (hasStructuralChange) updatedMetadata.is_synced = false;
-  if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && task.metadata.blockedReason) {
-    updatedMetadata.blockedReason = "";
-  }
-  if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
-  else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
-  if (updates.title !== void 0 && updates.title !== task.title) {
-    await addDocument2(task.collection, task.id, updates.title, updatedMetadata);
-  } else {
-    await updateDocument2(task.collection, task.id, updatedMetadata);
-  }
+  const t = task;
+  const prev = await withDocLock(t.collection, t.id, async () => {
+    const cur = (await getDocumentsByIds2(t.collection, [t.id]))[0];
+    if (!cur) throw new Error(`Task ${t.id} not found`);
+    const updatedMetadata = {
+      ...cur.metadata,
+      ...updates,
+      updated_at: Math.floor(Date.now() / 1e3)
+    };
+    if (hasStructuralChange) updatedMetadata.is_synced = false;
+    if (updates.status !== void 0 && updates.status !== "blocked" && updates.blockedReason === void 0 && cur.metadata.blockedReason) {
+      updatedMetadata.blockedReason = "";
+    }
+    if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
+    else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
+    if (updates.title !== void 0 && updates.title !== cur.content) {
+      await addDocument2(t.collection, t.id, updates.title, updatedMetadata);
+    } else {
+      await updateDocument2(t.collection, t.id, updatedMetadata);
+    }
+    return cur.metadata.status;
+  });
+  result.previousStatus = prev;
   if (result.claim?.kind === "granted") {
     await pushDocsNow(task.collection, [task.id]).catch(() => void 0);
   }
@@ -4613,11 +4675,11 @@ async function completeTask(id, durationMinutes, ctx = {}, record = {}) {
   if (durationMinutes != null) {
     completionUpdates.duration_minutes = durationMinutes;
   }
-  const { release } = await updateTask(id, completionUpdates, ctx);
+  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
   const recorded = record.learned?.length || record.follow_ups?.length ? await recordForTask({ id: task.id, collection: task.collection }, record) : void 0;
   const nudge = captureNudge(task.id, task.metadata, recorded);
   const extras = { ...release ? { release } : {}, ...recorded ? { recorded } : {}, ...nudge ? { nudge } : {} };
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern) {
+  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== "complete") {
     const nextDue = computeNextDue(
       task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
       task.metadata.recurrence_pattern
@@ -4658,6 +4720,7 @@ var init_update = __esm({
     init_config();
     init_close();
     init_store();
+    init_doc_lock();
     init_syncable();
     init_create();
     init_claim();
@@ -4681,9 +4744,9 @@ async function waitingOn(opts = {}) {
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
-    const open = tasks.filter((t) => t.metadata.status !== "complete");
+    const open2 = tasks.filter((t) => t.metadata.status !== "complete");
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -4706,7 +4769,7 @@ async function waitingOn(opts = {}) {
       };
       (m.kind === "decision" ? out.decisions : out.questions).push(item);
     }
-    for (const t of open) {
+    for (const t of open2) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
       const people = taskNeedsPeople(list5(m.tags));
@@ -4797,7 +4860,7 @@ var init_waiting = __esm({
 // packages/core/src/tasks/next.ts
 async function nextTasks(opts) {
   const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
-  const open = docs.filter((d) => d.metadata.status !== "complete");
+  const open2 = docs.filter((d) => d.metadata.status !== "complete");
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live = claims ? [...claims.values()] : [];
@@ -4806,7 +4869,7 @@ async function nextTasks(opts) {
     for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
     for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
   }
-  const openIds = new Set(open.map((d) => d.id));
+  const openIds = new Set(open2.map((d) => d.id));
   const skipped = [];
   const ready = [];
   const depCache = /* @__PURE__ */ new Map();
@@ -4815,7 +4878,7 @@ async function nextTasks(opts) {
     if (!depCache.has(id)) depCache.set(id, (await getTask(id).catch(() => null))?.metadata.status);
     return depCache.get(id);
   };
-  for (const d of open) {
+  for (const d of open2) {
     const tags = norm(d.metadata.tags);
     if (opts.tags?.length && !opts.tags.every((t) => tags.includes(t))) continue;
     if (opts.excludeTags?.some((t) => tags.includes(t))) {
@@ -4836,9 +4899,9 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `blocked${d.metadata.blockedReason ? `: ${d.metadata.blockedReason}` : ""}` });
       continue;
     }
-    const held = claims?.get(d.id);
-    if (held) {
-      skipped.push({ id: d.id, reason: `claimed by ${describeHolder(held)}` });
+    const held2 = claims?.get(d.id);
+    if (held2) {
+      skipped.push({ id: d.id, reason: `claimed by ${describeHolder(held2)}` });
       continue;
     }
     if (status === "in_progress" && !claims) {
@@ -4879,7 +4942,7 @@ async function nextTasks(opts) {
   const created = (id) => Number(byId.get(id)?.metadata.created_at ?? 0);
   ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
   const result = { ready, skipped, claimsKnown: claims !== void 0, cleanup: [] };
-  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open, claims);
+  if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open2, claims);
   if (!opts.claim) return result;
   const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a, includeCleanup: _i, ...claimOpts } = opts;
   for (const r of ready) {
@@ -4904,11 +4967,11 @@ async function nextTasks(opts) {
   }
   return result;
 }
-async function cleanupItems(collection, open, claims) {
+async function cleanupItems(collection, open2, claims) {
   const items = [];
   const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
-  if (open.some((d) => triageTag(norm(d.metadata.tags)))) {
-    const untriaged = open.filter((d) => !triageTag(norm(d.metadata.tags))).length;
+  if (open2.some((d) => triageTag(norm(d.metadata.tags)))) {
+    const untriaged = open2.filter((d) => !triageTag(norm(d.metadata.tags))).length;
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const now = Math.floor(Date.now() / 1e3);
@@ -4992,6 +5055,16 @@ var init_delete = __esm({
 });
 
 // packages/core/src/tasks/dependencies.ts
+async function editEdges(id, field, edit) {
+  const t = await getTask(id);
+  if (!t) return;
+  await withDocLock(t.collection, t.id, async () => {
+    const now = await getTask(id);
+    if (!now) return;
+    const next = edit(toList(now.metadata[field]));
+    if (next) await updateTask(id, { [field]: next });
+  });
+}
 async function addDependency(taskId, dependsOnId) {
   const task = await getTask(taskId);
   const dep = await getTask(dependsOnId);
@@ -4999,17 +5072,9 @@ async function addDependency(taskId, dependsOnId) {
     throw new Error("One or both tasks not found");
   }
   assertWritable(taskId, task.metadata);
-  const taskDeps = Array.isArray(task.metadata.depends_on) ? task.metadata.depends_on : (task.metadata.depends_on ?? "").split(",").filter(Boolean);
-  if (!taskDeps.includes(dependsOnId)) {
-    taskDeps.push(dependsOnId);
-    await updateTask(taskId, { depends_on: taskDeps });
-  }
+  await editEdges(taskId, "depends_on", (cur) => cur.includes(dependsOnId) ? void 0 : [...cur, dependsOnId]);
   if (isReadOnlyDoc(dep.metadata)) return;
-  const depBlocks = Array.isArray(dep.metadata.blocks) ? dep.metadata.blocks : (dep.metadata.blocks ?? "").split(",").filter(Boolean);
-  if (!depBlocks.includes(taskId)) {
-    depBlocks.push(taskId);
-    await updateTask(dependsOnId, { blocks: depBlocks });
-  }
+  await editEdges(dependsOnId, "blocks", (cur) => cur.includes(taskId) ? void 0 : [...cur, taskId]);
 }
 async function removeDependency(taskId, dependsOnId) {
   const task = await getTask(taskId);
@@ -5018,16 +5083,10 @@ async function removeDependency(taskId, dependsOnId) {
     throw new Error("Neither task found");
   }
   if (task) {
-    const taskDeps = toList(task.metadata.depends_on);
-    if (taskDeps.includes(dependsOnId)) {
-      await updateTask(taskId, { depends_on: taskDeps.filter((id) => id !== dependsOnId) });
-    }
+    await editEdges(taskId, "depends_on", (cur) => cur.includes(dependsOnId) ? cur.filter((id) => id !== dependsOnId) : void 0);
   }
   if (dep && !isReadOnlyDoc(dep.metadata)) {
-    const depBlocks = toList(dep.metadata.blocks);
-    if (depBlocks.includes(taskId)) {
-      await updateTask(dependsOnId, { blocks: depBlocks.filter((id) => id !== taskId) });
-    }
+    await editEdges(dependsOnId, "blocks", (cur) => cur.includes(taskId) ? cur.filter((id) => id !== taskId) : void 0);
   }
 }
 var toList;
@@ -5035,6 +5094,7 @@ var init_dependencies = __esm({
   "packages/core/src/tasks/dependencies.ts"() {
     "use strict";
     init_update();
+    init_doc_lock();
     init_syncable();
     toList = (x) => Array.isArray(x) ? x : String(x ?? "").split(",").filter(Boolean);
   }
@@ -6047,21 +6107,25 @@ async function updateMemory(id, patch, collection) {
   const typed = normalizeTyped(typedPatch, found.doc.metadata);
   const now = Math.floor(Date.now() / 1e3);
   const baseId = found.doc.metadata.parent_id ?? found.doc.id;
-  const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : [found.doc];
-  let metadata = found.doc.metadata;
-  for (const [i, d] of docs.entries()) {
-    metadata = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
-    const last = i === docs.length - 1;
-    if ((note?.trim() || content !== void 0) && last) {
-      const day = new Date(now * 1e3).toISOString().slice(0, 10);
-      const text = content ?? d.content;
-      await addDocument2(found.collection, d.id, note?.trim() ? `${text}
+  const metadata = await withDocLock(found.collection, baseId, async () => {
+    const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : await getDocumentsByIds2(found.collection, [found.doc.id]);
+    if (!docs.length) throw new MemoryNotFoundError(id);
+    let metadata2 = docs[docs.length - 1].metadata;
+    for (const [i, d] of docs.entries()) {
+      metadata2 = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+      const last = i === docs.length - 1;
+      if ((note?.trim() || content !== void 0) && last) {
+        const day = new Date(now * 1e3).toISOString().slice(0, 10);
+        const text = content ?? d.content;
+        await addDocument2(found.collection, d.id, note?.trim() ? `${text}
 
-${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata);
-    } else {
-      await updateDocument2(found.collection, d.id, metadata);
+${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
+      } else {
+        await updateDocument2(found.collection, d.id, metadata2);
+      }
     }
-  }
+    return metadata2;
+  });
   if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
   return { id: baseId, collection: found.collection, metadata };
 }
@@ -6071,6 +6135,7 @@ var init_update2 = __esm({
     "use strict";
     init_store();
     init_config();
+    init_doc_lock();
     init_syncable();
     init_kinds();
     init_links();
@@ -6347,9 +6412,9 @@ var init_capture = __esm({
 
 // packages/core/src/buckets/artifacts.ts
 import { existsSync, mkdirSync as mkdirSync5, readdirSync as readdirSync4, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 function artifactDir(kind) {
-  return join6(getConfig().ARTIFACTS_DIR, kind);
+  return join7(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
@@ -6381,17 +6446,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path = join6(dir, filename);
+  const path = join7(dir, filename);
   writeFileSync5(path, content);
   return path;
 }
 function readArtifact(kind, filename) {
-  const path = join6(artifactDir(kind), filename);
+  const path = join7(artifactDir(kind), filename);
   if (!existsSync(path)) return null;
   return readFileSync9(path, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join6(artifactDir(kind), filename);
+  return join7(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -6975,7 +7040,10 @@ async function dropMovedOut(backend, collectionName, followed, stats) {
     stats.moved++;
   }
 }
-async function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
+function applyRemoteDoc(backend, collectionName, remoteDoc, stats) {
+  return withDocLock(collectionName, remoteDoc.id, () => applyRemoteDocLocked(backend, collectionName, remoteDoc, stats));
+}
+async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats) {
   const [existing] = await getDocumentsByIds2(collectionName, [remoteDoc.id]).catch(() => []);
   if (!existing) {
     const elsewhere = await copiesElsewhere(remoteDoc.id, collectionName);
@@ -7028,6 +7096,7 @@ var MAX_PULL_PAGES;
 var init_pull = __esm({
   "packages/core/src/sync/pull.ts"() {
     "use strict";
+    init_doc_lock();
     init_config();
     init_store();
     init_backend();
@@ -7039,9 +7108,9 @@ var init_pull = __esm({
 });
 
 // packages/core/src/sync/shared-cycle.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { closeSync as closeSync2, mkdirSync as mkdirSync6, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync6, writeSync as writeSync2 } from "node:fs";
-import { dirname as dirname5, join as join7 } from "node:path";
+import { dirname as dirname5, join as join8 } from "node:path";
 function syncTargetKey(config = getConfig()) {
   let remote = "";
   if (config.SYNC_SERVICE_URL) remote = `service:${config.SYNC_SERVICE_URL}`;
@@ -7054,7 +7123,7 @@ function syncTargetKey(config = getConfig()) {
     }
   }
   const store = config.STORAGE === "local" ? `local:${config.LOCAL_STORE_PATH}` : `chroma:${config.CHROMA_URL}`;
-  return createHash2("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
+  return createHash3("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
 }
 function sharedDir(config = getConfig()) {
   if (!config.SYNC_COORDINATE || !config.SYNC_HEALTH_FILE) return void 0;
@@ -7066,9 +7135,9 @@ function paths(config = getConfig()) {
   const key = syncTargetKey(config);
   return {
     dir,
-    record: join7(dir, `sync-cycle-${key}.json`),
-    lock: join7(dir, `sync-cycle-${key}.lock`),
-    pulls: join7(dir, `sync-pulls-${key}.json`)
+    record: join8(dir, `sync-cycle-${key}.json`),
+    lock: join8(dir, `sync-cycle-${key}.lock`),
+    pulls: join8(dir, `sync-pulls-${key}.json`)
   };
 }
 function readJson(path) {
@@ -7119,14 +7188,14 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
       return () => {
         if (released) return;
         released = true;
-        const held = readJson(p.lock);
-        if (held?.pid === process.pid && held.started_at === now) rmSync4(p.lock, { force: true });
+        const held2 = readJson(p.lock);
+        if (held2?.pid === process.pid && held2.started_at === now) rmSync4(p.lock, { force: true });
       };
     } catch (e) {
       if (e.code !== "EEXIST") return () => {
       };
-      const held = readJson(p.lock);
-      const stale = !held || !alive(held.pid) || now - held.started_at > staleAfter || held.started_at > now + 6e4;
+      const held2 = readJson(p.lock);
+      const stale = !held2 || !alive(held2.pid) || now - held2.started_at > staleAfter || held2.started_at > now + 6e4;
       if (!stale || attempt2 > 0) return void 0;
       rmSync4(p.lock, { force: true });
     }
@@ -7181,7 +7250,7 @@ var init_shared_cycle = __esm({
 
 // packages/core/src/update-check.ts
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname6, join as join8 } from "node:path";
+import { dirname as dirname6, join as join9 } from "node:path";
 function compareVersions(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
   const pb = SEMVER.exec(String(b ?? "").trim());
@@ -7196,7 +7265,7 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join8(dirname6(health), "update-check.json") : void 0;
+  return health ? join9(dirname6(health), "update-check.json") : void 0;
 }
 function readUpdateState(path = updateStatePath()) {
   if (!path) return void 0;
@@ -7672,12 +7741,12 @@ ${jobResult.stdout}`);
 
 // packages/core/src/training/registry.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync12, writeFileSync as writeFileSync8 } from "fs";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 function registryPath() {
-  return join9(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join10(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join9(getConfig().ARTIFACTS_DIR, "adapters");
+  const dir = join10(getConfig().ARTIFACTS_DIR, "adapters");
   if (!existsSync2(dir)) mkdirSync8(dir, { recursive: true });
 }
 function load() {
@@ -7865,9 +7934,9 @@ RULES
 });
 
 // packages/core/src/training/index.ts
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash4 } from "crypto";
 import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync14, writeFileSync as writeFileSync9 } from "fs";
-import { join as join10 } from "path";
+import { join as join11 } from "path";
 function getBackend() {
   switch (getConfig().TRAINING_BACKEND) {
     case "fireworks":
@@ -7877,12 +7946,12 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join10(getConfig().ARTIFACTS_DIR, "training-runs");
+  const dir = join11(getConfig().ARTIFACTS_DIR, "training-runs");
   if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
-  return createHash3("sha256").update(content, "utf-8").digest("hex");
+  return createHash4("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -7911,7 +7980,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join10(dir, filename);
+  const previewPath = join11(dir, filename);
   writeFileSync9(previewPath, jsonl);
   return {
     manifestVersion,
@@ -8558,6 +8627,9 @@ async function putExternal(collection, ref, put) {
   if (!ref.trim()) throw new Error("external_ref is required");
   const typed = normalizeTyped({ ...put.typed, external_ref: ref });
   await getOrCreateCollection2(collection);
+  return withDocLock(collection, `external_ref:${ref}`, () => putLocked(collection, ref, put, typed));
+}
+async function putLocked(collection, ref, put, typed) {
   const existing = await findExternal(collection, ref);
   if (!existing) {
     const r = await storeMemory(put.content, { collection, tags: put.tags, typed });
@@ -8584,6 +8656,7 @@ var same;
 var init_external = __esm({
   "packages/core/src/memory/external.ts"() {
     "use strict";
+    init_doc_lock();
     init_store();
     init_kinds();
     init_store2();
@@ -8595,13 +8668,13 @@ var init_external = __esm({
 
 // packages/core/src/last-write.ts
 import { mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname7, join as join11 } from "node:path";
+import { dirname as dirname7, join as join12 } from "node:path";
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join11(dirname7(health), "last-write") : "";
+  return health ? join12(dirname7(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join11(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join12(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -8634,7 +8707,7 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync5(dir)) {
-      const p = join11(dir, name);
+      const p = join12(dir, name);
       try {
         if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
@@ -8974,6 +9047,7 @@ __export(src_exports, {
   waitingLine: () => waitingLine,
   waitingOn: () => waitingOn,
   waitsOnPeople: () => waitsOnPeople,
+  withDocLock: () => withDocLock,
   withFileLock: () => withFileLock,
   withFileLockSync: () => withFileLockSync,
   writeArtifact: () => writeArtifact,
@@ -9058,6 +9132,7 @@ var init_src = __esm({
     init_follow_through();
     init_update_check();
     init_last_write();
+    init_doc_lock();
   }
 });
 
@@ -9139,7 +9214,7 @@ __export(statusline_exports, {
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync17, realpathSync, renameSync as renameSync7, rmSync as rmSync6, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname8, join as join12, resolve } from "node:path";
+import { dirname as dirname8, join as join13, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -9220,7 +9295,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync17(join12(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync17(join13(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -9293,7 +9368,7 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join12(process.env.CLAUDE_CONFIG_DIR ?? join12(homedir3(), ".claude"), "settings.json");
+  return join13(process.env.CLAUDE_CONFIG_DIR ?? join13(homedir3(), ".claude"), "settings.json");
 }
 function readSettings(path) {
   try {
@@ -9342,7 +9417,7 @@ function copyScript(from, to) {
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join12(dir, REMOVED_MARKER);
+  const p = join13(dir, REMOVED_MARKER);
   try {
     if (removed) {
       mkdirSync11(dir, { recursive: true, mode: 448 });
@@ -9386,9 +9461,9 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join12(dirname8(self2), "sync-health.json");
-  const update = readUpdate(join12(dirname8(healthPath), "update-check.json"));
-  const last = readLastWrite2(join12(dirname8(healthPath), "last-write"), [stdinSession(input2), process.env.CLAUDE_CODE_SESSION_ID]);
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join13(dirname8(self2), "sync-health.json");
+  const update = readUpdate(join13(dirname8(healthPath), "update-check.json"));
+  const last = readLastWrite2(join13(dirname8(healthPath), "last-write"), [stdinSession(input2), process.env.CLAUDE_CODE_SESSION_ID]);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
@@ -9459,7 +9534,7 @@ __export(hooks_exports, {
 });
 import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync18, rmSync as rmSync7, writeFileSync as writeFileSync12 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname9, join as join13 } from "node:path";
+import { dirname as dirname9, join as join14 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -9523,11 +9598,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join13(dirname9(health), "statusline.mjs") : void 0;
+  return health ? join14(dirname9(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
   const here = dirname9(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join13(here, f)).find((p) => existsSync4(p));
+  return ["statusline.mjs", "statusline.js"].map((f) => join14(here, f)).find((p) => existsSync4(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -9541,8 +9616,8 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join13(dirname9(to), "statusline-added");
-    if (existsSync4(join13(dirname9(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    const added = join14(dirname9(to), "statusline-added");
+    if (existsSync4(join14(dirname9(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
@@ -9558,7 +9633,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join13(dirname9(to), "statusline-hint");
+  const marker = join14(dirname9(to), "statusline-hint");
   if (existsSync4(marker)) return void 0;
   try {
     writeFileSync12(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
@@ -9577,13 +9652,13 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join13(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join13(base, "sessions");
+  const base = process.env.CLAUDE_PLUGIN_DATA || join14(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join14(base, "sessions");
   mkdirSync12(dir, { recursive: true });
   return dir;
 }
 function stateFile2(sessionId, kind) {
-  return join13(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join14(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId) {
   try {
@@ -9697,7 +9772,7 @@ async function sessionStart(input2) {
   if (update) lines.push(update);
   const notice = takeNotice(input2.session_id);
   if (notice) lines.push(`_${notice}_`);
-  const [held] = await Promise.all([presence(collection, input2), keepLeasesAlive(input2)]);
+  const [held2] = await Promise.all([presence(collection, input2), keepLeasesAlive(input2)]);
   lines.push(...claimNoticeLines());
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
@@ -9706,7 +9781,7 @@ async function sessionStart(input2) {
       for (const t of tasks.slice(0, 10)) {
         const status = t.metadata.status ?? "open";
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : "";
-        const claim = claimNote(t, held.claims, leaseSessions(input2));
+        const claim = claimNote(t, held2.claims, leaseSessions(input2));
         lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${t.title}`);
       }
       if (tasks.length > 10) lines.push(`- _\u2026${tasks.length - 10} more (call \`task_list\` for the full list)_`);
@@ -9716,7 +9791,7 @@ async function sessionStart(input2) {
 `);
   }
   lines.push(...await waitingLines(getConfig().USERNAME));
-  lines.push(...held.lines);
+  lines.push(...held2.lines);
   try {
     const memories = await listMemories({ collection, limit: 5 });
     if (memories.length) {
@@ -9888,7 +9963,7 @@ __export(install_hooks_exports, {
 });
 import { mkdirSync as mkdirSync13, readFileSync as readFileSync19, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname10, join as join14 } from "node:path";
+import { dirname as dirname10, join as join15 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -9915,7 +9990,7 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join14(process.env.CLAUDE_CONFIG_DIR ?? join14(homedir4(), ".claude"), "settings.json");
+  return join15(process.env.CLAUDE_CONFIG_DIR ?? join15(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
@@ -10213,36 +10288,36 @@ async function dispatch(sub, args) {
       if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
       const addTags = list7(flag(args, "--tag")) ?? [];
-      const extra = {};
-      if (note) extra.notes = t.metadata.notes ? `${t.metadata.notes}
-${note}` : note;
-      if (addTags.length) {
-        const cur = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",").filter(Boolean);
-        extra.tags = [.../* @__PURE__ */ new Set([...cur, ...addTags])];
-      }
       const learned = jsonFile(flag(args, "--learned-file"), "array");
       const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
       const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
       const waitsOn = list7(flag(args, "--waits-on"));
       if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
-      if (waitsOn?.length) {
-        const cur = Array.isArray(t.metadata.waits_on) ? t.metadata.waits_on : String(t.metadata.waits_on ?? "").split(",").filter(Boolean);
-        extra.waits_on = [.../* @__PURE__ */ new Set([...cur, ...waitsOn])];
-      }
       validateLearned(learned);
+      const listOf = (v) => Array.isArray(v) ? v : String(v ?? "").split(",").filter(Boolean);
+      if (note || addTags.length || waitsOn?.length) {
+        await withDocLock(t.collection, t.id, async () => {
+          const now = await getTask(t.id) ?? t;
+          const extra = {};
+          if (note) extra.notes = now.metadata.notes ? `${now.metadata.notes}
+${note}` : note;
+          if (addTags.length) extra.tags = [.../* @__PURE__ */ new Set([...listOf(now.metadata.tags), ...addTags])];
+          if (waitsOn?.length) extra.waits_on = [.../* @__PURE__ */ new Set([...listOf(now.metadata.waits_on), ...waitsOn])];
+          await updateTask(t.id, extra, { session });
+        });
+      }
       let release;
       let recorded;
       let nudge;
       let decision;
       if (status === "complete") {
-        if (Object.keys(extra).length) await updateTask(t.id, extra, { session });
         const c = await completeTask(t.id, int(flag(args, "--duration"), "--duration"), { session }, { learned, follow_ups: followUps });
         release = c.release;
         recorded = c.recorded;
         nudge = c.nudge;
       } else {
         const reason = flag(args, "--reason");
-        const fields = { ...reason ? { blockedReason: reason } : {}, ...extra };
+        const fields = { ...reason ? { blockedReason: reason } : {} };
         if (decisionNeeded) {
           const d = await requestDecision(t.id, decisionNeeded, { session }, fields);
           release = d.release;
@@ -10485,7 +10560,7 @@ var init_memory = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname11, join as join15 } from "node:path";
+import { dirname as dirname11, join as join16 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 import { readFileSync } from "node:fs";
@@ -10641,7 +10716,7 @@ async function runStatusLineCommand(action, args) {
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join15(dirname11(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join16(dirname11(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,

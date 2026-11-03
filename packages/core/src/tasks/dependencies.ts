@@ -1,5 +1,23 @@
 import { getTask, updateTask } from './update.js';
+import { withDocLock } from '../doc-lock.js';
 import { assertWritable, isReadOnlyDoc } from '../sync/syncable.js';
+
+const toList = (x: unknown): string[] => Array.isArray(x) ? x : String(x ?? '').split(',').filter(Boolean);
+
+/**
+ * Change one edge list of task `id` under its lock, from the list as it is
+ * now: two sessions adding edges to one task at once both land.
+ */
+async function editEdges(id: string, field: 'depends_on' | 'blocks', edit: (cur: string[]) => string[] | undefined): Promise<void> {
+  const t = await getTask(id);
+  if (!t) return;
+  await withDocLock(t.collection, t.id, async () => {
+    const now = await getTask(id);
+    if (!now) return;
+    const next = edit(toList(now.metadata[field]));
+    if (next) await updateTask(id, { [field]: next });
+  });
+}
 
 /** Add a dependency: taskId depends on dependsOnId. Updates both tasks. */
 export async function addDependency(taskId: string, dependsOnId: string): Promise<void> {
@@ -11,27 +29,12 @@ export async function addDependency(taskId: string, dependsOnId: string): Promis
   }
   assertWritable(taskId, task.metadata);
 
-  // Update task with new dependency
-  const taskDeps: string[] = Array.isArray(task.metadata.depends_on)
-    ? task.metadata.depends_on
-    : (task.metadata.depends_on ?? '').split(',').filter(Boolean);
-
-  if (!taskDeps.includes(dependsOnId)) {
-    taskDeps.push(dependsOnId);
-    await updateTask(taskId, { depends_on: taskDeps });
-  }
+  await editEdges(taskId, 'depends_on', cur => (cur.includes(dependsOnId) ? undefined : [...cur, dependsOnId]));
 
   // Update dep with blocker info (a read-only dep keeps the remote's version;
   // the edge lives on taskId alone)
   if (isReadOnlyDoc(dep.metadata)) return;
-  const depBlocks: string[] = Array.isArray(dep.metadata.blocks)
-    ? dep.metadata.blocks
-    : (dep.metadata.blocks ?? '').split(',').filter(Boolean);
-
-  if (!depBlocks.includes(taskId)) {
-    depBlocks.push(taskId);
-    await updateTask(dependsOnId, { blocks: depBlocks });
-  }
+  await editEdges(dependsOnId, 'blocks', cur => (cur.includes(taskId) ? undefined : [...cur, taskId]));
 }
 
 /**
@@ -48,18 +51,10 @@ export async function removeDependency(taskId: string, dependsOnId: string): Pro
   }
 
   if (task) {
-    const taskDeps = toList(task.metadata.depends_on);
-    if (taskDeps.includes(dependsOnId)) {
-      await updateTask(taskId, { depends_on: taskDeps.filter(id => id !== dependsOnId) });
-    }
+    await editEdges(taskId, 'depends_on', cur => (cur.includes(dependsOnId) ? cur.filter(id => id !== dependsOnId) : undefined));
   }
 
   if (dep && !isReadOnlyDoc(dep.metadata)) {
-    const depBlocks = toList(dep.metadata.blocks);
-    if (depBlocks.includes(taskId)) {
-      await updateTask(dependsOnId, { blocks: depBlocks.filter(id => id !== taskId) });
-    }
+    await editEdges(dependsOnId, 'blocks', cur => (cur.includes(taskId) ? cur.filter(id => id !== taskId) : undefined));
   }
 }
-
-const toList = (x: unknown): string[] => Array.isArray(x) ? x : String(x ?? '').split(',').filter(Boolean);
