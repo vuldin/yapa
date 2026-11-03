@@ -3,7 +3,7 @@ import { createRequire as __yapaCreateRequire } from 'node:module'; const requir
 
 // packages/mcp/src/cli/statusline.ts
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,10 +51,13 @@ function remoteName(health, explicit) {
 }
 function renderSegment(health, now, opts = {}) {
   const paint = (tone, text) => opts.color ? `${ANSI[tone]}${text}${ANSI.reset}` : text;
-  const version = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
-  const latest = opts.update?.latest && version && newer(opts.update.latest, version) ? opts.update.latest : void 0;
+  const installed = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
+  const running = opts.session?.version ?? installed;
+  const restart = installed && (opts.session?.missing || opts.session?.version && newer(installed, opts.session.version)) ? installed : void 0;
+  const latest = opts.update?.latest && installed && newer(opts.update.latest, installed) ? opts.update.latest : void 0;
   const remote = remoteName(health, opts.remote ?? opts.label);
-  const head = `yapa${version ? `@v${version}` : ""}` + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
+  const shown = opts.session?.missing ? "yapa" : `yapa${running ? `@v${running}` : ""}`;
+  const head = shown + (restart ? ` ${paint("yellow", `(restart for v${restart})`)}` : "") + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
   const tail = cleanCollection(opts.collection);
@@ -100,12 +103,52 @@ function readLastWrite(dir, sessions) {
   return best;
 }
 function stdinSession(input) {
+  return stdinInfo(input).session;
+}
+function stdinInfo(input, now = Date.now()) {
+  let j;
   try {
-    const v = JSON.parse(input)?.session_id;
-    return typeof v === "string" ? v : void 0;
+    j = JSON.parse(input);
   } catch {
-    return void 0;
+    return {};
   }
+  const session = typeof j?.session_id === "string" ? j.session_id : void 0;
+  let ageMs = typeof j?.cost?.total_duration_ms === "number" ? j.cost.total_duration_ms : void 0;
+  if (ageMs === void 0 && typeof j?.transcript_path === "string") {
+    try {
+      const born = statSync(j.transcript_path).birthtimeMs;
+      if (born > 0) ageMs = now - born;
+    } catch {
+    }
+  }
+  return { session, ageMs };
+}
+function alive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function readSessionRecord(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      if (r && typeof r.version === "string" && typeof r.pid === "number" && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
+    } catch {
+    }
+  }
+  return best;
+}
+var SESSION_REPORT_GRACE_MS = 6e4;
+function sessionInfo(record, ageMs) {
+  if (record) return { version: record.version };
+  if (ageMs !== void 0 && ageMs > SESSION_REPORT_GRACE_MS) return { missing: true };
+  return void 0;
 }
 function readUpdate(path) {
   try {
@@ -261,13 +304,17 @@ async function main(args, self2) {
   }
   const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join(dirname(self2), "sync-health.json");
   const update = readUpdate(join(dirname(healthPath), "update-check.json"));
-  const last = readLastWrite(join(dirname(healthPath), "last-write"), [stdinSession(input), process.env.CLAUDE_CODE_SESSION_ID]);
+  const info = stdinInfo(input);
+  const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
+  const last = readLastWrite(join(dirname(healthPath), "last-write"), ids);
+  const session = sessionInfo(readSessionRecord(join(dirname(healthPath), "sessions"), ids), info.ageMs);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
     update,
-    collection: last?.collection
+    collection: last?.collection,
+    session
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -286,6 +333,7 @@ if (isMain(process.argv[1], self)) {
 export {
   REMOVED_MARKER,
   SCRIPT_VERSION,
+  SESSION_REPORT_GRACE_MS,
   copyScript,
   decodeWrapped,
   defaultSettingsPath,
@@ -300,10 +348,13 @@ export {
   newer,
   readHealth,
   readLastWrite,
+  readSessionRecord,
   readUpdate,
   removeStatusLine,
   renderSegment,
+  sessionInfo,
   setRemovedMarker,
+  stdinInfo,
   stdinSession,
   uninstallStatusLine
 };

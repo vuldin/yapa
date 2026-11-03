@@ -27,7 +27,7 @@
 //   node statusline.mjs --uninstall      remove it (restores a wrapped status line)
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -122,15 +122,28 @@ export interface RenderOptions {
   update?: UpdateRecord;
   /** The collection this session last wrote to. */
   collection?: string;
+  /**
+   * What this session's own YAPA server reported (sessions/<id>.json):
+   * `version` when a live server recorded one; `missing` when the session has
+   * run a while and no live server reported (an older YAPA, or none).
+   */
+  session?: { version?: string; missing?: boolean };
 }
 
 /** The segment for `health` (undefined: no record yet). */
 export function renderSegment(health: HealthRecord | undefined, now: number, opts: RenderOptions = {}): string {
   const paint = (tone: Tone, text: string) => (opts.color ? `${ANSI[tone]}${text}${ANSI.reset}` : text);
-  const version = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
-  const latest = opts.update?.latest && version && newer(opts.update.latest, version) ? opts.update.latest : undefined;
+  const installed = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
+  // The version this session runs, when its server said; else what is installed.
+  const running = opts.session?.version ?? installed;
+  // Installed is newer than what this session runs (or this session's server
+  // never reported): only a restart loads it.
+  const restart = installed && (opts.session?.missing || (opts.session?.version && newer(installed, opts.session.version))) ? installed : undefined;
+  const latest = opts.update?.latest && installed && newer(opts.update.latest, installed) ? opts.update.latest : undefined;
   const remote = remoteName(health, opts.remote ?? opts.label);
-  const head = `yapa${version ? `@v${version}` : ''}`
+  const shown = opts.session?.missing ? 'yapa' : `yapa${running ? `@v${running}` : ''}`;
+  const head = shown
+    + (restart ? ` ${paint('yellow', `(restart for v${restart})`)}` : '')
     + (latest ? ` ${paint('yellow', `(v${latest} available)`)}` : '')
     + (remote ? ` <-> ${remote}` : '');
   const push = health?.unpushed ? ` · ${health.unpushed} to push` : '';
@@ -190,12 +203,70 @@ export function readLastWrite(dir: string, sessions: Array<string | undefined>):
 
 /** `session_id` from the JSON Claude Code sends the status line on stdin. */
 export function stdinSession(input: string): string | undefined {
+  return stdinInfo(input).session;
+}
+
+/** What the status line needs from Claude Code's stdin JSON: the session, and how long it has run (ms). */
+export function stdinInfo(input: string, now = Date.now()): { session?: string; ageMs?: number } {
+  let j: any;
   try {
-    const v = JSON.parse(input)?.session_id;
-    return typeof v === 'string' ? v : undefined;
+    j = JSON.parse(input);
   } catch {
-    return undefined;
+    return {};
   }
+  const session = typeof j?.session_id === 'string' ? j.session_id : undefined;
+  let ageMs: number | undefined = typeof j?.cost?.total_duration_ms === 'number' ? j.cost.total_duration_ms : undefined;
+  if (ageMs === undefined && typeof j?.transcript_path === 'string') {
+    try {
+      const born = statSync(j.transcript_path).birthtimeMs;
+      if (born > 0) ageMs = now - born;
+    } catch {
+      // no transcript yet
+    }
+  }
+  return { session, ageMs };
+}
+
+export interface SessionRecord {
+  version: string;
+  pid: number;
+  started_at: number;
+}
+
+/** Is that process alive? EPERM means it exists but belongs to someone else. */
+function alive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** The newest record among `sessions` whose server is still running (the same file names as core's sessionRecordFile). */
+export function readSessionRecord(dir: string, sessions: Array<string | undefined>): SessionRecord | undefined {
+  let best: SessionRecord | undefined;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync(join(dir, `${s.replace(/[^A-Za-z0-9._-]/g, '_')}.json`), 'utf-8'));
+      if (r && typeof r.version === 'string' && typeof r.pid === 'number' && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
+    } catch {
+      // none for this id
+    }
+  }
+  return best;
+}
+
+/** A session this old without a live server record runs a YAPA too old to report one (or none). */
+export const SESSION_REPORT_GRACE_MS = 60_000;
+
+/** What to tell renderSegment about this session's own server. */
+export function sessionInfo(record: SessionRecord | undefined, ageMs: number | undefined): RenderOptions['session'] {
+  if (record) return { version: record.version };
+  if (ageMs !== undefined && ageMs > SESSION_REPORT_GRACE_MS) return { missing: true };
+  return undefined;
 }
 
 export function readUpdate(path: string): UpdateRecord | undefined {
@@ -390,10 +461,13 @@ export async function main(args: string[], self: string): Promise<void> {
   const update = readUpdate(join(dirname(healthPath), 'update-check.json'));
   // The session on stdin, and the id Claude Code started with (the MCP server
   // keeps that one after /clear): whichever wrote last.
-  const last = readLastWrite(join(dirname(healthPath), 'last-write'), [stdinSession(input), process.env.CLAUDE_CODE_SESSION_ID]);
+  const info = stdinInfo(input);
+  const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
+  const last = readLastWrite(join(dirname(healthPath), 'last-write'), ids);
+  const session = sessionInfo(readSessionRecord(join(dirname(healthPath), 'sessions'), ids), info.ageMs);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
-    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection: last?.collection,
+    color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection: last?.collection, session,
   }) + '\n');
 }
 

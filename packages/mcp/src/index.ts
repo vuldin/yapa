@@ -20,6 +20,8 @@ import {
   stopSync,
   flushPendingSync,
   consolidateSessionEverywhere,
+  recordSessionStart,
+  removeSessionRecord,
 } from '@yapa/core';
 
 const server = new McpServer({
@@ -81,6 +83,8 @@ async function startupDecay(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // Which YAPA this session runs, for the status line (sessions/<id>.json).
+  recordSessionStart(YAPA_VERSION);
   if (getConfig().STORAGE === 'local') {
     // Embedded store: no server to health-check.
     process.stderr.write(`✅ YAPA started with the embedded local store at ${getConfig().LOCAL_STORE_PATH} (embeddings: ${getConfig().EMBEDDING_PROVIDER})\n`);
@@ -151,6 +155,7 @@ async function shutdown(reason: string): Promise<void> {
     }
   })();
   await Promise.race([work, new Promise(resolve => setTimeout(resolve, SHUTDOWN_BUDGET_MS).unref())]);
+  removeSessionRecord();
   process.exit(0);
 }
 
