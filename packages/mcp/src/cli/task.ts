@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import {
   claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
-  releaseTaskClaim, requestDecision, TaskClaimedError, TypedMemoryError, updateTask, validateLearned,
+  recordLastWrite, releaseTaskClaim, requestDecision, TaskClaimedError, TypedMemoryError, updateTask, validateLearned,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -144,6 +144,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         collection, tags: list(flag(args, '--tag')), excludeTags: list(flag(args, '--exclude-tag')), claim: args.includes('--claim'),
         autoOnly: args.includes('--auto-only'), includeCleanup: args.includes('--include-cleanup'), ...claimOpts,
       });
+      if (r.claimed) recordLastWrite(collection);
       const json = { ok: true, claims_known: r.claimsKnown, ready: r.ready, skipped: r.skipped, cleanup: r.cleanup, claimed: claimJson(r.claimed) };
       if (!args.includes('--claim')) {
         return { exit: EXIT.ok, json, text: r.ready.length ? `next: ${r.ready[0].id} ${r.ready[0].title} (${r.ready.length} ready)` : 'nothing ready' };
@@ -160,6 +161,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         return { exit: claimExit(c), json: { ok: c.kind !== 'refused', id: positional, session: claimSession(session), claim: claimJson(c) }, text: describeClaim(c) || `claimed ${positional}` };
       }
       const r = await updateTask(positional, { status: 'in_progress' }, claimOpts);
+      recordLastWrite((await getTask(r.id))?.collection);
       return {
         exit: claimExit(r.claim),
         json: { ok: true, id: r.id, session: claimSession(session), claim: claimJson(r.claim) },
@@ -218,6 +220,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         }
         if (learned?.length || followUps?.length) recorded = await recordForTask({ id: t.id, collection: t.collection }, { learned, follow_ups: followUps });
       }
+      recordLastWrite(t.collection);
       // A CLI process has no background sync: push the new status before exiting.
       const pushed = await pushDocsNow(t.collection, [t.id]).catch(() => undefined);
       const exit = release?.kind === 'unshared' || (pushed && pushed.errors > 0) ? EXIT.unavailable : EXIT.ok;

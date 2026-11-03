@@ -9,7 +9,7 @@ vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()
 
 import {
   createConfig, createLocalStore, createNewCollection, createTask, getTask, listCollections,
-  resetConfig, resetStore, setConfig, setStore,
+  readLastWrite, resetConfig, resetStore, setConfig, setStore,
 } from '@yapa/core';
 import { withSyncOnWrite, SYNC_ON_WRITE_TOOLS, registerTools } from './tools.js';
 
@@ -106,6 +106,31 @@ describe('registered tools over the local store', () => {
     expect(upd.content[0].text).toBe(`Updated ${id} in project-typed [decision, accepted, for tester]`);
     expect((await call('waiting', {})).content[0].text).toBe('Nothing is waiting on anyone.');
     expect((await call('memory_update', { id: 'mem-nope', status: 'accepted' })).isError).toBe(true);
+  });
+
+  it('write tools note the collection this session last wrote to, for the status line', async () => {
+    const saved = process.env.CLAUDE_CODE_SESSION_ID;
+    process.env.CLAUDE_CODE_SESSION_ID = 'sess-lw';
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_HEALTH_FILE: join(dir, 'state', 'sync-health.json') }));
+    const last = () => readLastWrite('sess-lw')?.collection;
+    try {
+      await call('memory_store', { content: 'the lw port is 9000', collection: 'project-lw-a' });
+      expect(last()).toBe('project-lw-a');
+      const id = await createTask('lw task', {}, 'project-lw-b'); // straight through core: not a session write
+      expect(last()).toBe('project-lw-a');
+      await call('task_update', { id, notes: 'touched' }); // the task's collection, found by id
+      expect(last()).toBe('project-lw-b');
+      await call('memory_recall', { query: 'lw port', collection: 'project-lw-a' }); // reads change nothing
+      expect(last()).toBe('project-lw-b');
+      await call('task_create', { title: 'lw default' });
+      expect(last()).toBe('global');
+      await call('task_delete', { id });
+      expect(last()).toBe('project-lw-b');
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = saved;
+      setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true' }));
+    }
   });
 
   it('collection_delete refuses a non-empty shared collection until confirmed', async () => {

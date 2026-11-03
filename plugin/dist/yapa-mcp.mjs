@@ -43987,6 +43987,52 @@ async function verifyAdapterAgainstManifest(adapterRef, manifestVersion, options
 // packages/core/src/memory/external.ts
 init_store();
 
+// packages/core/src/last-write.ts
+init_config();
+init_coordination();
+import { mkdirSync as mkdirSync11, readdirSync as readdirSync3, readFileSync as readFileSync13, renameSync as renameSync5, rmSync as rmSync4, statSync, writeFileSync as writeFileSync11 } from "node:fs";
+import { dirname as dirname6, join as join9 } from "node:path";
+var PRUNE_AFTER_MS = 7 * 24 * 3600 * 1e3;
+var pruned = false;
+function lastWriteDir() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join9(dirname6(health), "last-write") : "";
+}
+function lastWriteFile(session, dir = lastWriteDir()) {
+  return join9(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function recordLastWrite(collection, opts = {}) {
+  const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
+  const dir = opts.dir ?? lastWriteDir();
+  if (!collection || !session || !dir) return;
+  const now = opts.now ?? Date.now();
+  try {
+    mkdirSync11(dir, { recursive: true, mode: 448 });
+    const file2 = lastWriteFile(session, dir);
+    const tmp = `${file2}.${process.pid}.tmp`;
+    writeFileSync11(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
+    renameSync5(tmp, file2);
+    if (!pruned) {
+      pruned = true;
+      pruneLastWrites(dir, now);
+    }
+  } catch {
+  }
+}
+function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
+  if (!dir) return;
+  try {
+    for (const name of readdirSync3(dir)) {
+      const p = join9(dir, name);
+      try {
+        if (now - statSync(p).mtimeMs > PRUNE_AFTER_MS) rmSync4(p, { force: true });
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+
 // packages/mcp/src/coord.ts
 var EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
 function defaultSession() {
@@ -44187,6 +44233,7 @@ ${result.instructions}`
       let result;
       try {
         result = await storeMemory(content, { tags, salience, sector, collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
+        recordLastWrite(collection ?? "global");
       } catch (e) {
         return typedError(e);
       }
@@ -44253,6 +44300,7 @@ ${r.content}`
     },
     async ({ id }) => {
       const collection = await forgetMemory(id);
+      recordLastWrite(collection);
       return {
         content: [{ type: "text", text: `Deleted ${id} from collection "${collection}"` }]
       };
@@ -44315,6 +44363,7 @@ ${r.content}`
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       try {
         const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, collection);
+        recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
         return { content: [{ type: "text", text: `Updated ${r.id} in ${r.collection}${label ? ` ${label}` : ""}` }] };
       } catch (e) {
@@ -44373,6 +44422,7 @@ ${r.content}`
     },
     async ({ collection, member_ids, summary, tags }) => {
       const result = await applyCompaction({ collection, member_ids, summary, tags });
+      recordLastWrite(collection);
       return {
         content: [{
           type: "text",
@@ -44390,6 +44440,7 @@ ${r.content}`
     },
     async ({ entry, collection }) => {
       const id = await journalAppend(entry, collection);
+      recordLastWrite(collection ?? "global");
       return { content: [{ type: "text", text: `Journal draft saved: ${id}` }] };
     }
   );
@@ -44402,6 +44453,7 @@ ${r.content}`
     },
     async ({ collection, summary }) => {
       const result = await journalConsolidate({ collection, summary });
+      recordLastWrite(collection ?? "global");
       if (!result) {
         return { content: [{ type: "text", text: "No journal drafts found for this session \u2014 nothing to consolidate." }] };
       }
@@ -44935,6 +44987,7 @@ ${r.content}`
         recurrence_pattern,
         claim_scope
       }, collection ?? "global");
+      recordLastWrite(collection ?? "global");
       let text = `Created task ${id}: "${title}"`;
       if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
       return { content: [{ type: "text", text }] };
@@ -45071,7 +45124,9 @@ ${r.content}`
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
-        const recorded = learned?.length || follow_ups?.length ? await recordForTask({ id: r.id, collection: (await getTask(r.id)).collection }, { learned, follow_ups }) : void 0;
+        const taskCollection = (await getTask(r.id))?.collection;
+        recordLastWrite(taskCollection);
+        const recorded = learned?.length || follow_ups?.length ? await recordForTask({ id: r.id, collection: taskCollection }, { learned, follow_ups }) : void 0;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
         if (decision) text += `
 Recorded decision ${decision} (needed${decision_needed.owner ? `, for ${decision_needed.owner}` : ""}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
@@ -45111,6 +45166,7 @@ ${rec}`;
       let result;
       try {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
+        recordLastWrite((await getTask(id))?.collection);
       } catch (e) {
         return typedError(e);
       }
@@ -45142,6 +45198,7 @@ ${rec}`;
     },
     async ({ collection, tags, exclude_tags, claim: claim2, auto_only, include_cleanup, limit }) => {
       const r = await nextTasks({ collection, tags, excludeTags: exclude_tags, claim: claim2, autoOnly: auto_only, includeCleanup: include_cleanup });
+      if (r.claimed) recordLastWrite(collection);
       const lines = [];
       if (!r.claimsKnown) lines.push("_Claims could not be read (offline or signed out): teammates may already be on some of these._");
       if (claim2) {
@@ -45183,6 +45240,7 @@ ${rec}`;
     },
     async ({ id }) => {
       const collection = await deleteTask(id);
+      recordLastWrite(collection);
       return {
         content: [{ type: "text", text: `Deleted task ${id} from collection "${collection}"` }]
       };
@@ -45217,6 +45275,7 @@ ${rec}`;
     },
     async ({ task_id, depends_on_id }) => {
       await addDependency(task_id, depends_on_id);
+      recordLastWrite((await getTask(task_id))?.collection);
       return {
         content: [{ type: "text", text: `${task_id} now depends on ${depends_on_id}` }]
       };
@@ -45231,6 +45290,7 @@ ${rec}`;
     },
     async ({ task_id, depends_on_id }) => {
       await removeDependency(task_id, depends_on_id);
+      recordLastWrite((await getTask(task_id))?.collection);
       return {
         content: [{ type: "text", text: `${task_id} no longer depends on ${depends_on_id}` }]
       };
@@ -45310,6 +45370,7 @@ ${rec}`;
     },
     async ({ from, into, dry_run }) => {
       const r = await mergeCollections(from, into, { dryRun: dry_run });
+      if (!r.dryRun) recordLastWrite(into);
       const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
       const lines = r.dryRun ? [`Dry run: would move ${r.moved} document(s) from "${from}" into "${into}" (${types}), then remove "${from}". Nothing changed.`] : [`Moved ${r.moved} document(s) from "${from}" into "${into}" (${types}) and removed the empty "${from}".`];
       if (r.teammateRowsKept > 0) {
