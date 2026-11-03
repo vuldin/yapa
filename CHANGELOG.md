@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **The status line shows the YAPA this session runs.** It showed the installed script's version, so a session still running an older YAPA after an update looked current and silently lacked newer features (such as the last-written collection). Each MCP server now records its version for its session at start (`~/.local/share/yapa/sessions/<session id>.json`, removed at exit), and the status line shows that version, with `(restart for v<installed>)` when it is older. A session that has run a minute without any server record (older than 1.10.1, or no YAPA server) shows `yapa (restart for v<installed>)`.
+
 ## 1.10.0 (2026-11-02)
 
 Private and local-only collections work fully on one machine: claims, leases, counters and task ids are coordinated there, a project folder can be mapped to a private collection, private memories stay out of other projects' recall, and sessions on one machine no longer lose each other's writes.

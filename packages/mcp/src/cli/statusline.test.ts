@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 
 import {
   renderSegment, formatAgo, mergeStatusLine, removeStatusLine, isYapaStatusLine, encodeWrapped, installStatusLine,
-  uninstallStatusLine, hasStatusLine, readLastWrite, stdinSession, type HealthRecord,
+  uninstallStatusLine, hasStatusLine, readLastWrite, readSessionRecord, sessionInfo, stdinInfo, stdinSession, type HealthRecord,
 } from './statusline.js';
 
 const NOW = new Date(2026, 10, 1, 15, 0).getTime();
@@ -61,6 +61,18 @@ describe('renderSegment', () => {
     expect(renderSegment(rec({}), NOW, { ...v, collection: ' ' })).toBe('yapa@v1.6.0 ● synced 1m ago');
   });
 
+  it("shows this session's own YAPA, and when only a restart loads the installed one", () => {
+    const base = rec({ remote: 'acme' });
+    expect(renderSegment(base, NOW, { version: '1.10.1', session: { version: '1.10.1' } })).toBe('yapa@v1.10.1 <-> acme ● synced 1m ago');
+    expect(renderSegment(base, NOW, { version: '1.10.1', session: { version: '1.8.0' } })).toBe('yapa@v1.8.0 (restart for v1.10.1) <-> acme ● synced 1m ago');
+    // No live server reported for a session that has run a while: older than 1.10.1, or none.
+    expect(renderSegment(base, NOW, { version: '1.10.1', session: { missing: true } })).toBe('yapa (restart for v1.10.1) <-> acme ● synced 1m ago');
+    // A newer release is judged against what is installed.
+    expect(renderSegment(base, NOW, { version: '1.10.1', session: { version: '1.8.0' }, update: { current: '1.10.1', latest: '1.11.0' } }))
+      .toBe('yapa@v1.8.0 (restart for v1.10.1) (v1.11.0 available) <-> acme ● synced 1m ago');
+    expect(renderSegment(base, NOW, { version: '1.10.1', session: { version: '1.8.0' }, color: true })).toContain('\x1b[33m(restart for v1.10.1)\x1b[0m');
+  });
+
   it('an ok record that stopped updating is unknown; a failure stays shown', () => {
     expect(renderSegment(rec({ at: NOW - 3 * 3600_000 }), NOW, v)).toBe('yapa@v1.6.0 ○ sync status unknown (last checked 3h ago)');
     expect(renderSegment(rec({ status: 'signed_out', at: NOW - 3 * 3600_000, since: at(9, 12) }), NOW, v)).toContain('signed out since 09:12');
@@ -98,6 +110,31 @@ describe('last-write lookup', () => {
       expect(readLastWrite(dir, ['a', 'b'])).toEqual({ collection: 'project-b', at: 9 });
       expect(readLastWrite(dir, ['a', undefined, 'c', '../b'])).toEqual({ collection: 'project-a', at: 5 });
       expect(readLastWrite(dir, [undefined])).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('session records', () => {
+  it('reads the stdin session and its age (cost, else the transcript file)', () => {
+    expect(stdinInfo('{"session_id":"a","cost":{"total_duration_ms":5000}}')).toEqual({ session: 'a', ageMs: 5000 });
+    expect(stdinInfo('{"session_id":"a","transcript_path":"/nonexistent"}')).toEqual({ session: 'a', ageMs: undefined });
+    expect(stdinInfo('nope')).toEqual({});
+  });
+
+  it("takes the newest record of a live server, and a session's age decides when none means \"restart\"", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yapa-sl-sess-'));
+    try {
+      writeFileSync(join(dir, 'a.json'), JSON.stringify({ version: '1.10.1', pid: process.pid, started_at: 2 }));
+      writeFileSync(join(dir, 'b.json'), JSON.stringify({ version: '1.10.0', pid: process.pid, started_at: 1 }));
+      writeFileSync(join(dir, 'dead.json'), JSON.stringify({ version: '1.9.0', pid: 2 ** 30, started_at: 3 }));
+      expect(readSessionRecord(dir, ['a', 'b'])?.version).toBe('1.10.1');
+      expect(readSessionRecord(dir, ['dead'])).toBeUndefined();
+      expect(sessionInfo(readSessionRecord(dir, ['b']), 5)).toEqual({ version: '1.10.0' });
+      expect(sessionInfo(undefined, 10_000)).toBeUndefined(); // just started: its server may not have reported yet
+      expect(sessionInfo(undefined, 120_000)).toEqual({ missing: true });
+      expect(sessionInfo(undefined, undefined)).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -199,6 +236,18 @@ describe('the script as Claude Code runs it', () => {
     lw('s', 'project-acme', 3000);
     expect(run([], { CLAUDE_CODE_SESSION_ID: 'started-as' }).stdout).toBe('yapa@v1.6.0 <-> acme ● synced just now | project-acme\n');
     rmSync(join(d, 'last-write'), { recursive: true });
+  });
+
+  it("shows the session's own server version, or that it needs a restart", () => {
+    writeFileSync(join(d, 'sync-health.json'), JSON.stringify({ status: 'ok', at: Date.now(), last_ok_at: Date.now(), remote: 'acme' }));
+    mkdirSync(join(d, 'sessions'), { recursive: true });
+    const env = { CLAUDE_CODE_SESSION_ID: '' };
+    const runAs = (input: string) => spawnSync(process.execPath, [bundled], { input, encoding: 'utf-8', env: { ...process.env, NO_COLOR: '1', ...env } }).stdout;
+    writeFileSync(join(d, 'sessions', 'old.json'), JSON.stringify({ version: '1.5.0', pid: process.pid, started_at: 1 }));
+    expect(runAs('{"session_id":"old"}')).toBe('yapa@v1.5.0 (restart for v1.6.0) <-> acme ● synced just now\n');
+    expect(runAs('{"session_id":"unreported","cost":{"total_duration_ms":120000}}')).toBe('yapa (restart for v1.6.0) <-> acme ● synced just now\n');
+    expect(runAs('{"session_id":"fresh","cost":{"total_duration_ms":3000}}')).toBe('yapa@v1.6.0 <-> acme ● synced just now\n');
+    rmSync(join(d, 'sessions'), { recursive: true });
   });
 
   it('a missing record still prints a line', () => {

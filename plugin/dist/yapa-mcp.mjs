@@ -37904,14 +37904,14 @@ var Protocol = class {
     const handler = this._requestHandlers.get(request.method) ?? this.fallbackRequestHandler;
     const capturedTransport = this._transport;
     const relatedTaskId = request.params?._meta?.[RELATED_TASK_META_KEY]?.taskId;
-    const sessionId = capturedTransport?.sessionId;
+    const sessionId2 = capturedTransport?.sessionId;
     const store = this._taskStore;
     let relatedTaskFound = true;
     let relatedTaskLookup;
-    if (relatedTaskId && store && this._taskMessageQueue && sessionId !== void 0) {
+    if (relatedTaskId && store && this._taskMessageQueue && sessionId2 !== void 0) {
       relatedTaskFound = false;
       relatedTaskLookup = (async () => {
-        if (!await store.getTask(relatedTaskId, sessionId)) {
+        if (!await store.getTask(relatedTaskId, sessionId2)) {
           throw new McpError(ErrorCode.InvalidParams, `Task not found: ${relatedTaskId}`);
         }
         relatedTaskFound = true;
@@ -37928,7 +37928,7 @@ var Protocol = class {
       };
       if (relatedTaskId && relatedTaskLookup) {
         const queuedError = { type: "error", message: errorResponse, timestamp: Date.now() };
-        relatedTaskLookup.then(() => this._enqueueTaskMessage(relatedTaskId, queuedError, sessionId), () => capturedTransport?.send(errorResponse)).catch((error62) => this._onerror(new Error(`Failed to send an error response: ${error62}`)));
+        relatedTaskLookup.then(() => this._enqueueTaskMessage(relatedTaskId, queuedError, sessionId2), () => capturedTransport?.send(errorResponse)).catch((error62) => this._onerror(new Error(`Failed to send an error response: ${error62}`)));
       } else if (relatedTaskId && this._taskMessageQueue) {
         this._enqueueTaskMessage(relatedTaskId, {
           type: "error",
@@ -38493,21 +38493,21 @@ var Protocol = class {
    * the error appropriately (e.g., by failing the task, logging, etc.). The Protocol layer
    * simply propagates the error.
    */
-  async _enqueueTaskMessage(taskId, message, sessionId) {
+  async _enqueueTaskMessage(taskId, message, sessionId2) {
     if (!this._taskStore || !this._taskMessageQueue) {
       throw new Error("Cannot enqueue task message: taskStore and taskMessageQueue are not configured");
     }
     const maxQueueSize = this._options?.maxTaskQueueSize;
-    await this._taskMessageQueue.enqueue(taskId, message, sessionId ?? this._transport?.sessionId, maxQueueSize);
+    await this._taskMessageQueue.enqueue(taskId, message, sessionId2 ?? this._transport?.sessionId, maxQueueSize);
   }
   /**
    * Clears the message queue for a task and rejects any pending request resolvers.
    * @param taskId The task ID whose queue should be cleared
    * @param sessionId Optional session ID for binding the operation to a specific session
    */
-  async _clearTaskQueue(taskId, sessionId) {
+  async _clearTaskQueue(taskId, sessionId2) {
     if (this._taskMessageQueue) {
-      const messages = await this._taskMessageQueue.dequeueAll(taskId, sessionId);
+      const messages = await this._taskMessageQueue.dequeueAll(taskId, sessionId2);
       for (const message of messages) {
         if (message.type === "request" && isJSONRPCRequest(message.message)) {
           const requestId = message.message.id;
@@ -38530,10 +38530,10 @@ var Protocol = class {
    * @param sessionId Session of the request that waits, passed to the task store
    * @returns Promise that resolves when an update occurs or rejects if aborted
    */
-  async _waitForTaskUpdate(taskId, signal, sessionId) {
+  async _waitForTaskUpdate(taskId, signal, sessionId2) {
     let interval = this._options?.defaultTaskPollInterval ?? 1e3;
     try {
-      const task = await this._taskStore?.getTask(taskId, sessionId);
+      const task = await this._taskStore?.getTask(taskId, sessionId2);
       if (task?.pollInterval) {
         interval = task.pollInterval;
       }
@@ -38551,7 +38551,7 @@ var Protocol = class {
       }, { once: true });
     });
   }
-  requestTaskStore(request, sessionId) {
+  requestTaskStore(request, sessionId2) {
     const taskStore = this._taskStore;
     if (!taskStore) {
       throw new Error("No task store configured");
@@ -38564,18 +38564,18 @@ var Protocol = class {
         return await taskStore.createTask(taskParams, request.id, {
           method: request.method,
           params: request.params
-        }, sessionId);
+        }, sessionId2);
       },
       getTask: async (taskId) => {
-        const task = await taskStore.getTask(taskId, sessionId);
+        const task = await taskStore.getTask(taskId, sessionId2);
         if (!task) {
           throw new McpError(ErrorCode.InvalidParams, "Failed to retrieve task: Task not found");
         }
         return task;
       },
       storeTaskResult: async (taskId, status, result) => {
-        await taskStore.storeTaskResult(taskId, status, result, sessionId);
-        const task = await taskStore.getTask(taskId, sessionId);
+        await taskStore.storeTaskResult(taskId, status, result, sessionId2);
+        const task = await taskStore.getTask(taskId, sessionId2);
         if (task) {
           const notification = TaskStatusNotificationSchema.parse({
             method: "notifications/tasks/status",
@@ -38588,18 +38588,18 @@ var Protocol = class {
         }
       },
       getTaskResult: (taskId) => {
-        return taskStore.getTaskResult(taskId, sessionId);
+        return taskStore.getTaskResult(taskId, sessionId2);
       },
       updateTaskStatus: async (taskId, status, statusMessage) => {
-        const task = await taskStore.getTask(taskId, sessionId);
+        const task = await taskStore.getTask(taskId, sessionId2);
         if (!task) {
           throw new McpError(ErrorCode.InvalidParams, `Task "${taskId}" not found - it may have been cleaned up`);
         }
         if (isTerminal(task.status)) {
           throw new McpError(ErrorCode.InvalidParams, `Cannot update task "${taskId}" from terminal status "${task.status}" to "${status}". Terminal states (completed, failed, cancelled) cannot transition to other states.`);
         }
-        await taskStore.updateTaskStatus(taskId, status, statusMessage, sessionId);
-        const updatedTask = await taskStore.getTask(taskId, sessionId);
+        await taskStore.updateTaskStatus(taskId, status, statusMessage, sessionId2);
+        const updatedTask = await taskStore.getTask(taskId, sessionId2);
         if (updatedTask) {
           const notification = TaskStatusNotificationSchema.parse({
             method: "notifications/tasks/status",
@@ -38612,7 +38612,7 @@ var Protocol = class {
         }
       },
       listTasks: (cursor) => {
-        return taskStore.listTasks(cursor, sessionId);
+        return taskStore.listTasks(cursor, sessionId2);
       }
     };
   }
@@ -38963,8 +38963,8 @@ var Server = class extends Protocol {
     this._serverInfo = _serverInfo;
     this._loggingLevels = /* @__PURE__ */ new Map();
     this.LOG_LEVEL_SEVERITY = new Map(LoggingLevelSchema.options.map((level, index) => [level, index]));
-    this.isMessageIgnored = (level, sessionId) => {
-      const currentLevel = this._loggingLevels.get(sessionId);
+    this.isMessageIgnored = (level, sessionId2) => {
+      const currentLevel = this._loggingLevels.get(sessionId2);
       return currentLevel ? this.LOG_LEVEL_SEVERITY.get(level) < this.LOG_LEVEL_SEVERITY.get(currentLevel) : false;
     };
     this._capabilities = options?.capabilities ?? {};
@@ -39298,9 +39298,9 @@ var Server = class extends Protocol {
    * @param params
    * @param sessionId optional for stateless and backward compatibility
    */
-  async sendLoggingMessage(params, sessionId) {
+  async sendLoggingMessage(params, sessionId2) {
     if (this._capabilities.logging) {
-      if (!this.isMessageIgnored(params.level, sessionId)) {
+      if (!this.isMessageIgnored(params.level, sessionId2)) {
         return this.notification({ method: "notifications/message", params });
       }
     }
@@ -40139,8 +40139,8 @@ var McpServer = class {
    * @param params
    * @param sessionId optional for stateless and backward compatibility
    */
-  async sendLoggingMessage(params, sessionId) {
-    return this.server.sendLoggingMessage(params, sessionId);
+  async sendLoggingMessage(params, sessionId2) {
+    return this.server.sendLoggingMessage(params, sessionId2);
   }
   /**
    * Sends a resource list changed event to the client, if connected.
@@ -41219,9 +41219,9 @@ import { randomBytes } from "crypto";
 init_sentinel();
 var SESSION_ID = process.env.YAPA_SESSION_ID ?? `${Date.now()}-${randomBytes(4).toString("hex")}`;
 var DRAFT_TYPE = "journal_draft";
-async function journalAppend(entry, collection, sessionId) {
+async function journalAppend(entry, collection, sessionId2) {
   const { collection: col } = await resolveWriteCollection(collection ?? "global");
-  const sid = sessionId ?? SESSION_ID;
+  const sid = sessionId2 ?? SESSION_ID;
   await getOrCreateCollection2(col);
   const now = Math.floor(Date.now() / 1e3);
   const id = `journal-${getConfig().USERNAME}-${sid}-${now}-${Math.random().toString(36).slice(2, 6)}`;
@@ -41234,9 +41234,9 @@ async function journalAppend(entry, collection, sessionId) {
   });
   return id;
 }
-async function listSessionDrafts(collection, sessionId) {
+async function listSessionDrafts(collection, sessionId2) {
   const col = collection ?? "global";
-  const sid = sessionId ?? SESSION_ID;
+  const sid = sessionId2 ?? SESSION_ID;
   try {
     const docs = await getDocumentsByFilter2(col, {
       type: DRAFT_TYPE,
@@ -41276,11 +41276,11 @@ ${body}`, {
   }
   return { memory_id: stored.ids[0], draft_count: drafts.length };
 }
-async function consolidateSessionEverywhere(sessionId = SESSION_ID) {
+async function consolidateSessionEverywhere(sessionId2 = SESSION_ID) {
   const out = [];
   for (const col of await listCollections2().catch(() => [])) {
     try {
-      const result = await journalConsolidate({ collection: col.name, sessionId });
+      const result = await journalConsolidate({ collection: col.name, sessionId: sessionId2 });
       if (result) out.push(result);
     } catch (e) {
       process.stderr.write(`[yapa] journal: consolidate failed in ${col.name}: ${e}
@@ -44908,6 +44908,64 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
 // packages/core/src/index.ts
 init_doc_lock();
 
+// packages/core/src/session-record.ts
+init_config();
+init_fs_lock();
+import { readdirSync as readdirSync6, readFileSync as readFileSync16, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
+import { dirname as dirname8, join as join13 } from "node:path";
+var PRUNE_AFTER_MS2 = 7 * 24 * 3600 * 1e3;
+function sessionRecordDir() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join13(dirname8(health), "sessions") : "";
+}
+function sessionRecordFile(session, dir = sessionRecordDir()) {
+  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function sessionId(explicit) {
+  const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
+  return v && /^[A-Za-z0-9._:-]{1,128}$/.test(v) ? v : void 0;
+}
+function recordSessionStart(version2, opts = {}) {
+  const session = sessionId(opts.session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!session || !dir) return void 0;
+  const file2 = sessionRecordFile(session, dir);
+  try {
+    writeJsonAtomic(file2, { version: version2, pid: process.pid, started_at: opts.now ?? Date.now() });
+    pruneSessionRecords(dir, opts.now ?? Date.now());
+    return file2;
+  } catch {
+    return void 0;
+  }
+}
+function removeSessionRecord(opts = {}) {
+  const session = sessionId(opts.session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!session || !dir) return;
+  const file2 = sessionRecordFile(session, dir);
+  try {
+    const r = JSON.parse(readFileSync16(file2, "utf-8"));
+    if (r.pid === process.pid) rmSync6(file2, { force: true });
+  } catch {
+  }
+}
+function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
+  if (!dir) return;
+  try {
+    for (const name of readdirSync6(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const p = join13(dir, name);
+      try {
+        const r = JSON.parse(readFileSync16(p, "utf-8"));
+        if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
+      } catch {
+        rmSync6(p, { force: true });
+      }
+    }
+  } catch {
+  }
+}
+
 // packages/mcp/src/coord.ts
 var EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 };
 function defaultSession() {
@@ -46740,6 +46798,7 @@ async function startupDecay() {
   }
 }
 async function main() {
+  recordSessionStart(YAPA_VERSION);
   if (getConfig().STORAGE === "local") {
     process.stderr.write(`\u2705 YAPA started with the embedded local store at ${getConfig().LOCAL_STORE_PATH} (embeddings: ${getConfig().EMBEDDING_PROVIDER})
 `);
@@ -46807,6 +46866,7 @@ async function shutdown(reason) {
     }
   })();
   await Promise.race([work, new Promise((resolve) => setTimeout(resolve, SHUTDOWN_BUDGET_MS).unref())]);
+  removeSessionRecord();
   process.exit(0);
 }
 process.stdin.on("end", () => void shutdown("stdin closed"));

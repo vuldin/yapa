@@ -2404,9 +2404,9 @@ var init_compact = __esm({
 
 // packages/core/src/memory/journal.ts
 import { randomBytes } from "crypto";
-async function journalAppend(entry, collection, sessionId) {
+async function journalAppend(entry, collection, sessionId2) {
   const { collection: col } = await resolveWriteCollection(collection ?? "global");
-  const sid = sessionId ?? SESSION_ID;
+  const sid = sessionId2 ?? SESSION_ID;
   await getOrCreateCollection2(col);
   const now = Math.floor(Date.now() / 1e3);
   const id = `journal-${getConfig().USERNAME}-${sid}-${now}-${Math.random().toString(36).slice(2, 6)}`;
@@ -2419,9 +2419,9 @@ async function journalAppend(entry, collection, sessionId) {
   });
   return id;
 }
-async function listSessionDrafts(collection, sessionId) {
+async function listSessionDrafts(collection, sessionId2) {
   const col = collection ?? "global";
-  const sid = sessionId ?? SESSION_ID;
+  const sid = sessionId2 ?? SESSION_ID;
   try {
     const docs = await getDocumentsByFilter2(col, {
       type: DRAFT_TYPE,
@@ -2461,11 +2461,11 @@ ${body}`, {
   }
   return { memory_id: stored.ids[0], draft_count: drafts.length };
 }
-async function consolidateSessionEverywhere(sessionId = SESSION_ID) {
+async function consolidateSessionEverywhere(sessionId2 = SESSION_ID) {
   const out = [];
   for (const col of await listCollections2().catch(() => [])) {
     try {
-      const result = await journalConsolidate({ collection: col.name, sessionId });
+      const result = await journalConsolidate({ collection: col.name, sessionId: sessionId2 });
       if (result) out.push(result);
     } catch (e) {
       process.stderr.write(`[yapa] journal: consolidate failed in ${col.name}: ${e}
@@ -6697,7 +6697,7 @@ Omit the disposition fields except for a finding. If nothing is settled, return 
 // packages/core/src/curation/capture.ts
 async function captureTurn(input2, options, deps = {}) {
   const d = { ...defaultDeps, ...deps };
-  const { collection, sessionId, turn } = input2;
+  const { collection, sessionId: sessionId2, turn } = input2;
   let settled = [];
   try {
     const f = await d.followThrough({ collection, userText: input2.userText, assistantText: input2.assistantText, taskIds: options.taskIds });
@@ -6715,7 +6715,7 @@ async function captureTurn(input2, options, deps = {}) {
     { maxMemories: options.maxMemories }
   );
   if (!candidates.length) {
-    if (settledNotice) d.log(`${settledNotice} [session ${sessionId}, turn ${turn}]`);
+    if (settledNotice) d.log(`${settledNotice} [session ${sessionId2}, turn ${turn}]`);
     return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice } : {} };
   }
   let stored = 0;
@@ -6766,7 +6766,7 @@ async function captureTurn(input2, options, deps = {}) {
       supersedes,
       metadata: {
         source: "auto-capture",
-        session_id: sessionId,
+        session_id: sessionId2,
         turn,
         extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
         rationale: candidate.rationale,
@@ -6782,7 +6782,7 @@ async function captureTurn(input2, options, deps = {}) {
   let notice;
   if (stored > 0 || skipped > 0) {
     notice = `Auto-captured ${stored} ${stored === 1 ? "memory" : "memories"} from last turn` + (superseded ? `, ${superseded} superseding stale ${superseded === 1 ? "memory" : "memories"}` : "") + (skipped ? ` (${skipped} skipped as already known)` : "") + ` \u2192 \`${collection}\``;
-    d.log(`${notice} [session ${sessionId}, turn ${turn}]`);
+    d.log(`${notice} [session ${sessionId2}, turn ${turn}]`);
   }
   if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
   return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice };
@@ -7573,7 +7573,7 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
   if (!p) return () => {
   };
   const now = opts.now ?? Date.now();
-  const alive = opts.alive ?? pidAlive;
+  const alive2 = opts.alive ?? pidAlive;
   const staleAfter = Math.max(2 * config.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
   const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
   for (let attempt2 = 0; attempt2 < 2; attempt2++) {
@@ -7596,7 +7596,7 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
       if (e.code !== "EEXIST") return () => {
       };
       const held2 = readJson(p.lock);
-      const stale2 = !held2 || !alive(held2.pid) || now - held2.started_at > staleAfter || held2.started_at > now + 6e4;
+      const stale2 = !held2 || !alive2(held2.pid) || now - held2.started_at > staleAfter || held2.started_at > now + 6e4;
       if (!stale2 || attempt2 > 0) return void 0;
       rmSync4(p.lock, { force: true });
     }
@@ -9126,6 +9126,70 @@ var init_last_write = __esm({
   }
 });
 
+// packages/core/src/session-record.ts
+import { readdirSync as readdirSync6, readFileSync as readFileSync17, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
+import { dirname as dirname8, join as join13 } from "node:path";
+function sessionRecordDir() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join13(dirname8(health), "sessions") : "";
+}
+function sessionRecordFile(session, dir = sessionRecordDir()) {
+  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+function sessionId(explicit) {
+  const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
+  return v && /^[A-Za-z0-9._:-]{1,128}$/.test(v) ? v : void 0;
+}
+function recordSessionStart(version, opts = {}) {
+  const session = sessionId(opts.session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!session || !dir) return void 0;
+  const file = sessionRecordFile(session, dir);
+  try {
+    writeJsonAtomic(file, { version, pid: process.pid, started_at: opts.now ?? Date.now() });
+    pruneSessionRecords(dir, opts.now ?? Date.now());
+    return file;
+  } catch {
+    return void 0;
+  }
+}
+function removeSessionRecord(opts = {}) {
+  const session = sessionId(opts.session);
+  const dir = opts.dir ?? sessionRecordDir();
+  if (!session || !dir) return;
+  const file = sessionRecordFile(session, dir);
+  try {
+    const r = JSON.parse(readFileSync17(file, "utf-8"));
+    if (r.pid === process.pid) rmSync6(file, { force: true });
+  } catch {
+  }
+}
+function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
+  if (!dir) return;
+  try {
+    for (const name of readdirSync6(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const p = join13(dir, name);
+      try {
+        const r = JSON.parse(readFileSync17(p, "utf-8"));
+        if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
+      } catch {
+        rmSync6(p, { force: true });
+      }
+    }
+  } catch {
+  }
+}
+var PRUNE_AFTER_MS2;
+var init_session_record = __esm({
+  "packages/core/src/session-record.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    PRUNE_AFTER_MS2 = 7 * 24 * 3600 * 1e3;
+  }
+});
+
 // packages/core/src/index.ts
 var src_exports = {};
 __export(src_exports, {
@@ -9359,6 +9423,7 @@ __export(src_exports, {
   patchDocuments: () => patchDocuments2,
   pidAlive: () => pidAlive,
   pruneLastWrites: () => pruneLastWrites,
+  pruneSessionRecords: () => pruneSessionRecords,
   pullCollection: () => pullCollection,
   pullFromRemote: () => pullFromRemote,
   pushDocsNow: () => pushDocsNow,
@@ -9382,6 +9447,7 @@ __export(src_exports, {
   recordForTask: () => recordForTask,
   recordLastWrite: () => recordLastWrite,
   recordPull: () => recordPull,
+  recordSessionStart: () => recordSessionStart,
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
   redirectNote: () => redirectNote,
@@ -9390,6 +9456,7 @@ __export(src_exports, {
   releaseTaskClaim: () => releaseTaskClaim,
   removeCollection: () => removeCollection,
   removeDependency: () => removeDependency,
+  removeSessionRecord: () => removeSessionRecord,
   requestDecision: () => requestDecision,
   requireCoordination: () => requireCoordination,
   requireSyncBackend: () => requireSyncBackend,
@@ -9408,6 +9475,8 @@ __export(src_exports, {
   scopeNotes: () => scopeNotes,
   searchTasks: () => searchTasks,
   serviceCoordination: () => serviceCoordination,
+  sessionRecordDir: () => sessionRecordDir,
+  sessionRecordFile: () => sessionRecordFile,
   sessionsHoldingLeases: () => sessionsHoldingLeases,
   setConfig: () => setConfig,
   setHostLLMCaller: () => setHostLLMCaller,
@@ -9551,6 +9620,7 @@ var init_src = __esm({
     init_update_check();
     init_last_write();
     init_doc_lock();
+    init_session_record();
   }
 });
 
@@ -9608,6 +9678,7 @@ var statusline_exports = {};
 __export(statusline_exports, {
   REMOVED_MARKER: () => REMOVED_MARKER,
   SCRIPT_VERSION: () => SCRIPT_VERSION,
+  SESSION_REPORT_GRACE_MS: () => SESSION_REPORT_GRACE_MS,
   copyScript: () => copyScript,
   decodeWrapped: () => decodeWrapped,
   defaultSettingsPath: () => defaultSettingsPath,
@@ -9622,17 +9693,20 @@ __export(statusline_exports, {
   newer: () => newer,
   readHealth: () => readHealth,
   readLastWrite: () => readLastWrite2,
+  readSessionRecord: () => readSessionRecord,
   readUpdate: () => readUpdate,
   removeStatusLine: () => removeStatusLine,
   renderSegment: () => renderSegment,
+  sessionInfo: () => sessionInfo,
   setRemovedMarker: () => setRemovedMarker,
+  stdinInfo: () => stdinInfo,
   stdinSession: () => stdinSession,
   uninstallStatusLine: () => uninstallStatusLine
 });
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync17, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync6, writeFileSync as writeFileSync10 } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync18, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname8, join as join13, resolve } from "node:path";
+import { dirname as dirname9, join as join14, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -9672,10 +9746,13 @@ function remoteName(health, explicit) {
 }
 function renderSegment(health, now, opts = {}) {
   const paint = (tone, text) => opts.color ? `${ANSI[tone]}${text}${ANSI.reset}` : text;
-  const version = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
-  const latest = opts.update?.latest && version && newer(opts.update.latest, version) ? opts.update.latest : void 0;
+  const installed = opts.version ?? SCRIPT_VERSION ?? opts.update?.current;
+  const running2 = opts.session?.version ?? installed;
+  const restart = installed && (opts.session?.missing || opts.session?.version && newer(installed, opts.session.version)) ? installed : void 0;
+  const latest = opts.update?.latest && installed && newer(opts.update.latest, installed) ? opts.update.latest : void 0;
   const remote = remoteName(health, opts.remote ?? opts.label);
-  const head = `yapa${version ? `@v${version}` : ""}` + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
+  const shown = opts.session?.missing ? "yapa" : `yapa${running2 ? `@v${running2}` : ""}`;
+  const head = shown + (restart ? ` ${paint("yellow", `(restart for v${restart})`)}` : "") + (latest ? ` ${paint("yellow", `(v${latest} available)`)}` : "") + (remote ? ` <-> ${remote}` : "");
   const push = health?.unpushed ? ` \xB7 ${health.unpushed} to push` : "";
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
   const tail = cleanCollection(opts.collection);
@@ -9713,7 +9790,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync17(join13(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -9721,16 +9798,55 @@ function readLastWrite2(dir, sessions) {
   return best;
 }
 function stdinSession(input2) {
+  return stdinInfo(input2).session;
+}
+function stdinInfo(input2, now = Date.now()) {
+  let j;
   try {
-    const v = JSON.parse(input2)?.session_id;
-    return typeof v === "string" ? v : void 0;
+    j = JSON.parse(input2);
   } catch {
-    return void 0;
+    return {};
   }
+  const session = typeof j?.session_id === "string" ? j.session_id : void 0;
+  let ageMs = typeof j?.cost?.total_duration_ms === "number" ? j.cost.total_duration_ms : void 0;
+  if (ageMs === void 0 && typeof j?.transcript_path === "string") {
+    try {
+      const born = statSync4(j.transcript_path).birthtimeMs;
+      if (born > 0) ageMs = now - born;
+    } catch {
+    }
+  }
+  return { session, ageMs };
+}
+function alive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function readSessionRecord(dir, sessions) {
+  let best;
+  for (const s of new Set(sessions)) {
+    if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
+    try {
+      const r = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      if (r && typeof r.version === "string" && typeof r.pid === "number" && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
+    } catch {
+    }
+  }
+  return best;
+}
+function sessionInfo(record, ageMs) {
+  if (record) return { version: record.version };
+  if (ageMs !== void 0 && ageMs > SESSION_REPORT_GRACE_MS) return { missing: true };
+  return void 0;
 }
 function readUpdate(path3) {
   try {
-    const u = JSON.parse(readFileSync17(path3, "utf-8"));
+    const u = JSON.parse(readFileSync18(path3, "utf-8"));
     return u && typeof u === "object" ? { current: typeof u.current === "string" ? u.current : void 0, latest: typeof u.latest === "string" ? u.latest : void 0 } : void 0;
   } catch {
     return void 0;
@@ -9738,7 +9854,7 @@ function readUpdate(path3) {
 }
 function readHealth(path3) {
   try {
-    const h = JSON.parse(readFileSync17(path3, "utf-8"));
+    const h = JSON.parse(readFileSync18(path3, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -9786,18 +9902,18 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join13(process.env.CLAUDE_CONFIG_DIR ?? join13(homedir3(), ".claude"), "settings.json");
+  return join14(process.env.CLAUDE_CONFIG_DIR ?? join14(homedir3(), ".claude"), "settings.json");
 }
 function readSettings(path3) {
   try {
-    return JSON.parse(readFileSync17(path3, "utf-8"));
+    return JSON.parse(readFileSync18(path3, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
   }
 }
 function writeSettings(path3, settings) {
-  mkdirSync11(dirname8(path3), { recursive: true });
+  mkdirSync11(dirname9(path3), { recursive: true });
   const tmp = `${path3}.${process.pid}.tmp`;
   writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
   renameSync7(tmp, path3);
@@ -9812,7 +9928,7 @@ function uninstallStatusLine(path3 = defaultSettingsPath(), script) {
 }
 function hasStatusLine(path3 = defaultSettingsPath(), script) {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync17(path3, "utf-8")).statusLine, script);
+    return isYapaStatusLine(JSON.parse(readFileSync18(path3, "utf-8")).statusLine, script);
   } catch {
     return false;
   }
@@ -9820,29 +9936,29 @@ function hasStatusLine(path3 = defaultSettingsPath(), script) {
 function copyScript(from, to) {
   let src;
   try {
-    src = readFileSync17(from);
+    src = readFileSync18(from);
   } catch {
     return false;
   }
   try {
-    if (readFileSync17(to).equals(src)) return false;
+    if (readFileSync18(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync11(dirname8(to), { recursive: true, mode: 448 });
+  mkdirSync11(dirname9(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
   renameSync7(tmp, to);
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join13(dir, REMOVED_MARKER);
+  const p = join14(dir, REMOVED_MARKER);
   try {
     if (removed) {
       mkdirSync11(dir, { recursive: true, mode: 448 });
       writeFileSync10(p, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
     } else {
-      rmSync6(p, { force: true });
+      rmSync7(p, { force: true });
     }
   } catch {
   }
@@ -9862,13 +9978,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
-    setRemovedMarker(dirname8(self2), false);
+    setRemovedMarker(dirname9(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
     process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
-    setRemovedMarker(dirname8(self2), true);
+    setRemovedMarker(dirname9(self2), true);
     return;
   }
   const input2 = await readStdin();
@@ -9879,15 +9995,19 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join13(dirname8(self2), "sync-health.json");
-  const update = readUpdate(join13(dirname8(healthPath), "update-check.json"));
-  const last = readLastWrite2(join13(dirname8(healthPath), "last-write"), [stdinSession(input2), process.env.CLAUDE_CODE_SESSION_ID]);
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join14(dirname9(self2), "sync-health.json");
+  const update = readUpdate(join14(dirname9(healthPath), "update-check.json"));
+  const info = stdinInfo(input2);
+  const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
+  const last = readLastWrite2(join14(dirname9(healthPath), "last-write"), ids);
+  const session = sessionInfo(readSessionRecord(join14(dirname9(healthPath), "sessions"), ids), info.ageMs);
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color,
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
     update,
-    collection: last?.collection
+    collection: last?.collection,
+    session
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -9898,7 +10018,7 @@ function isMain(argv1, self2) {
     return false;
   }
 }
-var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_MS, ANSI, REMOVED_MARKER, self;
+var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_MS, ANSI, SESSION_REPORT_GRACE_MS, REMOVED_MARKER, self;
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
@@ -9908,6 +10028,7 @@ var init_statusline = __esm({
     STALE_INTERVALS = 3;
     WRAP_TIMEOUT_MS = 5e3;
     ANSI = { green: "\x1B[32m", red: "\x1B[31m", yellow: "\x1B[33m", dim: "\x1B[2m", reset: "\x1B[0m" };
+    SESSION_REPORT_GRACE_MS = 6e4;
     REMOVED_MARKER = "statusline-removed";
     self = fileURLToPath(import.meta.url);
     if (isMain(process.argv[1], self)) {
@@ -9950,9 +10071,9 @@ __export(hooks_exports, {
   userText: () => userText,
   waitingLines: () => waitingLines
 });
-import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync18, rmSync as rmSync7, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync19, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname9, join as join14 } from "node:path";
+import { dirname as dirname10, join as join15 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -10017,11 +10138,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join14(dirname9(health), "statusline.mjs") : void 0;
+  return health ? join15(dirname10(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
-  const here = dirname9(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join14(here, f)).find((p) => existsSync4(p));
+  const here = dirname10(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join15(here, f)).find((p) => existsSync4(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -10035,8 +10156,8 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join14(dirname9(to), "statusline-added");
-    if (existsSync4(join14(dirname9(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    const added = join15(dirname10(to), "statusline-added");
+    if (existsSync4(join15(dirname10(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
@@ -10052,7 +10173,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join14(dirname9(to), "statusline-hint");
+  const marker = join15(dirname10(to), "statusline-hint");
   if (existsSync4(marker)) return void 0;
   try {
     writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
@@ -10071,37 +10192,37 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join14(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join14(base, "sessions");
+  const base = process.env.CLAUDE_PLUGIN_DATA || join15(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join15(base, "sessions");
   mkdirSync12(dir, { recursive: true });
   return dir;
 }
-function stateFile2(sessionId, kind) {
-  return join14(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+function stateFile2(sessionId2, kind) {
+  return join15(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
-function readTurn(sessionId) {
+function readTurn(sessionId2) {
   try {
-    return JSON.parse(readFileSync18(stateFile2(sessionId, "turn"), "utf-8"));
+    return JSON.parse(readFileSync19(stateFile2(sessionId2, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
 }
-function recordPrompt(sessionId, prompt) {
-  if (!sessionId) return;
+function recordPrompt(sessionId2, prompt) {
+  if (!sessionId2) return;
   try {
-    const turn = (readTurn(sessionId)?.turn ?? 0) + 1;
-    writeFileSync11(stateFile2(sessionId, "turn"), JSON.stringify({ prompt, turn }));
+    const turn = (readTurn(sessionId2)?.turn ?? 0) + 1;
+    writeFileSync11(stateFile2(sessionId2, "turn"), JSON.stringify({ prompt, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
   }
 }
-function takeNotice(sessionId) {
-  if (!sessionId) return void 0;
-  const file = stateFile2(sessionId, "notice");
+function takeNotice(sessionId2) {
+  if (!sessionId2) return void 0;
+  const file = stateFile2(sessionId2, "notice");
   try {
-    const notice = readFileSync18(file, "utf-8").trim();
-    rmSync7(file, { force: true });
+    const notice = readFileSync19(file, "utf-8").trim();
+    rmSync8(file, { force: true });
     return notice || void 0;
   } catch {
     return void 0;
@@ -10347,7 +10468,7 @@ async function sessionEnd(input2) {
   if (!input2.session_id) return;
   for (const kind of ["turn", "notice"]) {
     try {
-      rmSync7(stateFile2(input2.session_id, kind), { force: true });
+      rmSync8(stateFile2(input2.session_id, kind), { force: true });
     } catch {
     }
   }
@@ -10382,9 +10503,9 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync13, readFileSync as readFileSync19, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync13, readFileSync as readFileSync20, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname10, join as join15 } from "node:path";
+import { dirname as dirname11, join as join16 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -10411,14 +10532,14 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join15(process.env.CLAUDE_CONFIG_DIR ?? join15(homedir4(), ".claude"), "settings.json");
+  return join16(process.env.CLAUDE_CONFIG_DIR ?? join16(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
 function readSettings2(path3) {
   try {
-    return JSON.parse(readFileSync19(path3, "utf-8"));
+    return JSON.parse(readFileSync20(path3, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
@@ -10426,7 +10547,7 @@ function readSettings2(path3) {
 }
 function installHooks(path3 = defaultSettingsPath2(), command = selfCommand()) {
   const merged = mergeHooks(readSettings2(path3), command);
-  mkdirSync13(dirname10(path3), { recursive: true });
+  mkdirSync13(dirname11(path3), { recursive: true });
   writeFileSync12(path3, JSON.stringify(merged, null, 2) + "\n");
   return path3;
 }
@@ -10569,7 +10690,7 @@ __export(task_exports, {
   TASK_USAGE: () => TASK_USAGE,
   runTask: () => runTask
 });
-import { readFileSync as readFileSync20 } from "node:fs";
+import { readFileSync as readFileSync21 } from "node:fs";
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -10784,7 +10905,7 @@ function jsonFile(path3, shape) {
   if (path3 === void 0) return void 0;
   let v;
   try {
-    v = JSON.parse(readFileSync20(path3 === "-" ? 0 : path3, "utf8"));
+    v = JSON.parse(readFileSync21(path3 === "-" ? 0 : path3, "utf8"));
   } catch (e) {
     throw new UsageError(`${path3}: ${e instanceof Error ? e.message : e}`);
   }
@@ -10996,7 +11117,7 @@ var init_memory = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname11, join as join16 } from "node:path";
+import { dirname as dirname12, join as join17 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 import { readFileSync } from "node:fs";
@@ -11141,18 +11262,18 @@ async function runStatusLineCommand(action, args) {
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path3)} (runs ${script})
 `);
-      sl.setRemovedMarker(dirname11(script), false);
+      sl.setRemovedMarker(dirname12(script), false);
       return;
     }
     case "uninstall":
       process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path3, script)}
 `);
-      if (script) sl.setRemovedMarker(dirname11(script), true);
+      if (script) sl.setRemovedMarker(dirname12(script), true);
       return;
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join16(dirname11(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join17(dirname12(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,

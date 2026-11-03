@@ -18,6 +18,9 @@ sync health record and its daily release check (no network calls of its own):
   writes are waiting), `● signed out since 09:12 · run: gcloud auth login`
   (red), `● offline since 09:12` / `● sync error ...` (yellow), `○ local only` /
   `○ sync status unknown` (dim).
+- `(restart for v<installed>)` (yellow): this session's YAPA server is older
+  than the one installed (or never reported its version); restart the
+  session to load it.
 - `| project-acme`: the collection this session last wrote to (a memory,
   task, journal entry or merge through YAPA). Absent until the session's
   first write.
