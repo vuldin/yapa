@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.10.1 (2026-11-03)
+
+The status line now shows the YAPA each session actually runs, and says when a session needs a restart to load the installed one.
+
+**Upgrading:** update the plugin and restart Claude Code, including old sessions (they then show `(restart for v1.10.1)` until restarted). Nothing to deploy.
 
 ### Fixes
 - **The status line shows the YAPA this session runs.** It showed the installed script's version, so a session still running an older YAPA after an update looked current and silently lacked newer features (such as the last-written collection). Each MCP server now records its version for its session at start (`~/.local/share/yapa/sessions/<session id>.json`, removed at exit), and the status line shows that version, with `(restart for v<installed>)` when it is older. A session that has run a minute without any server record (older than 1.10.1, or no YAPA server) shows `yapa (restart for v<installed>)`.
