@@ -148,6 +148,7 @@ describe('authenticated, no-DB routes', () => {
     const limits = (await r.json()).limits;
     expect(limits.pull_max_bytes).toBe(8 * 1024 * 1024);
     expect(limits.deleted_retention_days).toBe(30);
+    expect(limits.erasure).toBe('delete');
   });
 
   it('soft-delete routes validate input before any DB access', async () => {

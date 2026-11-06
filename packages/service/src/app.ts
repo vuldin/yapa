@@ -239,6 +239,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         pull_max_bytes: pullMaxBytes,
         similarity_threshold: config.similarityThreshold,
         deleted_retention_days: retentionDays,
+        erasure: 'delete',
       },
     });
   });
