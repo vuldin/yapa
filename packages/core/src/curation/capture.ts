@@ -68,6 +68,8 @@ export interface CaptureTurnResult {
   settled?: Array<{ id: string; kind: string; status: string; note: string }>;
   /** One-line visibility notice for the next injection, or undefined if nothing happened. */
   notice?: string;
+  /** Documents this turn wrote (stored chunks and settled items), for an immediate push. */
+  ids?: string[];
 }
 
 const defaultDeps: CaptureDeps = {
@@ -143,12 +145,13 @@ async function runCapture(
   );
   if (!candidates.length) {
     if (settledNotice) d.log(`${settledNotice} [session ${sessionId}, turn ${turn}]`);
-    return { stored: 0, skipped: 0, superseded: 0, ...(settled.length ? { settled, notice: settledNotice } : {}) };
+    return { stored: 0, skipped: 0, superseded: 0, ...(settled.length ? { settled, notice: settledNotice, ids: settled.map(c => c.id) } : {}) };
   }
 
   let stored = 0;
   let skipped = 0;
   let superseded = 0;
+  const written: string[] = settled.map(c => c.id);
   for (const candidate of candidates) {
     const neighbors = await d.queryDocuments(collection, candidate.content, 3, { type: 'memory' })
       .then(results => results.filter(r => r.distance < options.dedupeDistance && r.metadata?.archived !== true))
@@ -201,7 +204,7 @@ async function runCapture(
       ? { kind: candidate.kind, ...(candidate.kind === 'decision' ? { status: 'accepted' } : {}), ...(candidate.owner ? { owner: candidate.owner } : {}), ...(options.taskIds?.length ? { task_ids: options.taskIds } : {}) }
       : undefined;
     try {
-      await d.storeMemory(content, {
+      const r = await d.storeMemory(content, {
         collection,
         ...(typed ? { typed } : {}),
         tags: [...new Set([...candidate.tags, 'auto-capture'])],
@@ -220,6 +223,7 @@ async function runCapture(
           }),
         },
       });
+      written.push(...(r?.ids ?? []));
     } catch (e) {
       state.storeError = e;
       d.log(`Storing a captured memory failed in ${collection}: ${e}`);
@@ -238,5 +242,5 @@ async function runCapture(
     d.log(`${notice} [session ${sessionId}, turn ${turn}]`);
   }
   if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
-  return { stored, skipped, superseded, ...(settled.length ? { settled } : {}), notice };
+  return { stored, skipped, superseded, ...(settled.length ? { settled } : {}), notice, ...(written.length ? { ids: written } : {}) };
 }

@@ -26,6 +26,7 @@ import {
   getPendingBackfills,
   clearPendingBackfill,
   isSyncConfigured,
+  pushDocsNow,
   resolveSyncUsername,
   captureTurn,
   storeMemory,
@@ -119,6 +120,25 @@ export function attribution(metadata: Record<string, any>): string {
 
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
   return Promise.race([work, new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), ms).unref())]);
+}
+
+const HOOK_PUSH_TIMEOUT_MS = 5000;
+
+/**
+ * Push what a hook just wrote, so teammates see it now rather than after the
+ * MCP server's next cycle. Bounded and fail-open: anything not pushed here
+ * stays unsynced for that cycle. Skipped while sync is down.
+ */
+export async function pushWritten(collection: string, ids: string[] | undefined, timeoutMs = HOOK_PUSH_TIMEOUT_MS): Promise<void> {
+  if (!ids?.length || !isSyncConfigured(getConfig()) || !isSyncableCollection(collection)) return;
+  const health = readSyncHealth();
+  if (health && (health.status === 'signed_out' || health.status === 'unreachable')) return;
+  try {
+    const r = await withTimeout(pushDocsNow(collection, ids), timeoutMs);
+    if (!r) process.stderr.write(`[yapa-hook] push to ${collection} timed out; the next sync cycle pushes it\n`);
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] push to ${collection} failed (non-fatal): ${e}\n`);
+  }
 }
 
 /**
@@ -613,6 +633,7 @@ export async function stop(input: StopInput): Promise<void> {
       },
     );
     if (result.notice) writeFileSync(stateFile(input.session_id, 'notice'), result.notice);
+    await pushWritten(collection, result.ids);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}\n`);
   }
@@ -628,13 +649,14 @@ export async function postCompact(input: PostCompactInput): Promise<void> {
   if (!getConfig().CAPTURE_COMPACTION || !summary) return;
   try {
     const { collection } = await detectCollection(input.cwd);
-    await storeMemory(`# Conversation compaction summary\n\n${summary}`, {
+    const written = await storeMemory(`# Conversation compaction summary\n\n${summary}`, {
       collection,
       tags: ['compaction', 'journal'],
       salience: 1.5,
       sector: 'episodic',
       metadata: { source: 'compaction', session_id: input.session_id, trigger: input.trigger },
     });
+    await pushWritten(collection, written.ids);
     recordCapture({ kind: 'compaction' });
   } catch (e) {
     recordCapture({ kind: 'compaction', error: e });

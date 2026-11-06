@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Captured memories reach teammates right away.** The Stop hook's auto-captures, the items it settles, and the PostCompact hook's summary were written locally and waited for the MCP server's next sync cycle, up to five minutes, before teammates saw them. The hook now pushes exactly what it wrote, in shared collections with sync on and up. It waits at most five seconds, and anything it doesn't push stays for the next cycle.
+
 ## 1.14.1 (2026-11-06)
 
 Follow-through settles what a turn answers again in sessions that have worked one task for a while.

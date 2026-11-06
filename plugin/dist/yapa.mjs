@@ -8132,11 +8132,12 @@ async function runCapture(input2, options, d, state) {
   );
   if (!candidates.length) {
     if (settledNotice) d.log(`${settledNotice} [session ${sessionId2}, turn ${turn}]`);
-    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice } : {} };
+    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice, ids: settled.map((c) => c.id) } : {} };
   }
   let stored = 0;
   let skipped = 0;
   let superseded = 0;
+  const written = settled.map((c) => c.id);
   for (const candidate of candidates) {
     const neighbors = await d.queryDocuments(collection, candidate.content, 3, { type: "memory" }).then((results) => results.filter((r) => r.distance < options.dedupeDistance && r.metadata?.archived !== true)).catch(() => []);
     let content = candidate.content;
@@ -8174,7 +8175,7 @@ async function runCapture(input2, options, d, state) {
     }
     const typed = candidate.kind ? { kind: candidate.kind, ...candidate.kind === "decision" ? { status: "accepted" } : {}, ...candidate.owner ? { owner: candidate.owner } : {}, ...options.taskIds?.length ? { task_ids: options.taskIds } : {} } : void 0;
     try {
-      await d.storeMemory(content, {
+      const r = await d.storeMemory(content, {
         collection,
         ...typed ? { typed } : {},
         tags: [.../* @__PURE__ */ new Set([...candidate.tags, "auto-capture"])],
@@ -8193,6 +8194,7 @@ async function runCapture(input2, options, d, state) {
           }
         }
       });
+      written.push(...r?.ids ?? []);
     } catch (e) {
       state.storeError = e;
       d.log(`Storing a captured memory failed in ${collection}: ${e}`);
@@ -8207,7 +8209,7 @@ async function runCapture(input2, options, d, state) {
     d.log(`${notice} [session ${sessionId2}, turn ${turn}]`);
   }
   if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
-  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice };
+  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice, ...written.length ? { ids: written } : {} };
 }
 var MAX_EXTRACT_CHARS, defaultDeps;
 var init_capture = __esm({
@@ -11664,6 +11666,7 @@ __export(hooks_exports, {
   postCompact: () => postCompact,
   prepareStatusLine: () => prepareStatusLine,
   presenceLines: () => presenceLines,
+  pushWritten: () => pushWritten,
   reloadConfig: () => reloadConfig,
   sessionEnd: () => sessionEnd,
   sessionStart: () => sessionStart,
@@ -11695,6 +11698,19 @@ function attribution(metadata) {
 }
 function withTimeout(work, ms) {
   return Promise.race([work, new Promise((resolve3) => setTimeout(() => resolve3(void 0), ms).unref())]);
+}
+async function pushWritten(collection, ids, timeoutMs = HOOK_PUSH_TIMEOUT_MS) {
+  if (!ids?.length || !isSyncConfigured(getConfig()) || !isSyncableCollection(collection)) return;
+  const health = readSyncHealth();
+  if (health && (health.status === "signed_out" || health.status === "unreachable")) return;
+  try {
+    const r = await withTimeout(pushDocsNow(collection, ids), timeoutMs);
+    if (!r) process.stderr.write(`[yapa-hook] push to ${collection} timed out; the next sync cycle pushes it
+`);
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] push to ${collection} failed (non-fatal): ${e}
+`);
+  }
 }
 async function freshenFromRemote(collection, opts = {}) {
   const config = getConfig();
@@ -12058,6 +12074,7 @@ async function stop(input2) {
       }
     );
     if (result.notice) writeFileSync11(stateFile2(input2.session_id, "notice"), result.notice);
+    await pushWritten(collection, result.ids);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -12069,7 +12086,7 @@ async function postCompact(input2) {
   if (!getConfig().CAPTURE_COMPACTION || !summary) return;
   try {
     const { collection } = await detectCollection(input2.cwd);
-    await storeMemory(`# Conversation compaction summary
+    const written = await storeMemory(`# Conversation compaction summary
 
 ${summary}`, {
       collection,
@@ -12078,6 +12095,7 @@ ${summary}`, {
       sector: "episodic",
       metadata: { source: "compaction", session_id: input2.session_id, trigger: input2.trigger }
     });
+    await pushWritten(collection, written.ids);
     recordCapture({ kind: "compaction" });
   } catch (e) {
     recordCapture({ kind: "compaction", error: e });
@@ -12098,7 +12116,7 @@ async function sessionEnd(input2) {
 function reloadConfig() {
   setConfig(createConfig(process.env));
 }
-var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, relTime;
+var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, HOOK_PUSH_TIMEOUT_MS, relTime;
 var init_hooks = __esm({
   "packages/mcp/src/cli/hooks.ts"() {
     "use strict";
@@ -12110,6 +12128,7 @@ var init_hooks = __esm({
     STALE_JOURNAL_BUDGET_MS = 2e3;
     LEASE_LIST_BUDGET_MS = 1500;
     HEARTBEAT_BUDGET_MS = 1500;
+    HOOK_PUSH_TIMEOUT_MS = 5e3;
     relTime = (secs) => secs < 120 ? `${secs}s` : secs < 7200 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`;
   }
 });

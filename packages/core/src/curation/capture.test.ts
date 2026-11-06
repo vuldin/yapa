@@ -24,6 +24,7 @@ describe('captureTurn', () => {
     const result = await captureTurn(input, options, d);
     expect(result).toMatchObject({ stored: 1, skipped: 0 });
     expect(result.notice).toContain('project-acme');
+    expect(result.ids).toEqual(['m1']);
     const [content, opts] = vi.mocked(d.storeMemory).mock.calls[0] as any;
     expect(content).toBe('acme API listens on port 9000');
     expect(opts.salience).toBe(2); // clamped from 4
