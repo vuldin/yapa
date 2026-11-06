@@ -19,7 +19,7 @@ import { PostgresBackend } from './postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
 import { pullFromRemote, pullCollection } from './pull.js';
 import { isSyncableCollection } from './syncable.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions, addCollectionRedirect, clearLeftCollection } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions, addCollectionRedirect, clearLeftCollection, getPendingBackfills } from './sentinel.js';
 import { removeCollection, mergeCollections } from '../collections/manage.js';
 import { getPendingDeletes, getLocalTombstones } from './deletes.js';
 import { addLocalTombstone } from './deletes.js';
@@ -293,6 +293,27 @@ describe('a shared collection removed from this machine only', () => {
     expect(mockedRemote.mock.calls.some(c => c[0] === 'customer-left')).toBe(false);
     expect((await store.listCollections()).some(c => c.name === 'customer-left')).toBe(false);
     await clearLeftCollection('customer-left');
+    mockedRemote.mockReset();
+  });
+
+  it('followed again with collection_create: the next pull fetches its whole history, then pulls incrementally', async () => {
+    const { createNewCollection } = await import('../collections/manage.js');
+    const store = getStore();
+    await store.createCollection('customer-back');
+    await removeCollection('customer-back');
+    await createNewCollection('customer-back');
+    expect(await getPendingBackfills()).toContain('customer-back');
+    const sinces: number[] = [];
+    mockedRemote.mockImplementation(async (col: string, since: number) => {
+      if (col === 'customer-back') sinces.push(Number(since));
+      return col === 'customer-back' ? [remote('b-old', 'customer-back', 'an old teammate note')] : [];
+    });
+    await pullFromRemote();
+    expect(sinces[0]).toBe(0);
+    expect((await getDocumentsByIds('customer-back', ['b-old'])).length).toBe(1);
+    expect(await getPendingBackfills()).not.toContain('customer-back');
+    await pullFromRemote();
+    expect(sinces[1]).toBeGreaterThan(0);
     mockedRemote.mockReset();
   });
 });

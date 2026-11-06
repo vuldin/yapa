@@ -20,7 +20,7 @@ import { setSyncBackend } from '../sync/backend.js';
 import { PostgresBackend } from '../sync/postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds, getDocumentsByFilter } from '../store/index.js';
 import { getPendingDeletes, getLocalTombstones } from '../sync/deletes.js';
-import { getLeftCollections, getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects, addCollectionRedirect, clearCollectionRedirect, resolveWriteCollection, redirectNote } from '../sync/sentinel.js';
+import { getLeftCollections, getPendingBackfills, getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects, addCollectionRedirect, clearCollectionRedirect, resolveWriteCollection, redirectNote } from '../sync/sentinel.js';
 import { pushToRemote } from '../sync/push.js';
 import { mergeCollections, mergeReportLines, removeCollection, removeReport, createNewCollection, CollectionDeleteRefusedError } from './manage.js';
 import { storeMemory } from '../memory/store.js';
@@ -250,10 +250,40 @@ describe('removeCollection', () => {
     expect((await getLocalTombstones()).has('k-2')).toBe(false);
     expect(await getSyncSubscriptions()).not.toContain('project-keep');
     expect(await getLeftCollections()).toContain('project-keep');
-    // Creating it again (or subscribing) follows it again.
+    // Left: a write to it is refused instead of bringing it back half-followed.
+    await expect(storeMemory('a new note', { collection: 'project-keep' })).rejects.toThrow(/removed from this machine .* sync subscribe project-keep/);
+    expect(await names()).not.toContain('project-keep');
+    // Creating it again follows it again: subscribed, with its whole history on the next pull.
     await createNewCollection('project-keep');
     expect(await getLeftCollections()).not.toContain('project-keep');
-    await removeCollection('project-keep');
+    expect(await getSyncSubscriptions()).toContain('project-keep');
+    expect(await getPendingBackfills()).toContain('project-keep');
+    await storeMemory('a new note', { collection: 'project-keep' });
+    await removeCollection('project-keep', { confirm: 'project-keep' });
+  });
+
+  it("pushes your unpushed edits to teammates' documents too before removing the collection here", async () => {
+    await getStore().createCollection('project-edits');
+    await getStore().addDocument('project-edits', 'mate-dec', 'Which retry policy?', { type: 'memory', origin_user: 'teammate', is_synced: true, created_at: 1_800_000_000 });
+    await updateMemory('mate-dec', { note: 'answered: go with option B' }, 'project-edits');
+    vi.mocked(upsertRemoteDocument).mockClear();
+    const r = await removeCollection('project-edits');
+    expect(r.pushed).toBe(1);
+    expect(vi.mocked(upsertRemoteDocument).mock.calls.some(c => (c[0] as any).id === 'mate-dec')).toBe(true);
+  });
+
+  it('documents the sync service refused (unchanged since) are named as existing only here, not as a failed push', async () => {
+    const { syncFingerprint } = await import('../sync/push.js');
+    await getStore().createCollection('project-rej');
+    const doc = { id: 'rej-1', content: 'token=abc', metadata: { type: 'memory', origin_user: 'tester', is_synced: false, sync_rejected: 'secret_detected' } as Record<string, any> };
+    doc.metadata.sync_rejected_fp = syncFingerprint(doc);
+    await getStore().addDocument('project-rej', doc.id, doc.content, doc.metadata);
+    vi.mocked(upsertRemoteDocument).mockClear();
+    const err = await removeCollection('project-rej').catch(e => e);
+    expect(err.message).toMatch(/1 document in "project-rej" \(rej-1\) was refused by the sync service and exists only on this machine/);
+    expect(vi.mocked(upsertRemoteDocument)).not.toHaveBeenCalled();
+    await removeCollection('project-rej', { confirm: 'project-rej' });
+    expect(await names()).not.toContain('project-rej');
   });
 
   it('pushes your unpushed documents before removing a shared collection here, and refuses if that push fails', async () => {

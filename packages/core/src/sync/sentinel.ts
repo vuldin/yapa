@@ -202,7 +202,68 @@ export interface WriteCollection {
  */
 export async function resolveWriteCollection(name: string): Promise<WriteCollection> {
   if (name === 'global') return { collection: name };
-  return resolveCollectionRedirect(name, await getCollectionRedirects());
+  const w = resolveCollectionRedirect(name, await getCollectionRedirects());
+  // Removed from this machine: a write would bring it back pushed but never
+  // pulled (teammates' docs missing from recall). Following it again is explicit.
+  if ((await getLeftCollections()).includes(w.collection)) throw new CollectionLeftError(w.collection);
+  return w;
+}
+
+/** A write to a collection removed from this machine (collection_delete, scope local). */
+export class CollectionLeftError extends Error {
+  readonly code = 'collection_left';
+  constructor(readonly collection: string) {
+    super(`"${collection}" was removed from this machine (collection_delete), so writes to it are refused: written here it would be pushed but never pulled, and teammates' documents in it would be missing. To follow it again with its full history, run sync subscribe ${collection} (or collection_create ${collection}), then write again.`);
+    this.name = 'CollectionLeftError';
+  }
+}
+
+const COLLECTIONS_BACKFILL_ID = '__collections_backfill__';
+
+/**
+ * Collections to pull from the start of their history on the next pull (a
+ * collection followed again after leaving it): kept until a pull of it
+ * succeeds, so an offline moment can't leave it with only recent docs.
+ */
+export async function getPendingBackfills(): Promise<string[]> {
+  try {
+    const r = await getDocumentsByFilter('global', { type: { $eq: 'collections_backfill' } }, 1);
+    return String(r[0]?.metadata.collections ?? '').split(',').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function writePendingBackfills(names: string[]): Promise<void> {
+  await getOrCreateCollection('global');
+  await addDocument('global', COLLECTIONS_BACKFILL_ID, 'collections to backfill', {
+    type: 'collections_backfill',
+    collections: [...new Set(names)].sort().join(','),
+  });
+}
+
+export async function addPendingBackfill(name: string): Promise<void> {
+  const p = await getPendingBackfills();
+  if (!p.includes(name)) await writePendingBackfills([...p, name]);
+}
+
+export async function clearPendingBackfill(name: string): Promise<void> {
+  const p = await getPendingBackfills();
+  if (p.includes(name)) await writePendingBackfills(p.filter(n => n !== name));
+}
+
+/**
+ * Follow a collection left earlier again: no longer left, subscribed, and
+ * marked for a full-history backfill on the next pull. No-op for a name
+ * that was not left.
+ */
+export async function rejoinCollection(name: string): Promise<boolean> {
+  if (!(await getLeftCollections()).includes(name)) return false;
+  await clearLeftCollection(name);
+  const subs = await getSyncSubscriptions();
+  if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  await addPendingBackfill(name);
+  return true;
 }
 
 /** The tool-reply note for a write that followed a redirect (empty when none). */

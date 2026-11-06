@@ -3,7 +3,7 @@ import { getConfig } from '../config.js';
 import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument, patchDocument } from '../store/index.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type RemoteDeletion, type RemoteDocument, type SyncBackend } from './backend.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections, getPendingBackfills, clearPendingBackfill } from './sentinel.js';
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
 
@@ -85,12 +85,14 @@ export async function pullFromRemote(): Promise<PullStats> {
     if (isSyncable(col.name) && !unfollowed.has(col.name)) pullCollectionNames.push(col.name);
   }
 
-  const backfill = new Set<string>();
+  // Followed again after leaving it: from the start of its history.
+  const pendingBackfills = (await getPendingBackfills()).filter(n => !unfollowed.has(n));
+  const backfill = new Set<string>(pendingBackfills);
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncable(sub) && !unfollowed.has(sub)) {
+    if ((!localCollectionNames.has(sub) || backfill.has(sub)) && isSyncable(sub) && !unfollowed.has(sub)) {
       await getOrCreateCollection(sub);
-      pullCollectionNames.push(sub);
+      if (!pullCollectionNames.includes(sub)) pullCollectionNames.push(sub);
       backfill.add(sub);
     }
   }
@@ -98,12 +100,14 @@ export async function pullFromRemote(): Promise<PullStats> {
   const followed = new Set(pullCollectionNames);
   let fatal = false;
   for (const collectionName of pullCollectionNames) {
+    const errorsBefore = stats.errors;
     await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
       includeOwnDevice: recovering,
       followedCollections: followed,
       onFatal: () => { fatal = true; },
     });
     if (fatal) break;
+    if (pendingBackfills.includes(collectionName) && stats.errors === errorsBefore) await clearPendingBackfill(collectionName);
   }
 
   // A cycle cut short (not signed in, unreachable) must not advance the pull

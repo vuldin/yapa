@@ -19,6 +19,8 @@ import {
   getSyncSubscriptions,
   updateSyncSubscriptions,
   getUnfollowedCollections,
+  getPendingBackfills,
+  clearPendingBackfill,
   isSyncConfigured,
   resolveSyncUsername,
   captureTurn,
@@ -132,7 +134,9 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
     // named in the prompt): pull its whole history, then follow it so the
     // background sync keeps it current. Subscribe only after the backfill
     // finished, so a pull cut off by the timeout simply retries next prompt.
-    const followed = (await getSyncSubscriptions()).includes(collection);
+    // Followed again after leaving it: pull its whole history like a first visit.
+    const pendingBackfill = (await getPendingBackfills()).includes(collection);
+    const followed = (await getSyncSubscriptions()).includes(collection) && !pendingBackfill;
     // Another session (or the shared cycle) pulled it moments ago: nothing new
     // worth a request. A first visit (backfill) is never skipped.
     if (opts.gate && followed && !shouldPull(collection)) return 0;
@@ -146,6 +150,7 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
     if (stats.errors === 0) {
       noteSyncOk();
       recordPull(collection);
+      if (pendingBackfill) await clearPendingBackfill(collection);
     }
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();
