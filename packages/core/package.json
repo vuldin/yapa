@@ -1,6 +1,6 @@
 {
   "name": "@yapa/core",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "YAPA core: memory, tasks, sync, curation, buckets, and training logic backed by ChromaDB",
   "type": "module",
   "main": "dist/index.js",
