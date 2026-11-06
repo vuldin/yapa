@@ -9,6 +9,7 @@ import {
   createConfig,
   recallMemory,
   listMemories,
+  isSessionSummary,
   listTasks,
   listCollections,
   collectionSize,
@@ -466,7 +467,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   lines.push(...held.lines);
 
   try {
-    const memories = await listMemories({ collection, limit: 5 });
+    const memories = (await listMemories({ collection, limit: 25 })).filter(r => !isSessionSummary(r.metadata)).slice(0, 5);
     if (memories.length) {
       lines.push('', '## Top memories (by salience)');
       for (const r of memories) {

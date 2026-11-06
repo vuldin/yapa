@@ -45,6 +45,7 @@ export function registerCompactionCapture(ctx: Context, getResolved: () => Resol
             salience: 1.5,
             sector: 'episodic',
             collection,
+            metadata: { source: 'compaction' },
           },
         );
         recordCapture({ kind: 'compaction' });

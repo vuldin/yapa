@@ -21,6 +21,12 @@
   - It calls each one a progress note, superseded or kept. A finding too long to show whole is kept, and so is one whose newer note is being closed in the same sweep, or anything the model doesn't judge.
   - It's a dry run that lists the verdicts (`--save FILE` keeps them). `--apply --from FILE` (optionally `--ids a,b`) resolves exactly the reviewed list as no-action with the reason, after checking each one is still an open finding of yours. `--apply` alone judges and resolves in one step. Read-only documents are skipped.
 - The backlog count, the `cleanup:findings` item and the session-start line cover only your own findings.
+- **Compaction summaries no longer crowd recall.**
+  - Each `PostCompact` summary is long, so it's stored in many chunks, and they made up about a third of a busy store. Their mid-sentence fragments surfaced in the prompt hook's recall ahead of real findings: 6 of 28 hits across eight sample prompts in a real store, and all three hits on one prompt.
+  - Recall now leaves them out by default, fetching more until it has the number asked for. That covers the prompt hook, `memory_recall`, DSH `yapa_memory_recall` and the reference remote's `memory_recall`, including its "latest" candidates. Session start's top memories skip them too.
+  - Pass `include_sessions: true` to search them. Journals, and ordinary memories tagged `compaction` (log compaction, say), stay in recall.
+  - A summary is known by `source: compaction`, or by carrying both the `compaction` and `journal` tags. DSH's compaction capture now also sets `source`.
+  - The summaries are still stored (`CAPTURE_COMPACTION`), and they no longer count toward `COMPACTION_THRESHOLD` or get grouped by `compaction_suggest`.
 - Capture in a folder whose collection was removed from this machine (`collection_delete`) now does nothing, without calling the aux model. Before, it ran the model and then failed to store.
 - When one captured memory is refused (an invalid typed memory, say), the turn's other memories are still stored.
 
