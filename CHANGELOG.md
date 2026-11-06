@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Questions and decisions for people outside YAPA no longer disappear from `waiting`.** An owner is matched to a YAPA user case-insensitively (`Josh`, `josh@example.com` and `josh` are one person). An owner who is no YAPA user (`Dana`, `the platform team`) is someone to ask: the item waits on whoever recorded it and reads `[question, for josh, ask Dana, 2d]`. Existing items are read the same way, with no migration. The same rule applies in session start, DSH and the reference remote's `waiting`.
+- **Follow-through no longer settles items a turn doesn't settle.** The judge must quote the words of the turn that settle an item, and a change whose quote is not in the turn is dropped, as is one whose note says the turn doesn't address the item. A question for another YAPA user is answered only in that user's turn, and a question for someone outside YAPA only by their reported answer, not by the person's own plan (follow-through prompt v2).
+
 ## 1.13.0 (2026-11-06)
 
 YAPA can sync with a remote that serves the Sync API as an MCP tool behind a gateway, and with remotes that have stricter rules about deleting data.

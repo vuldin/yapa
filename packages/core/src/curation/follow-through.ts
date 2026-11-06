@@ -16,9 +16,14 @@
  *
  * Guard rails, enforced here rather than trusted to the model: only items
  * that were shown can change; every change is validated like an agent's
- * (memory/kinds.ts); a decision with an owner is settled only in a turn of
- * that owner. Same aux-LLM route as the extractor; one call, only when there
- * are open items to judge.
+ * (memory/kinds.ts); every change quotes the words of the turn that settle
+ * it; a decision with an owner is settled only in a turn of that owner (an
+ * owner unknown here may be a teammate, so a decision for someone outside
+ * YAPA is recorded by hand); a question whose owner is another YAPA user only
+ * in a turn of that user, one for someone outside YAPA by their reported
+ * answer.
+ * Same aux-LLM route as the extractor; one call, only when there are open
+ * items to judge.
  *
  * @module @yapa/core/curation/follow-through
  */
@@ -26,9 +31,11 @@ import { getDocumentsByIds, listCollections, queryDocuments, type DocumentResult
 import { getConfig } from '../config.js';
 import { isOpenTyped, normalizeTyped, type MemoryKind } from '../memory/kinds.js';
 import { updateMemory } from '../memory/update.js';
+import { includesUser, resolveOwner } from '../memory/owners.js';
+import { knownUsers } from '../memory/known-users.js';
 import { callCurationLLM } from './provider.js';
 
-export const FOLLOW_THROUGH_PROMPT_VERSION = 'v1';
+export const FOLLOW_THROUGH_PROMPT_VERSION = 'v2';
 
 /** How close (cosine) an open item must be to the turn to be judged. */
 export const FOLLOW_THROUGH_MAX_DISTANCE = 0.75;
@@ -38,14 +45,16 @@ export const FOLLOW_THROUGH_SYSTEM_PROMPT = `You keep a team's open items curren
 
 Settle an item only on clear evidence in the turn:
 - decision -> "accepted" when the PERSON states the choice or explicitly approves one option (or the recommendation); "rejected" when the person rules the decision out entirely. Never settle a decision on the assistant's word alone. note: the choice, in a short sentence.
-- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). note: the answer.
+- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). A question "for" someone is answered only by that someone's answer, reported in the turn: the person's own choice or plan does not answer it. note: the answer.
 - finding -> "resolved" when the turn decides what becomes of it. Give "disposition": "no-action" with "disposition_reason", or "task" / "decision" / "limitation" with "disposition_ids" naming ids that appear in the turn.
 - limitation -> "mitigated" (worked around) or "closed" (no longer true), when the turn shows it. note: how.
 - idea -> "adopted" (the person commits to it) or "dropped". note: why.
 Do not settle an item the turn merely mentions, discusses or plans to address.
+Leave out every item the turn does not talk about. Never list an item to say the turn does not address it: "no-action" means the turn decided that nothing more is needed.
+"evidence" is required: the words from the turn that settle the item, copied exactly (at most 200 characters).
 
 OUTPUT: valid JSON only, no commentary, no fences. An array:
-[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
+[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "evidence": "<exact words from the turn>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
 Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
 
 export interface OpenItem {
@@ -125,8 +134,37 @@ export function buildFollowThroughPrompt(items: OpenItem[], turn: { user: string
   return lines.join('\n');
 }
 
+const flat = (s: string) => s.toLowerCase()
+  .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u2013\u2014]/g, '-')
+  .replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim();
+
+const excerpt = (s: string) => flat(s).replace(/^["']+|["']+$/g, '').replace(/(\.\.\.|\u2026)$/, '').replace(/[.!?,;:]+$/, '').trim();
+
+/** The excerpt, if it really is words of the turn (a short reply of the person's may be quoted whole). */
+function quotes(evidence: unknown, turn: FollowThroughTurn): boolean {
+  const e = excerpt(String(evidence ?? ''));
+  if (!e) return false;
+  const words = (x: string) => ` ${x.replace(/[.!?,;:]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  const reply = excerpt(turn.userText ?? '');
+  if (reply && (e === reply || (reply.split(' ').length <= 4 && words(e).trim() && words(reply).includes(words(e))))) return true;
+  return e.length >= 8 && flat(turn.text).includes(e);
+}
+
+const DISCLAIMS = [
+  /\b(the|this) (turn|conversation|exchange|discussion|message)\b[^.]*\b(does(?:n't| not)|did(?:n't| not)) (address|mention|discuss|decide|settle|cover)/i,
+  /\bnot (addressed|mentioned|discussed|settled) in (the|this) (turn|conversation|exchange|discussion|message)\b/i,
+];
+
+export interface FollowThroughTurn {
+  /** Everything the person and the assistant said, for checking evidence. */
+  text: string;
+  /** The person's words alone. */
+  userText?: string;
+  knownUsers?: Iterable<string>;
+}
+
 /** Parse and vet the judge's answer against the items it was shown. */
-export function parseFollowThrough(raw: string, items: OpenItem[], user: string): ItemChange[] {
+export function parseFollowThrough(raw: string, items: OpenItem[], user: string, turn: FollowThroughTurn): ItemChange[] {
   const s = raw.replace(/```(?:json)?/g, '').trim();
   const start = s.indexOf('[');
   const end = s.lastIndexOf(']');
@@ -143,8 +181,14 @@ export function parseFollowThrough(raw: string, items: OpenItem[], user: string)
     if (!e || typeof e !== 'object') continue;
     const item = byId.get(String((e as any).id));
     if (!item) continue;
-    // Only the owner settles a decision that names one.
-    if (item.kind === 'decision' && item.owner && item.owner !== user) continue;
+    if (!quotes((e as any).evidence, turn)) continue;
+    const said = `${(e as any).note ?? ''} ${(e as any).disposition_reason ?? ''}`;
+    if (DISCLAIMS.some(r => r.test(said))) continue;
+    if (item.owner && (item.kind === 'decision' || item.kind === 'question')) {
+      const owner = resolveOwner(item.owner, [user, ...(turn.knownUsers ?? [])]);
+      // A decision's owner must be this user: an owner unknown here may be a teammate, not an outsider.
+      if (item.kind === 'decision' ? !owner.user || !includesUser([owner.user], user) : owner.user && !includesUser([owner.user], user)) continue;
+    }
     const change: ItemChange = {
       id: item.id,
       status: String((e as any).status ?? ''),
@@ -171,6 +215,7 @@ export interface FollowThroughDeps {
   findOpenItems: typeof findOpenItems;
   call: typeof callCurationLLM;
   updateMemory: typeof updateMemory;
+  knownUsers: () => Promise<Iterable<string>>;
 }
 
 export interface FollowThroughResult {
@@ -183,7 +228,7 @@ export async function followThrough(
   turn: { collection: string; userText: string; assistantText: string; taskIds?: string[]; user?: string },
   deps: Partial<FollowThroughDeps> = {},
 ): Promise<FollowThroughResult> {
-  const d: FollowThroughDeps = { findOpenItems, call: callCurationLLM, updateMemory, ...deps };
+  const d: FollowThroughDeps = { findOpenItems, call: callCurationLLM, updateMemory, knownUsers, ...deps };
   const user = turn.user ?? getConfig().USERNAME;
   const items = await d.findOpenItems(turn.collection, `${turn.userText}\n${turn.assistantText}`, turn.taskIds ?? []);
   if (!items.length || !(turn.userText.trim() || turn.assistantText.trim())) return { judged: 0, changes: [] };
@@ -198,7 +243,8 @@ export async function followThrough(
   });
   const byId = new Map(items.map(i => [i.id, i]));
   const changes: FollowThroughResult['changes'] = [];
-  for (const c of parseFollowThrough(raw, items, user)) {
+  const known = items.some(i => i.owner) ? await d.knownUsers() : [];
+  for (const c of parseFollowThrough(raw, items, user, { text: `${turn.userText}\n${turn.assistantText}`, userText: turn.userText, knownUsers: known })) {
     const item = byId.get(c.id)!;
     const { id, note, ...typed } = c;
     try {
