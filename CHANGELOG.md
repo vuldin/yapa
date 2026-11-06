@@ -13,6 +13,14 @@
 ### Fixes
 - **Questions and decisions for people outside YAPA no longer disappear from `waiting`.** An owner is matched to a YAPA user case-insensitively (`Josh`, `josh@example.com` and `josh` are one person). An owner who is no YAPA user (`Dana`, `the platform team`) is someone to ask: the item waits on whoever recorded it and reads `[question, for josh, ask Dana, 2d]`. Existing items are read the same way, with no migration. The same rule applies in session start, DSH and the reference remote's `waiting`.
 - **Follow-through no longer settles items a turn doesn't settle.** The judge must quote the words of the turn that settle an item, and a change whose quote is not in the turn is dropped, as is one whose note says the turn doesn't address the item. A question for another YAPA user is answered only in that user's turn, and a question for someone outside YAPA only by their reported answer, not by the person's own plan (follow-through prompt v2).
+- **Open findings no longer pile up unseen.**
+  - Capture stops recording progress as findings (extractor prompt v3). A review round, a push, a merge, a release or tests passing is never a finding, and a release or a merge is never a decision. When such an update is worth keeping, it's stored as an ordinary episodic note.
+  - `task_next` used to offer `cleanup:findings` only when no task was ready, which in an active collection meant never. It now offers it beside ready tasks once a collection holds `FINDINGS_CLEANUP_THRESHOLD` (default 20) open findings older than two days with no disposition. Session start (and DSH) says so too.
+- **`yapa memory sweep-findings --collection C`** works through that backlog, for your own findings only (`--all-owners` for everyone's).
+  - The curation model reads each open finding older than `--min-age-days` (default 2) in full, with chunks joined. Next to it is the newest similar typed finding, decision or limitation (journals and compaction summaries don't count).
+  - It calls each one a progress note, superseded or kept. A finding too long to show whole is kept, and so is one whose newer note is being closed in the same sweep, or anything the model doesn't judge.
+  - It's a dry run that lists the verdicts (`--save FILE` keeps them). `--apply --from FILE` (optionally `--ids a,b`) resolves exactly the reviewed list as no-action with the reason, after checking each one is still an open finding of yours. `--apply` alone judges and resolves in one step. Read-only documents are skipped.
+- The backlog count, the `cleanup:findings` item and the session-start line cover only your own findings.
 - Capture in a folder whose collection was removed from this machine (`collection_delete`) now does nothing, without calling the aux model. Before, it ran the model and then failed to store.
 - When one captured memory is refused (an invalid typed memory, say), the turn's other memories are still stored.
 
