@@ -10037,12 +10037,21 @@ async function resolveSyncUsername() {
 }
 function parseDataRules(limits) {
   const l = limits && typeof limits === "object" ? limits : {};
+  const unrecognized = [];
   const days = l.deleted_retention_days;
-  const erasure = l.erasure;
-  return {
-    deletedRetentionDays: days === null ? null : typeof days === "number" && Number.isInteger(days) && days >= 1 ? days : REFERENCE_DATA_RULES.deletedRetentionDays,
-    erasure: erasure === "delete" || erasure === "redact" || erasure === "none" ? erasure : REFERENCE_DATA_RULES.erasure
-  };
+  let deletedRetentionDays = REFERENCE_DATA_RULES.deletedRetentionDays;
+  if (days === null || typeof days === "number" && Number.isInteger(days) && days >= 1) deletedRetentionDays = days;
+  else if (days !== void 0) {
+    deletedRetentionDays = void 0;
+    unrecognized.push(`deleted_retention_days=${JSON.stringify(days)}`);
+  }
+  let erasure = REFERENCE_DATA_RULES.erasure;
+  if (l.erasure === "delete" || l.erasure === "redact" || l.erasure === "none") erasure = l.erasure;
+  else if (l.erasure !== void 0) {
+    erasure = "none";
+    unrecognized.push(`erasure=${JSON.stringify(l.erasure)}`);
+  }
+  return { deletedRetentionDays, erasure, ...unrecognized.length ? { unrecognized } : {} };
 }
 async function remoteDataRules(opts = {}) {
   if (!isSyncConfigured()) return void 0;
@@ -10055,7 +10064,10 @@ async function remoteDataRules(opts = {}) {
   }
 }
 function describeDataRules(r) {
-  const kept = r.deletedRetentionDays === null ? "until purged" : `${r.deletedRetentionDays} days`;
+  const kept = r.deletedRetentionDays === null ? "until purged" : r.deletedRetentionDays === void 0 ? "for an unknown time" : `${r.deletedRetentionDays} days`;
+  if (r.unrecognized) {
+    return `deleted documents restorable ${kept}; the remote declares rules this client does not know (${r.unrecognized.join(", ")}), so retracted or purged content may stay on it`;
+  }
   const erased = { delete: "removed", redact: "redacted (an audit stub stays)", none: "kept on the remote, hidden (it cannot erase)" }[r.erasure];
   return `deleted documents restorable ${kept}; retracted or purged content ${erased}`;
 }
@@ -42559,7 +42571,11 @@ async function mergeCollections(from, into, opts = {}) {
     teammateRowsKept,
     ownRowsRetracted
   };
-  if (ownRowsRetracted > 0 && (await remoteDataRules({ cachedOnly: true }))?.erasure === "none") result.remoteKeepsContent = true;
+  if (ownRowsRetracted > 0 && isSyncConfigured()) {
+    const rules = await remoteDataRules({ cachedOnly: true });
+    if (!rules) result.remoteRulesUnknown = true;
+    else if (rules.erasure === "none") result.remoteKeepsContent = true;
+  }
   if (opts.dryRun) return result;
   if (docs.length > 0) {
     const before = await getCollectionCount2(into);
@@ -42595,6 +42611,11 @@ async function mergeCollections(from, into, opts = {}) {
   await addCollectionRedirect(from, into);
   return result;
 }
+function erasureLines(r) {
+  if (r.remoteKeepsContent) return ["This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good."];
+  if (r.remoteRulesUnknown) return ["This sync service's data rules aren't known yet (see `sync status`): if it cannot erase, it keeps their content."];
+  return [];
+}
 function mergeReportLines(r) {
   const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
   const sharedToPrivate = isSyncable2(r.from) && !isSyncable2(r.into);
@@ -42603,7 +42624,7 @@ function mergeReportLines(r) {
     const lines2 = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
     if (sharedToPrivate && r.ownRowsRetracted > 0) {
       lines2.push(`Up to ${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
-      if (r.remoteKeepsContent) lines2.push("This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.");
+      lines2.push(...erasureLines(r));
     }
     if (sharedToPrivate && r.teammateRowsKept > 0) {
       lines2.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
@@ -42614,7 +42635,7 @@ function mergeReportLines(r) {
   if (sharedToPrivate) {
     if (r.ownRowsRetracted > 0) {
       lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
-      if (r.remoteKeepsContent) lines.push("This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.");
+      lines.push(...erasureLines(r));
     }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);

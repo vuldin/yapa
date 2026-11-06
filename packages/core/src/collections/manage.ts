@@ -15,7 +15,7 @@ import {
   getCollectionCount,
 } from '../store/index.js';
 import { isSyncableCollection, isReadOnlyDoc } from '../sync/syncable.js';
-import { remoteDataRules } from '../sync/backend.js';
+import { isSyncConfigured, remoteDataRules } from '../sync/backend.js';
 
 export interface CollectionInfo {
   name: string;
@@ -209,6 +209,8 @@ export interface MergeResult {
   ownRowsRetracted: number;
   /** The sync service declares it cannot erase, so retracted rows keep their content there, hidden. */
   remoteKeepsContent?: boolean;
+  /** Sync is on but the service's data rules are not known yet (nothing has asked it this run). */
+  remoteRulesUnknown?: boolean;
 }
 
 /** Docs per target write (the store embeds each batch). */
@@ -293,7 +295,11 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
   const result: MergeResult = {
     from, into, moved: docs.length, byType, dryRun: !!opts.dryRun, sourceRemoved: false, teammateRowsKept, ownRowsRetracted,
   };
-  if (ownRowsRetracted > 0 && (await remoteDataRules({ cachedOnly: true }))?.erasure === 'none') result.remoteKeepsContent = true;
+  if (ownRowsRetracted > 0 && isSyncConfigured()) {
+    const rules = await remoteDataRules({ cachedOnly: true });
+    if (!rules) result.remoteRulesUnknown = true;
+    else if (rules.erasure === 'none') result.remoteKeepsContent = true;
+  }
   if (opts.dryRun) return result;
 
   if (docs.length > 0) {
@@ -345,6 +351,12 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
  * your shared rows are retracted at the next push, teammates' rows stay
  * shared in `from`, and `from` is not followed again unless asked.
  */
+function erasureLines(r: MergeResult): string[] {
+  if (r.remoteKeepsContent) return ['This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.'];
+  if (r.remoteRulesUnknown) return ["This sync service's data rules aren't known yet (see `sync status`): if it cannot erase, it keeps their content."];
+  return [];
+}
+
 export function mergeReportLines(r: MergeResult): string[] {
   const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
   const sharedToPrivate = isSyncable(r.from) && !isSyncable(r.into);
@@ -353,7 +365,7 @@ export function mergeReportLines(r: MergeResult): string[] {
     const lines = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
     if (sharedToPrivate && r.ownRowsRetracted > 0) {
       lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
-    if (r.remoteKeepsContent) lines.push('This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.');
+      lines.push(...erasureLines(r));
     }
     if (sharedToPrivate && r.teammateRowsKept > 0) {
       lines.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
@@ -364,8 +376,8 @@ export function mergeReportLines(r: MergeResult): string[] {
   if (sharedToPrivate) {
     if (r.ownRowsRetracted > 0) {
       lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
-      if (r.remoteKeepsContent) lines.push('This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.');
-    }
+      lines.push(...erasureLines(r));
+      }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
     }

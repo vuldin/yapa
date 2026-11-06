@@ -249,6 +249,16 @@ describe.skipIf(!URL_)('soft delete, restore and purge (real Postgres + RLS)', (
     expect((await bob!).body.results[0]).toMatchObject({ status: 'error', error: { code: 'purged' } });
   });
 
+  it('purges and restores of the same ids in opposite orders do not deadlock', async () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `sd-dl-${String(i).padStart(2, '0')}`);
+    await upsert('alice', 'A', ids.map(id => doc(id)));
+    await del('alice', ids);
+    const [a, b, c] = await Promise.all([purge('alice', ids), purge('alice', [...ids].reverse()), restore('alice', [...ids].reverse())]);
+    expect([a.status, b.status, c.status]).toEqual([200, 200, 200]);
+    expect(a.body.results.map((r: { id: string }) => r.id)).toEqual(ids);
+    expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id LIKE 'sd-dl-%'")).rows[0].n).toBe(0);
+  });
+
   it('retention: rows older than the window are not listed or restorable, and the sweep removes every user\'s', async () => {
     await upsert('alice', 'A', [doc('sd-old-a')]);
     await upsert('bob', 'B', [doc('sd-old-b')]);

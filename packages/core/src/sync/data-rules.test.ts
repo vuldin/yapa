@@ -6,12 +6,19 @@ import {
 } from './backend.js';
 
 describe('parseDataRules', () => {
-  it('reads what a remote declares and falls back to the reference for anything absent or invalid', () => {
+  it('reads what a remote declares and falls back to the reference for anything absent', () => {
     expect(parseDataRules(undefined)).toEqual(REFERENCE_DATA_RULES);
     expect(parseDataRules({ deleted_retention_days: null, erasure: 'redact' })).toEqual({ deletedRetentionDays: null, erasure: 'redact' });
     expect(parseDataRules({ deleted_retention_days: 7, erasure: 'none' })).toEqual({ deletedRetentionDays: 7, erasure: 'none' });
-    expect(parseDataRules({ deleted_retention_days: 0, erasure: 'shred' })).toEqual(REFERENCE_DATA_RULES);
-    expect(parseDataRules({ deleted_retention_days: '30' })).toEqual(REFERENCE_DATA_RULES);
+    expect(parseDataRules({ similarity_threshold: 0.95 })).toEqual(REFERENCE_DATA_RULES);
+  });
+
+  it('never reads a declared value it does not know as the reassuring answer', () => {
+    expect(parseDataRules({ erasure: 'deferred' })).toEqual({ deletedRetentionDays: 30, erasure: 'none', unrecognized: ['erasure="deferred"'] });
+    expect(parseDataRules({ deleted_retention_days: 0 })).toEqual({ deletedRetentionDays: undefined, erasure: 'delete', unrecognized: ['deleted_retention_days=0'] });
+    expect(parseDataRules({ deleted_retention_days: '30' }).deletedRetentionDays).toBeUndefined();
+    expect(describeDataRules(parseDataRules({ erasure: 'deferred', deleted_retention_days: '30' })))
+      .toBe('deleted documents restorable for an unknown time; the remote declares rules this client does not know (deleted_retention_days="30", erasure="deferred"), so retracted or purged content may stay on it');
   });
 
   it('describes each rule in plain words', () => {
@@ -55,6 +62,7 @@ describe('a merge into a private collection on a remote that cannot erase', () =
   it('says the remote keeps the content', () => {
     expect(mergeReportLines({ ...base, remoteKeepsContent: true }).join('\n')).toMatch(/cannot erase: it keeps their content, hidden/);
     expect(mergeReportLines({ ...base, dryRun: true, remoteKeepsContent: true }).join('\n')).toMatch(/cannot erase/);
-    expect(mergeReportLines(base).join('\n')).not.toMatch(/cannot erase/);
+    expect(mergeReportLines(base).join('\n')).not.toMatch(/cannot erase|aren't known/);
+    expect(mergeReportLines({ ...base, remoteRulesUnknown: true }).join('\n')).toMatch(/data rules aren't known yet \(see `sync status`\)/);
   });
 });

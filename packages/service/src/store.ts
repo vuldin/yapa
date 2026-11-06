@@ -369,7 +369,7 @@ export async function deleteMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], 
   const me = ctx.caller.username;
   return withUserTx(pool, me, async c => {
     const rows = await c.query(
-      `SELECT id, collection, origin_user, last_editor FROM documents WHERE id = ANY($1::text[]) AND ${LOCAL_ONLY_SQL} FOR UPDATE`,
+      `SELECT id, collection, origin_user, last_editor FROM documents WHERE id = ANY($1::text[]) AND ${LOCAL_ONLY_SQL} ORDER BY id FOR UPDATE`,
       [ids],
     );
     const byId = new Map(rows.rows.map(r => [r.id as string, r]));
@@ -476,6 +476,7 @@ export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[],
     const done = new Map<string, RestoreResult>();
     let restored = 0;
     const one = async (id: string): Promise<RestoreResult> => {
+      await lockDocId(c, id);
       const found = await c.query(
         `SELECT ${MICROS('deleted_at', 'deleted_us')}, collection, last_editor, origin_user, content
            FROM deleted_documents
@@ -519,7 +520,8 @@ export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[],
       restored++;
       return { id, status: 'restored', synced_at: Number(ins.rows[0].synced_at) };
     };
-    for (const id of ids) if (!done.has(id)) done.set(id, await one(id));
+    // One lock order for every request, so two that share ids cannot deadlock.
+    for (const id of [...new Set(ids)].sort()) done.set(id, await one(id));
     return { results: ids.map(id => done.get(id)!), restored };
   });
 }
@@ -589,7 +591,8 @@ export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): 
       purged++;
       return { id, status: 'purged' };
     };
-    for (const id of ids) if (!done.has(id)) done.set(id, await one(id));
+    // One lock order for every request, so two that share ids cannot deadlock.
+    for (const id of [...new Set(ids)].sort()) done.set(id, await one(id));
     return { results: ids.map(id => done.get(id)!), purged };
   });
 }

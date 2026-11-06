@@ -442,9 +442,15 @@ Every remote, whatever it declares:
   back.
 
 With `erasure: "none"` the remote keeps a retracted or purged doc's content,
-hidden as above. It MUST NOT offer `documents:purge` (the client then sends an
+hidden as above; nobody, its owner included, can list or restore it through
+this API. It MUST NOT offer `documents:purge` (the client then sends an
 ordinary delete), and SHOULD name, in its own documentation, who can remove
-content for good.
+content for good. `deleted_retention_days` applies only to a remote that
+offers `GET /v1/me/deleted` and restore.
+
+A key present with a value the client does not know is not read as the
+reference's: the client treats an unknown `erasure` as `"none"` and an unknown
+retention as unknown, and says so.
 
 The client never fails because of these rules; it tells the user where they
 matter: `trash list` shows how long the remote keeps deleted documents, a purge
