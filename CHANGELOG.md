@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Service
+- **Deletes are soft: the owner can list, restore and purge deleted rows.** `documents:batchDelete` now moves a row into `deleted_documents` instead of dropping it; its owner can list their deleted rows (`GET /v1/me/deleted`), restore one (`POST /v1/documents:restore`, back as an update with a new `updated_at`; `id_taken` when the id is live again) or remove an id for good (`POST /v1/documents:purge`, after which any upsert of it is refused with the permanent item error `purged`; if the id is now another user's live document, only your deleted copies go and the answer is `purged_copies`). Deleted rows stay restorable for `YAPA_DELETED_RETENTION_DAYS` (default 30). A retract (an author taking a document out of the team copy, as in a shared-to-private merge) keeps no copy: the author still has it locally. Pull deletion entries now carry `reason` (`delete` or `retract`) and `purged`; older clients ignore them. The client library has the matching optional `listDeleted`/`restore`/`purge` backend methods; an older service answers them with `UnsupportedByRemoteError`. See `docs/sync-api.md` section 5, "Soft delete".
+- **Deploy order:** apply `infra/cloudsql/sql/07_soft_delete.sql` (schema v4, by hand with psql, see `infra/cloudsql/README.md`) BEFORE deploying a `yapa-service` or `yapa-mcp` built from this release: the new pull reads the new `deletions` columns. Clients must not rely on restore or purge until both are done.
+- **A purge fully works only once teammates update.** A client from before this release treats a purged id in the deletions feed as an ordinary delete: it drops a clean copy but keeps a copy it has edited, and that copy's next push is refused with `purged`.
+
 ## 1.11.0 (2026-11-06)
 
 Deleting a collection no longer deletes it for the team unless you ask: by default it is removed from this machine only, after everything only this machine has is pushed.

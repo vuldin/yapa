@@ -2,7 +2,7 @@
  * Integration-test database: a fresh database on the server named by
  * YAPA_SERVICE_IT_DATABASE_URL (a superuser URL, e.g. a throwaway
  * pgvector/pgvector:pg17 container), with the production schema applied
- * from infra/cloudsql/sql/00-04 and a non-owner runtime login so the RLS
+ * from infra/cloudsql/sql/00-04, 06 and 07, and a non-owner runtime login so the RLS
  * policies in 04_rls.sql are really in force.
  *
  * The SQL files are psql scripts; the few psql meta-commands they use are
@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 const SQL_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../../infra/cloudsql/sql');
-const FILES = ['00_roles.sql', '01_schema_v1.sql', '02_schema_v2.sql', '03_grants.sql', '04_rls.sql', '06_coordination.sql'];
+const FILES = ['00_roles.sql', '01_schema_v1.sql', '02_schema_v2.sql', '03_grants.sql', '04_rls.sql', '06_coordination.sql', '07_soft_delete.sql'];
 export const RUNTIME_ROLE = 'yapa_it_runtime';
 
 const ident = (s: string) => `"${s.replace(/"/g, '""')}"`;

@@ -355,7 +355,8 @@ are Unix seconds (integers) to match the client code. Every response carries
 | `POST /v1/leases:acquire`, `:heartbeat`, `:release`, `GET /v1/leases` | (new, schema v3) leases, josh-631 |
 | `POST /v1/counters:next` | (new, schema v3) atomic counters, josh-631 |
 | `POST /v1/me/task-ids:next` | (new, schema v3) replaces the client's max + 1 over `max-task-number` |
-| (part of pull) `deletions` in the pull response | (new, v1) delete propagation, gap 5, decision 5 |
+| (part of pull) `deletions` in the pull response | (new, v1) delete propagation, gap 5, decision 5; `reason` and `purged` since schema v4 |
+| `GET /v1/me/deleted`, `POST /v1/documents:restore`, `POST /v1/documents:purge` | (new, schema v4) soft delete, restore and purge |
 | `POST /mcp` on `yapa-mcp` (not `yapa-service`) | (new, later) remote MCP, josh-313 |
 
 `migrateSchema` and `ensureVectorIndex` have no endpoint: schema is owned by
@@ -424,7 +425,8 @@ MCP service reads `kind`/`status`/`owner` (and task `waits_on` and
 // 200
 { "documents": [Document, ...],
   "deletions": [{ "id": "acme-auth-fix-1", "deleted_by": "alice",
-                  "deleted_at": 1760000600 }],
+                  "deleted_at": 1760000600,
+                  "reason": "delete", "purged": false }],   // reason, purged: schema v4
   "next_cursor": "b64...", "has_more": true }
 ```
 
@@ -500,8 +502,24 @@ MCP service reads `kind`/`status`/`owner` (and task `waits_on` and
 `POST /v1/documents:batchDelete` `{ "ids": ["..."] }` (max 500) ->
 `{ "results": [{ "id": "...", "status": "deleted" | "not_found" | "error", "error": {"code": "not_owner"} }], "deleted": 3 }`.
 Each delete writes a row to `deletions` (id, collection, deleted_by,
-deleted_at) in the same transaction, and pull returns it to teammates so they
+deleted_at, reason) in the same transaction, and pull returns it to teammates so they
 drop clean copies (gap 5, decision 5).
+
+Since schema v4 (`07_soft_delete.sql`) the delete is soft: one statement
+moves the row from `documents` into `deleted_documents` (every column, plus
+deleted_by, deleted_at, reason). Its owner can list it
+(`GET /v1/me/deleted`), restore it (`POST /v1/documents:restore`, back into
+`documents` with `updated_at = now()`, a new `synced_at`, last_device
+`@restore` so no device treats it as an echo, audit action `restore`, no
+deletions entry; `id_taken` if a live row has the id now) or purge it
+(`POST /v1/documents:purge`: removes the live row and every deleted copy the
+caller owns, records the id in `purged_ids`, writes a deletions entry with
+`purged = true` per affected collection, audit action `purge`; later upserts
+of the id are refused per item with `purged`). Deleted rows older than
+`YAPA_DELETED_RETENTION_DAYS` (default 30) are removed lazily: requests that
+touch deleted rows start at most one background sweep per instance every 5
+minutes (`yapa_purge_expired_deleted`), and a failed sweep never fails the
+request. The API contract is in `docs/sync-api.md` section 5, "Soft delete".
 
 ### Lookups
 
@@ -547,6 +565,7 @@ collection.
 | 403 | `not_member`, `user_inactive`, `not_owner`, `local_only_collection`, `task_namespace`, `read_only_principal` | authz |
 | 404 | `not_found` | missing or not readable (indistinguishable on purpose) |
 | 409 | `id_taken` | task id collision, includes `suggested_id` |
+| 410 | `purged` | the id was purged by its owner (schema v4); permanent |
 | 413 | `payload_too_large` | over batch/doc limits |
 | 422 | `embedding_dimension`, `embedding_invalid` | embedding is not 384 finite numbers with L2 norm 1 +/- 0.01 |
 | 422 | `secret_detected` | content matches a secret pattern; doc stays local (decision 8) |
@@ -782,6 +801,44 @@ enforces holder-only renew and release, and shared collections only):
 `(collection, name)`, monotonic `value`; task ids under collection `@tasks`).
 The runtime gets DML on `leases`, SELECT/INSERT on `lease_log`, and
 SELECT/INSERT/UPDATE on `counters`.
+
+Schema v4 (`07_soft_delete.sql`) adds soft delete (section 5, "Delete"):
+
+```sql
+-- deleted_documents: a deleted row, restorable by its owner within retention
+CREATE TABLE deleted_documents (
+  id TEXT NOT NULL, collection TEXT NOT NULL, content TEXT NOT NULL,
+  embedding vector(384) NOT NULL, metadata JSONB NOT NULL DEFAULT '{}',
+  origin_user TEXT NOT NULL, related_ids TEXT[] DEFAULT '{}',
+  synced_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+  last_editor TEXT, last_device TEXT,
+  deleted_by TEXT NOT NULL, deleted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reason TEXT NOT NULL CHECK (reason IN ('delete', 'retract')),
+  PRIMARY KEY (id, deleted_at)
+);
+CREATE INDEX idx_deleted_docs_owner ON deleted_documents (origin_user, collection, deleted_at);
+CREATE INDEX idx_deleted_docs_at ON deleted_documents (deleted_at);
+
+-- purged_ids: ids removed for good; upserts of them are refused
+CREATE TABLE purged_ids (
+  id TEXT PRIMARY KEY, purged_by TEXT NOT NULL, purged_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE deletions
+  ADD COLUMN reason TEXT NOT NULL DEFAULT 'delete',
+  ADD COLUMN purged BOOLEAN NOT NULL DEFAULT false;
+```
+
+`deleted_documents` is under RLS with owner-only SELECT, INSERT (also
+`deleted_by` = caller, shared collections only) and DELETE policies, and the
+runtime gets SELECT/INSERT/DELETE on it (no UPDATE). `purged_ids` is under
+RLS too: any signed-in member reads it (the upsert check), INSERT only with
+`purged_by` = caller; the runtime gets SELECT/INSERT. The retention sweep is
+`yapa_purge_expired_deleted(retention_days)`, a SECURITY DEFINER function
+owned by `yapa_owner` (so it removes every user's expired rows despite the
+owner-only policies) that can only delete rows older than at least one day;
+only the runtime may EXECUTE it. An older service keeps working against v4:
+its plain DELETE and its deletions INSERT get the column defaults.
 
 ## 7. Threat model (STRIDE)
 

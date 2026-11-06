@@ -215,7 +215,7 @@ describe.skipIf(!URL_)('service integration (real Postgres + RLS)', () => {
       expect(byAlice.body).toEqual({ results: [{ id: 'acme-del-1', status: 'deleted' }], deleted: 1 });
 
       const feed = (await pullAll('bob', 'B', 'customer-acme')).body.deletions;
-      expect(feed).toEqual([{ id: 'acme-del-1', deleted_by: 'alice', deleted_at: expect.any(Number) }]);
+      expect(feed).toEqual([{ id: 'acme-del-1', deleted_by: 'alice', deleted_at: expect.any(Number), reason: 'delete', purged: false }]);
       expect((await auditRows('acme-del-1')).map(a => a.action)).toEqual(['insert', 'delete']);
 
       const retract = await upsert('alice', 'A', [doc('acme-ret-1', 'customer-acme')]);

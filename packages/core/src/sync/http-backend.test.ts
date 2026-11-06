@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
 import { HttpBackend, IdTokenProvider, decodeJwtPayload, redactTokens } from './http-backend.js';
-import { setSyncBackend, lastSyncError, getSyncBackend, syncBackendKind, syncUsernameNote } from './backend.js';
+import { setSyncBackend, lastSyncError, getSyncBackend, syncBackendKind, syncUsernameNote, UnsupportedByRemoteError } from './backend.js';
 import { getConfig } from '../config.js';
 import { getNextTaskId } from '../tasks/create.js';
 import { pushToRemote, listRejectedDocs } from './push.js';
@@ -317,6 +317,89 @@ describe('every API call', () => {
     const h = await backend().health();
     expect(h.ok).toBe(false);
     expect(h.error).toMatch(/temporarily unavailable/);
+  });
+});
+
+describe('soft delete (service schema v4)', () => {
+  it('pull parses reason and purged on deletions; an older service without them leaves them unset', async () => {
+    handler = () => ({ json: { documents: [], has_more: false, deletions: [
+      { id: 'a', deleted_by: 'mate', deleted_at: 4, reason: 'retract', purged: false },
+      { id: 'b', deleted_by: 'mate', deleted_at: 5, reason: 'delete', purged: true },
+      { id: 'c', deleted_by: 'mate', deleted_at: 6 },
+      { id: 'd', deleted_by: 'mate', deleted_at: 7, reason: 'bogus', purged: 'yes' },
+    ] } });
+    const p = await backend().pull('project-x', { since: 0 });
+    expect(p.deletions).toEqual([
+      { id: 'a', deleted_by: 'mate', deleted_at: 4, reason: 'retract', purged: false },
+      { id: 'b', deleted_by: 'mate', deleted_at: 5, reason: 'delete', purged: true },
+      { id: 'c', deleted_by: 'mate', deleted_at: 6 },
+      { id: 'd', deleted_by: 'mate', deleted_at: 7 },
+    ]);
+  });
+
+  it('listDeleted: GET /v1/me/deleted with optional collection and limit', async () => {
+    handler = () => ({ json: { documents: [{ id: 'x', collection: 'project-x', content: 'abc', metadata: { type: 'memory' }, deleted_at: 9, reason: 'retract' }] } });
+    const b = backend();
+    expect(await b.listDeleted()).toEqual([{ id: 'x', collection: 'project-x', content: 'abc', metadata: { type: 'memory' }, deleted_at: 9, reason: 'retract' }]);
+    await b.listDeleted('project-x', 20);
+    expect(seen.map(s => [s.method, s.path, Object.fromEntries(s.query)])).toEqual([
+      ['GET', '/v1/me/deleted', {}],
+      ['GET', '/v1/me/deleted', { collection: 'project-x', limit: '20' }],
+    ]);
+  });
+
+  it('restore and purge: routes, bodies, Idempotency-Key, 500 ids per request, results in input order', async () => {
+    handler = s => {
+      if (s.path === '/v1/documents:restore') {
+        return { json: { results: s.body.ids.map((id: string) => (id === 'taken' ? { id, status: 'id_taken' } : id === 'gone' ? { id, status: 'not_found' } : { id, status: 'restored', synced_at: 11 })) } };
+      }
+      return { json: { results: s.body.ids.map((id: string) => (id === 'theirs'
+        ? { id, status: 'error', error: { code: 'not_owner', message: 'only the owner can purge a row' } }
+        : { id, status: id === 'gone' ? 'not_found' : id === 'reused' ? 'purged_copies' : 'purged' })) } };
+    };
+    const b = backend();
+    expect(await b.restore(['r1', 'taken', 'gone', 'r1'])).toEqual([
+      { id: 'r1', status: 'restored', synced_at: 11 }, { id: 'taken', status: 'id_taken' }, { id: 'gone', status: 'not_found' },
+    ]);
+    expect(seen[0]).toMatchObject({ method: 'POST', path: '/v1/documents:restore', body: { ids: ['r1', 'taken', 'gone'] } });
+    expect(seen[0].headers['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/);
+
+    expect(await b.purge(['p1', 'theirs', 'gone', 'reused'])).toEqual([
+      { id: 'p1', status: 'purged' },
+      { id: 'theirs', status: 'error', code: 'not_owner', message: 'only the owner can purge a row' },
+      { id: 'gone', status: 'not_found' },
+      { id: 'reused', status: 'purged_copies' },
+    ]);
+    expect(seen[1]).toMatchObject({ method: 'POST', path: '/v1/documents:purge', body: { ids: ['p1', 'theirs', 'gone', 'reused'] } });
+    expect(seen[1].headers['idempotency-key']).toBeTruthy();
+
+    seen.length = 0;
+    const many = Array.from({ length: 501 }, (_, i) => `id${i}`);
+    expect((await b.purge(many)).map(r => r.id)).toEqual(many);
+    expect(seen.map(s => s.body.ids.length)).toEqual([500, 1]);
+  });
+
+  it('an older service (JSON 404 not_found) is UnsupportedByRemoteError and does not mark sync unhealthy', async () => {
+    handler = () => ({ status: 404, json: { error: { code: 'not_found', message: 'no such route' } } });
+    const b = backend();
+    const before = lastSyncError();
+    for (const call of [() => b.listDeleted(), () => b.restore(['a']), () => b.purge(['a'])]) {
+      const err = await call().catch(e => e);
+      expect(err).toBeInstanceOf(UnsupportedByRemoteError);
+      expect(err.code).toBe('unsupported_by_remote');
+    }
+    expect(lastSyncError()).toBe(before);
+    // An HTML 404 (wrong base URL) stays a ServiceError, not "unsupported".
+    handler = () => ({ status: 404, text: '<html>not here</html>' });
+    const html = await b.purge(['a']).catch(e => e);
+    expect(html).not.toBeInstanceOf(UnsupportedByRemoteError);
+    expect(html.code).toBe('http_404');
+  });
+
+  it('a purged item error on upsert is permanent (the client stops resending)', async () => {
+    handler = () => ({ json: { results: [{ id: 'a', status: 'error', error: { code: 'purged', message: 'this id was purged by its owner' } }] } });
+    const [out] = await backend().upsertMany([{ id: 'a', collection: 'project-x', content: 'c', embedding: [1], metadata: {}, origin_user: 'tester', created_at: 1, updated_at: 1 }]);
+    expect(out).toMatchObject({ ok: false, code: 'purged', permanent: true });
   });
 });
 

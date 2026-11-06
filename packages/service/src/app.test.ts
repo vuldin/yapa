@@ -49,6 +49,7 @@ describe('deny by default', () => {
       'GET /v1/collections', 'GET /v1/collections/:c/documents', 'POST /v1/documents:batchUpsert', 'PUT /v1/documents/:id',
       'POST /v1/documents:batchDelete', 'POST /v1/documents:collections', 'POST /v1/documents:owners',
       'GET /v1/documents/:id/created-at', 'POST /v1/documents/:id/related-ids', 'POST /v1/collections/:spec',
+      'GET /v1/me/deleted', 'POST /v1/documents:restore', 'POST /v1/documents:purge',
     ]) expect(paths).toContain(p);
   });
 
@@ -142,9 +143,41 @@ describe('authenticated, no-DB routes', () => {
     }
   });
 
-  it('/v1/me reports the pull byte budget', async () => {
+  it('/v1/me reports the pull byte budget and the deleted-row retention', async () => {
     const r = await app(user).request('/v1/me', { headers: auth });
-    expect((await r.json()).limits.pull_max_bytes).toBe(8 * 1024 * 1024);
+    const limits = (await r.json()).limits;
+    expect(limits.pull_max_bytes).toBe(8 * 1024 * 1024);
+    expect(limits.deleted_retention_days).toBe(30);
+  });
+
+  it('soft-delete routes validate input before any DB access', async () => {
+    const a = app(user);
+    const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+      a.request(path, { method: 'POST', headers: { ...auth, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    for (const path of ['/v1/documents:restore', '/v1/documents:purge']) {
+      const cases: Array<[unknown, number, string]> = [
+        [{}, 400, 'invalid_request'],
+        [{ ids: 'acme-1' }, 400, 'invalid_request'],
+        [{ ids: ['ok', 'has space'] }, 400, 'invalid_request'],
+        [{ ids: ['__sentinel'] }, 400, 'invalid_request'],
+        [{ ids: Array.from({ length: 501 }, (_, i) => `id-${i}`) }, 413, 'payload_too_large'],
+      ];
+      for (const [body, status, code] of cases) {
+        const r = await post(path, body);
+        expect([r.status, (await r.json()).error.code], `${path} ${JSON.stringify(body).slice(0, 40)}`).toEqual([status, code]);
+      }
+      const badKey = await post(path, { ids: ['a'] }, { 'idempotency-key': 'bad key!' });
+      expect(badKey.status).toBe(400);
+    }
+    const get = (qs: string) => a.request(`/v1/me/deleted${qs}`, { headers: auth });
+    for (const [qs, status, code] of [
+      ['?limit=0', 400, 'invalid_request'], ['?limit=abc', 400, 'invalid_request'], ['?limit=1.5', 400, 'invalid_request'],
+      ['?collection=private-mine', 403, 'local_only_collection'], ['?collection=global', 403, 'local_only_collection'],
+      ['?collection=Bad Name', 400, 'invalid_collection'],
+    ] as const) {
+      const r = await get(qs);
+      expect([r.status, (await r.json()).error.code], qs).toEqual([status, code]);
+    }
   });
 
   it('rate limits reads with 429 and Retry-After', async () => {

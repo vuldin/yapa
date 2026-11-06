@@ -6,7 +6,10 @@
 import { describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { decodeCursor, posFromSince } from './cursor.js';
-import { echoClause, findOrCreateUser, idempotencyStorageKey, pull, requestHash, rowsWithinBudget, type RequestCtx, usernameFromEmail } from './store.js';
+import {
+  echoClause, findOrCreateUser, idempotencyStorageKey, pull, purgeMany, requestHash, restoreMany, rowsWithinBudget, upsertOne,
+  type RequestCtx, usernameFromEmail,
+} from './store.js';
 
 interface Q { text: string; values: unknown[] }
 
@@ -148,5 +151,69 @@ describe('usernameFromEmail', () => {
     expect(usernameFromEmail('Dana.Smith+yapa@redpanda.com')).toBe('dana-smith-yapa');
     expect(usernameFromEmail('..@redpanda.com')).toBeUndefined();
     expect(usernameFromEmail(`${'a'.repeat(80)}@x.com`)).toHaveLength(64);
+  });
+});
+
+describe('soft delete ownership (no database)', () => {
+  // Like fakePool above, but rowCount follows the rows the responder returns.
+  function countingPool(respond: (q: Q) => Array<Record<string, unknown>>) {
+    const queries: Q[] = [];
+    const client = {
+      query: async (text: string, values: unknown[] = []) => {
+        const q = { text, values };
+        queries.push(q);
+        const rows = /^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|SELECT set_config)/.test(text) ? [] : respond(q);
+        return { rows, rowCount: rows.length };
+      },
+      release: () => undefined,
+    };
+    return { pool: { connect: async () => client } as unknown as pg.Pool, queries };
+  }
+  const writes = (qs: Q[]) => qs.filter(q => /^\s*(WITH|INSERT|DELETE|UPDATE)/.test(q.text));
+
+  it('purge of a teammate\'s live row is not_owner and changes nothing', async () => {
+    const { pool, queries } = countingPool(q => (q.text.includes('FROM documents WHERE id = $1 FOR UPDATE')
+      ? [{ collection: 'customer-acme', origin_user: 'bob', last_editor: 'bob' }] : []));
+    const r = await purgeMany(pool, ctx('alice', 'A'), ['acme-1']);
+    expect(r).toEqual({ results: [{ id: 'acme-1', status: 'error', error: { code: 'not_owner', message: expect.any(String) } }], purged: 0 });
+    // The only write is the caller-scoped removal of their own deleted copies, which found none.
+    expect(writes(queries).map(q => [q.text.split(' WHERE')[0], q.values])).toEqual([['DELETE FROM deleted_documents', ['acme-1', 'alice']]]);
+  });
+
+  it('purge of a reused id removes only the caller\'s deleted copies: purged_copies, no purged_ids or feed entry', async () => {
+    const { pool, queries } = countingPool(q => {
+      if (q.text.includes('FROM documents WHERE id = $1 FOR UPDATE')) return [{ collection: 'customer-acme', origin_user: 'bob', last_editor: 'bob' }];
+      if (q.text.startsWith('DELETE FROM deleted_documents')) return [{ collection: 'customer-acme', last_editor: 'alice', origin_user: 'alice' }];
+      return [];
+    });
+    expect(await purgeMany(pool, ctx('alice', 'A'), ['acme-1'])).toEqual({ results: [{ id: 'acme-1', status: 'purged_copies' }], purged: 1 });
+    expect(queries.some(q => q.text.includes('purged_ids') || q.text.includes('INSERT INTO deletions') || q.text.startsWith('DELETE FROM documents'))).toBe(false);
+  });
+
+  it('purge with neither a live row nor an own deleted copy is not_found; deleted copies are matched on the caller', async () => {
+    const { pool, queries } = countingPool(() => []);
+    expect((await purgeMany(pool, ctx('alice', 'A'), ['acme-1'])).results).toEqual([{ id: 'acme-1', status: 'not_found' }]);
+    const del = queries.find(q => q.text.startsWith('DELETE FROM deleted_documents'))!;
+    expect(del.text).toContain('origin_user = $2');
+    expect(del.values).toEqual(['acme-1', 'alice']);
+    expect(queries.some(q => q.text.includes('purged_ids') || q.text.includes('INSERT INTO deletions'))).toBe(false);
+  });
+
+  it('restore only looks at the caller\'s own deleted rows within retention', async () => {
+    const { pool, queries } = countingPool(() => []);
+    expect(await restoreMany(pool, ctx('bob', 'B'), ['acme-1'], 30)).toEqual({ results: [{ id: 'acme-1', status: 'not_found' }], restored: 0 });
+    const sel = queries.find(q => q.text.includes('FROM deleted_documents'))!;
+    expect(sel.text).toMatch(/origin_user = \$2 AND deleted_at > now\(\) - make_interval\(days => \$3::int\)/);
+    expect(sel.values).toEqual(['acme-1', 'bob', 30]);
+    expect(writes(queries)).toEqual([]);
+  });
+
+  it('upsert of a purged id is the item error purged, before any write', async () => {
+    const { pool, queries } = countingPool(q => (q.text.includes('FROM purged_ids') ? [{ one: 1 }] : []));
+    const r = await upsertOne(pool, ctx('alice', 'A'), {
+      id: 'acme-1', collection: 'customer-acme', content: 'x', embedding: Array(384).fill(1 / Math.sqrt(384)), metadata: {}, created_at: 1, updated_at: 1,
+    } as never, 0.95);
+    expect(r).toEqual({ id: 'acme-1', status: 'error', error: { code: 'purged', message: expect.any(String) } });
+    expect(writes(queries)).toEqual([]);
   });
 });

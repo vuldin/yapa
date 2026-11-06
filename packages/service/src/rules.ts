@@ -15,6 +15,9 @@ export const MAX_LOOKUP_IDS = 1000;
 export const MAX_RELATED_IDS = 100;
 export const PULL_LIMIT_DEFAULT = 500;
 export const PULL_LIMIT_MAX = 1000;
+/** GET /v1/me/deleted page size. */
+export const LIST_DELETED_LIMIT_DEFAULT = 100;
+export const LIST_DELETED_LIMIT_MAX = 500;
 /** 2024-01-01T00:00:00Z: lower bound for client-supplied created_at. */
 export const MIN_CREATED_AT = 1704067200;
 export const MAX_FUTURE_SECONDS = 86400;

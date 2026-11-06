@@ -2790,6 +2790,12 @@ function toOutcome(id, r) {
   }
   return { id, ok: true, status: String(r.status), ...r.stale ? { stale: true } : {}, similar: Array.isArray(r.similar) ? r.similar : [] };
 }
+function toDeletion(d) {
+  const out = { id: d.id, deleted_by: d.deleted_by, deleted_at: Number(d.deleted_at) };
+  if (d.reason === "delete" || d.reason === "retract") out.reason = d.reason;
+  if (typeof d.purged === "boolean") out.purged = d.purged;
+  return out;
+}
 function embeddingModelLabel() {
   const c = getConfig();
   if (c.EMBEDDING_PROVIDER === "chromadb") return "Xenova/all-MiniLM-L6-v2:q8";
@@ -2838,7 +2844,9 @@ var init_http_backend = __esm({
       "local_only_collection",
       "task_namespace",
       "payload_too_large",
-      "not_owner"
+      "not_owner",
+      // The owner purged the id: no write of it will ever be accepted.
+      "purged"
     ]);
     IdTokenProvider = class {
       constructor(cmd = "", now = Date.now, cachePath = "") {
@@ -3018,7 +3026,7 @@ var init_http_backend = __esm({
         const r = await this.request("GET", `/v1/collections/${encodeURIComponent(collection)}/documents?${q}`);
         return {
           documents: (r.documents ?? []).map((d) => ({ ...d, related_ids: d.related_ids ?? [], metadata: d.metadata ?? {} })),
-          deletions: r.deletions ?? [],
+          deletions: (r.deletions ?? []).map(toDeletion),
           nextCursor: r.next_cursor,
           hasMore: Boolean(r.has_more)
         };
@@ -3049,6 +3057,64 @@ var init_http_backend = __esm({
           deleted += Number(r.deleted ?? 0);
         }
         return deleted;
+      }
+      /**
+       * Soft-delete routes (service schema v4) are user actions, not sync: they
+       * are quiet (a failure does not mark sync unhealthy, a sign-out still
+       * does), and an older service's `404 not_found` becomes an
+       * UnsupportedByRemoteError.
+       */
+      async softDeleteCall(feature, method, path3, opts = {}) {
+        try {
+          return await this.request(method, path3, { ...opts, quiet: true });
+        } catch (e) {
+          if (e instanceof ServiceError && e.status === 404 && e.code === "not_found") throw new UnsupportedByRemoteError(feature);
+          throw e;
+        }
+      }
+      async listDeleted(collection, limit) {
+        const q = new URLSearchParams();
+        if (collection) q.set("collection", collection);
+        if (limit !== void 0) q.set("limit", String(limit));
+        const qs = q.toString();
+        const r = await this.softDeleteCall("listing deleted documents", "GET", `/v1/me/deleted${qs ? `?${qs}` : ""}`);
+        return (r.documents ?? []).map((d) => ({
+          id: String(d.id),
+          collection: String(d.collection),
+          content: String(d.content ?? ""),
+          metadata: d.metadata ?? {},
+          deleted_at: Number(d.deleted_at),
+          reason: d.reason === "retract" ? "retract" : "delete"
+        }));
+      }
+      async restore(ids) {
+        const out = [];
+        for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
+          const r = await this.softDeleteCall("restoring deleted documents", "POST", "/v1/documents:restore", { body: { ids: part }, idempotent: true });
+          const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
+          for (const id of part) {
+            const x = byId.get(id);
+            if (x?.status === "restored") out.push({ id, status: "restored", synced_at: Number(x.synced_at ?? 0) });
+            else out.push({ id, status: x?.status === "id_taken" ? "id_taken" : "not_found" });
+          }
+        }
+        return out;
+      }
+      async purge(ids) {
+        const out = [];
+        for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
+          const r = await this.softDeleteCall("purging documents", "POST", "/v1/documents:purge", { body: { ids: part }, idempotent: true });
+          const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
+          for (const id of part) {
+            const x = byId.get(id);
+            if (x?.status === "purged" || x?.status === "purged_copies" || x?.status === "not_found") out.push({ id, status: x.status });
+            else {
+              const code = String(x?.error?.code ?? "internal");
+              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300) });
+            }
+          }
+        }
+        return out;
       }
       async collections() {
         return (await this.request("GET", "/v1/collections")).collections ?? [];
@@ -3651,12 +3717,21 @@ function syncUsernameNote() {
   if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return void 0;
   return `Username: using '${serverUsername}' from your Google account (the username option '${configuredUsername}' is informational with the sync service)`;
 }
-var override, active3, lastError, serverUsername, configuredUsername;
+var UnsupportedByRemoteError, override, active3, lastError, serverUsername, configuredUsername;
 var init_backend = __esm({
   "packages/core/src/sync/backend.ts"() {
     "use strict";
     init_config();
     init_health();
+    UnsupportedByRemoteError = class extends Error {
+      constructor(feature, message = `the sync service does not support ${feature} yet (it needs a newer service release)`) {
+        super(message);
+        this.feature = feature;
+        this.name = "UnsupportedByRemoteError";
+      }
+      feature;
+      code = "unsupported_by_remote";
+    };
   }
 });
 
@@ -9387,6 +9462,7 @@ __export(src_exports, {
   TaskClaimedError: () => TaskClaimedError,
   TypedMemoryError: () => TypedMemoryError,
   UPDATE_CHECK_INTERVAL_MS: () => UPDATE_CHECK_INTERVAL_MS,
+  UnsupportedByRemoteError: () => UnsupportedByRemoteError,
   VERIFY_JUDGE_SYSTEM_PROMPT: () => VERIFY_JUDGE_SYSTEM_PROMPT,
   adapterDemote: () => adapterDemote,
   adapterPromote: () => adapterPromote,
