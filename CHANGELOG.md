@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Background curation leaves documents the remote owns alone.** A remote can serve records it owns with `metadata.read_only: true`. Edits by hand were already refused, but curation still touched them. Now:
+  - the janitor never pairs or archives them as duplicates;
+  - `compaction_suggest` never groups them, and `compaction_apply` never archives one;
+  - the decay sweep and the recall salience boost leave their salience as served.
+
 ## 1.14.1 (2026-11-06)
 
 Follow-through settles what a turn answers again in sessions that have worked one task for a while.

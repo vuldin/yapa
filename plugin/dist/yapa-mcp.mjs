@@ -41525,6 +41525,7 @@ async function storeMemory(content, options = {}) {
 
 // packages/core/src/memory/recall.ts
 init_store();
+init_syncable();
 init_config();
 init_syncable();
 
@@ -41615,7 +41616,7 @@ async function recallMemory(query, options = {}) {
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
   const boosts = /* @__PURE__ */ new Map();
   for (const r of results) {
-    if (options.boost === false || r.distance >= boostMaxDistance) continue;
+    if (options.boost === false || r.distance >= boostMaxDistance || isReadOnlyDoc(r.metadata)) continue;
     if (r.collection) {
       const lifecycleMeta = {
         salience: r.metadata.salience ?? 1,
@@ -41725,6 +41726,7 @@ async function listMemories(options = {}) {
 
 // packages/core/src/memory/decay.ts
 init_store();
+init_syncable();
 
 // packages/core/src/memory/trash.ts
 init_config();
@@ -41883,6 +41885,7 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
       const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
       const updates = [];
       for (const doc of docs) {
+        if (isReadOnlyDoc(doc.metadata)) continue;
         const anchor2 = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
         const days = (now - anchor2) / DAY2;
         if (days <= 0) continue;
@@ -41920,6 +41923,7 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
 }
 
 // packages/core/src/memory/compact.ts
+init_syncable();
 init_config();
 init_store();
 init_sentinel();
@@ -41941,7 +41945,7 @@ function intersect(a, b) {
   return b.filter((t) => set2.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -41950,7 +41954,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && !isReadOnlyDoc(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -41982,7 +41986,7 @@ async function applyCompaction(input2) {
   for (const id of input2.member_ids) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
       await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
@@ -43642,17 +43646,18 @@ function extractJsonObject(raw) {
 }
 
 // packages/core/src/curation/janitor.ts
+init_syncable();
 init_config();
 init_store();
 async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
       const key = [doc.id, n.id].sort().join("|");
       if (seen.has(key)) continue;
       seen.add(key);
