@@ -12,6 +12,7 @@ import { purgeDocuments, restoreDeleted, listTrash } from './trash.js';
 let dir: string;
 const calls: { purge: string[][]; delete: string[][]; restore: string[][] } = { purge: [], delete: [], restore: [] };
 let supportsPurge = true;
+let reused = new Set<string>();
 
 const stub = (): SyncBackend => ({
   kind: 'service', target: 'stub',
@@ -21,7 +22,7 @@ const stub = (): SyncBackend => ({
   purge: async ids => {
     if (!supportsPurge) throw new UnsupportedByRemoteError('purge');
     calls.purge.push(ids);
-    return ids.map(id => ({ id, status: 'purged' as const }));
+    return ids.map(id => ({ id, status: reused.has(id) ? 'purged_copies' as const : 'purged' as const }));
   },
   restore: async ids => { calls.restore.push(ids); return ids.map(id => ({ id, status: 'restored' as const, synced_at: 1 })); },
   listDeleted: async () => [{ id: 'tester-9', collection: 'project-acme', content: 'old', metadata: {}, deleted_at: 1_800_000_000, reason: 'delete' }],
@@ -42,7 +43,7 @@ afterAll(async () => {
   resetStore();
   resetConfig();
 });
-beforeEach(() => { calls.purge = []; calls.delete = []; calls.restore = []; supportsPurge = true; });
+beforeEach(() => { calls.purge = []; calls.delete = []; calls.restore = []; supportsPurge = true; reused = new Set(); });
 
 describe('purge', () => {
   it('removes your document here at once and purges it on the next push; refuses a teammate\'s; a local-only one just goes', async () => {
@@ -59,6 +60,15 @@ describe('purge', () => {
     expect(await getPendingPurges()).toEqual(['mem-leak']);
     const stats = await pushToRemote();
     expect(calls.purge).toEqual([['mem-leak']]);
+    expect(stats.purged).toBe(1);
+    expect(await getPendingPurges()).toEqual([]);
+  });
+
+  it('an id another user reused counts as purged when the service removed only our deleted copies', async () => {
+    reused = new Set(['mem-reused']);
+    await purgeDocuments(['mem-reused']);
+    const stats = await pushToRemote();
+    expect(calls.purge).toEqual([['mem-reused']]);
     expect(stats.purged).toBe(1);
     expect(await getPendingPurges()).toEqual([]);
   });

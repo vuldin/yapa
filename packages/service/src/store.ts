@@ -376,14 +376,19 @@ export async function deleteMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], 
         results.push({ id, status: 'error', error: itemError('not_owner', 'only the owner can delete a shared row; keep a local tombstone instead') });
         continue;
       }
-      // Soft delete: the row moves to deleted_documents (restorable by its
-      // owner within the retention window) in the same statement.
-      const del = await c.query(
-        `WITH gone AS (DELETE FROM documents WHERE id = $1 AND origin_user = $2 RETURNING *)
-         INSERT INTO deleted_documents (${DOC_COLUMNS}, deleted_by, deleted_at, reason)
-         SELECT ${DOC_COLUMNS}, $2, clock_timestamp(), $3 FROM gone`,
-        [id, me, action],
-      );
+      // A delete is soft: the row moves to deleted_documents (restorable by
+      // its owner within the retention window) in the same statement. A
+      // retract is not: the doc moved into a private collection on the
+      // owner's machine (which keeps it), and the point of the move is that
+      // no shared copy of its content stays here.
+      const del = action === 'retract'
+        ? await c.query('DELETE FROM documents WHERE id = $1 AND origin_user = $2', [id, me])
+        : await c.query(
+          `WITH gone AS (DELETE FROM documents WHERE id = $1 AND origin_user = $2 RETURNING *)
+           INSERT INTO deleted_documents (${DOC_COLUMNS}, deleted_by, deleted_at, reason)
+           SELECT ${DOC_COLUMNS}, $2, clock_timestamp(), $3 FROM gone`,
+          [id, me, action],
+        );
       if (del.rowCount === 0) { results.push({ id, status: 'not_found' }); continue; }
       await c.query(
         'INSERT INTO deletions (id, collection, deleted_by, deleted_at, reason) VALUES ($1, $2, $3, clock_timestamp(), $4)',
@@ -513,8 +518,14 @@ export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[],
   });
 }
 
+/**
+ * `purged`: the caller's live row and every deleted copy are gone, and the id
+ * can never be written again. `purged_copies`: the id is now someone else's
+ * live document (reused after the caller deleted theirs): the caller's deleted
+ * copies are gone, the other person's row and the id stay.
+ */
 export type PurgeResult =
-  | { id: string; status: 'purged' | 'not_found' }
+  | { id: string; status: 'purged' | 'purged_copies' | 'not_found' }
   | { id: string; status: 'error'; error: ItemError };
 
 /**
@@ -530,14 +541,27 @@ export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): 
     let purged = 0;
     const one = async (id: string): Promise<PurgeResult> => {
       const live = (await c.query('SELECT collection, origin_user, last_editor FROM documents WHERE id = $1 FOR UPDATE', [id])).rows[0];
-      if (live && live.origin_user !== me) {
-        return { id, status: 'error', error: itemError('not_owner', 'only the owner can purge a row') };
-      }
       // RLS shows only the caller's deleted rows; the filter says so explicitly.
       const gone = await c.query(
         'DELETE FROM deleted_documents WHERE id = $1 AND origin_user = $2 RETURNING collection, last_editor, origin_user',
         [id, me],
       );
+      if (live && live.origin_user !== me) {
+        // The id was reused by someone else after the caller deleted theirs:
+        // the caller's own deleted copies still go (a leaked secret must not
+        // wait out the retention), the other person's live row and the id stay.
+        if (gone.rowCount === 0) {
+          return { id, status: 'error', error: itemError('not_owner', 'this id is another user\'s live document and you have no deleted copy of it to purge') };
+        }
+        for (const coll of new Set(gone.rows.map(r => r.collection as string))) {
+          await audit(c, {
+            ...auditBase(ctx), action: 'purge', doc_id: id, collection: coll, row_owner: me, change_class: 'own',
+            prev_editor: gone.rows[0].last_editor ?? gone.rows[0].origin_user,
+          });
+        }
+        purged++;
+        return { id, status: 'purged_copies' };
+      }
       if (!live && gone.rowCount === 0) return { id, status: 'not_found' };
       if (live) await c.query('DELETE FROM documents WHERE id = $1 AND origin_user = $2', [id, me]);
       await c.query('INSERT INTO purged_ids (id, purged_by) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [id, me]);
@@ -549,10 +573,12 @@ export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): 
         );
       }
       const prev = live ?? gone.rows[0];
-      await audit(c, {
-        ...auditBase(ctx), action: 'purge', doc_id: id, collection: collections[0], row_owner: me, change_class: 'own',
-        prev_editor: prev.last_editor ?? prev.origin_user,
-      });
+      for (const coll of collections) {
+        await audit(c, {
+          ...auditBase(ctx), action: 'purge', doc_id: id, collection: coll, row_owner: me, change_class: 'own',
+          prev_editor: prev.last_editor ?? prev.origin_user,
+        });
+      }
       purged++;
       return { id, status: 'purged' };
     };

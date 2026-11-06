@@ -69,7 +69,8 @@ export type RestoreResult =
 
 /** `purged`: the live row and every deleted copy are gone, and the id can never be written again. */
 export type PurgeResult =
-  | { id: string; status: 'purged' | 'not_found' }
+  /** `purged_copies`: the id is now someone else's live document; only your deleted copies were purged. */
+  | { id: string; status: 'purged' | 'purged_copies' | 'not_found' }
   | { id: string; status: 'error'; code: string; message: string };
 
 /**

@@ -160,8 +160,10 @@ async function pushAll(): Promise<PushStats> {
           const results = await backend.purge(purges);
           for (const r of results) {
             if (r.status === 'error') process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}\n`);
+            // The id is now someone else's live document: only our deleted copies went.
+            if (r.status === 'purged_copies') process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays\n`);
           }
-          stats.purged = results.filter(r => r.status === 'purged').length;
+          stats.purged = results.filter(r => r.status === 'purged' || r.status === 'purged_copies').length;
         } catch (e) {
           if (!(e instanceof UnsupportedByRemoteError)) throw e;
           // An older service: delete instead (its copy may stay restorable there).

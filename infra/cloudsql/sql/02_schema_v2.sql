@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   actor_email     TEXT NOT NULL,
   device          TEXT,
   request_id      TEXT NOT NULL,
-  action          TEXT NOT NULL,          -- insert|update|archive|move|delete|link|retract
+  action          TEXT NOT NULL,          -- insert|update|archive|move|delete|link|retract|restore|purge (restore, purge: schema v4)
                                           -- |overwrote_teammate_edit|transfer_owner
   doc_id          TEXT NOT NULL,
   collection      TEXT NOT NULL,

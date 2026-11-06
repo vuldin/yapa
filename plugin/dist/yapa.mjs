@@ -4755,8 +4755,10 @@ async function pushAll() {
           for (const r of results) {
             if (r.status === "error") process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}
 `);
+            if (r.status === "purged_copies") process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays
+`);
           }
-          stats.purged = results.filter((r) => r.status === "purged").length;
+          stats.purged = results.filter((r) => r.status === "purged" || r.status === "purged_copies").length;
         } catch (e) {
           if (!(e instanceof UnsupportedByRemoteError)) throw e;
           process.stderr.write(`[yapa-sync] The sync service can't purge yet: deleting ${purges.length} doc(s) instead
@@ -10507,7 +10509,7 @@ var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
-    SCRIPT_VERSION = true ? "1.10.3" : void 0;
+    SCRIPT_VERSION = true ? "1.11.0" : void 0;
     SEMVER2 = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
     DEFAULT_INTERVAL_MS = 3e5;
     STALE_INTERVALS = 3;
@@ -10532,7 +10534,7 @@ var YAPA_VERSION;
 var init_version = __esm({
   "packages/mcp/src/version.ts"() {
     "use strict";
-    YAPA_VERSION = true ? "1.10.3" : fromPackage();
+    YAPA_VERSION = true ? "1.11.0" : fromPackage();
   }
 });
 

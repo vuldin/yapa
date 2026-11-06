@@ -10686,8 +10686,10 @@ async function pushAll() {
           for (const r of results) {
             if (r.status === "error") process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}
 `);
+            if (r.status === "purged_copies") process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays
+`);
           }
-          stats.purged = results.filter((r) => r.status === "purged").length;
+          stats.purged = results.filter((r) => r.status === "purged" || r.status === "purged_copies").length;
         } catch (e) {
           if (!(e instanceof UnsupportedByRemoteError)) throw e;
           process.stderr.write(`[yapa-sync] The sync service can't purge yet: deleting ${purges.length} doc(s) instead
@@ -11164,7 +11166,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.10.3" : fromPackage();
+var YAPA_VERSION = true ? "1.11.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
