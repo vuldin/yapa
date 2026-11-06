@@ -19,6 +19,33 @@ describe('parseFollowThrough guards', () => {
     expect(parseFollowThrough(raw, [finding], 'josh', t)).toEqual([]);
   });
 
+  it('keeps a close whose note only says something else was unrelated', () => {
+    const t = turn('the lag spike was unrelated to the upgrade, close it');
+    for (const note of [
+      'No action: the lag spike was unrelated to the upgrade.',
+      'Answered: the restart did not address the lag; the root cause is the quota.',
+      'Closed: RF=3 is not covered by the SLA, so the limit no longer applies.',
+      'Resolved: the fix does not touch the consumer path, so no follow-up needed.',
+    ]) {
+      const raw = reply({ id: 'mem-f', status: 'resolved', note, evidence: 'the lag spike was unrelated to the upgrade', disposition: 'no-action', disposition_reason: note });
+      expect(parseFollowThrough(raw, [finding], 'josh', t)).toHaveLength(1);
+    }
+    const raw = reply({ id: 'mem-f', status: 'resolved', note: 'Not addressed in this turn.', evidence: 'the lag spike was unrelated to the upgrade', disposition: 'no-action', disposition_reason: 'n/a' });
+    expect(parseFollowThrough(raw, [finding], 'josh', t)).toEqual([]);
+  });
+
+  it('accepts a short reply quoted whole, and quotes the model reformatted lightly', () => {
+    const d = { ...decision, owner: 'josh' };
+    const short = (userText: string, evidence: string) =>
+      parseFollowThrough(reply({ id: 'mem-d', status: 'accepted', note: 'Friday', evidence }), [d], 'josh', { text: `${userText}\nOK.`, userText, knownUsers: ['josh'] });
+    expect(short('yes', 'yes')).toHaveLength(1);
+    expect(short('go with B', 'go with B.')).toHaveLength(1);
+    expect(short('Yes, go with Friday', 'go with Friday')).toHaveLength(1);
+    expect(short('a long reply that talks about many other things', 'yes')).toEqual([]);
+    const t = { text: 'use the **quota** fix — then redeploy', userText: '', knownUsers: [] };
+    expect(parseFollowThrough(reply({ id: 'mem-q', status: 'answered', note: 'quota', evidence: 'use the quota fix - then redeploy' }), [question], 'josh', t)).toHaveLength(1);
+  });
+
   it('needs evidence that is really in the turn', () => {
     const t = turn('The customer confirmed they run in us-east-2.');
     const ok = { id: 'mem-q', status: 'answered', note: 'us-east-2' };

@@ -155,7 +155,7 @@ describe('waitingOn', () => {
 
     const all = await waitingOn({ collection: W });
     expect(all.decisions.map(d => d.id)).toEqual([dec]);
-    expect(all.decisions[0]).toMatchObject({ for: ['josh'], options: ['Friday', 'after the fix'], recommendation: 'after the fix', waiting_tasks: [waiter] });
+    expect(all.decisions[0]).toMatchObject({ for: ['tester'], ask: 'josh', options: ['Friday', 'after the fix'], recommendation: 'after the fix', waiting_tasks: [waiter] });
     expect(all.questions.map(q => [q.for, q.ask])).toEqual([[['tester'], 'alex']]);
     expect(all.actions.map(a => a.id).sort()).toEqual([act, anyone].sort());
     expect(all.blocked.map(b => b.id)).toEqual([blocked]);
@@ -169,7 +169,9 @@ describe('waitingOn', () => {
 
   it('matches owners to users case-insensitively, and sends one for someone outside YAPA to whoever recorded it', async () => {
     const W = 'project-owners';
-    await createTask('Review the plan', { tags: ['needs:josh'] }, W);
+    const { addDocument } = await import('../store/index.js');
+    await addDocument(W, 'josh-1', 'Review the plan', { type: 'task', status: 'pending', username: 'josh', created_at: 1, tags: 'needs:legal' });
+    const { ids: [team] } = await storeMemory('Can we ship the new terms?', { collection: W, typed: { kind: 'question', owner: 'Legal' } });
     const { ids: [cap] } = await storeMemory('Keep the old endpoint for a month?', {
       collection: W, typed: { kind: 'decision', status: 'needed', owner: 'Josh', options: ['yes', 'no'] },
     });
@@ -178,10 +180,10 @@ describe('waitingOn', () => {
 
     const all = await waitingOn({ collection: W });
     expect(all.decisions.map(d => [d.id, d.for, d.ask])).toEqual([[cap, ['josh'], undefined]]);
-    expect(all.questions.map(q => [q.id, q.for, q.ask]).sort()).toEqual([[ext, ['tester'], 'Vendor support'], [mail, ['josh'], undefined]].sort());
+    expect(all.questions.map(q => [q.id, q.for, q.ask]).sort()).toEqual([[ext, ['tester'], 'Vendor support'], [mail, ['josh'], undefined], [team, ['tester'], 'Legal']].sort());
 
     expect((await waitingOn({ collection: W, user: 'JOSH' })).questions.map(q => q.id)).toEqual([mail]);
-    expect((await waitingOn({ collection: W, user: 'tester' })).questions.map(q => q.id)).toEqual([ext]);
+    expect((await waitingOn({ collection: W, user: 'tester' })).questions.map(q => q.id).sort()).toEqual([ext, team].sort());
     const { formatWaiting } = await import('../tasks/waiting.js');
     expect(formatWaiting(all)).toMatch(new RegExp(`\\*\\*${ext}\\*\\* \\[question, for tester, ask Vendor support, new\\]`));
   });

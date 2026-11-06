@@ -1,16 +1,12 @@
 import { getConfig } from '../config.js';
 import { getDocumentsByFilter, getStore, listCollections, type VectorStore } from '../store/index.js';
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
-
-/** The users a set of documents shows: authors, and people named by `needs:<user>` tags. */
+/** The users a set of documents shows: their authors. */
 export function usersIn(docs: Array<{ metadata: Record<string, any> }>): string[] {
   const out: string[] = [];
   for (const { metadata: m } of docs) {
     if (m.username) out.push(String(m.username));
     if (m.origin_user) out.push(String(m.origin_user));
-    for (const t of list(m.tags)) if (t.startsWith('needs:') && t.length > 6) out.push(t.slice(6));
   }
   return out;
 }

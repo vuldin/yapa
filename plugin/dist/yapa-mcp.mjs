@@ -7238,8 +7238,8 @@ var require_dist = __commonJS({
         return ajv;
       }
       const [formats, exportName] = opts.mode === "fast" ? [formats_1.fastFormats, fastName] : [formats_1.fullFormats, fullName];
-      const list7 = opts.formats || formats_1.formatNames;
-      addFormats(ajv, list7, formats, exportName);
+      const list6 = opts.formats || formats_1.formatNames;
+      addFormats(ajv, list6, formats, exportName);
       if (opts.keywords)
         (0, limit_1.default)(ajv);
       return ajv;
@@ -7251,11 +7251,11 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list7, fs, exportName) {
+    function addFormats(ajv, list6, fs, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
-      for (const f of list7)
+      for (const f of list6)
         ajv.addFormat(f, fs[f]);
     }
     module.exports = exports = formatsPlugin;
@@ -10739,15 +10739,15 @@ function noticesPath() {
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list7 = [];
+      let list6 = [];
       try {
-        list7 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list6 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list7)) list7 = [];
-      if (list7.some((n) => n.text === text)) return;
-      list7.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list7.slice(-20));
+      if (!Array.isArray(list6)) list6 = [];
+      if (list6.some((n) => n.text === text)) return;
+      list6.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list6.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -31410,8 +31410,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list7 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list7)
+  const list6 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list6)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -42356,13 +42356,11 @@ function includesUser(people, user) {
 // packages/core/src/memory/known-users.ts
 init_config();
 init_store();
-var list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 function usersIn(docs) {
   const out = [];
   for (const { metadata: m } of docs) {
     if (m.username) out.push(String(m.username));
     if (m.origin_user) out.push(String(m.origin_user));
-    for (const t of list5(m.tags)) if (t.startsWith("needs:") && t.length > 6) out.push(t.slice(6));
   }
   return out;
 }
@@ -42388,7 +42386,7 @@ async function knownUsers() {
 
 // packages/core/src/tasks/waiting.ts
 init_config();
-var list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+var list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 var firstLine = (s) => {
   const line = s.split("\n").find((l) => l.trim()) ?? "";
   const t = line.replace(/^#+\s*/, "").trim();
@@ -42416,7 +42414,7 @@ async function waitingOn(opts = {}) {
   for (const { collection, decisions, questions, tasks } of read) {
     const open3 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open3) for (const m of list6(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open3) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -42434,7 +42432,7 @@ async function waitingOn(opts = {}) {
         by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list6(m.options).length ? { options: list6(m.options) } : {},
+        ...list5(m.options).length ? { options: list5(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -42443,7 +42441,7 @@ async function waitingOn(opts = {}) {
     for (const t of open3) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list6(m.tags));
+      const people = taskNeedsPeople(list5(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
