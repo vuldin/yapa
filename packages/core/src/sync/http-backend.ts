@@ -96,7 +96,7 @@ export function runCommand(cmd: string, explain: (detail: string) => string, fal
 /** The command's program name, never its arguments or leading `VAR=value` assignments (either can hold a secret). */
 export function programOf(cmd: string): string {
   const word = cmd.trim().split(/\s+/).find(w => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
-  return word?.split('/').pop() || 'the token command';
+  return word && /^[\w./-]+$/.test(word) ? word.split('/').pop() || 'the token command' : 'the token command';
 }
 
 function exitText(code: unknown): string {

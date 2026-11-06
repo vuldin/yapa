@@ -2945,7 +2945,7 @@ function runCommand(cmd, explain2, fallback) {
 }
 function programOf(cmd) {
   const word = cmd.trim().split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
-  return word?.split("/").pop() || "the token command";
+  return word && /^[\w./-]+$/.test(word) ? word.split("/").pop() || "the token command" : "the token command";
 }
 function exitText(code) {
   return typeof code === "number" ? `exit code ${code}` : String(code ?? "failed");

@@ -313,6 +313,8 @@ describe('sync over MCP', () => {
     expect(programOf('TOKEN=s3cret A=1 /usr/local/bin/mycli get --key sk-123')).toBe('mycli');
     expect(programOf('echo sk-123')).toBe('echo');
     expect(programOf('TOKEN=s3cret')).toBe('the token command');
+    expect(programOf('TOKEN="s3cret part2" mycli get')).toBe('the token command');
+    expect(programOf("TOKEN='abc def' /bin/tok")).toBe('the token command');
     expect(programOf('  ')).toBe('the token command');
   });
 
