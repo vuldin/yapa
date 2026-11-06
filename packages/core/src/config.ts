@@ -88,6 +88,8 @@ export interface YapaConfig {
 
   // Compaction
   COMPACTION_THRESHOLD: number;
+  /** Open findings older than two days with no disposition at which task_next offers cleanup:findings even when tasks are ready. */
+  FINDINGS_CLEANUP_THRESHOLD: number;
   COMPACTION_MIN_GROUP_SIZE: number;
   COMPACTION_SIMILARITY_DISTANCE: number;
 
@@ -331,6 +333,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, 'CONTRADICTION_MAX_RESULTS', '3'), 10),
 
     COMPACTION_THRESHOLD: parseInt(get(env, 'COMPACTION_THRESHOLD', '50'), 10),
+    FINDINGS_CLEANUP_THRESHOLD: parseInt(get(env, 'FINDINGS_CLEANUP_THRESHOLD', '20'), 10),
     COMPACTION_MIN_GROUP_SIZE: parseInt(get(env, 'COMPACTION_MIN_GROUP_SIZE', '3'), 10),
     COMPACTION_SIMILARITY_DISTANCE: parseFloat(get(env, 'COMPACTION_SIMILARITY_DISTANCE', '0.30')),
 
