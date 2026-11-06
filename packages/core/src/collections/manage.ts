@@ -345,18 +345,18 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
   return result;
 }
 
-/**
- * The user-facing report of a merge, shared by the MCP and DSH tools. For a
- * shared -> private merge it spells out what happens on the sync service:
- * your shared rows are retracted at the next push, teammates' rows stay
- * shared in `from`, and `from` is not followed again unless asked.
- */
 function erasureLines(r: MergeResult): string[] {
   if (r.remoteKeepsContent) return ['This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.'];
   if (r.remoteRulesUnknown) return ["This sync service's data rules aren't known yet (see `sync status`): if it cannot erase, it keeps their content."];
   return [];
 }
 
+/**
+ * The user-facing report of a merge, shared by the MCP and DSH tools. For a
+ * shared -> private merge it spells out what happens on the sync service:
+ * your shared rows are retracted at the next push, teammates' rows stay
+ * shared in `from`, and `from` is not followed again unless asked.
+ */
 export function mergeReportLines(r: MergeResult): string[] {
   const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(', ') || 'none';
   const sharedToPrivate = isSyncable(r.from) && !isSyncable(r.into);
@@ -377,7 +377,7 @@ export function mergeReportLines(r: MergeResult): string[] {
     if (r.ownRowsRetracted > 0) {
       lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
       lines.push(...erasureLines(r));
-      }
+    }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
     }

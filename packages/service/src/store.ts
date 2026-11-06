@@ -247,6 +247,11 @@ async function similarIn(c: pg.PoolClient, collection: string, vec: string, thre
     .filter(s => s.similarity > threshold);
 }
 
+/** Byte order, as `COLLATE "C"` sorts, so every request locks ids in the same order. */
+function lockOrder(ids: string[]): string[] {
+  return [...new Set(ids)].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+}
+
 function lockDocId(c: pg.PoolClient, id: string): Promise<unknown> {
   return c.query("SELECT pg_advisory_xact_lock(hashtextextended('yapa-doc:' || $1, 0))", [id]);
 }
@@ -520,8 +525,7 @@ export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[],
       restored++;
       return { id, status: 'restored', synced_at: Number(ins.rows[0].synced_at) };
     };
-    // One lock order for every request, so two that share ids cannot deadlock.
-    for (const id of [...new Set(ids)].sort()) done.set(id, await one(id));
+    for (const id of lockOrder(ids)) done.set(id, await one(id));
     return { results: ids.map(id => done.get(id)!), restored };
   });
 }
@@ -591,8 +595,7 @@ export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): 
       purged++;
       return { id, status: 'purged' };
     };
-    // One lock order for every request, so two that share ids cannot deadlock.
-    for (const id of [...new Set(ids)].sort()) done.set(id, await one(id));
+    for (const id of lockOrder(ids)) done.set(id, await one(id));
     return { results: ids.map(id => done.get(id)!), purged };
   });
 }
