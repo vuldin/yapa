@@ -231,6 +231,24 @@ describe.skipIf(!URL_)('soft delete, restore and purge (real Postgres + RLS)', (
     expect((await purge('alice', ['sd-reuse'])).body.results[0]).toMatchObject({ status: 'error', error: { code: 'not_owner' } });
   });
 
+  it('an upsert that waited on a purge of a deleted-only id is refused once the purge commits', async () => {
+    await upsert('alice', 'A', [doc('sd-race')]);
+    await del('alice', ['sd-race']);
+    const c = await db.adminPool.connect();
+    let bob: ReturnType<typeof upsert> | undefined;
+    try {
+      await c.query('BEGIN');
+      await c.query("SELECT pg_advisory_xact_lock(hashtextextended('yapa-doc:' || $1, 0))", ['sd-race']);
+      bob = upsert('bob', 'B', [doc('sd-race')]);
+      await new Promise(r => setTimeout(r, 300));
+      await c.query("INSERT INTO purged_ids (id, purged_by) VALUES ('sd-race', 'alice')");
+      await c.query('COMMIT');
+    } finally {
+      c.release();
+    }
+    expect((await bob!).body.results[0]).toMatchObject({ status: 'error', error: { code: 'purged' } });
+  });
+
   it('retention: rows older than the window are not listed or restorable, and the sweep removes every user\'s', async () => {
     await upsert('alice', 'A', [doc('sd-old-a')]);
     await upsert('bob', 'B', [doc('sd-old-b')]);
