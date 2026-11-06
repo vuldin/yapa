@@ -1055,7 +1055,7 @@ function matchesFilter(metadata, filter) {
   return true;
 }
 function createLocalStore(rootDir) {
-  const cache = /* @__PURE__ */ new Map();
+  const cache2 = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
   const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
@@ -1073,12 +1073,12 @@ function createLocalStore(rootDir) {
       }
       const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
-      cache.set(name, parsed);
+      cache2.set(name, parsed);
       cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache.delete(name);
+        cache2.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -1086,14 +1086,14 @@ function createLocalStore(rootDir) {
     }
   }
   async function load2(name) {
-    const cached2 = cache.get(name);
+    const cached2 = cache2.get(name);
     if (!cached2) return readFromDisk(name);
     try {
       const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache.delete(name);
+        cache2.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -1113,7 +1113,7 @@ function createLocalStore(rootDir) {
       await rm(tmp, { force: true });
       throw e;
     }
-    cache.set(cf.name, cf);
+    cache2.set(cf.name, cf);
     cacheMtimes.set(cf.name, identity(await stat(file, { bigint: true })));
   }
   function mutate(name, apply) {
@@ -1126,7 +1126,7 @@ function createLocalStore(rootDir) {
           const out = apply(cur);
           if (out) await writeAtomic(out);
         } catch (e) {
-          cache.delete(name);
+          cache2.delete(name);
           cacheMtimes.delete(name);
           throw e;
         }
@@ -1161,7 +1161,7 @@ function createLocalStore(rootDir) {
       await withFileLock(lockFileFor(fileFor(name)), async () => {
         await rm(fileFor(name), { force: true });
       }, { waitMs: 15e3 });
-      cache.delete(name);
+      cache2.delete(name);
       cacheMtimes.delete(name);
       writeChains.delete(name);
     },
@@ -3491,7 +3491,7 @@ import { join as join5, dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 function mcpTokenProvider(config) {
   const cmd = config.SYNC_MCP_TOKEN_CMD.trim();
-  const cache = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const cache2 = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
   const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
   return new IdTokenProvider(async () => {
     if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
@@ -3500,7 +3500,7 @@ function mcpTokenProvider(config) {
     const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
     if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
     return token;
-  }, Date.now, cache, OPAQUE_TOKEN_TTL_MS2);
+  }, Date.now, cache2, OPAQUE_TOKEN_TTL_MS2);
 }
 function pickSyncTool(names, host, explicit = "") {
   if (explicit) {
@@ -6279,6 +6279,71 @@ OUTPUT: valid JSON only, no commentary, no fences. One entry per finding:
   }
 });
 
+// packages/core/src/memory/owners.ts
+function resolveOwner(raw, knownUsers2) {
+  const s = raw === void 0 || raw === null ? "" : String(raw).trim();
+  if (!s) return {};
+  const users = /* @__PURE__ */ new Map();
+  for (const u of knownUsers2) if (u && !users.has(u.toLowerCase())) users.set(u.toLowerCase(), u);
+  const k = s.toLowerCase().replace(/^@/, "");
+  const hit = users.get(k) ?? (k.includes("@") ? users.get(k.slice(0, k.indexOf("@"))) : void 0);
+  return hit ? { user: hit } : { external: s };
+}
+function ownerWaitsOn(owner, recorder, knownUsers2) {
+  const r = resolveOwner(owner, knownUsers2);
+  if (r.user) return { for: [r.user] };
+  if (r.external) return { for: recorder ? [recorder] : [], ask: r.external };
+  return { for: [] };
+}
+function includesUser(people, user) {
+  const u = user.toLowerCase();
+  return people.some((p) => p.toLowerCase() === u);
+}
+var init_owners = __esm({
+  "packages/core/src/memory/owners.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/memory/known-users.ts
+function usersIn(docs) {
+  const out = [];
+  for (const { metadata: m } of docs) {
+    if (m.username) out.push(String(m.username));
+    if (m.origin_user) out.push(String(m.origin_user));
+  }
+  return out;
+}
+async function knownUsers() {
+  const store = getStore();
+  const me = getConfig().USERNAME;
+  if (cache && cache.store === store && cache.user === me && Date.now() - cache.at < CACHE_MS) return cache.users;
+  const users = new Set([me].filter(Boolean));
+  const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  await Promise.all(names.map(async (c) => {
+    const docs = (await Promise.all([
+      getDocumentsByFilter2(c, { type: "task" }, 5e3).catch(() => []),
+      getDocumentsByFilter2(c, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(c, { type: "memory", kind: "question" }, 2e3).catch(() => [])
+    ])).flat();
+    for (const u of usersIn(docs)) users.add(u);
+  }));
+  cache = { at: Date.now(), store, user: me, users };
+  return users;
+}
+function resetKnownUsers() {
+  cache = void 0;
+}
+var CACHE_MS, cache;
+var init_known_users = __esm({
+  "packages/core/src/memory/known-users.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    CACHE_MS = 6e4;
+  }
+});
+
 // packages/core/src/tasks/waiting.ts
 function taskNeedsPeople(tags) {
   const named = tags.filter((t) => t.startsWith("needs:")).map((t) => t.slice("needs:".length)).filter(Boolean);
@@ -6288,12 +6353,18 @@ function taskNeedsPeople(tags) {
 async function waitingOn(opts = {}) {
   const names = opts.collection ? [opts.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
   const out = { decisions: [], questions: [], actions: [], blocked: [] };
-  await Promise.all(names.map(async (collection) => {
+  const read = await Promise.all(names.map(async (collection) => {
     const [decisions, questions, tasks] = await Promise.all([
       getDocumentsByFilter2(collection, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
+    return { collection, decisions, questions, tasks };
+  }));
+  const known = new Set(opts.collection ? await knownUsers() : [getConfig().USERNAME]);
+  if (opts.user) known.add(opts.user);
+  for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
+  for (const { collection, decisions, questions, tasks } of read) {
     const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
     for (const t of open2) for (const m of list6(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
@@ -6304,13 +6375,14 @@ async function waitingOn(opts = {}) {
       const id = m.parent_id ?? d.id;
       if (seen.has(id) || m.parent_id && (m.chunk_index ?? 0) !== 0) continue;
       seen.add(id);
+      const by = m.origin_user ?? m.username ?? "";
       const item = {
         id,
         collection,
         what: m.kind,
         title: firstLine(d.content),
-        for: m.owner ? [String(m.owner)] : [],
-        by: m.origin_user ?? m.username ?? "",
+        ...ownerWaitsOn(m.owner, by, known),
+        by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
         ...list6(m.options).length ? { options: list6(m.options) } : {},
@@ -6349,15 +6421,15 @@ async function waitingOn(opts = {}) {
         });
       }
     }
-  }));
-  const forUser = (i) => !opts.user || i.for.length === 0 || i.for.includes(opts.user);
+  }
+  const forUser = (i) => !opts.user || i.for.length === 0 || includesUser(i.for, opts.user);
   const oldest = (a, b) => a.since - b.since;
   return {
     decisions: out.decisions.filter(forUser).sort(oldest),
     questions: out.questions.filter(forUser).sort(oldest),
     actions: out.actions.filter(forUser).sort(oldest),
     // Blocked tasks belong to whoever owns them.
-    blocked: out.blocked.filter((i) => !opts.user || i.for.includes(opts.user)).sort(oldest)
+    blocked: out.blocked.filter((i) => !opts.user || includesUser(i.for, opts.user)).sort(oldest)
   };
 }
 function fenceWaiting(w, activeCollection) {
@@ -6381,7 +6453,8 @@ function age(since, now = Math.floor(Date.now() / 1e3)) {
 function waitingLine(i, opts = {}) {
   const where = opts.collection ? ` (${i.collection})` : "";
   const tag = i.what === "decision" ? `decision ${i.status}` : i.what === "question" ? "question" : i.what === "action" ? "needs a person" : "blocked";
-  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since)}] ${i.title}`;
+  const ask = i.ask ? `, ask ${i.ask}` : "";
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}${ask}, ${age(i.since)}] ${i.title}`;
   const extra = [];
   if (i.options?.length) extra.push(`options: ${i.options.join(" | ")}`);
   if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);
@@ -6408,6 +6481,9 @@ var init_waiting = __esm({
     init_store();
     init_kinds();
     init_syncable();
+    init_owners();
+    init_known_users();
+    init_config();
     list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     firstLine = (s) => {
       const line = s.split("\n").find((l) => l.trim()) ?? "";
@@ -7682,7 +7758,15 @@ function buildFollowThroughPrompt(items, turn) {
   lines.push("", `[PERSON: ${turn.user}]`, turn.userText.trim() || "(none)", "", "[ASSISTANT]", turn.assistantText.trim() || "(none)");
   return lines.join("\n");
 }
-function parseFollowThrough(raw, items, user) {
+function quotes(evidence, turn) {
+  const e = excerpt(String(evidence ?? ""));
+  if (!e) return false;
+  const words = (x) => ` ${x.replace(/[.!?,;:]/g, " ").replace(/\s+/g, " ").trim()} `;
+  const reply = excerpt(turn.userText ?? "");
+  if (reply && (e === reply || reply.split(" ").length <= 4 && words(e).trim() && words(reply).includes(words(e)))) return true;
+  return e.length >= 8 && flat(turn.text).includes(e);
+}
+function parseFollowThrough(raw, items, user, turn) {
   const s = raw.replace(/```(?:json)?/g, "").trim();
   const start = s.indexOf("[");
   const end = s.lastIndexOf("]");
@@ -7699,7 +7783,13 @@ function parseFollowThrough(raw, items, user) {
     if (!e || typeof e !== "object") continue;
     const item = byId.get(String(e.id));
     if (!item) continue;
-    if (item.kind === "decision" && item.owner && item.owner !== user) continue;
+    if (!quotes(e.evidence, turn)) continue;
+    const said = `${e.note ?? ""} ${e.disposition_reason ?? ""}`;
+    if (DISCLAIMS.some((r) => r.test(said))) continue;
+    if (item.owner && (item.kind === "decision" || item.kind === "question")) {
+      const owner = resolveOwner(item.owner, [user, ...turn.knownUsers ?? []]);
+      if (item.kind === "decision" ? !owner.user || !includesUser([owner.user], user) : owner.user && !includesUser([owner.user], user)) continue;
+    }
     const change = {
       id: item.id,
       status: String(e.status ?? ""),
@@ -7721,7 +7811,7 @@ function parseFollowThrough(raw, items, user) {
   return out;
 }
 async function followThrough(turn, deps = {}) {
-  const d = { findOpenItems, call: callCurationLLM, updateMemory, ...deps };
+  const d = { findOpenItems, call: callCurationLLM, updateMemory, knownUsers, ...deps };
   const user = turn.user ?? getConfig().USERNAME;
   const items = await d.findOpenItems(turn.collection, `${turn.userText}
 ${turn.assistantText}`, turn.taskIds ?? []);
@@ -7737,7 +7827,9 @@ ${turn.assistantText}`, turn.taskIds ?? []);
   });
   const byId = new Map(items.map((i) => [i.id, i]));
   const changes = [];
-  for (const c of parseFollowThrough(raw, items, user)) {
+  const known = items.some((i) => i.owner) ? await d.knownUsers() : [];
+  for (const c of parseFollowThrough(raw, items, user, { text: `${turn.userText}
+${turn.assistantText}`, userText: turn.userText, knownUsers: known })) {
     const item = byId.get(c.id);
     const { id, note, ...typed } = c;
     try {
@@ -7748,7 +7840,7 @@ ${turn.assistantText}`, turn.taskIds ?? []);
   }
   return { judged: items.length, changes };
 }
-var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list7;
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list7, flat, excerpt, DISCLAIMS;
 var init_follow_through = __esm({
   "packages/core/src/curation/follow-through.ts"() {
     "use strict";
@@ -7756,24 +7848,34 @@ var init_follow_through = __esm({
     init_config();
     init_kinds();
     init_update2();
+    init_owners();
+    init_known_users();
     init_provider();
-    FOLLOW_THROUGH_PROMPT_VERSION = "v1";
+    FOLLOW_THROUGH_PROMPT_VERSION = "v2";
     FOLLOW_THROUGH_MAX_DISTANCE = 0.75;
     MAX_ITEMS = 8;
     FOLLOW_THROUGH_SYSTEM_PROMPT = `You keep a team's open items current. You get a list of OPEN items (decisions waiting on a choice, open questions, open findings, open limitations, proposed ideas) and ONE conversation turn between a person and their assistant. Report only the items this turn settles. Most turns settle nothing: [] is the common, correct answer.
 
 Settle an item only on clear evidence in the turn:
 - decision -> "accepted" when the PERSON states the choice or explicitly approves one option (or the recommendation); "rejected" when the person rules the decision out entirely. Never settle a decision on the assistant's word alone. note: the choice, in a short sentence.
-- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). note: the answer.
+- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). A question "for" someone is answered only by that someone's answer, reported in the turn: the person's own choice or plan does not answer it. note: the answer.
 - finding -> "resolved" when the turn decides what becomes of it. Give "disposition": "no-action" with "disposition_reason", or "task" / "decision" / "limitation" with "disposition_ids" naming ids that appear in the turn.
 - limitation -> "mitigated" (worked around) or "closed" (no longer true), when the turn shows it. note: how.
 - idea -> "adopted" (the person commits to it) or "dropped". note: why.
 Do not settle an item the turn merely mentions, discusses or plans to address.
+Leave out every item the turn does not talk about. Never list an item to say the turn does not address it: "no-action" means the turn decided that nothing more is needed.
+"evidence" is required: the words from the turn that settle the item, copied exactly (at most 200 characters).
 
 OUTPUT: valid JSON only, no commentary, no fences. An array:
-[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
+[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "evidence": "<exact words from the turn>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
 Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
     list7 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    flat = (s) => s.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u2013\u2014]/g, "-").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
+    excerpt = (s) => flat(s).replace(/^["']+|["']+$/g, "").replace(/(\.\.\.|\u2026)$/, "").replace(/[.!?,;:]+$/, "").trim();
+    DISCLAIMS = [
+      /\b(the|this) (turn|conversation|exchange|discussion|message)\b[^.]*\b(does(?:n't| not)|did(?:n't| not)) (address|mention|discuss|decide|settle|cover)/i,
+      /\bnot (addressed|mentioned|discussed|settled) in (the|this) (turn|conversation|exchange|discussion|message)\b/i
+    ];
   }
 });
 
@@ -10522,6 +10624,7 @@ __export(src_exports, {
   healthStatusFor: () => healthStatusFor,
   heartbeatIfDue: () => heartbeatIfDue,
   heldKeys: () => heldKeys,
+  includesUser: () => includesUser,
   isCoordinationUnavailable: () => isCoordinationUnavailable,
   isCycleFatal: () => isCycleFatal,
   isDetectionStale: () => isDetectionStale,
@@ -10539,6 +10642,7 @@ __export(src_exports, {
   judgeAggregate: () => judgeAggregate,
   judgeVerification: () => judgeVerification,
   keepDeletedUpstream: () => keepDeletedUpstream,
+  knownUsers: () => knownUsers,
   lastSyncError: () => lastSyncError,
   lastWriteDir: () => lastWriteDir,
   lastWriteFile: () => lastWriteFile,
@@ -10575,6 +10679,7 @@ __export(src_exports, {
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
   openWaits: () => openWaits,
+  ownerWaitsOn: () => ownerWaitsOn,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
   parseDataRules: () => parseDataRules,
@@ -10637,10 +10742,12 @@ __export(src_exports, {
   requireSyncBackend: () => requireSyncBackend,
   resetConfig: () => resetConfig,
   resetDeviceId: () => resetDeviceId,
+  resetKnownUsers: () => resetKnownUsers,
   resetLocalCoordination: () => resetLocalCoordination,
   resetStore: () => resetStore,
   resolveCollectionRedirect: () => resolveCollectionRedirect,
   resolveConflict: () => resolveConflict,
+  resolveOwner: () => resolveOwner,
   resolveSyncUsername: () => resolveSyncUsername,
   resolveWriteCollection: () => resolveWriteCollection,
   restoreDeleted: () => restoreDeleted,
@@ -10709,6 +10816,7 @@ __export(src_exports, {
   updateSyncPullTimestamp: () => updateSyncPullTimestamp,
   updateSyncSubscriptions: () => updateSyncSubscriptions,
   updateTask: () => updateTask,
+  usersIn: () => usersIn,
   validateLearned: () => validateLearned,
   verifyAdapterAgainstManifest: () => verifyAdapterAgainstManifest,
   waitingCount: () => waitingCount,
@@ -10793,6 +10901,8 @@ var init_src = __esm({
     init_verification();
     init_kinds();
     init_sweep();
+    init_owners();
+    init_known_users();
     init_update2();
     init_external();
     init_links();
@@ -11501,7 +11611,7 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
     if (!all) return [];
     const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-    const mine2 = items.filter((i) => i.for.includes(user));
+    const mine2 = items.filter((i) => includesUser(i.for, user));
     const anyone = items.filter((i) => i.for.length === 0).length;
     if (!mine2.length && !anyone && !hidden) return [];
     const out = ["", "## Waiting on you"];

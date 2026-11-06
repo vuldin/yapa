@@ -34,6 +34,7 @@ import {
   waitingOn,
   staleFindings,
   waitingLine,
+  includesUser,
   fenceWaiting,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
@@ -169,7 +170,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
             // In a shared scope, private-*/local-* items are only counted.
             const { waiting: w, hidden } = fenceWaiting(all, collection);
             const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-            const mine = items.filter(i => i.for.includes(me));
+            const mine = items.filter(i => includesUser(i.for, me));
             const anyone = items.filter(i => i.for.length === 0).length;
             if (mine.length || anyone || hidden) {
               lines.push('', '## Waiting on you');

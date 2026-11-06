@@ -8294,7 +8294,7 @@ function matchesFilter(metadata, filter) {
   return true;
 }
 function createLocalStore(rootDir) {
-  const cache = /* @__PURE__ */ new Map();
+  const cache2 = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
   const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
@@ -8312,12 +8312,12 @@ function createLocalStore(rootDir) {
       }
       const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
-      cache.set(name, parsed);
+      cache2.set(name, parsed);
       cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache.delete(name);
+        cache2.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -8325,14 +8325,14 @@ function createLocalStore(rootDir) {
     }
   }
   async function load2(name) {
-    const cached3 = cache.get(name);
+    const cached3 = cache2.get(name);
     if (!cached3) return readFromDisk(name);
     try {
       const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache.delete(name);
+        cache2.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -8352,7 +8352,7 @@ function createLocalStore(rootDir) {
       await rm(tmp, { force: true });
       throw e;
     }
-    cache.set(cf.name, cf);
+    cache2.set(cf.name, cf);
     cacheMtimes.set(cf.name, identity(await stat(file2, { bigint: true })));
   }
   function mutate(name, apply) {
@@ -8365,7 +8365,7 @@ function createLocalStore(rootDir) {
           const out = apply(cur);
           if (out) await writeAtomic(out);
         } catch (e) {
-          cache.delete(name);
+          cache2.delete(name);
           cacheMtimes.delete(name);
           throw e;
         }
@@ -8400,7 +8400,7 @@ function createLocalStore(rootDir) {
       await withFileLock(lockFileFor(fileFor(name)), async () => {
         await rm(fileFor(name), { force: true });
       }, { waitMs: 15e3 });
-      cache.delete(name);
+      cache2.delete(name);
       cacheMtimes.delete(name);
       writeChains.delete(name);
     },
@@ -10030,7 +10030,7 @@ import { join as join5, dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 function mcpTokenProvider(config2) {
   const cmd = config2.SYNC_MCP_TOKEN_CMD.trim();
-  const cache = config2.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config2.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const cache2 = config2.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config2.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
   const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
   return new IdTokenProvider(async () => {
     if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
@@ -10039,7 +10039,7 @@ function mcpTokenProvider(config2) {
     const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
     if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
     return token;
-  }, Date.now, cache, OPAQUE_TOKEN_TTL_MS2);
+  }, Date.now, cache2, OPAQUE_TOKEN_TTL_MS2);
 }
 function pickSyncTool(names, host, explicit = "") {
   if (explicit) {
@@ -32249,21 +32249,21 @@ function visit(schema, fnOrHandlers) {
     const h = fnOrHandlers[node2._zod.def.type];
     return h ? h(node2, rewritten) : node2;
   };
-  const cache = /* @__PURE__ */ new Map();
+  const cache2 = /* @__PURE__ */ new Map();
   function run2(s) {
-    const cached3 = cache.get(s);
+    const cached3 = cache2.get(s);
     if (cached3 === RESOLVING) {
       return new $ZodLazy({
         type: "lazy",
-        getter: () => cache.get(s)
+        getter: () => cache2.get(s)
       });
     }
     if (cached3 !== void 0)
       return cached3;
-    cache.set(s, RESOLVING);
+    cache2.set(s, RESOLVING);
     const inner = mapInner(s);
     const mapped = fn(inner, inner !== s);
-    cache.set(s, mapped);
+    cache2.set(s, mapped);
     return mapped;
   }
   function mapInner(s) {
@@ -42556,6 +42556,61 @@ init_claim();
 // packages/core/src/tasks/waiting.ts
 init_store();
 init_syncable();
+
+// packages/core/src/memory/owners.ts
+function resolveOwner(raw, knownUsers2) {
+  const s = raw === void 0 || raw === null ? "" : String(raw).trim();
+  if (!s) return {};
+  const users = /* @__PURE__ */ new Map();
+  for (const u of knownUsers2) if (u && !users.has(u.toLowerCase())) users.set(u.toLowerCase(), u);
+  const k = s.toLowerCase().replace(/^@/, "");
+  const hit = users.get(k) ?? (k.includes("@") ? users.get(k.slice(0, k.indexOf("@"))) : void 0);
+  return hit ? { user: hit } : { external: s };
+}
+function ownerWaitsOn(owner, recorder, knownUsers2) {
+  const r = resolveOwner(owner, knownUsers2);
+  if (r.user) return { for: [r.user] };
+  if (r.external) return { for: recorder ? [recorder] : [], ask: r.external };
+  return { for: [] };
+}
+function includesUser(people, user) {
+  const u = user.toLowerCase();
+  return people.some((p) => p.toLowerCase() === u);
+}
+
+// packages/core/src/memory/known-users.ts
+init_config();
+init_store();
+function usersIn(docs) {
+  const out = [];
+  for (const { metadata: m } of docs) {
+    if (m.username) out.push(String(m.username));
+    if (m.origin_user) out.push(String(m.origin_user));
+  }
+  return out;
+}
+var CACHE_MS = 6e4;
+var cache;
+async function knownUsers() {
+  const store = getStore();
+  const me = getConfig().USERNAME;
+  if (cache && cache.store === store && cache.user === me && Date.now() - cache.at < CACHE_MS) return cache.users;
+  const users = new Set([me].filter(Boolean));
+  const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  await Promise.all(names.map(async (c) => {
+    const docs = (await Promise.all([
+      getDocumentsByFilter2(c, { type: "task" }, 5e3).catch(() => []),
+      getDocumentsByFilter2(c, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(c, { type: "memory", kind: "question" }, 2e3).catch(() => [])
+    ])).flat();
+    for (const u of usersIn(docs)) users.add(u);
+  }));
+  cache = { at: Date.now(), store, user: me, users };
+  return users;
+}
+
+// packages/core/src/tasks/waiting.ts
+init_config();
 var list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 var firstLine = (s) => {
   const line = s.split("\n").find((l) => l.trim()) ?? "";
@@ -42570,12 +42625,18 @@ function taskNeedsPeople(tags) {
 async function waitingOn(opts = {}) {
   const names = opts.collection ? [opts.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
   const out = { decisions: [], questions: [], actions: [], blocked: [] };
-  await Promise.all(names.map(async (collection) => {
+  const read = await Promise.all(names.map(async (collection) => {
     const [decisions, questions, tasks] = await Promise.all([
       getDocumentsByFilter2(collection, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
+    return { collection, decisions, questions, tasks };
+  }));
+  const known = new Set(opts.collection ? await knownUsers() : [getConfig().USERNAME]);
+  if (opts.user) known.add(opts.user);
+  for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
+  for (const { collection, decisions, questions, tasks } of read) {
     const open3 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
     for (const t of open3) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
@@ -42586,13 +42647,14 @@ async function waitingOn(opts = {}) {
       const id = m.parent_id ?? d.id;
       if (seen.has(id) || m.parent_id && (m.chunk_index ?? 0) !== 0) continue;
       seen.add(id);
+      const by = m.origin_user ?? m.username ?? "";
       const item = {
         id,
         collection,
         what: m.kind,
         title: firstLine(d.content),
-        for: m.owner ? [String(m.owner)] : [],
-        by: m.origin_user ?? m.username ?? "",
+        ...ownerWaitsOn(m.owner, by, known),
+        by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
         ...list5(m.options).length ? { options: list5(m.options) } : {},
@@ -42631,15 +42693,15 @@ async function waitingOn(opts = {}) {
         });
       }
     }
-  }));
-  const forUser = (i) => !opts.user || i.for.length === 0 || i.for.includes(opts.user);
+  }
+  const forUser = (i) => !opts.user || i.for.length === 0 || includesUser(i.for, opts.user);
   const oldest = (a, b) => a.since - b.since;
   return {
     decisions: out.decisions.filter(forUser).sort(oldest),
     questions: out.questions.filter(forUser).sort(oldest),
     actions: out.actions.filter(forUser).sort(oldest),
     // Blocked tasks belong to whoever owns them.
-    blocked: out.blocked.filter((i) => !opts.user || i.for.includes(opts.user)).sort(oldest)
+    blocked: out.blocked.filter((i) => !opts.user || includesUser(i.for, opts.user)).sort(oldest)
   };
 }
 function age(since, now = Math.floor(Date.now() / 1e3)) {
@@ -42653,7 +42715,8 @@ var who = (i) => i.for.length ? i.for.join(", ") : "anyone";
 function waitingLine(i, opts = {}) {
   const where = opts.collection ? ` (${i.collection})` : "";
   const tag = i.what === "decision" ? `decision ${i.status}` : i.what === "question" ? "question" : i.what === "action" ? "needs a person" : "blocked";
-  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since)}] ${i.title}`;
+  const ask = i.ask ? `, ask ${i.ask}` : "";
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}${ask}, ${age(i.since)}] ${i.title}`;
   const extra = [];
   if (i.options?.length) extra.push(`options: ${i.options.join(" | ")}`);
   if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);

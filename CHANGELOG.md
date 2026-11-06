@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Fixes
+- **Questions and decisions for people outside YAPA no longer disappear from `waiting`.** An owner is matched to a YAPA user case-insensitively (`Josh`, `josh@example.com` and `josh` are one person). An owner who is no YAPA user (`Dana`, `the platform team`) is someone to ask: the item waits on whoever recorded it and reads `[question, for josh, ask Dana, 2d]`. Existing items are read the same way, with no migration. The same rule applies in session start, DSH and the reference remote's `waiting`.
+- **Follow-through no longer settles items a turn doesn't settle.** The judge must quote the words of the turn that settle an item, and a change whose quote is not in the turn is dropped, as is one whose note says the turn doesn't address the item. A question for another YAPA user is answered only in that user's turn, and a question for someone outside YAPA only by their reported answer, not by the person's own plan (follow-through prompt v2).
 - **Open findings no longer pile up unseen.**
   - Capture stops recording progress as findings (extractor prompt v3). A review round, a push, a merge, a release or tests passing is never a finding, and a release or a merge is never a decision. When such an update is worth keeping, it's stored as an ordinary episodic note.
   - `task_next` used to offer `cleanup:findings` only when no task was ready, which in an active collection meant never. It now offers it beside ready tasks once a collection holds `FINDINGS_CLEANUP_THRESHOLD` (default 20) open findings older than two days with no disposition. Session start (and DSH) says so too.

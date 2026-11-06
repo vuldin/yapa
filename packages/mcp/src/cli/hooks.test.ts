@@ -467,6 +467,9 @@ describe('waiting on you', () => {
       collection: 'project-acme', typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['keep it', 'drop it'], recommendation: 'keep it' },
     });
     await storeMemory('Ask the vendor about rate limits', { collection: 'project-acme', typed: { kind: 'question', owner: 'alex' } });
+    const { addDocument } = await import('@yapa/core');
+    await addDocument('project-acme', 'alex-1', 'Alex signs off', { type: 'task', status: 'pending', username: 'alex', created_at: 1, tags: '' });
+    await storeMemory('Does the CDN cache 404s?', { collection: 'project-acme', typed: { kind: 'question', owner: 'CDN support' } });
     await createTask('Approve the cloud spend', { tags: ['needs-human'] }, 'project-other');
     capture();
     await sessionStart({ session_id: 'w1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
@@ -476,6 +479,7 @@ describe('waiting on you', () => {
     expect(ctx).toContain('options: keep it | drop it; recommended: keep it');
     const section = ctx.slice(ctx.indexOf('## Waiting on you')).split('\n## ')[0];
     expect(section).not.toContain('Ask the vendor');
+    expect(section).toMatch(/\[question, for josh, ask CDN support, new\] Does the CDN cache 404s\?/);
     expect(section).toContain('1 item(s) wait on anyone');
   });
 

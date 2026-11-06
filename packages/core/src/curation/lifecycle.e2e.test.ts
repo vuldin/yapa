@@ -98,7 +98,7 @@ describe('typed memories are created and kept current by the work itself', () =>
   it('3. a turn by someone other than the owner does not settle the decision', async () => {
     as('alex');
     extractorReply = '[]';
-    followReply = JSON.stringify([{ id: decision, status: 'accepted', note: 'the durable log' }]);
+    followReply = JSON.stringify([{ id: decision, status: 'accepted', note: 'the durable log', evidence: 'just use the durable log' }]);
     const r = await captureTurn(turn('just use the durable log', 'OK.'), opts([task]));
     expect(r.settled).toBeUndefined();
     const [d] = await getDocumentsByIds(C, [decision]);
@@ -108,7 +108,7 @@ describe('typed memories are created and kept current by the work itself', () =>
   it('4. the owner answers in chat: the choice is recorded and the task is ready again', async () => {
     as('josh');
     seen.length = 0;
-    followReply = JSON.stringify([{ id: decision, status: 'accepted', note: 'the durable log; keep the queue for retries only' }]);
+    followReply = JSON.stringify([{ id: decision, status: 'accepted', note: 'the durable log; keep the queue for retries only', evidence: 'Go with the durable log.' }]);
     const r = await captureTurn(turn('Go with the durable log. Keep the queue only for retries.', 'Noted.'), opts());
     expect(r.settled).toEqual([{ id: decision, kind: 'decision', status: 'accepted', note: 'the durable log; keep the queue for retries only' }]);
     expect(r.notice).toContain(`decision ${decision} accepted`);
@@ -131,15 +131,15 @@ describe('typed memories are created and kept current by the work itself', () =>
       collection: C, typed: { kind: 'question', owner: 'platform-team' },
     });
     followReply = JSON.stringify([
-      { id: finding, status: 'resolved' },                                       // no disposition: invalid, dropped
-      { id: question, status: 'answered', note: 'per partition; key by customer id' },
-      { id: 'mem-not-shown', status: 'answered', note: 'x' },                    // never shown: dropped
+      { id: finding, status: 'resolved', evidence: 'order is per partition' },  // no disposition: invalid, dropped
+      { id: question, status: 'answered', note: 'per partition; key by customer id', evidence: 'order is per partition, so we key by customer id' },
+      { id: 'mem-not-shown', status: 'answered', note: 'x', evidence: 'order is per partition' }, // never shown: dropped
     ]);
     let r = await captureTurn(turn('', 'The platform team confirmed: order is per partition, so we key by customer id.'), opts([task]));
     expect(r.settled?.map(s => [s.id, s.status])).toEqual([[question, 'answered']]);
     expect((await getDocumentsByIds(C, [finding]))[0].metadata.status).toBe('open');
 
-    followReply = JSON.stringify([{ id: finding, status: 'resolved', disposition: 'decision', disposition_ids: [decision], note: 'addressed by the move to the log' }]);
+    followReply = JSON.stringify([{ id: finding, status: 'resolved', disposition: 'decision', disposition_ids: [decision], note: 'addressed by the move to the log', evidence: 'order events move to the durable log' }]);
     r = await captureTurn(turn('', `The overflow is addressed by ${decision}: order events move to the durable log.`), opts([task]));
     expect(r.settled?.map(s => s.id)).toEqual([finding]);
     expect((await getDocumentsByIds(C, [finding]))[0].metadata).toMatchObject({ status: 'resolved', disposition: 'decision', disposition_ids: [decision] });

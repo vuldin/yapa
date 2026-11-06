@@ -111,4 +111,48 @@ describe.skipIf(!LIVE)('capture prompts against a real model (opt-in)', () => {
     const [d] = await getDocumentsByIds(C, [decision]);
     expect(d.metadata.status).toBe('accepted');
   }, 180_000);
+
+  it('follow-through answers a question the turn settles, and leaves an unrelated finding open', async () => {
+    const L = 'project-live-2';
+    const { ids: [question] } = await storeMemory('Will the remote allow a narrow exception so the sync role can blank the content of revisions of its own retracted records?', {
+      collection: L, typed: { kind: 'question' },
+    });
+    const { ids: [finding] } = await storeMemory('The client\'s purge() treats the purged_copies status as an internal error instead of a success.', {
+      collection: L, typed: { kind: 'finding' },
+    });
+
+    const unrelated = await followThrough({
+      collection: L,
+      userText: 'merged 75, now 74 has conflicts',
+      assistantText: 'Resolved #74\'s conflicts with main after #75 merged: the CHANGELOG and backend.ts kept both sides, the HTTP backend tests moved into the shared suites file, and the bundles were rebuilt. Pushed.',
+    });
+    expect(unrelated.changes).toEqual([]);
+
+    const answered = await followThrough({
+      collection: L,
+      userText: 'go with this approach, the remote owner agreed to the exception',
+      assistantText: 'OK. The remote erases by redaction: a retract or purge blanks every revision\'s title, body and metadata, and a trigger allows only that UPDATE, only for the sync role on its own retracted records.',
+    });
+    expect(answered.changes.map(c => [c.id, c.status])).toEqual([[question, 'answered']]);
+    expect((await getDocumentsByIds(L, [finding]))[0].metadata.status).toBe('open');
+  }, 180_000);
+
+  it('a question for someone outside YAPA is answered by their reported answer, not by the person\'s own plan', async () => {
+    const L = 'project-live-3';
+    const { ids: [question] } = await storeMemory('Can service accounts be exempted from password expiry?', {
+      collection: L, typed: { kind: 'question', owner: 'the platform team' },
+    });
+    const plan = await followThrough({
+      collection: L,
+      userText: 'Let\'s plan on a service account for the export, I\'ll ask the platform team about expiry.',
+      assistantText: 'OK: the export moves to a service account once the platform team says whether it can skip password expiry.',
+    });
+    expect(plan.changes).toEqual([]);
+    const reply = await followThrough({
+      collection: L,
+      userText: 'the platform team got back to me',
+      assistantText: 'The platform team confirmed service accounts can be exempted from password expiry if they are tagged svc- and owned by a team.',
+    });
+    expect(reply.changes.map(c => [c.id, c.status])).toEqual([[question, 'answered']]);
+  }, 180_000);
 });
