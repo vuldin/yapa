@@ -8625,6 +8625,38 @@ var init_store = __esm({
   }
 });
 
+// packages/core/src/doc-lock.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { join as join4 } from "node:path";
+function docLockPath(collection, id) {
+  const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
+  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
+}
+async function withDocLock(collection, id, fn) {
+  const path2 = docLockPath(collection, id);
+  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine2.some((h) => h.paths.has(path2))) return fn();
+  return withFileLock(path2, async () => {
+    const me = { paths: /* @__PURE__ */ new Set([path2]), active: true };
+    try {
+      return await held.run([...mine2, me], fn);
+    } finally {
+      me.active = false;
+    }
+  }, { waitMs: WAIT_MS });
+}
+var held, WAIT_MS;
+var init_doc_lock = __esm({
+  "packages/core/src/doc-lock.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    held = new AsyncLocalStorage();
+    WAIT_MS = 2e4;
+  }
+});
+
 // packages/core/src/sync/sentinel.ts
 async function getSyncPullTimestamp() {
   try {
@@ -8689,16 +8721,20 @@ async function writeCollectionRedirects(redirects) {
 }
 async function addCollectionRedirect(from, into) {
   if (from === into || from === "global") return;
-  const redirects = await getCollectionRedirects();
-  redirects[from] = into;
-  delete redirects[into];
-  await writeCollectionRedirects(redirects);
+  await withDocLock("global", COLLECTION_REDIRECTS_ID, async () => {
+    const redirects = await getCollectionRedirects();
+    redirects[from] = into;
+    delete redirects[into];
+    await writeCollectionRedirects(redirects);
+  });
 }
 async function clearCollectionRedirect(name) {
-  const redirects = await getCollectionRedirects();
-  if (!Object.hasOwn(redirects, name)) return;
-  delete redirects[name];
-  await writeCollectionRedirects(redirects);
+  await withDocLock("global", COLLECTION_REDIRECTS_ID, async () => {
+    const redirects = await getCollectionRedirects();
+    if (!Object.hasOwn(redirects, name)) return;
+    delete redirects[name];
+    await writeCollectionRedirects(redirects);
+  });
 }
 async function getLeftCollections() {
   try {
@@ -8717,12 +8753,16 @@ async function writeLeftCollections(names) {
   });
 }
 async function addLeftCollection(name) {
-  const left = await getLeftCollections();
-  if (!left.includes(name)) await writeLeftCollections([...left, name]);
+  await withDocLock("global", COLLECTIONS_LEFT_ID, async () => {
+    const left = await getLeftCollections();
+    if (!left.includes(name)) await writeLeftCollections([...left, name]);
+  });
 }
 async function clearLeftCollection(name) {
-  const left = await getLeftCollections();
-  if (left.includes(name)) await writeLeftCollections(left.filter((n) => n !== name));
+  await withDocLock("global", COLLECTIONS_LEFT_ID, async () => {
+    const left = await getLeftCollections();
+    if (left.includes(name)) await writeLeftCollections(left.filter((n) => n !== name));
+  });
 }
 async function getUnfollowedCollections() {
   return /* @__PURE__ */ new Set([...Object.keys(await getCollectionRedirects()), ...await getLeftCollections()]);
@@ -8760,18 +8800,24 @@ async function writePendingBackfills(names) {
   });
 }
 async function addPendingBackfill(name) {
-  const p = await getPendingBackfills();
-  if (!p.includes(name)) await writePendingBackfills([...p, name]);
+  await withDocLock("global", COLLECTIONS_BACKFILL_ID, async () => {
+    const p = await getPendingBackfills();
+    if (!p.includes(name)) await writePendingBackfills([...p, name]);
+  });
 }
 async function clearPendingBackfill(name) {
-  const p = await getPendingBackfills();
-  if (p.includes(name)) await writePendingBackfills(p.filter((n) => n !== name));
+  await withDocLock("global", COLLECTIONS_BACKFILL_ID, async () => {
+    const p = await getPendingBackfills();
+    if (p.includes(name)) await writePendingBackfills(p.filter((n) => n !== name));
+  });
 }
 async function rejoinCollection(name) {
   if (!(await getLeftCollections()).includes(name)) return false;
   await clearLeftCollection(name);
-  const subs = await getSyncSubscriptions();
-  if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  await withDocLock("global", SYNC_SUBSCRIPTIONS_ID, async () => {
+    const subs = await getSyncSubscriptions();
+    if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  });
   await addPendingBackfill(name);
   return true;
 }
@@ -8783,6 +8829,7 @@ var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
     init_store();
+    init_doc_lock();
     SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
     COLLECTION_REDIRECTS_ID = "__collection_redirects__";
@@ -8797,38 +8844,6 @@ var init_sentinel = __esm({
       code = "collection_left";
     };
     COLLECTIONS_BACKFILL_ID = "__collections_backfill__";
-  }
-});
-
-// packages/core/src/doc-lock.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
-import { join as join4 } from "node:path";
-function docLockPath(collection, id) {
-  const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
-  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
-}
-async function withDocLock(collection, id, fn) {
-  const path2 = docLockPath(collection, id);
-  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine2.some((h) => h.paths.has(path2))) return fn();
-  return withFileLock(path2, async () => {
-    const me = { paths: /* @__PURE__ */ new Set([path2]), active: true };
-    try {
-      return await held.run([...mine2, me], fn);
-    } finally {
-      me.active = false;
-    }
-  }, { waitMs: WAIT_MS });
-}
-var held, WAIT_MS;
-var init_doc_lock = __esm({
-  "packages/core/src/doc-lock.ts"() {
-    "use strict";
-    init_config();
-    init_fs_lock();
-    held = new AsyncLocalStorage();
-    WAIT_MS = 2e4;
   }
 });
 
@@ -10851,6 +10866,42 @@ function wrap(c) {
     counterNext: guard(c.counterNext),
     nextTaskId: guard(c.nextTaskId)
   };
+}
+async function moveOwnLeases(from, into, now = Math.floor(Date.now() / 1e3)) {
+  const out = { moved: 0, kept: [] };
+  let coord;
+  let leases;
+  try {
+    coord = await requireCoordination();
+    leases = (await coord.leaseList(from)).leases;
+  } catch {
+    return out;
+  }
+  const me = getConfig().USERNAME.toLowerCase();
+  for (const l of leases) {
+    if (l.expired || l.holder.user.toLowerCase() !== me) continue;
+    try {
+      const r = await coord.leaseAcquire({
+        collection: into,
+        key: l.key,
+        session: l.holder.session,
+        scope: l.scope,
+        ttlSeconds: Math.max(LEASE_TTL_MIN, l.expires_at - now),
+        ...l.title ? { title: l.title } : {}
+      });
+      if (!r.granted) {
+        out.kept.push(l.key);
+        continue;
+      }
+      await coord.leaseRelease(from, l.key, l.holder.session).catch(() => void 0);
+      noteLeaseReleased(l.holder.session, from, l.key);
+      noteLeaseHeld(l.holder.session, r.lease.ttl_seconds, now, { collection: into, key: l.key });
+      out.moved++;
+    } catch {
+      out.kept.push(l.key);
+    }
+  }
+  return out;
 }
 var SESSION_RE2, heldKey, CoordinationUnavailableError, local;
 var init_coordination = __esm({
@@ -43101,6 +43152,7 @@ function formatDuration(minutes) {
 // packages/core/src/collections/manage.ts
 init_config();
 init_deletes();
+init_coordination();
 init_sentinel();
 init_doc_lock();
 init_push();
@@ -43279,6 +43331,8 @@ async function mergeCollections(from, into, opts = {}) {
   await removeCollection(from, { force: true, markLeft: false });
   result.sourceRemoved = true;
   await addCollectionRedirect(from, into);
+  const leases = await moveOwnLeases(from, into);
+  if (leases.moved || leases.kept.length) result.leases = leases;
   return result;
 }
 function erasureLines(r) {
@@ -43311,6 +43365,8 @@ function mergeReportLines(r) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
     }
   }
+  if (r.leases?.moved) lines.push(`${r.leases.moved} of your claims moved with their tasks to "${r.into}".`);
+  if (r.leases?.kept.length) lines.push(`Claims still on "${r.from}" (the target refused them): ${r.leases.kept.join(", ")}.`);
   if (isSyncable2(r.from)) {
     lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
     lines.push(

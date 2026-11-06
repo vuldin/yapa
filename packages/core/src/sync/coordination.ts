@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { getConfig } from '../config.js';
 import { lockFileFor, sweepLockDebris, withFileLockSync, writeJsonAtomic } from '../fs-lock.js';
 import { getSyncBackend, isCycleFatal, isSyncConfigured, type Coordination, type Lease } from './backend.js';
-import { createLocalCoordination } from './local-coordination.js';
+import { createLocalCoordination, LEASE_TTL_MIN as LEASE_TTL_FLOOR } from './local-coordination.js';
 import { isSyncableCollection } from './syncable.js';
 
 const SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -374,4 +374,46 @@ function wrap(c: Coordination): Coordination {
     counterNext: guard(c.counterNext),
     nextTaskId: guard(c.nextTaskId),
   };
+}
+
+export interface LeaseMoveResult {
+  moved: number;
+  /** Keys left in the source: the target refused them, or the move failed. */
+  kept: string[];
+}
+
+/**
+ * After a merge: re-acquire this user's live leases on `from` in `into` (same
+ * session, key, title, scope and remaining time), release them in `from` and
+ * move the sessions' held markers, so a claim on a moved task still guards it.
+ * Other users' leases stay where they are. Best effort: never throws.
+ */
+export async function moveOwnLeases(from: string, into: string, now = Math.floor(Date.now() / 1000)): Promise<LeaseMoveResult> {
+  const out: LeaseMoveResult = { moved: 0, kept: [] };
+  let coord: Coordination;
+  let leases: Lease[];
+  try {
+    coord = await requireCoordination();
+    leases = (await coord.leaseList(from)).leases;
+  } catch {
+    return out;
+  }
+  const me = getConfig().USERNAME.toLowerCase();
+  for (const l of leases) {
+    if (l.expired || l.holder.user.toLowerCase() !== me) continue;
+    try {
+      const r = await coord.leaseAcquire({
+        collection: into, key: l.key, session: l.holder.session, scope: l.scope,
+        ttlSeconds: Math.max(LEASE_TTL_FLOOR, l.expires_at - now), ...(l.title ? { title: l.title } : {}),
+      });
+      if (!r.granted) { out.kept.push(l.key); continue; }
+      await coord.leaseRelease(from, l.key, l.holder.session).catch(() => undefined);
+      noteLeaseReleased(l.holder.session, from, l.key);
+      noteLeaseHeld(l.holder.session, r.lease.ttl_seconds, now, { collection: into, key: l.key });
+      out.moved++;
+    } catch {
+      out.kept.push(l.key);
+    }
+  }
+  return out;
 }

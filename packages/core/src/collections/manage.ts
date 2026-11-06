@@ -1,5 +1,6 @@
 import { getConfig } from '../config.js';
 import { queueSyncDeletes, addLocalTombstones } from '../sync/deletes.js';
+import { moveOwnLeases } from '../sync/coordination.js';
 import { getSyncSubscriptions, updateSyncSubscriptions, addCollectionRedirect, addLeftCollection, clearCollectionRedirect, clearLeftCollection, rejoinCollection } from '../sync/sentinel.js';
 import { withDocLock } from '../doc-lock.js';
 import { isPushable, isRejectedUnchanged, pushDocsNow } from '../sync/push.js';
@@ -186,6 +187,8 @@ export function removeReport(r: RemoveCollectionResult): string {
 export interface MergeResult {
   from: string;
   into: string;
+  /** Your live leases (task claims) re-acquired in `into`; `kept` stayed in `from`. */
+  leases?: { moved: number; kept: string[] };
   /** Docs moved (or that would move, for a dry run). */
   moved: number;
   /** Moved docs per metadata `type` (memory, task, journal, ...). */
@@ -342,6 +345,8 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
   // Teammates' rows keep `from` alive remotely: without this, the next prompt
   // in its folder (or a recovery pull) would recreate and re-follow it.
   await addCollectionRedirect(from, into);
+  const leases = await moveOwnLeases(from, into);
+  if (leases.moved || leases.kept.length) result.leases = leases;
   return result;
 }
 
@@ -382,6 +387,8 @@ export function mergeReportLines(r: MergeResult): string[] {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
     }
   }
+  if (r.leases?.moved) lines.push(`${r.leases.moved} of your claims moved with their tasks to "${r.into}".`);
+  if (r.leases?.kept.length) lines.push(`Claims still on "${r.from}" (the target refused them): ${r.leases.kept.join(', ')}.`);
   if (isSyncable(r.from)) {
     lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
     lines.push(

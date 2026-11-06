@@ -1,4 +1,5 @@
 import { addDocument, getOrCreateCollection, getDocumentsByFilter } from '../store/index.js';
+import { withDocLock } from '../doc-lock.js';
 
 const SYNC_PULL_SENTINEL_ID = '__sync_pull_sentinel__';
 const SYNC_SUBSCRIPTIONS_ID = '__sync_subscriptions__';
@@ -95,27 +96,25 @@ async function writeCollectionRedirects(redirects: Record<string, string>): Prom
   });
 }
 
-/**
- * Record that `from` was merged into `into`. `into` is live again, so a redirect away from it is dropped.
- *
- * Read-modify-write with no lock: two merges at the same moment in different
- * processes can lose one redirect. A per-document lock for sentinel docs
- * comes in a later change; merges are rare, user-driven operations.
- */
+/** Record that `from` was merged into `into`. `into` is live again, so a redirect away from it is dropped. */
 export async function addCollectionRedirect(from: string, into: string): Promise<void> {
   if (from === into || from === 'global') return;
-  const redirects = await getCollectionRedirects();
-  redirects[from] = into;
-  delete redirects[into];
-  await writeCollectionRedirects(redirects);
+  await withDocLock('global', COLLECTION_REDIRECTS_ID, async () => {
+    const redirects = await getCollectionRedirects();
+    redirects[from] = into;
+    delete redirects[into];
+    await writeCollectionRedirects(redirects);
+  });
 }
 
 /** Forget the redirect for `name` (the user wants that collection back). No-op without one. */
 export async function clearCollectionRedirect(name: string): Promise<void> {
-  const redirects = await getCollectionRedirects();
-  if (!Object.hasOwn(redirects, name)) return;
-  delete redirects[name];
-  await writeCollectionRedirects(redirects);
+  await withDocLock('global', COLLECTION_REDIRECTS_ID, async () => {
+    const redirects = await getCollectionRedirects();
+    if (!Object.hasOwn(redirects, name)) return;
+    delete redirects[name];
+    await writeCollectionRedirects(redirects);
+  });
 }
 
 const COLLECTIONS_LEFT_ID = '__collections_left__';
@@ -148,14 +147,18 @@ async function writeLeftCollections(names: string[]): Promise<void> {
 
 /** Record that this machine left the shared collection `name`. */
 export async function addLeftCollection(name: string): Promise<void> {
-  const left = await getLeftCollections();
-  if (!left.includes(name)) await writeLeftCollections([...left, name]);
+  await withDocLock('global', COLLECTIONS_LEFT_ID, async () => {
+    const left = await getLeftCollections();
+    if (!left.includes(name)) await writeLeftCollections([...left, name]);
+  });
 }
 
 /** Follow `name` again (the user subscribed to it or created it). No-op when not left. */
 export async function clearLeftCollection(name: string): Promise<void> {
-  const left = await getLeftCollections();
-  if (left.includes(name)) await writeLeftCollections(left.filter(n => n !== name));
+  await withDocLock('global', COLLECTIONS_LEFT_ID, async () => {
+    const left = await getLeftCollections();
+    if (left.includes(name)) await writeLeftCollections(left.filter(n => n !== name));
+  });
 }
 
 /**
@@ -243,13 +246,17 @@ async function writePendingBackfills(names: string[]): Promise<void> {
 }
 
 export async function addPendingBackfill(name: string): Promise<void> {
-  const p = await getPendingBackfills();
-  if (!p.includes(name)) await writePendingBackfills([...p, name]);
+  await withDocLock('global', COLLECTIONS_BACKFILL_ID, async () => {
+    const p = await getPendingBackfills();
+    if (!p.includes(name)) await writePendingBackfills([...p, name]);
+  });
 }
 
 export async function clearPendingBackfill(name: string): Promise<void> {
-  const p = await getPendingBackfills();
-  if (p.includes(name)) await writePendingBackfills(p.filter(n => n !== name));
+  await withDocLock('global', COLLECTIONS_BACKFILL_ID, async () => {
+    const p = await getPendingBackfills();
+    if (p.includes(name)) await writePendingBackfills(p.filter(n => n !== name));
+  });
 }
 
 /**
@@ -260,8 +267,10 @@ export async function clearPendingBackfill(name: string): Promise<void> {
 export async function rejoinCollection(name: string): Promise<boolean> {
   if (!(await getLeftCollections()).includes(name)) return false;
   await clearLeftCollection(name);
-  const subs = await getSyncSubscriptions();
-  if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  await withDocLock('global', SYNC_SUBSCRIPTIONS_ID, async () => {
+    const subs = await getSyncSubscriptions();
+    if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  });
   await addPendingBackfill(name);
   return true;
 }
