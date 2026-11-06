@@ -145,4 +145,16 @@ describe('waiting', () => {
     ].join('\n'));
     expect(formatWaiting(buildWaiting([], []))).toBe('Nothing is waiting on anyone.');
   });
+
+  it('matches owners case-insensitively, and gives an outside owner\'s item to whoever recorded it', () => {
+    const mems = [
+      row('q-a', 'Which plan?', { type: 'memory', kind: 'question', owner: 'Alice' }),
+      row('q-e', 'Can the vendor raise the limit?', { type: 'memory', kind: 'question', owner: 'Vendor support' }, { origin_user: 'sam' }),
+    ];
+    const w = buildWaiting(mems, tasks, 'ALICE', 'alice');
+    expect(w.questions.map(i => [i.id, i.for, i.ask])).toEqual([['q-a', ['alice'], undefined]]);
+    const sam = buildWaiting(mems, tasks, 'sam', 'sam');
+    expect(sam.questions.map(i => [i.id, i.for, i.ask])).toEqual([['q-e', ['sam'], 'Vendor support']]);
+    expect(formatWaiting(sam, { now: NOW })).toContain('- **q-e** [question, for sam, ask Vendor support, 3d] Can the vendor raise the limit?');
+  });
 });

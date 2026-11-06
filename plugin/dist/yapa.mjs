@@ -1054,7 +1054,7 @@ function matchesFilter(metadata, filter) {
   return true;
 }
 function createLocalStore(rootDir) {
-  const cache = /* @__PURE__ */ new Map();
+  const cache2 = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
   const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
@@ -1072,12 +1072,12 @@ function createLocalStore(rootDir) {
       }
       const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
-      cache.set(name, parsed);
+      cache2.set(name, parsed);
       cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache.delete(name);
+        cache2.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -1085,14 +1085,14 @@ function createLocalStore(rootDir) {
     }
   }
   async function load2(name) {
-    const cached2 = cache.get(name);
+    const cached2 = cache2.get(name);
     if (!cached2) return readFromDisk(name);
     try {
       const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache.delete(name);
+        cache2.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -1112,7 +1112,7 @@ function createLocalStore(rootDir) {
       await rm(tmp, { force: true });
       throw e;
     }
-    cache.set(cf.name, cf);
+    cache2.set(cf.name, cf);
     cacheMtimes.set(cf.name, identity(await stat(file, { bigint: true })));
   }
   function mutate(name, apply) {
@@ -1125,7 +1125,7 @@ function createLocalStore(rootDir) {
           const out = apply(cur);
           if (out) await writeAtomic(out);
         } catch (e) {
-          cache.delete(name);
+          cache2.delete(name);
           cacheMtimes.delete(name);
           throw e;
         }
@@ -1160,7 +1160,7 @@ function createLocalStore(rootDir) {
       await withFileLock(lockFileFor(fileFor(name)), async () => {
         await rm(fileFor(name), { force: true });
       }, { waitMs: 15e3 });
-      cache.delete(name);
+      cache2.delete(name);
       cacheMtimes.delete(name);
       writeChains.delete(name);
     },
@@ -3490,7 +3490,7 @@ import { join as join5, dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 function mcpTokenProvider(config) {
   const cmd = config.SYNC_MCP_TOKEN_CMD.trim();
-  const cache = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const cache2 = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
   const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
   return new IdTokenProvider(async () => {
     if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
@@ -3499,7 +3499,7 @@ function mcpTokenProvider(config) {
     const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
     if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
     return token;
-  }, Date.now, cache, OPAQUE_TOKEN_TTL_MS2);
+  }, Date.now, cache2, OPAQUE_TOKEN_TTL_MS2);
 }
 function pickSyncTool(names, host, explicit = "") {
   if (explicit) {
@@ -4245,15 +4245,15 @@ function noticesPath() {
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list9 = [];
+      let list10 = [];
       try {
-        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list10 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list9)) list9 = [];
-      if (list9.some((n) => n.text === text)) return;
-      list9.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list9.slice(-20));
+      if (!Array.isArray(list10)) list10 = [];
+      if (list10.some((n) => n.text === text)) return;
+      list10.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list10.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -4261,14 +4261,14 @@ function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
 function takeClaimNotices() {
   try {
     return withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list9 = [];
+      let list10 = [];
       try {
-        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list10 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
         return [];
       }
       rmSync3(noticesPath(), { force: true });
-      return Array.isArray(list9) ? list9.map((n) => n.text) : [];
+      return Array.isArray(list10) ? list10.map((n) => n.text) : [];
     }, { waitMs: 2e3 });
   } catch {
     return [];
@@ -5818,6 +5818,73 @@ var init_update = __esm({
   }
 });
 
+// packages/core/src/memory/owners.ts
+function resolveOwner(raw, knownUsers2) {
+  const s = raw === void 0 || raw === null ? "" : String(raw).trim();
+  if (!s) return {};
+  const users = /* @__PURE__ */ new Map();
+  for (const u of knownUsers2) if (u && !users.has(u.toLowerCase())) users.set(u.toLowerCase(), u);
+  const k = s.toLowerCase().replace(/^@/, "");
+  const hit = users.get(k) ?? (k.includes("@") ? users.get(k.slice(0, k.indexOf("@"))) : void 0);
+  return hit ? { user: hit } : { external: s };
+}
+function ownerWaitsOn(owner, recorder, knownUsers2) {
+  const r = resolveOwner(owner, knownUsers2);
+  if (r.user) return { for: [r.user] };
+  if (r.external) return { for: recorder ? [recorder] : [], ask: r.external };
+  return { for: [] };
+}
+function includesUser(people, user) {
+  const u = user.toLowerCase();
+  return people.some((p) => p.toLowerCase() === u);
+}
+var init_owners = __esm({
+  "packages/core/src/memory/owners.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/memory/known-users.ts
+function usersIn(docs) {
+  const out = [];
+  for (const { metadata: m } of docs) {
+    if (m.username) out.push(String(m.username));
+    if (m.origin_user) out.push(String(m.origin_user));
+    for (const t of list5(m.tags)) if (t.startsWith("needs:") && t.length > 6) out.push(t.slice(6));
+  }
+  return out;
+}
+async function knownUsers() {
+  const store = getStore();
+  const me = getConfig().USERNAME;
+  if (cache && cache.store === store && cache.user === me && Date.now() - cache.at < CACHE_MS) return cache.users;
+  const users = new Set([me].filter(Boolean));
+  const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  await Promise.all(names.map(async (c) => {
+    const docs = (await Promise.all([
+      getDocumentsByFilter2(c, { type: "task" }, 5e3).catch(() => []),
+      getDocumentsByFilter2(c, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
+      getDocumentsByFilter2(c, { type: "memory", kind: "question" }, 2e3).catch(() => [])
+    ])).flat();
+    for (const u of usersIn(docs)) users.add(u);
+  }));
+  cache = { at: Date.now(), store, user: me, users };
+  return users;
+}
+function resetKnownUsers() {
+  cache = void 0;
+}
+var list5, CACHE_MS, cache;
+var init_known_users = __esm({
+  "packages/core/src/memory/known-users.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    CACHE_MS = 6e4;
+  }
+});
+
 // packages/core/src/tasks/waiting.ts
 function taskNeedsPeople(tags) {
   const named = tags.filter((t) => t.startsWith("needs:")).map((t) => t.slice("needs:".length)).filter(Boolean);
@@ -5827,15 +5894,21 @@ function taskNeedsPeople(tags) {
 async function waitingOn(opts = {}) {
   const names = opts.collection ? [opts.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
   const out = { decisions: [], questions: [], actions: [], blocked: [] };
-  await Promise.all(names.map(async (collection) => {
+  const read = await Promise.all(names.map(async (collection) => {
     const [decisions, questions, tasks] = await Promise.all([
       getDocumentsByFilter2(collection, { type: "memory", kind: "decision" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
+    return { collection, decisions, questions, tasks };
+  }));
+  const known = new Set(opts.collection ? await knownUsers() : [getConfig().USERNAME]);
+  if (opts.user) known.add(opts.user);
+  for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
+  for (const { collection, decisions, questions, tasks } of read) {
     const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open2) for (const m of list6(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -5843,16 +5916,17 @@ async function waitingOn(opts = {}) {
       const id = m.parent_id ?? d.id;
       if (seen.has(id) || m.parent_id && (m.chunk_index ?? 0) !== 0) continue;
       seen.add(id);
+      const by = m.origin_user ?? m.username ?? "";
       const item = {
         id,
         collection,
         what: m.kind,
         title: firstLine(d.content),
-        for: m.owner ? [String(m.owner)] : [],
-        by: m.origin_user ?? m.username ?? "",
+        ...ownerWaitsOn(m.owner, by, known),
+        by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list5(m.options).length ? { options: list5(m.options) } : {},
+        ...list6(m.options).length ? { options: list6(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -5861,7 +5935,7 @@ async function waitingOn(opts = {}) {
     for (const t of open2) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list5(m.tags));
+      const people = taskNeedsPeople(list6(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
@@ -5888,15 +5962,15 @@ async function waitingOn(opts = {}) {
         });
       }
     }
-  }));
-  const forUser = (i) => !opts.user || i.for.length === 0 || i.for.includes(opts.user);
+  }
+  const forUser = (i) => !opts.user || i.for.length === 0 || includesUser(i.for, opts.user);
   const oldest = (a, b) => a.since - b.since;
   return {
     decisions: out.decisions.filter(forUser).sort(oldest),
     questions: out.questions.filter(forUser).sort(oldest),
     actions: out.actions.filter(forUser).sort(oldest),
     // Blocked tasks belong to whoever owns them.
-    blocked: out.blocked.filter((i) => !opts.user || i.for.includes(opts.user)).sort(oldest)
+    blocked: out.blocked.filter((i) => !opts.user || includesUser(i.for, opts.user)).sort(oldest)
   };
 }
 function fenceWaiting(w, activeCollection) {
@@ -5920,7 +5994,8 @@ function age(since, now = Math.floor(Date.now() / 1e3)) {
 function waitingLine(i, opts = {}) {
   const where = opts.collection ? ` (${i.collection})` : "";
   const tag = i.what === "decision" ? `decision ${i.status}` : i.what === "question" ? "question" : i.what === "action" ? "needs a person" : "blocked";
-  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since)}] ${i.title}`;
+  const ask = i.ask ? `, ask ${i.ask}` : "";
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}${ask}, ${age(i.since)}] ${i.title}`;
   const extra = [];
   if (i.options?.length) extra.push(`options: ${i.options.join(" | ")}`);
   if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);
@@ -5940,14 +6015,17 @@ function formatWaiting(w, opts = {}) {
 ${items.map((i) => waitingLine(i, opts)).join("\n")}`);
   return parts.length ? parts.join("\n\n") : "Nothing is waiting on anyone.";
 }
-var list5, firstLine, waitingCount, who;
+var list6, firstLine, waitingCount, who;
 var init_waiting = __esm({
   "packages/core/src/tasks/waiting.ts"() {
     "use strict";
     init_store();
     init_kinds();
     init_syncable();
-    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    init_owners();
+    init_known_users();
+    init_config();
+    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     firstLine = (s) => {
       const line = s.split("\n").find((l) => l.trim()) ?? "";
       const t = line.replace(/^#+\s*/, "").trim();
@@ -7395,7 +7473,7 @@ function toItem(collection, d) {
     status: m.status,
     content: d.content.slice(0, 600),
     ...m.owner ? { owner: String(m.owner) } : {},
-    ...list6(m.options).length ? { options: list6(m.options) } : {},
+    ...list7(m.options).length ? { options: list7(m.options) } : {},
     ...m.recommendation ? { recommendation: String(m.recommendation) } : {}
   };
 }
@@ -7404,7 +7482,7 @@ async function findOpenItems(collection, text, taskIds = []) {
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds2(collection, [tid]).catch(() => []);
-    for (const mid of [...list6(t?.metadata.waits_on), ...list6(t?.metadata.memory_ids)]) {
+    for (const mid of [...list7(t?.metadata.waits_on), ...list7(t?.metadata.memory_ids)]) {
       for (const name of [collection, ...names.filter((n) => n !== collection)]) {
         const direct = await getDocumentsByIds2(name, [mid]).catch(() => []);
         const [doc] = direct.length ? direct : await getDocumentsByIds2(name, [`${mid}-0`]).catch(() => []);
@@ -7436,7 +7514,11 @@ function buildFollowThroughPrompt(items, turn) {
   lines.push("", `[PERSON: ${turn.user}]`, turn.userText.trim() || "(none)", "", "[ASSISTANT]", turn.assistantText.trim() || "(none)");
   return lines.join("\n");
 }
-function parseFollowThrough(raw, items, user) {
+function quotes(evidence, turnText) {
+  const e = flat(String(evidence ?? "")).replace(/^["']+|["']+$/g, "").replace(/(\.\.\.|\u2026)$/, "").trim();
+  return e.length >= 8 && flat(turnText).includes(e);
+}
+function parseFollowThrough(raw, items, user, turn) {
   const s = raw.replace(/```(?:json)?/g, "").trim();
   const start = s.indexOf("[");
   const end = s.lastIndexOf("]");
@@ -7453,7 +7535,12 @@ function parseFollowThrough(raw, items, user) {
     if (!e || typeof e !== "object") continue;
     const item = byId.get(String(e.id));
     if (!item) continue;
-    if (item.kind === "decision" && item.owner && item.owner !== user) continue;
+    if (!quotes(e.evidence, turn.text)) continue;
+    if (DISCLAIMS.test(`${e.note ?? ""} ${e.disposition_reason ?? ""}`)) continue;
+    if (item.owner && (item.kind === "decision" || item.kind === "question")) {
+      const owner = resolveOwner(item.owner, [user, ...turn.knownUsers ?? []]);
+      if (item.kind === "decision" ? !owner.user || !includesUser([owner.user], user) : owner.user && !includesUser([owner.user], user)) continue;
+    }
     const change = {
       id: item.id,
       status: String(e.status ?? ""),
@@ -7475,7 +7562,7 @@ function parseFollowThrough(raw, items, user) {
   return out;
 }
 async function followThrough(turn, deps = {}) {
-  const d = { findOpenItems, call: callCurationLLM, updateMemory, ...deps };
+  const d = { findOpenItems, call: callCurationLLM, updateMemory, knownUsers, ...deps };
   const user = turn.user ?? getConfig().USERNAME;
   const items = await d.findOpenItems(turn.collection, `${turn.userText}
 ${turn.assistantText}`, turn.taskIds ?? []);
@@ -7491,7 +7578,9 @@ ${turn.assistantText}`, turn.taskIds ?? []);
   });
   const byId = new Map(items.map((i) => [i.id, i]));
   const changes = [];
-  for (const c of parseFollowThrough(raw, items, user)) {
+  const known = items.some((i) => i.owner) ? await d.knownUsers() : [];
+  for (const c of parseFollowThrough(raw, items, user, { text: `${turn.userText}
+${turn.assistantText}`, knownUsers: known })) {
     const item = byId.get(c.id);
     const { id, note, ...typed } = c;
     try {
@@ -7502,7 +7591,7 @@ ${turn.assistantText}`, turn.taskIds ?? []);
   }
   return { judged: items.length, changes };
 }
-var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list6;
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list7, flat, DISCLAIMS;
 var init_follow_through = __esm({
   "packages/core/src/curation/follow-through.ts"() {
     "use strict";
@@ -7510,24 +7599,30 @@ var init_follow_through = __esm({
     init_config();
     init_kinds();
     init_update2();
+    init_owners();
+    init_known_users();
     init_provider();
-    FOLLOW_THROUGH_PROMPT_VERSION = "v1";
+    FOLLOW_THROUGH_PROMPT_VERSION = "v2";
     FOLLOW_THROUGH_MAX_DISTANCE = 0.75;
     MAX_ITEMS = 8;
     FOLLOW_THROUGH_SYSTEM_PROMPT = `You keep a team's open items current. You get a list of OPEN items (decisions waiting on a choice, open questions, open findings, open limitations, proposed ideas) and ONE conversation turn between a person and their assistant. Report only the items this turn settles. Most turns settle nothing: [] is the common, correct answer.
 
 Settle an item only on clear evidence in the turn:
 - decision -> "accepted" when the PERSON states the choice or explicitly approves one option (or the recommendation); "rejected" when the person rules the decision out entirely. Never settle a decision on the assistant's word alone. note: the choice, in a short sentence.
-- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). note: the answer.
+- question -> "answered" when the turn contains the answer (the person gives it, or the assistant reports an answer it found or was given). A question "for" someone is answered only by that someone's answer, reported in the turn: the person's own choice or plan does not answer it. note: the answer.
 - finding -> "resolved" when the turn decides what becomes of it. Give "disposition": "no-action" with "disposition_reason", or "task" / "decision" / "limitation" with "disposition_ids" naming ids that appear in the turn.
 - limitation -> "mitigated" (worked around) or "closed" (no longer true), when the turn shows it. note: how.
 - idea -> "adopted" (the person commits to it) or "dropped". note: why.
 Do not settle an item the turn merely mentions, discusses or plans to address.
+Leave out every item the turn does not talk about. Never list an item to say the turn does not address it: "no-action" means the turn decided that nothing more is needed.
+"evidence" is required: the words from the turn that settle the item, copied exactly (at most 200 characters).
 
 OUTPUT: valid JSON only, no commentary, no fences. An array:
-[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
+[{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "evidence": "<exact words from the turn>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
 Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
-    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list7 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    flat = (s) => s.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, " ").trim();
+    DISCLAIMS = /\b(does(?:n't| not)|did(?:n't| not)) (address|mention|discuss|decide|settle|cover|touch)|\bnot (addressed|mentioned|discussed|covered)\b|\bunrelated\b|\bno (mention|information) (of|about)\b/i;
   }
 });
 
@@ -10273,6 +10368,7 @@ __export(src_exports, {
   healthStatusFor: () => healthStatusFor,
   heartbeatIfDue: () => heartbeatIfDue,
   heldKeys: () => heldKeys,
+  includesUser: () => includesUser,
   isCoordinationUnavailable: () => isCoordinationUnavailable,
   isCycleFatal: () => isCycleFatal,
   isDetectionStale: () => isDetectionStale,
@@ -10290,6 +10386,7 @@ __export(src_exports, {
   judgeAggregate: () => judgeAggregate,
   judgeVerification: () => judgeVerification,
   keepDeletedUpstream: () => keepDeletedUpstream,
+  knownUsers: () => knownUsers,
   lastSyncError: () => lastSyncError,
   lastWriteDir: () => lastWriteDir,
   lastWriteFile: () => lastWriteFile,
@@ -10326,6 +10423,7 @@ __export(src_exports, {
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
   openWaits: () => openWaits,
+  ownerWaitsOn: () => ownerWaitsOn,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
   parseDataRules: () => parseDataRules,
@@ -10387,10 +10485,12 @@ __export(src_exports, {
   requireSyncBackend: () => requireSyncBackend,
   resetConfig: () => resetConfig,
   resetDeviceId: () => resetDeviceId,
+  resetKnownUsers: () => resetKnownUsers,
   resetLocalCoordination: () => resetLocalCoordination,
   resetStore: () => resetStore,
   resolveCollectionRedirect: () => resolveCollectionRedirect,
   resolveConflict: () => resolveConflict,
+  resolveOwner: () => resolveOwner,
   resolveSyncUsername: () => resolveSyncUsername,
   resolveWriteCollection: () => resolveWriteCollection,
   restoreDeleted: () => restoreDeleted,
@@ -10457,6 +10557,7 @@ __export(src_exports, {
   updateSyncPullTimestamp: () => updateSyncPullTimestamp,
   updateSyncSubscriptions: () => updateSyncSubscriptions,
   updateTask: () => updateTask,
+  usersIn: () => usersIn,
   validateLearned: () => validateLearned,
   verifyAdapterAgainstManifest: () => verifyAdapterAgainstManifest,
   waitingCount: () => waitingCount,
@@ -10540,6 +10641,8 @@ var init_src = __esm({
     init_synthesis();
     init_verification();
     init_kinds();
+    init_owners();
+    init_known_users();
     init_update2();
     init_external();
     init_links();
@@ -11248,7 +11351,7 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
     if (!all) return [];
     const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-    const mine = items.filter((i) => i.for.includes(user));
+    const mine = items.filter((i) => includesUser(i.for, user));
     const anyone = items.filter((i) => i.for.length === 0).length;
     if (!mine.length && !anyone && !hidden) return [];
     const out = ["", "## Waiting on you"];
@@ -11739,7 +11842,7 @@ async function dispatch(sub, args) {
   const session = flag(args, "--session");
   const claimOpts = {
     session,
-    scope: list7(flag(args, "--scope")),
+    scope: list8(flag(args, "--scope")),
     ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
     title: flag(args, "--title"),
     reclaim: args.includes("--reclaim") || void 0
@@ -11749,7 +11852,7 @@ async function dispatch(sub, args) {
       const status = flag(args, "--status");
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(", ")}`);
       const collection = flag(args, "--collection");
-      const wantTags = list7(flag(args, "--tag")) ?? [];
+      const wantTags = list8(flag(args, "--tag")) ?? [];
       const tasks = (await listTasks({ collection, status, includeComplete: args.includes("--include-complete") })).filter((t) => {
         if (!wantTags.length) return true;
         const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",");
@@ -11769,8 +11872,8 @@ async function dispatch(sub, args) {
       if (!collection) throw new UsageError("--collection is required");
       const r = await nextTasks({
         collection,
-        tags: list7(flag(args, "--tag")),
-        excludeTags: list7(flag(args, "--exclude-tag")),
+        tags: list8(flag(args, "--tag")),
+        excludeTags: list8(flag(args, "--exclude-tag")),
         claim: args.includes("--claim"),
         autoOnly: args.includes("--auto-only"),
         includeCleanup: args.includes("--include-cleanup"),
@@ -11813,11 +11916,11 @@ async function dispatch(sub, args) {
       const t = await getTask(positional2);
       if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
-      const addTags = list7(flag(args, "--tag")) ?? [];
+      const addTags = list8(flag(args, "--tag")) ?? [];
       const learned = jsonFile(flag(args, "--learned-file"), "array");
       const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
       const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
-      const waitsOn = list7(flag(args, "--waits-on"));
+      const waitsOn = list8(flag(args, "--waits-on"));
       if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
       validateLearned(learned);
       const listOf = (v) => Array.isArray(v) ? v : String(v ?? "").split(",").filter(Boolean);
@@ -11892,14 +11995,14 @@ function isFlagValue(args, a) {
   const i = args.indexOf(a);
   return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text", "--auto-only", "--include-cleanup"].includes(args[i - 1]);
 }
-var TASK_USAGE, list7, UsageError, STATUSES;
+var TASK_USAGE, list8, UsageError, STATUSES;
 var init_task = __esm({
   "packages/mcp/src/cli/task.ts"() {
     "use strict";
     init_src();
     init_coord();
     TASK_USAGE = 'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n                         [--waits-on MEM,..] [--learned-file F] [--follow-ups-file F] [--decision-needed-file F] [--session S]\n       yapa task release cleanup:KIND --collection C [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\nhold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\non it, pending). "-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
-    list7 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    list8 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
     UsageError = class extends Error {
     };
     STATUSES = ["pending", "in_progress", "blocked", "complete"];
@@ -12300,7 +12403,7 @@ function flag3(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
 }
-function list8(v) {
+function list9(v) {
   return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 function int2(v, name) {
@@ -12333,14 +12436,14 @@ async function runCoord(sub, args) {
           collection: need(collection, "--collection"),
           key: need(flag3(args, "--key"), "--key"),
           session,
-          scope: list8(flag3(args, "--scope")),
+          scope: list9(flag3(args, "--scope")),
           ttlSeconds: int2(flag3(args, "--ttl"), "--ttl"),
           title: flag3(args, "--title"),
           ...args.includes("--reclaim") ? { reclaim: true } : {}
         });
         break;
       case "heartbeat":
-        r = await coord.leaseHeartbeat(collection, session, list8(flag3(args, "--keys")));
+        r = await coord.leaseHeartbeat(collection, session, list9(flag3(args, "--keys")));
         break;
       case "release":
         r = await coord.leaseRelease(need(collection, "--collection"), need(flag3(args, "--key"), "--key"), session, flag3(args, "--outcome"));
