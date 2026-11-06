@@ -11028,7 +11028,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.10.3" : fromPackage();
+var YAPA_VERSION = true ? "1.11.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
