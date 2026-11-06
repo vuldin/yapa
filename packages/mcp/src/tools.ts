@@ -76,6 +76,10 @@ import {
   mergeReportLines,
   clearCollectionRedirect,
   clearLeftCollection,
+  keepDeletedUpstream,
+  listTrash,
+  purgeDocuments,
+  restoreDeleted,
   removeReport,
   resolveWriteCollection,
   redirectNote,
@@ -105,7 +109,7 @@ import {
 export const SYNC_ON_WRITE_TOOLS = new Set([
   'memory_store', 'memory_update', 'memory_forget', 'compaction_apply', 'journal_consolidate', 'janitor_now',
   'task_create', 'task_update', 'task_complete', 'task_delete', 'task_add_dependency', 'task_next',
-  'task_remove_dependency', 'collection_merge',
+  'task_remove_dependency', 'collection_merge', 'trash',
 ]);
 
 /**
@@ -295,7 +299,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'memory_forget',
-    'Delete a memory by ID (searches across all collections)',
+    'Delete a memory by ID (searches across all collections). One of yours in a shared collection is deleted for teammates too: the sync service keeps it restorable (`trash restore`) and teammates keep an archived copy, both for the retention period. To remove a leaked secret for good, use `trash purge`.',
     {
       id: z.string().describe('Memory document ID to delete'),
     },
@@ -1304,7 +1308,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'task_delete',
-    'Remove a task permanently',
+    'Delete a task. One of yours in a shared collection is deleted for teammates too, restorable on the sync service (`trash restore`) for the retention period.',
     {
       id: z.string().describe('Task ID to delete'),
     },
@@ -1480,6 +1484,67 @@ export function registerTools(server: McpServer): void {
       // Refusals (it would lose data, unconfirmed) throw with the reason for the model.
       const r = await removeCollection(name, { scope, confirm });
       return { content: [{ type: 'text' as const, text: removeReport(r) }] };
+    },
+  );
+
+  // --- Trash: what deletions left behind, restore and purge ---
+  server.tool(
+    'trash',
+    'Deleted documents. `list`: copies kept here after their owner deleted them on the sync service (hidden, never pushed, removed after the retention period), and your own deleted documents on the sync service (restorable within its retention). '
+      + '`restore` (ids): bring your own deleted documents back on the sync service; every machine, teammates\' included, gets them on its next pull. '
+      + '`keep` (id, collection): keep a copy someone else deleted as a new document of yours. '
+      + '`purge` (ids): remove documents of yours for good, only for mistakes such as a leaked secret: no restorable copy remains, teammates\' copies are dropped even with local edits, and the id can never be written again. Confirm with the user before purging.',
+    {
+      action: z.enum(['list', 'restore', 'keep', 'purge']),
+      collection: z.string().optional().describe('list: only this collection; keep: the copy\'s collection'),
+      ids: z.array(z.string()).optional().describe('restore / purge: document ids'),
+      id: z.string().optional().describe('keep: the copy to keep'),
+    },
+    async ({ action, collection, ids, id }) => {
+      const text = (t: string, isError = false) => ({ content: [{ type: 'text' as const, text: t }], ...(isError ? { isError: true } : {}) });
+      const when = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+      try {
+        if (action === 'list') {
+          const t = await listTrash(collection);
+          const lines: string[] = [];
+          lines.push(t.upstream.length ? `**Deleted by their owners, kept here** (${t.upstream.length}):` : 'No copies of documents deleted by their owners are kept here.');
+          for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] ${c.type}, deleted by ${c.deleted_by} ${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`);
+          lines.push('');
+          if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);
+          else {
+            lines.push(t.remote.length ? `**Your deleted documents on the sync service** (${t.remote.length}, restorable):` : 'You have no deleted documents on the sync service.');
+            for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}] ${d.reason === 'retract' ? 'moved into a private collection' : 'deleted'} ${when(d.deleted_at)}: ${d.content.slice(0, 100).replace(/\s+/g, ' ')}`);
+          }
+          return text(lines.join('\n').trim());
+        }
+        if (action === 'keep') {
+          if (!id || !collection) return text('trash keep needs id and collection', true);
+          const r = await keepDeletedUpstream(id, collection);
+          recordLastWrite(collection);
+          return text(`Kept ${id} as your ${r.type} ${r.id} in ${collection}; the deleted copy is gone.`);
+        }
+        if (!ids?.length) return text(`trash ${action} needs ids`, true);
+        if (action === 'restore') {
+          const results = await restoreDeleted(ids);
+          const by = (s: string) => results.filter(r => r.status === s).map(r => r.id);
+          const parts = [
+            by('restored').length ? `Restored on the sync service: ${by('restored').join(', ')} (back here and on teammates' machines with the next pull).` : '',
+            by('not_found').length ? `Not found among your deleted documents (past retention, or not yours): ${by('not_found').join(', ')}.` : '',
+            by('id_taken').length ? `Not restored, the id is in use again: ${by('id_taken').join(', ')}.` : '',
+          ].filter(Boolean);
+          await syncCycle().catch(() => undefined);
+          return text(parts.join('\n'));
+        }
+        const r = await purgeDocuments(ids);
+        const parts = [
+          r.queued.length ? `Purged here and queued for a purge on the sync service: ${r.queued.join(', ')}. Teammates' copies are dropped on their next pull, and these ids can't be written again.` : '',
+          r.local.length ? `Removed for good (it never left this machine): ${r.local.join(', ')}.` : '',
+          r.refused.length ? `Not yours, not purged: ${r.refused.map(x => `${x.id} (${x.owner})`).join(', ')}. Ask the owner to purge it.` : '',
+        ].filter(Boolean);
+        return text(parts.join('\n'));
+      } catch (e) {
+        return text(`trash ${action}: ${(e as Error).message}`, true);
+      }
     },
   );
 

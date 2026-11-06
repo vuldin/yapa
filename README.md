@@ -423,6 +423,14 @@ Completing, blocking, resetting to pending or deleting the task releases the cla
 
 `task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
 
+### Deleting, restoring and purging
+
+Nothing is lost by accident:
+- `collection_delete` removes a collection from this machine only, unless you pass `scope: "everyone"` (with `confirm`). A shared collection stays with teammates, and your unpushed documents in it are pushed first.
+- Deleting one of your documents in a shared collection (`memory_forget`, `task_delete`, `collection_delete` with `scope: "everyone"`) removes it for teammates too. The sync service keeps it restorable for 30 days, and each teammate's machine keeps an archived copy for 30 days (`YAPA_DELETED_RETENTION_DAYS`): hidden, never pushed back, back to live if you restore it.
+- `trash list` shows both, `trash restore` brings yours back for everyone, and `trash keep` makes a teammate's deleted copy your own.
+- `trash purge` is for mistakes that must not survive, such as a leaked secret. The service keeps no restorable copy, teammates drop theirs even with local edits, and the id is refused if anyone writes it again. Only the owner can purge.
+
 ### Local-only collections on this machine
 
 `private-*`, `local-*` and `global` never leave your machine, and every collection stays local while sync is off. Coordination works there too, served by this machine instead of the sync service, with the same rules and answers:

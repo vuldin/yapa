@@ -12,7 +12,9 @@
 import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
 import { deleteDocument, getDocumentsByFilter, getDocumentsByIds, listCollections } from '../store/index.js';
-import { isDeletedUpstream } from '../sync/syncable.js';
+import { isDeletedUpstream, isSyncableCollection } from '../sync/syncable.js';
+import { getSyncBackend, isSyncConfigured, UnsupportedByRemoteError, type DeletedDocument, type RestoreResult } from '../sync/backend.js';
+import { queueSyncPurges } from '../sync/deletes.js';
 import { storeMemory } from './store.js';
 import { createTask } from '../tasks/create.js';
 
@@ -93,4 +95,85 @@ export async function keepDeletedUpstream(id: string, collection: string): Promi
     await deleteDocument(collection, id);
     return { id: newId, type: String(m.type ?? 'memory') };
   });
+}
+
+// ------------------------------------------------------------ on the remote
+
+export interface TrashListing {
+  /** Copies kept here after their owners deleted them upstream. */
+  upstream: TrashedCopy[];
+  /** Your own deleted documents on the sync service, restorable within its retention. */
+  remote: DeletedDocument[];
+  /** Why `remote` is empty when it is not known: sync off, offline, or an older service. */
+  remoteUnavailable?: string;
+}
+
+export async function listTrash(collection?: string): Promise<TrashListing> {
+  const out: TrashListing = { upstream: await listDeletedUpstream(collection), remote: [] };
+  if (!isSyncConfigured()) {
+    out.remoteUnavailable = 'sync is off';
+    return out;
+  }
+  try {
+    const backend = await getSyncBackend();
+    if (!backend?.listDeleted) out.remoteUnavailable = 'this sync target has no soft delete';
+    else out.remote = await backend.listDeleted(collection);
+  } catch (e) {
+    out.remoteUnavailable = e instanceof UnsupportedByRemoteError ? e.message : `the sync service could not be asked: ${(e as Error).message}`;
+  }
+  return out;
+}
+
+/**
+ * Restore your own deleted documents on the sync service; the next pull
+ * brings each back here (over an archived copy, on every teammate's machine
+ * too). Throws UnsupportedByRemoteError on an older service.
+ */
+export async function restoreDeleted(ids: string[]): Promise<RestoreResult[]> {
+  if (!isSyncConfigured()) throw new Error('restore needs the sync service (sync is off)');
+  const backend = await getSyncBackend();
+  if (!backend?.restore) throw new UnsupportedByRemoteError('restore');
+  return backend.restore([...new Set(ids)]);
+}
+
+export interface PurgeQueued {
+  /** Removed here and queued for a purge on the next push. */
+  queued: string[];
+  /** Removed here only: in a local-only collection (no remote copy), or sync is off. */
+  local: string[];
+  /** Not yours: only the owner can purge a document. */
+  refused: Array<{ id: string; collection: string; owner: string }>;
+}
+
+/**
+ * Purge documents of yours for good: a mistake such as a leaked secret. Each
+ * is removed here at once (with its chunks) and, in a shared collection,
+ * queued for a purge on the next push. Ids not found here are queued too:
+ * the service may still hold them as deleted rows.
+ */
+export async function purgeDocuments(ids: string[]): Promise<PurgeQueued> {
+  const me = getConfig().USERNAME;
+  const out: PurgeQueued = { queued: [], local: [], refused: [] };
+  const collections = (await listCollections().catch(() => [])).map(c => c.name);
+  for (const id of [...new Set(ids)]) {
+    let found: { collection: string; metadata: Record<string, any> } | undefined;
+    for (const c of collections) {
+      const [d] = await getDocumentsByIds(c, [id]).catch(() => []);
+      if (d) { found = { collection: c, metadata: d.metadata }; break; }
+    }
+    if (found && found.metadata.origin_user && found.metadata.origin_user !== me) {
+      out.refused.push({ id, collection: found.collection, owner: String(found.metadata.origin_user) });
+      continue;
+    }
+    if (found) {
+      await withDocLock(found.collection, id, async () => {
+        for (const c of await getDocumentsByFilter(found!.collection, { parent_id: id }, 1000).catch(() => [])) await deleteDocument(found!.collection, c.id);
+        await deleteDocument(found!.collection, id);
+      });
+    }
+    if (found && (!isSyncableCollection(found.collection) || !isSyncConfigured())) out.local.push(id);
+    else out.queued.push(id);
+  }
+  await queueSyncPurges(out.queued);
+  return out;
 }

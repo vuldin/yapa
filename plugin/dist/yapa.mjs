@@ -22,6 +22,9 @@ function isSyncableCollection(name) {
 function looksPrivateButShared(name) {
   return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
 }
+function isDeletedUpstream(metadata) {
+  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== "";
+}
 function isReadOnlyDoc(metadata) {
   return metadata?.read_only === true;
 }
@@ -97,6 +100,7 @@ function createConfig(env = process.env) {
     VOYAGE_API_KEY: get(env, "VOYAGE_API_KEY"),
     OLLAMA_URL: get(env, "OLLAMA_URL", "http://localhost:11434"),
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
+    DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -2182,13 +2186,41 @@ async function getLocalTombstones() {
     return /* @__PURE__ */ new Set();
   }
 }
-var SYNC_DELETES_ID, SYNC_TOMBSTONES_ID;
+async function queueSyncPurges(docIds) {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection2("global");
+  const existing = new Set(await getPendingPurges());
+  for (const id of docIds) existing.add(id);
+  await addDocument2("global", SYNC_PURGES_ID, "sync purge queue", {
+    type: "sync_sentinel",
+    pending_purges: [...existing].join(",")
+  });
+}
+async function getPendingPurges() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: "sync_sentinel" }, 10);
+    const raw = results.find((r) => r.id === SYNC_PURGES_ID)?.metadata.pending_purges;
+    return typeof raw === "string" ? raw.split(",").filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+async function clearPendingPurges(processed) {
+  try {
+    const done = new Set(processed);
+    const remaining = (await getPendingPurges()).filter((id) => !done.has(id));
+    await addDocument2("global", SYNC_PURGES_ID, "sync purge queue", { type: "sync_sentinel", pending_purges: remaining.join(",") });
+  } catch {
+  }
+}
+var SYNC_DELETES_ID, SYNC_TOMBSTONES_ID, SYNC_PURGES_ID;
 var init_deletes = __esm({
   "packages/core/src/sync/deletes.ts"() {
     "use strict";
     init_store();
     SYNC_DELETES_ID = "__sync_deletes__";
     SYNC_TOMBSTONES_ID = "__sync_tombstones__";
+    SYNC_PURGES_ID = "__sync_purges__";
   }
 });
 
@@ -2272,271 +2304,6 @@ var init_list = __esm({
     "use strict";
     init_store();
     init_filters();
-  }
-});
-
-// packages/core/src/memory/decay.ts
-async function lastSweepAt() {
-  try {
-    const results = await getDocumentsByFilter2("global", { type: { $eq: "decay_sentinel" } }, 1);
-    return results[0]?.metadata.last_run;
-  } catch {
-    return void 0;
-  }
-}
-async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
-  const collections = await listCollections2();
-  const fallbackAnchor = await lastSweepAt() ?? now - DAY;
-  let decayedCount = 0;
-  for (const collection of collections) {
-    try {
-      const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
-      const updates = [];
-      for (const doc of docs) {
-        const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
-        const days = (now - anchor) / DAY;
-        if (days <= 0) continue;
-        const lifecycleMeta = {
-          salience: doc.metadata.salience ?? 1,
-          accessed_at: doc.metadata.accessed_at ?? now,
-          created_at: doc.metadata.created_at ?? now,
-          sector: doc.metadata.sector ?? "episodic"
-        };
-        const decayed = applyDecay(lifecycleMeta, days);
-        updates.push({ id: doc.id, patch: { salience: decayed.salience, decayed_at: now } });
-      }
-      if (updates.length > 0) {
-        await patchDocuments2(collection.name, updates);
-        decayedCount += updates.length;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return decayedCount;
-}
-async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
-  const last = await lastSweepAt();
-  return last === void 0 || now - last > DAY;
-}
-async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
-  const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
-  await getOrCreateCollection3("global");
-  await addDocument3("global", DECAY_SENTINEL_ID, "decay sentinel", {
-    type: "decay_sentinel",
-    last_run: now
-  });
-}
-var DECAY_SENTINEL_ID, DAY, SWEEP_LIMIT;
-var init_decay = __esm({
-  "packages/core/src/memory/decay.ts"() {
-    "use strict";
-    init_store();
-    init_lifecycle();
-    DECAY_SENTINEL_ID = "__decay_sentinel__";
-    DAY = 86400;
-    SWEEP_LIMIT = 1e4;
-  }
-});
-
-// packages/core/src/memory/compact.ts
-async function collectionSize(collection) {
-  try {
-    const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e4);
-    return docs.filter((d) => d.metadata.archived !== true).length;
-  } catch {
-    return 0;
-  }
-}
-function tagsOf(metadata) {
-  if (Array.isArray(metadata.tags)) return metadata.tags;
-  if (typeof metadata.tags === "string") return metadata.tags.split(",").filter(Boolean);
-  return [];
-}
-function intersect(a, b) {
-  const set = new Set(a);
-  return b.filter((t) => set.has(t));
-}
-async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
-  if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
-  all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
-  const consumed = /* @__PURE__ */ new Set();
-  const groups = [];
-  for (const seed of all) {
-    if (consumed.has(seed.id)) continue;
-    const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
-    const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
-    );
-    if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
-    const memberIds = [seed.id, ...matches.map((m) => m.id)];
-    memberIds.forEach((id) => consumed.add(id));
-    const sharedTags = matches.reduce(
-      (acc, m) => intersect(acc, tagsOf(m.metadata)),
-      tagsOf(seed.metadata)
-    );
-    groups.push({
-      seed_id: seed.id,
-      member_ids: memberIds,
-      seed_content: seed.content,
-      similar_content: matches.map((m) => m.content),
-      shared_tags: sharedTags
-    });
-  }
-  return groups;
-}
-async function applyCompaction(input2) {
-  input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
-  const stored = await storeMemory(input2.summary, {
-    collection: input2.collection,
-    salience: 2,
-    tags: ["compacted", ...input2.tags ?? []],
-    sector: "semantic"
-  });
-  const summaryId = stored.ids[0];
-  const archivedIds = [];
-  for (const id of input2.member_ids) {
-    try {
-      const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length) continue;
-      await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
-      archivedIds.push(id);
-    } catch (e) {
-      process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}
-`);
-    }
-  }
-  try {
-    const summaryDocs = await getDocumentsByIds2(input2.collection, [summaryId]);
-    if (summaryDocs.length) {
-      await patchDocument(input2.collection, summaryId, { compacted_from: archivedIds });
-    }
-  } catch (e) {
-    process.stderr.write(`[yapa] compact: failed to set back-reference on summary: ${e}
-`);
-  }
-  return { summary_id: summaryId, archived_ids: archivedIds };
-}
-var init_compact = __esm({
-  "packages/core/src/memory/compact.ts"() {
-    "use strict";
-    init_config();
-    init_archive();
-    init_store();
-    init_store2();
-    init_kinds();
-    init_sentinel();
-  }
-});
-
-// packages/core/src/memory/journal.ts
-import { randomBytes } from "crypto";
-async function journalAppend(entry, collection, sessionId2) {
-  const { collection: col } = await resolveWriteCollection(collection ?? "global");
-  const sid = sessionId2 ?? SESSION_ID;
-  await getOrCreateCollection2(col);
-  const now = Math.floor(Date.now() / 1e3);
-  const id = `journal-${getConfig().USERNAME}-${sid}-${now}-${Math.random().toString(36).slice(2, 6)}`;
-  await addDocument2(col, id, entry, {
-    type: DRAFT_TYPE,
-    username: getConfig().USERNAME,
-    session_id: sid,
-    created_at: now,
-    is_synced: false
-  });
-  return id;
-}
-async function listSessionDrafts(collection, sessionId2) {
-  const col = collection ?? "global";
-  const sid = sessionId2 ?? SESSION_ID;
-  try {
-    const docs = await getDocumentsByFilter2(col, {
-      type: DRAFT_TYPE,
-      session_id: sid
-    }, 1e3);
-    return docs.map((d) => ({
-      id: d.id,
-      entry: d.content,
-      created_at: d.metadata.created_at ?? 0,
-      session_id: d.metadata.session_id ?? sid
-    })).sort((a, b) => a.created_at - b.created_at);
-  } catch {
-    return [];
-  }
-}
-async function journalConsolidate(input2 = {}) {
-  const { collection: col } = await resolveWriteCollection(input2.collection ?? "global");
-  const sid = input2.sessionId ?? SESSION_ID;
-  const drafts = await listSessionDrafts(col, sid);
-  if (drafts.length === 0) return null;
-  const body = input2.summary ? input2.summary : drafts.map((d) => `- ${d.entry}`).join("\n");
-  const stored = await storeMemory(`# Session journal (${sid})
-
-${body}`, {
-    collection: col,
-    salience: 1.5,
-    sector: "episodic",
-    tags: ["journal"]
-  });
-  for (const d of drafts) {
-    try {
-      await deleteDocument2(col, d.id);
-    } catch (e) {
-      process.stderr.write(`[yapa] journal: failed to delete draft ${d.id}: ${e}
-`);
-    }
-  }
-  return { memory_id: stored.ids[0], draft_count: drafts.length };
-}
-async function consolidateSessionEverywhere(sessionId2 = SESSION_ID) {
-  const out = [];
-  for (const col of await listCollections2().catch(() => [])) {
-    try {
-      const result = await journalConsolidate({ collection: col.name, sessionId: sessionId2 });
-      if (result) out.push(result);
-    } catch (e) {
-      process.stderr.write(`[yapa] journal: consolidate failed in ${col.name}: ${e}
-`);
-    }
-  }
-  return out;
-}
-async function consolidateStaleDrafts(maxAgeSeconds = 24 * 3600) {
-  const cutoff = Math.floor(Date.now() / 1e3) - maxAgeSeconds;
-  const out = [];
-  for (const col of await listCollections2().catch(() => [])) {
-    let drafts;
-    try {
-      drafts = await getDocumentsByFilter2(col.name, { type: DRAFT_TYPE }, 1e3);
-    } catch {
-      continue;
-    }
-    const sessions = /* @__PURE__ */ new Map();
-    for (const d of drafts) {
-      const sid = d.metadata.session_id;
-      if (!sid) continue;
-      if (d.metadata.username && d.metadata.username !== getConfig().USERNAME) continue;
-      sessions.set(sid, Math.max(sessions.get(sid) ?? 0, d.metadata.created_at ?? 0));
-    }
-    for (const [sid, newest] of sessions) {
-      if (newest > cutoff) continue;
-      const result = await journalConsolidate({ collection: col.name, sessionId: sid }).catch(() => null);
-      if (result) out.push(result);
-    }
-  }
-  return out;
-}
-var SESSION_ID, DRAFT_TYPE;
-var init_journal = __esm({
-  "packages/core/src/memory/journal.ts"() {
-    "use strict";
-    init_config();
-    init_store();
-    init_store2();
-    init_sentinel();
-    SESSION_ID = process.env.YAPA_SESSION_ID ?? `${Date.now()}-${randomBytes(4).toString("hex")}`;
-    DRAFT_TYPE = "journal_draft";
   }
 });
 
@@ -4321,6 +4088,395 @@ var init_create = __esm({
   }
 });
 
+// packages/core/src/memory/trash.ts
+function toCopy(collection, d) {
+  const at = Number(d.metadata.deleted_upstream_at) || 0;
+  return {
+    id: d.id,
+    collection,
+    type: String(d.metadata.type ?? "memory"),
+    content: d.content,
+    deleted_by: String(d.metadata.deleted_upstream_by ?? ""),
+    deleted_at: at,
+    reason: String(d.metadata.deleted_upstream_reason ?? "delete"),
+    expires_at: at + getConfig().DELETED_RETENTION_DAYS * DAY
+  };
+}
+async function listDeletedUpstream(collection) {
+  const names = collection ? [collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const out = [];
+  for (const c of names) {
+    for (const d of await getDocumentsByFilter2(c, { archived: true }, 1e5).catch(() => [])) {
+      if (isDeletedUpstream(d.metadata) && !(d.metadata.parent_id && (d.metadata.chunk_index ?? 0) !== 0)) out.push(toCopy(c, d));
+    }
+  }
+  return out.sort((a, b) => b.deleted_at - a.deleted_at);
+}
+async function sweepDeletedUpstream(now = Math.floor(Date.now() / 1e3)) {
+  const cutoff = now - getConfig().DELETED_RETENTION_DAYS * DAY;
+  let n = 0;
+  for (const c of (await listCollections2().catch(() => [])).map((x) => x.name)) {
+    for (const d of await getDocumentsByFilter2(c, { archived: true }, 1e5).catch(() => [])) {
+      if (!isDeletedUpstream(d.metadata) || Number(d.metadata.deleted_upstream_at) > cutoff) continue;
+      await deleteDocument2(c, d.id).catch(() => void 0);
+      n++;
+    }
+  }
+  return n;
+}
+async function keepDeletedUpstream(id, collection) {
+  return withDocLock(collection, id, async () => {
+    const [d] = await getDocumentsByIds2(collection, [id]);
+    if (!d || !isDeletedUpstream(d.metadata)) throw new Error(`${id} is not a deleted copy in ${collection}`);
+    const m = d.metadata;
+    const tags = Array.isArray(m.tags) ? m.tags : String(m.tags ?? "").split(",").filter(Boolean);
+    let newId;
+    if (m.type === "task") {
+      newId = await createTask(d.content, { priority: m.priority, tags, notes: m.notes ? `${m.notes}
+(kept from ${id}, deleted by ${m.deleted_upstream_by})` : `(kept from ${id}, deleted by ${m.deleted_upstream_by})` }, collection);
+    } else {
+      const base = m.parent_id ?? d.id;
+      const chunks = m.parent_id ? (await getDocumentsByFilter2(collection, { parent_id: base }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : [d];
+      newId = (await storeMemory(chunks.map((c) => c.content).join("\n"), { collection, tags, salience: m.salience })).ids[0];
+      for (const c of chunks) if (c.id !== id) await deleteDocument2(collection, c.id);
+    }
+    await deleteDocument2(collection, id);
+    return { id: newId, type: String(m.type ?? "memory") };
+  });
+}
+async function listTrash(collection) {
+  const out = { upstream: await listDeletedUpstream(collection), remote: [] };
+  if (!isSyncConfigured()) {
+    out.remoteUnavailable = "sync is off";
+    return out;
+  }
+  try {
+    const backend = await getSyncBackend();
+    if (!backend?.listDeleted) out.remoteUnavailable = "this sync target has no soft delete";
+    else out.remote = await backend.listDeleted(collection);
+  } catch (e) {
+    out.remoteUnavailable = e instanceof UnsupportedByRemoteError ? e.message : `the sync service could not be asked: ${e.message}`;
+  }
+  return out;
+}
+async function restoreDeleted(ids) {
+  if (!isSyncConfigured()) throw new Error("restore needs the sync service (sync is off)");
+  const backend = await getSyncBackend();
+  if (!backend?.restore) throw new UnsupportedByRemoteError("restore");
+  return backend.restore([...new Set(ids)]);
+}
+async function purgeDocuments(ids) {
+  const me = getConfig().USERNAME;
+  const out = { queued: [], local: [], refused: [] };
+  const collections = (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const id of [...new Set(ids)]) {
+    let found;
+    for (const c of collections) {
+      const [d] = await getDocumentsByIds2(c, [id]).catch(() => []);
+      if (d) {
+        found = { collection: c, metadata: d.metadata };
+        break;
+      }
+    }
+    if (found && found.metadata.origin_user && found.metadata.origin_user !== me) {
+      out.refused.push({ id, collection: found.collection, owner: String(found.metadata.origin_user) });
+      continue;
+    }
+    if (found) {
+      await withDocLock(found.collection, id, async () => {
+        for (const c of await getDocumentsByFilter2(found.collection, { parent_id: id }, 1e3).catch(() => [])) await deleteDocument2(found.collection, c.id);
+        await deleteDocument2(found.collection, id);
+      });
+    }
+    if (found && (!isSyncableCollection(found.collection) || !isSyncConfigured())) out.local.push(id);
+    else out.queued.push(id);
+  }
+  await queueSyncPurges(out.queued);
+  return out;
+}
+var DAY;
+var init_trash = __esm({
+  "packages/core/src/memory/trash.ts"() {
+    "use strict";
+    init_config();
+    init_doc_lock();
+    init_store();
+    init_syncable();
+    init_backend();
+    init_deletes();
+    init_store2();
+    init_create();
+    DAY = 86400;
+  }
+});
+
+// packages/core/src/memory/decay.ts
+async function lastSweepAt() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: { $eq: "decay_sentinel" } }, 1);
+    return results[0]?.metadata.last_run;
+  } catch {
+    return void 0;
+  }
+}
+async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
+  const collections = await listCollections2();
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY2;
+  let decayedCount = 0;
+  for (const collection of collections) {
+    try {
+      const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
+      const updates = [];
+      for (const doc of docs) {
+        const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
+        const days = (now - anchor) / DAY2;
+        if (days <= 0) continue;
+        const lifecycleMeta = {
+          salience: doc.metadata.salience ?? 1,
+          accessed_at: doc.metadata.accessed_at ?? now,
+          created_at: doc.metadata.created_at ?? now,
+          sector: doc.metadata.sector ?? "episodic"
+        };
+        const decayed = applyDecay(lifecycleMeta, days);
+        updates.push({ id: doc.id, patch: { salience: decayed.salience, decayed_at: now } });
+      }
+      if (updates.length > 0) {
+        await patchDocuments2(collection.name, updates);
+        decayedCount += updates.length;
+      }
+    } catch {
+      continue;
+    }
+  }
+  await sweepDeletedUpstream(now).catch(() => 0);
+  return decayedCount;
+}
+async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
+  const last = await lastSweepAt();
+  return last === void 0 || now - last > DAY2;
+}
+async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
+  const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
+  await getOrCreateCollection3("global");
+  await addDocument3("global", DECAY_SENTINEL_ID, "decay sentinel", {
+    type: "decay_sentinel",
+    last_run: now
+  });
+}
+var DECAY_SENTINEL_ID, DAY2, SWEEP_LIMIT;
+var init_decay = __esm({
+  "packages/core/src/memory/decay.ts"() {
+    "use strict";
+    init_store();
+    init_trash();
+    init_lifecycle();
+    DECAY_SENTINEL_ID = "__decay_sentinel__";
+    DAY2 = 86400;
+    SWEEP_LIMIT = 1e4;
+  }
+});
+
+// packages/core/src/memory/compact.ts
+async function collectionSize(collection) {
+  try {
+    const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e4);
+    return docs.filter((d) => d.metadata.archived !== true).length;
+  } catch {
+    return 0;
+  }
+}
+function tagsOf(metadata) {
+  if (Array.isArray(metadata.tags)) return metadata.tags;
+  if (typeof metadata.tags === "string") return metadata.tags.split(",").filter(Boolean);
+  return [];
+}
+function intersect(a, b) {
+  const set = new Set(a);
+  return b.filter((t) => set.has(t));
+}
+async function suggestCompaction(collection) {
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
+  all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
+  const consumed = /* @__PURE__ */ new Set();
+  const groups = [];
+  for (const seed of all) {
+    if (consumed.has(seed.id)) continue;
+    const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
+    const matches = neighbors.filter(
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+    );
+    if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
+    const memberIds = [seed.id, ...matches.map((m) => m.id)];
+    memberIds.forEach((id) => consumed.add(id));
+    const sharedTags = matches.reduce(
+      (acc, m) => intersect(acc, tagsOf(m.metadata)),
+      tagsOf(seed.metadata)
+    );
+    groups.push({
+      seed_id: seed.id,
+      member_ids: memberIds,
+      seed_content: seed.content,
+      similar_content: matches.map((m) => m.content),
+      shared_tags: sharedTags
+    });
+  }
+  return groups;
+}
+async function applyCompaction(input2) {
+  input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
+  const stored = await storeMemory(input2.summary, {
+    collection: input2.collection,
+    salience: 2,
+    tags: ["compacted", ...input2.tags ?? []],
+    sector: "semantic"
+  });
+  const summaryId = stored.ids[0];
+  const archivedIds = [];
+  for (const id of input2.member_ids) {
+    try {
+      const existing = await getDocumentsByIds2(input2.collection, [id]);
+      if (!existing.length) continue;
+      await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
+      archivedIds.push(id);
+    } catch (e) {
+      process.stderr.write(`[yapa] compact: failed to archive ${id}: ${e}
+`);
+    }
+  }
+  try {
+    const summaryDocs = await getDocumentsByIds2(input2.collection, [summaryId]);
+    if (summaryDocs.length) {
+      await patchDocument(input2.collection, summaryId, { compacted_from: archivedIds });
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa] compact: failed to set back-reference on summary: ${e}
+`);
+  }
+  return { summary_id: summaryId, archived_ids: archivedIds };
+}
+var init_compact = __esm({
+  "packages/core/src/memory/compact.ts"() {
+    "use strict";
+    init_config();
+    init_archive();
+    init_store();
+    init_store2();
+    init_kinds();
+    init_sentinel();
+  }
+});
+
+// packages/core/src/memory/journal.ts
+import { randomBytes } from "crypto";
+async function journalAppend(entry, collection, sessionId2) {
+  const { collection: col } = await resolveWriteCollection(collection ?? "global");
+  const sid = sessionId2 ?? SESSION_ID;
+  await getOrCreateCollection2(col);
+  const now = Math.floor(Date.now() / 1e3);
+  const id = `journal-${getConfig().USERNAME}-${sid}-${now}-${Math.random().toString(36).slice(2, 6)}`;
+  await addDocument2(col, id, entry, {
+    type: DRAFT_TYPE,
+    username: getConfig().USERNAME,
+    session_id: sid,
+    created_at: now,
+    is_synced: false
+  });
+  return id;
+}
+async function listSessionDrafts(collection, sessionId2) {
+  const col = collection ?? "global";
+  const sid = sessionId2 ?? SESSION_ID;
+  try {
+    const docs = await getDocumentsByFilter2(col, {
+      type: DRAFT_TYPE,
+      session_id: sid
+    }, 1e3);
+    return docs.map((d) => ({
+      id: d.id,
+      entry: d.content,
+      created_at: d.metadata.created_at ?? 0,
+      session_id: d.metadata.session_id ?? sid
+    })).sort((a, b) => a.created_at - b.created_at);
+  } catch {
+    return [];
+  }
+}
+async function journalConsolidate(input2 = {}) {
+  const { collection: col } = await resolveWriteCollection(input2.collection ?? "global");
+  const sid = input2.sessionId ?? SESSION_ID;
+  const drafts = await listSessionDrafts(col, sid);
+  if (drafts.length === 0) return null;
+  const body = input2.summary ? input2.summary : drafts.map((d) => `- ${d.entry}`).join("\n");
+  const stored = await storeMemory(`# Session journal (${sid})
+
+${body}`, {
+    collection: col,
+    salience: 1.5,
+    sector: "episodic",
+    tags: ["journal"]
+  });
+  for (const d of drafts) {
+    try {
+      await deleteDocument2(col, d.id);
+    } catch (e) {
+      process.stderr.write(`[yapa] journal: failed to delete draft ${d.id}: ${e}
+`);
+    }
+  }
+  return { memory_id: stored.ids[0], draft_count: drafts.length };
+}
+async function consolidateSessionEverywhere(sessionId2 = SESSION_ID) {
+  const out = [];
+  for (const col of await listCollections2().catch(() => [])) {
+    try {
+      const result = await journalConsolidate({ collection: col.name, sessionId: sessionId2 });
+      if (result) out.push(result);
+    } catch (e) {
+      process.stderr.write(`[yapa] journal: consolidate failed in ${col.name}: ${e}
+`);
+    }
+  }
+  return out;
+}
+async function consolidateStaleDrafts(maxAgeSeconds = 24 * 3600) {
+  const cutoff = Math.floor(Date.now() / 1e3) - maxAgeSeconds;
+  const out = [];
+  for (const col of await listCollections2().catch(() => [])) {
+    let drafts;
+    try {
+      drafts = await getDocumentsByFilter2(col.name, { type: DRAFT_TYPE }, 1e3);
+    } catch {
+      continue;
+    }
+    const sessions = /* @__PURE__ */ new Map();
+    for (const d of drafts) {
+      const sid = d.metadata.session_id;
+      if (!sid) continue;
+      if (d.metadata.username && d.metadata.username !== getConfig().USERNAME) continue;
+      sessions.set(sid, Math.max(sessions.get(sid) ?? 0, d.metadata.created_at ?? 0));
+    }
+    for (const [sid, newest] of sessions) {
+      if (newest > cutoff) continue;
+      const result = await journalConsolidate({ collection: col.name, sessionId: sid }).catch(() => null);
+      if (result) out.push(result);
+    }
+  }
+  return out;
+}
+var SESSION_ID, DRAFT_TYPE;
+var init_journal = __esm({
+  "packages/core/src/memory/journal.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_store2();
+    init_sentinel();
+    SESSION_ID = process.env.YAPA_SESSION_ID ?? `${Date.now()}-${randomBytes(4).toString("hex")}`;
+    DRAFT_TYPE = "journal_draft";
+  }
+});
+
 // packages/core/src/tasks/list.ts
 async function listTasks(filters = {}) {
   const collectionNames = filters.collection ? [filters.collection] : (await listCollections2()).map((c) => c.name);
@@ -4335,6 +4491,7 @@ async function listTasks(filters = {}) {
       const tasks = await getDocumentsByFilter2(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
+        if (task.metadata.archived === true && !filters.includeArchived) continue;
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -4464,7 +4621,7 @@ var init_close = __esm({
 // packages/core/src/sync/push.ts
 import { createHash as createHash2 } from "node:crypto";
 function emptyPushStats() {
-  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+  return { pushed: 0, linked: 0, deleted: 0, purged: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 function syncFingerprint(doc) {
   const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
@@ -4499,7 +4656,7 @@ function pushDocsNow(collection, ids) {
     const backend = await getSyncBackend();
     if (!backend) return out;
     await resolveSyncUsername();
-    const docs = (await getDocumentsByIds2(collection, ids)).filter((d) => d.metadata.is_synced === false && !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const docs = (await getDocumentsByIds2(collection, ids)).filter((d) => d.metadata.is_synced === false && !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && !isDeletedUpstream(d.metadata) && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
     const stats = emptyPushStats();
     const batch = [];
     for (const unsynced of docs) {
@@ -4535,10 +4692,39 @@ async function pushAll() {
   if (!backend) return stats;
   await resolveSyncUsername();
   try {
+    const purges = await getPendingPurges();
+    if (purges.length > 0) {
+      if (backend.purge) {
+        try {
+          const results = await backend.purge(purges);
+          for (const r of results) {
+            if (r.status === "error") process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}
+`);
+          }
+          stats.purged = results.filter((r) => r.status === "purged").length;
+        } catch (e) {
+          if (!(e instanceof UnsupportedByRemoteError)) throw e;
+          process.stderr.write(`[yapa-sync] The sync service can't purge yet: deleting ${purges.length} doc(s) instead
+`);
+          stats.deleted += await backend.delete(purges, "delete");
+        }
+      } else {
+        stats.deleted += await backend.delete(purges, "delete");
+      }
+      await clearPendingPurges(purges);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Purge error: ${e}
+`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+  try {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
       const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
-      stats.deleted = await backend.delete(docIds, "delete");
+      stats.deleted += await backend.delete(docIds, "delete");
       await clearPendingDeletes(pendingDeletes);
     }
   } catch (e) {
@@ -4572,6 +4758,7 @@ async function pushAll() {
         if (unsynced.id.startsWith("__")) continue;
         if (unsynced.metadata.type === "journal_draft") continue;
         if (isReadOnlyDoc(unsynced.metadata)) continue;
+        if (isDeletedUpstream(unsynced.metadata)) continue;
         if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
         const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
         try {
@@ -4696,7 +4883,7 @@ async function countUnpushed() {
     if (!isSyncableCollection(col.name)) continue;
     const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
     for (const d of docs) {
-      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
+      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata) || isDeletedUpstream(d.metadata)) continue;
       if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
       n++;
     }
@@ -5152,7 +5339,7 @@ async function waitingOn(opts = {}) {
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
-    const open2 = tasks.filter((t) => t.metadata.status !== "complete");
+    const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
     for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
@@ -5287,7 +5474,7 @@ async function expiredLeaseKeys(collection) {
   }
 }
 async function nextTasks(opts) {
-  const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
+  const docs = (await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => [])).filter((d) => d.metadata.archived !== true);
   const open2 = docs.filter((d) => d.metadata.status !== "complete");
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
@@ -5414,7 +5601,7 @@ async function cleanupItems(collection, open2, claims) {
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const now = Math.floor(Date.now() / 1e3);
-  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY2 && (f.metadata.chunk_index ?? 0) === 0);
+  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY3 && (f.metadata.chunk_index ?? 0) === 0);
   if (findings.length) items.push({ key: "cleanup:findings", title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
   const size = await collectionSize(collection).catch(() => 0);
   if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: "cleanup:compaction", title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
@@ -5424,7 +5611,7 @@ async function cleanupItems(collection, open2, claims) {
   }
   return items;
 }
-var PRIORITY_RANK, norm, DAY2;
+var PRIORITY_RANK, norm, DAY3;
 var init_next = __esm({
   "packages/core/src/tasks/next.ts"() {
     "use strict";
@@ -5439,7 +5626,7 @@ var init_next = __esm({
     init_waiting();
     PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
     norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
-    DAY2 = 86400;
+    DAY3 = 86400;
   }
 });
 
@@ -7409,7 +7596,7 @@ var init_buckets = __esm({
 
 // packages/core/src/sync/pull.ts
 function emptyPullStats() {
-  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, archived: 0, keptDirty: 0, errors: 0 };
 }
 async function pullFromRemote() {
   const stats = emptyPullStats();
@@ -7529,16 +7716,31 @@ async function pullCollection(collectionName, since, stats = emptyPullStats(), o
   return stats;
 }
 async function applyRemoteDeletion(collectionName, del, stats) {
-  const [existing] = await getDocumentsByIds2(collectionName, [del.id]).catch(() => []);
-  if (!existing) return;
-  if (existing.metadata.is_synced === false) {
-    stats.keptDirty++;
-    process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)
+  await withDocLock(collectionName, del.id, async () => {
+    const [existing] = await getDocumentsByIds2(collectionName, [del.id]).catch(() => []);
+    if (!existing) return;
+    if (del.purged) {
+      await deleteDocument2(collectionName, del.id);
+      stats.deleted++;
+      if (existing.metadata.is_synced === false) process.stderr.write(`[yapa-sync] ${del.id} was purged by ${del.deleted_by}: dropped here, with its unpushed edits
 `);
-    return;
-  }
-  await deleteDocument2(collectionName, del.id);
-  stats.deleted++;
+      return;
+    }
+    if (existing.metadata.is_synced === false && !isDeletedUpstream(existing.metadata)) {
+      stats.keptDirty++;
+      process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)
+`);
+      return;
+    }
+    if (isDeletedUpstream(existing.metadata)) return;
+    await patchDocument(collectionName, del.id, {
+      archived: true,
+      deleted_upstream_by: del.deleted_by,
+      deleted_upstream_at: Number(del.deleted_at) || Math.floor(Date.now() / 1e3),
+      deleted_upstream_reason: del.reason ?? "delete"
+    });
+    stats.archived++;
+  });
 }
 function toUnixSeconds(value) {
   if (value == null) return 0;
@@ -7598,9 +7800,10 @@ async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, a
     }
   }
   if (existing) {
-    const localDirty = existing.metadata.is_synced === false;
+    const upstreamGone = isDeletedUpstream(existing.metadata);
+    const localDirty = existing.metadata.is_synced === false && !upstreamGone;
     const localUpdated = toUnixSeconds(existing.metadata.updated_at ?? existing.metadata.created_at);
-    if (!localDirty && toUnixSeconds(remoteDoc.updated_at) > localUpdated) {
+    if (upstreamGone || !localDirty && toUnixSeconds(remoteDoc.updated_at) > localUpdated) {
       await addDocument2(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
       stats.updated++;
     } else {
@@ -7911,8 +8114,8 @@ async function syncCycle() {
 `);
       pullStats.errors++;
     }
-    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.keptDirty > 0;
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.purged > 0 || pushStats.retracted > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.archived > 0 || pullStats.keptDirty > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
     if (hasPushActivity || hasPullActivity || pushStats.rejected > 0) {
       process.stderr.write(`[yapa-sync] ${formatSyncStats({ push: pushStats, pull: pullStats })}
@@ -8073,10 +8276,10 @@ async function startSync(opts = {}) {
 `);
 }
 function formatSyncStats({ push, pull }) {
-  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
+  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.purged ?? 0} purged, ${push.retracted} retracted`;
   if (push.renamed) line += `, ${push.renamed} renamed`;
   if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
-  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.skipped} skipped`;
+  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.archived ?? 0} archived, ${pull.skipped} skipped`;
   if (pull.keptDirty) line += `, ${pull.keptDirty} remote deletions not applied (local edits kept)`;
   return `${line}, ${pull.errors} errors`;
 }
@@ -9451,6 +9654,7 @@ __export(src_exports, {
   clearEmbeddingMemo: () => clearEmbeddingMemo,
   clearLeftCollection: () => clearLeftCollection,
   clearPendingDeletes: () => clearPendingDeletes,
+  clearPendingPurges: () => clearPendingPurges,
   clearSelectedForManifest: () => clearSelectedForManifest,
   closeSyncBackend: () => closeSyncBackend,
   collectClassifiedMemories: () => collectClassifiedMemories,
@@ -9521,6 +9725,7 @@ __export(src_exports, {
   getNextTaskId: () => getNextTaskId,
   getOrCreateCollection: () => getOrCreateCollection2,
   getPendingDeletes: () => getPendingDeletes,
+  getPendingPurges: () => getPendingPurges,
   getRegistryPath: () => getRegistryPath,
   getStore: () => getStore,
   getSyncBackend: () => getSyncBackend,
@@ -9548,6 +9753,7 @@ __export(src_exports, {
   journalConsolidate: () => journalConsolidate,
   judgeAggregate: () => judgeAggregate,
   judgeVerification: () => judgeVerification,
+  keepDeletedUpstream: () => keepDeletedUpstream,
   lastSyncError: () => lastSyncError,
   lastWriteDir: () => lastWriteDir,
   lastWriteFile: () => lastWriteFile,
@@ -9555,10 +9761,12 @@ __export(src_exports, {
   listAdapters: () => listAdapters,
   listCollections: () => listCollections2,
   listCollectionsWithCounts: () => listCollectionsWithCounts,
+  listDeletedUpstream: () => listDeletedUpstream,
   listMemories: () => listMemories,
   listRejectedDocs: () => listRejectedDocs,
   listSessionDrafts: () => listSessionDrafts,
   listTasks: () => listTasks,
+  listTrash: () => listTrash,
   listVersions: () => listVersions,
   loadManifestSplit: () => loadManifestSplit,
   localCoordination: () => localCoordination,
@@ -9600,6 +9808,7 @@ __export(src_exports, {
   pruneSessionRecords: () => pruneSessionRecords,
   pullCollection: () => pullCollection,
   pullFromRemote: () => pullFromRemote,
+  purgeDocuments: () => purgeDocuments,
   pushDocsNow: () => pushDocsNow,
   pushNow: () => pushNow,
   pushToRemote: () => pushToRemote,
@@ -9608,6 +9817,7 @@ __export(src_exports, {
   queryDocuments: () => queryDocuments2,
   queueSyncDelete: () => queueSyncDelete,
   queueSyncDeletes: () => queueSyncDeletes,
+  queueSyncPurges: () => queueSyncPurges,
   rankScore: () => rankScore,
   readArtifact: () => readArtifact,
   readCycleRecord: () => readCycleRecord,
@@ -9644,6 +9854,7 @@ __export(src_exports, {
   resolveConflict: () => resolveConflict,
   resolveSyncUsername: () => resolveSyncUsername,
   resolveWriteCollection: () => resolveWriteCollection,
+  restoreDeleted: () => restoreDeleted,
   retryUnsharedClaims: () => retryUnsharedClaims,
   routeMemory: () => routeMemory,
   runDecaySweep: () => runDecaySweep,
@@ -9673,6 +9884,7 @@ __export(src_exports, {
   stopUpdateChecks: () => stopUpdateChecks,
   storeMemory: () => storeMemory,
   suggestCompaction: () => suggestCompaction,
+  sweepDeletedUpstream: () => sweepDeletedUpstream,
   sweepLockDebris: () => sweepLockDebris,
   syncBackendKind: () => syncBackendKind,
   syncCycle: () => syncCycle,
@@ -9797,6 +10009,7 @@ var init_src = __esm({
     init_last_write();
     init_doc_lock();
     init_session_record();
+    init_trash();
   }
 });
 

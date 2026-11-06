@@ -63,7 +63,7 @@ export async function syncCycle(): Promise<SyncStats | null> {
       pullStats.errors++;
     }
 
-    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.purged > 0 || pushStats.retracted > 0;
     const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.archived > 0 || pullStats.keptDirty > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
@@ -267,7 +267,7 @@ export async function startSync(opts: { version?: string } = {}): Promise<void> 
 
 /** One line summarizing a cycle's push and pull. */
 export function formatSyncStats({ push, pull }: SyncStats): string {
-  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
+  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.purged ?? 0} purged, ${push.retracted} retracted`;
   if (push.renamed) line += `, ${push.renamed} renamed`;
   if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
   line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.archived ?? 0} archived, ${pull.skipped} skipped`;

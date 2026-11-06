@@ -21,6 +21,7 @@ const GATED = new Set([
   'yapa_memory_forget',
   'yapa_task_delete',
   'yapa_collection_delete',
+  'yapa_trash', // only its purge (see below)
   'yapa_storage_import',
   'yapa_training_trigger',
   'yapa_training_cancel',
@@ -45,6 +46,11 @@ export function registerApprovalGate(ctx: Context, getResolved: () => ResolvedCo
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (!getResolved().approvalGate) return next();
     if (!GATED.has(exec.name)) return next();
+    // yapa_trash only asks for a purge; when its arguments can't be seen, it asks.
+    if (exec.name === 'yapa_trash') {
+      const args = (exec as { args?: { action?: unknown }; input?: { action?: unknown } }).args ?? (exec as { input?: { action?: unknown } }).input;
+      if (args && args.action !== 'purge') return next();
+    }
     if (effectivePolicy(exec as never) !== 'ask') return next();
     return {
       kind: 'ask',

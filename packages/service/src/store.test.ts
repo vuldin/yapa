@@ -147,9 +147,9 @@ describe('findOrCreateUser reserves the svc- namespace (no database)', () => {
 
 describe('usernameFromEmail', () => {
   it('lowercases the local part and maps other characters to -', () => {
-    expect(usernameFromEmail('josh@redpanda.com')).toBe('josh');
-    expect(usernameFromEmail('Dana.Smith+yapa@redpanda.com')).toBe('dana-smith-yapa');
-    expect(usernameFromEmail('..@redpanda.com')).toBeUndefined();
+    expect(usernameFromEmail('alex@example.com')).toBe('alex');
+    expect(usernameFromEmail('Dana.Smith+yapa@example.com')).toBe('dana-smith-yapa');
+    expect(usernameFromEmail('..@example.com')).toBeUndefined();
     expect(usernameFromEmail(`${'a'.repeat(80)}@x.com`)).toHaveLength(64);
   });
 });

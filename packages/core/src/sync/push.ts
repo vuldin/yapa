@@ -4,8 +4,8 @@ import { withDocLock } from '../doc-lock.js';
 import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
-import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
-import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
+import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, UnsupportedByRemoteError, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
+import { getPendingDeletes, clearPendingDeletes, getPendingPurges, clearPendingPurges } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
@@ -15,6 +15,8 @@ export interface PushStats {
   pushed: number;
   linked: number;
   deleted: number;
+  /** Ids purged for good on the remote (memory/trash.ts purgeDocuments). */
+  purged: number;
   /** Shared rows removed because this user's doc now lives in a private-/local- collection. */
   retracted: number;
   /** Docs the remote refused (secret, bad embedding, ...): kept local and unsynced until they change. */
@@ -25,7 +27,7 @@ export interface PushStats {
 }
 
 export function emptyPushStats(): PushStats {
-  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+  return { pushed: 0, linked: 0, deleted: 0, purged: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 
 /** Local bookkeeping that never leaves this machine. */
@@ -134,12 +136,41 @@ async function pushAll(): Promise<PushStats> {
   // Owner checks, origin_user and task renames use the remote's name for us.
   await resolveSyncUsername();
 
+  // Step 0: purges first (a purged id must not be pushed again by step 3).
+  try {
+    const purges = await getPendingPurges();
+    if (purges.length > 0) {
+      if (backend.purge) {
+        try {
+          const results = await backend.purge(purges);
+          for (const r of results) {
+            if (r.status === 'error') process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}\n`);
+          }
+          stats.purged = results.filter(r => r.status === 'purged').length;
+        } catch (e) {
+          if (!(e instanceof UnsupportedByRemoteError)) throw e;
+          // An older service: delete instead (its copy may stay restorable there).
+          process.stderr.write(`[yapa-sync] The sync service can't purge yet: deleting ${purges.length} doc(s) instead\n`);
+          stats.deleted += await backend.delete(purges, 'delete');
+        }
+      } else {
+        stats.deleted += await backend.delete(purges, 'delete');
+      }
+      await clearPendingPurges(purges);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Purge error: ${e}\n`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+
   // Step 1: Process pending deletes
   try {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
       const docIds = pendingDeletes.map(entry => entry.split(':')[1]).filter(Boolean);
-      stats.deleted = await backend.delete(docIds, 'delete');
+      stats.deleted += await backend.delete(docIds, 'delete');
       // Only the entries handled here: a delete queued during the await stays.
       await clearPendingDeletes(pendingDeletes);
     }

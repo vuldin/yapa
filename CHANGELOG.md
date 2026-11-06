@@ -10,6 +10,14 @@
   - `everyone`: needs `confirm: "<name>"`, and deletes your documents in it from the sync service and from every teammate's machine (as `collection_delete` did before). Teammates' own documents stay shared.
   - The reply says exactly what was removed where.
 
+- **Nothing a teammate deletes is lost on your machine.** When a document's owner deletes it on the sync service, your copy is archived instead of dropped: it is hidden from recall, task lists, the ready queue and `waiting`, never pushed back (even if you edit it), and removed after 30 days (`YAPA_DELETED_RETENTION_DAYS`). If the owner restores it, the live document comes back on the next pull.
+- **`trash` tool (DSH `yapa_trash`):**
+  - `list`: copies kept after their owner deleted them, and your own deleted documents on the sync service.
+  - `restore`: bring yours back for everyone.
+  - `keep`: turn a copy someone else deleted into a document of your own.
+  - `purge`: remove documents of yours for good, for mistakes such as a leaked secret. No restorable copy remains, teammates' copies are dropped even with local edits, and the id can never be written again. An older service without purge gets an ordinary delete instead. DSH asks for approval before a purge.
+- `memory_forget` and `task_delete` say that one of your documents in a shared collection is deleted for teammates too, and how to restore it.
+
 ### Fixes
 - **Deleting a collection that has no other copy needs `confirm`.** A non-empty local-only collection (`private-*`, `local-*`, `global`), or any collection while sync is off, was deleted without confirmation, and that is permanent.
 - A claim in a local-only collection says "this machine: your other sessions see it as yours" instead of "teammates see it as yours".
