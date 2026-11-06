@@ -1,4 +1,5 @@
 import { getConfig } from '../config.js';
+import { isReadOnlyDoc } from '../sync/syncable.js';
 import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 
 import { CLASSIFIER_PROMPT_VERSION, classifyMemories } from './classifier.js';
@@ -30,7 +31,7 @@ async function collectUnclassified(collection: string): Promise<
   Array<{ id: string; content: string; metadata: Record<string, any> }>
 > {
   const docs = await getDocumentsByFilter(collection, { type: 'memory' }, MAX_PER_COLLECTION);
-  return docs.filter(d => d.metadata.classified_at == null);
+  return docs.filter(d => d.metadata.classified_at == null && !isReadOnlyDoc(d.metadata));
 }
 
 /**
