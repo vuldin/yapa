@@ -457,6 +457,27 @@ describe('task claims in hook context', () => {
 });
 
 describe('waiting on you', () => {
+  it('session start names a findings backlog over the threshold, with the sweep command', async () => {
+    const { patchDocument } = await import('@yapa/core');
+    configure({ YAPA_FINDINGS_CLEANUP_THRESHOLD: '2' });
+    const old = Math.floor(Date.now() / 1000) - 5 * 86400;
+    for (const t of ['The beta importer drops rows with a null region.', 'The beta export retries forever on a 403.']) {
+      const { ids: [id] } = await storeMemory(t, { collection: 'project-beta', typed: { kind: 'finding' } });
+      await patchDocument('project-beta', id, { created_at: old });
+    }
+    capture();
+    await sessionStart({ session_id: 'fb1', cwd: join(dir, 'proj', 'beta'), source: 'startup' });
+    let ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('## Findings backlog');
+    expect(ctx).toContain('2 of your open findings in project-beta have had no disposition for over two days. `yapa memory sweep-findings --collection project-beta --save FILE`');
+
+    configure({ YAPA_FINDINGS_CLEANUP_THRESHOLD: '3' });
+    capture();
+    await sessionStart({ session_id: 'fb2', cwd: join(dir, 'proj', 'beta'), source: 'startup' });
+    ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).not.toContain('## Findings backlog');
+  });
+
   it('session start lists decisions and steps that name you, and counts those for anyone', async () => {
     const { createTask } = await import('@yapa/core');
     await storeMemory('Keep the old API for one more release?', {

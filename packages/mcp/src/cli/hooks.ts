@@ -13,6 +13,7 @@ import {
   listTasks,
   listCollections,
   collectionSize,
+  staleFindings,
   detectCollection,
   scopeNotes,
   pullCollection,
@@ -484,6 +485,15 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] compaction check failed: ${e}\n`);
+  }
+
+  try {
+    const stale = (await staleFindings(collection)).length;
+    if (stale >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
+      lines.push('', '## Findings backlog', `${stale} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] findings check failed: ${e}\n`);
   }
 
   // Sessions that died without their MCP server consolidating (crash, kill):

@@ -15,7 +15,7 @@
 
 import { callCurationLLM } from './provider.js';
 
-export const EXTRACTOR_PROMPT_VERSION = 'v2';
+export const EXTRACTOR_PROMPT_VERSION = 'v3';
 
 export const EXTRACTOR_SYSTEM_PROMPT = `You are a memory extractor for a long-term memory system. Given ONE conversation turn — the user's message and the assistant's response — decide whether anything said is worth storing in long-term memory, and extract it.
 
@@ -29,6 +29,7 @@ STORE a candidate when the turn contains:
 
 DO NOT STORE:
 - Ephemeral conversation state (plans for this turn, progress narration, acknowledgments)
+- Status updates (a commit pushed, a PR opened or merged, a release tagged, a review round's outcome, tests passing), unless someone will need that later: then store it untyped, sector "episodic"
 - Obvious code patterns or anything readable from the code/git history itself
 - Restatements of the user's message with no new information
 - Generic advice, boilerplate, or filler
@@ -43,8 +44,8 @@ RULES
 - sector is "semantic" for durable facts/patterns, "episodic" for events, decisions, and things tied to a moment in time.
 - tags: 1-4 short lowercase tags for categorization.
 - kind (optional; omit for an ordinary fact or preference):
-  - "finding": a result, a root cause, a retraction of something believed before, or a methodology trap
-  - "decision": a choice that WAS MADE in this turn (by the user, or agreed with them)
+  - "finding": a result, a root cause, a retraction of something believed before, or a methodology trap, that stays true after the work moves on. Progress is never a finding.
+  - "decision": a choice that WAS MADE in this turn (by the user, or agreed with them). A release, a merge or a deploy is an event, not a decision.
   - "limitation": something the system cannot do yet, and what would change that
   - "question": an open question that someone outside this conversation (a person or another team) has to answer
   - "idea": a proposed capability or change nobody has committed to

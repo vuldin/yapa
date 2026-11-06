@@ -32,6 +32,7 @@ import {
   heartbeatIfDue,
   takeClaimNotices,
   waitingOn,
+  staleFindings,
   waitingLine,
   includesUser,
   fenceWaiting,
@@ -192,6 +193,10 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         if (candidates.length) {
           lines.push('', '## Memory compaction candidates (long-term store, not context window)');
           for (const c of candidates) lines.push(`- ${c}`);
+        }
+        const stale = (await staleFindings(collection).catch(() => [])).length;
+        if (stale >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
+          lines.push('', '## Findings backlog', `${stale} of your open findings in ${collection} have had no disposition for over two days: give each one a disposition with \`yapa_memory_update\` (\`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes).`);
         }
       }
 
