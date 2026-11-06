@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -34,23 +34,32 @@ afterAll(() => {
 });
 
 describe('yapa memory sweep-findings', () => {
-  it('lists what it would close, then closes it with --apply', async () => {
-    let r = await runMemory('sweep-findings', ['--collection', C]);
+  it('lists what it would close, saves it, and applies exactly the saved list', async () => {
+    const file = join(dir, 'sweep.json');
+    let r = await runMemory('sweep-findings', ['--collection', C, '--save', file]);
     expect(r.exit).toBe(0);
-    expect(r.text).toContain('2 open finding(s) in project-acme: 1 progress note(s), 0 superseded, 1 kept (dry run: --apply resolves them)');
+    expect(r.text).toContain(`2 of your open finding(s) in project-acme: 1 progress note(s), 0 superseded, 1 kept (dry run, saved to ${file}; apply it with --apply --from ${file})`);
     expect(r.text).toContain(`- ${progress} [progress] a release event | Release 2.3.0 was tagged`);
     expect((await getDocumentsByIds(C, [progress]))[0].metadata.status).toBe('open');
 
-    r = await runMemory('sweep-findings', ['--collection', C, '--apply']);
-    expect(r.text).toContain('1 resolved as no-action');
-    expect((await getDocumentsByIds(C, [progress]))[0].metadata).toMatchObject({ status: 'resolved', disposition: 'no-action' });
+    setHostLLMCaller(async () => { throw new Error('the apply step must not ask the model again'); });
+    r = await runMemory('sweep-findings', ['--collection', C, '--apply', '--from', file, '--ids', 'mem-other']);
+    expect(r.text).toContain('0 of 0 reviewed finding(s) in project-acme resolved as no-action');
+    expect((await getDocumentsByIds(C, [progress]))[0].metadata.status).toBe('open');
+
+    r = await runMemory('sweep-findings', ['--collection', C, '--apply', '--from', file]);
+    expect(r.text).toContain('1 of 1 reviewed finding(s) in project-acme resolved as no-action');
+    expect((await getDocumentsByIds(C, [progress]))[0].metadata).toMatchObject({ status: 'resolved', disposition: 'no-action', disposition_reason: 'progress note, not a finding: a release event' });
     expect((await getDocumentsByIds(C, [keep]))[0].metadata.status).toBe('open');
-    expect((r.json as any).items.map((i: any) => i.id)).toEqual([progress, keep]);
   });
 
-  it('needs a collection and whole numbers', async () => {
-    expect((await runMemory('sweep-findings', [])).exit).toBe(2);
-    expect((await runMemory('sweep-findings', ['--collection', C, '--limit', 'x'])).exit).toBe(2);
-    expect((await runMemory('sweep-findings', ['--collection', C, '--min-age-days', '-1'])).exit).toBe(2);
+  it('refuses bad arguments and a file from another collection', async () => {
+    const file = join(dir, 'other.json');
+    writeFileSync(file, JSON.stringify({ collection: 'project-other', items: [] }));
+    for (const args of [
+      [], ['--collection', C, '--limit', 'x'], ['--collection', C, '--min-age-days', '-1'],
+      ['--collection', C, '--from', file], ['--collection', C, '--ids', 'a'], ['--collection', C, '--apply', '--from', file],
+      ['--collection', C, '--apply', '--from', join(dir, 'missing.json')],
+    ]) expect((await runMemory('sweep-findings', args)).exit).toBe(2);
   });
 });

@@ -452,7 +452,7 @@ describe('waiting on you', () => {
     await sessionStart({ session_id: 'fb1', cwd: join(dir, 'proj', 'beta'), source: 'startup' });
     let ctx = restore().hookSpecificOutput.additionalContext as string;
     expect(ctx).toContain('## Findings backlog');
-    expect(ctx).toContain('2 open findings in project-beta have had no disposition for over two days. `yapa memory sweep-findings --collection project-beta`');
+    expect(ctx).toContain('2 of your open findings in project-beta have had no disposition for over two days. `yapa memory sweep-findings --collection project-beta --save FILE`');
 
     configure({ YAPA_FINDINGS_CLEANUP_THRESHOLD: '3' });
     capture();

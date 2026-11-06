@@ -488,7 +488,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   try {
     const stale = (await staleFindings(collection)).length;
     if (stale >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
-      lines.push('', '## Findings backlog', `${stale} open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes or superseded (\`--apply\` closes them); give the rest a disposition with \`memory_update\`.`);
+      lines.push('', '## Findings backlog', `${stale} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`);
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] findings check failed: ${e}\n`);

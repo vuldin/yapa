@@ -41,7 +41,7 @@ export interface NextOptions extends ClaimOptions {
  * Upkeep offered when no task is ready, each claimable as a lease on its key:
  *   cleanup:triage      open tasks not yet tagged auto or needs-human (only in
  *                       a collection that already uses those tags)
- *   cleanup:findings    open findings older than two days with no disposition
+ *   cleanup:findings    your open findings older than two days with no disposition
  *                       (also offered beside ready tasks once there are
  *                       FINDINGS_CLEANUP_THRESHOLD of them)
  *   cleanup:compaction  the collection is over the compaction threshold
@@ -250,7 +250,7 @@ async function cleanupItems(
   if (findings.length) {
     items.push({
       key: 'cleanup:findings', count: findings.length,
-      title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` closes the ones that are only progress notes`,
+      title: `Give ${findings.length} of your open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes`,
     });
   }
   const size = want('cleanup:compaction') ? await collectionSize(collection).catch(() => 0) : 0;

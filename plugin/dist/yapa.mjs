@@ -1873,12 +1873,12 @@ function docLockPath(collection, id) {
 }
 async function withDocLock(collection, id, fn) {
   const path3 = docLockPath(collection, id);
-  const mine = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine.some((h) => h.paths.has(path3))) return fn();
+  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine2.some((h) => h.paths.has(path3))) return fn();
   return withFileLock(path3, async () => {
     const me = { paths: /* @__PURE__ */ new Set([path3]), active: true };
     try {
-      return await held.run([...mine, me], fn);
+      return await held.run([...mine2, me], fn);
     } finally {
       me.active = false;
     }
@@ -4246,15 +4246,15 @@ function noticesPath() {
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list9 = [];
+      let list10 = [];
       try {
-        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list10 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list9)) list9 = [];
-      if (list9.some((n) => n.text === text)) return;
-      list9.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list9.slice(-20));
+      if (!Array.isArray(list10)) list10 = [];
+      if (list10.some((n) => n.text === text)) return;
+      list10.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list10.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -4262,14 +4262,14 @@ function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
 function takeClaimNotices() {
   try {
     return withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list9 = [];
+      let list10 = [];
       try {
-        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list10 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
         return [];
       }
       rmSync3(noticesPath(), { force: true });
-      return Array.isArray(list9) ? list9.map((n) => n.text) : [];
+      return Array.isArray(list10) ? list10.map((n) => n.text) : [];
     }, { waitMs: 2e3 });
   } catch {
     return [];
@@ -4338,13 +4338,13 @@ async function requireCoordination() {
     leaseAcquire: async (req) => (await pick(req.collection)).leaseAcquire(req),
     leaseHeartbeat: async (collection, session, keys) => {
       if (collection !== void 0) return (await pick(collection)).leaseHeartbeat(collection, session, keys);
-      const mine = await localCoordination().leaseHeartbeat(void 0, session);
-      if (!isSyncConfigured()) return mine;
+      const mine2 = await localCoordination().leaseHeartbeat(void 0, session);
+      if (!isSyncConfigured()) return mine2;
       try {
         const theirs = await (await serviceCoordination()).leaseHeartbeat(void 0, session);
-        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
+        return { renewed: [...mine2.renewed, ...theirs.renewed], lost: [] };
       } catch (e) {
-        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: e.message };
+        if (mine2.renewed.length && isCoordinationUnavailable(e)) return { ...mine2, unreachable: e.message };
         throw e;
       }
     },
@@ -5423,12 +5423,12 @@ async function retractSharedCopies(backend, collection) {
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
   const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
-  const mine = unchecked.filter((d) => {
+  const mine2 = unchecked.filter((d) => {
     const row = remote.get(d.id);
     const localCreated = Number(d.metadata.created_at);
     return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
   });
-  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
+  const removed = mine2.length > 0 ? await backend.delete(mine2.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
   for (const d of unchecked) await writeIfUnchanged(collection, d, (cur) => ({ ...cur, remote_checked_at: versionOf(d) }));
@@ -5639,8 +5639,8 @@ function claimNote(task, claims, mySessions = [currentSession()]) {
   if (!claims) return task.metadata.claim_unshared ? "claim not shared yet" : "";
   const l = claims.get(task.id);
   if (l) {
-    const mine = mySessions.find((s) => s && s === l.holder.session);
-    return `claimed by ${describeHolder(l, void 0, mine)}`;
+    const mine2 = mySessions.find((s) => s && s === l.holder.session);
+    return `claimed by ${describeHolder(l, void 0, mine2)}`;
   }
   if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
   return "";
@@ -6043,24 +6043,52 @@ var init_update2 = __esm({
 });
 
 // packages/core/src/memory/sweep.ts
-async function staleFindings(collection, minAgeDays = 2, now = Math.floor(Date.now() / 1e3)) {
+async function staleFindings(collection, opts = {}) {
+  const now = opts.now ?? Math.floor(Date.now() / 1e3);
+  const me = getConfig().USERNAME;
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) <= now - minAgeDays * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0);
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
 }
-async function newerNeighbor(collection, f, q) {
+async function wholeText(collection, f) {
+  if (!f.metadata.parent_id) return f.content;
+  const parts = await getDocumentsByFilter2(collection, { parent_id: f.metadata.parent_id }, 1e3).catch(() => [f]);
+  return parts.sort((a, b) => Number(a.metadata.chunk_index ?? 0) - Number(b.metadata.chunk_index ?? 0)).map((p, i) => i ? p.content.slice(CHUNK_OVERLAP) : p.content).join("");
+}
+async function newerNeighbor(collection, f, text, q) {
   const created = Number(f.metadata.created_at ?? 0);
-  const near = await q(collection, f.content.slice(0, 2e3), 5, { type: "memory" }).catch(() => []);
+  const near = await q(collection, text.slice(0, 2e3), 8, { type: "memory" }).catch(() => []);
   const own = f.metadata.parent_id ?? f.id;
-  const n = near.find((d) => (d.metadata.parent_id ?? d.id) !== own && d.distance < NEIGHBOR_MAX_DISTANCE && d.metadata.archived !== true && Number(d.metadata.created_at ?? 0) > created);
+  const n = near.find((d) => (d.metadata.parent_id ?? d.id) !== own && d.distance < NEIGHBOR_MAX_DISTANCE && lasting(d.metadata) && Number(d.metadata.created_at ?? 0) > created);
   return n ? { id: n.metadata.parent_id ?? n.id, content: n.content.slice(0, 600) } : void 0;
 }
 function prompt(batch) {
   const lines = [];
   for (const c of batch) {
-    lines.push(`- id: ${c.id}`, `  recorded: ${new Date(c.created * 1e3).toISOString().slice(0, 10)}`, `  text: ${c.content.replace(/\s+/g, " ")}`);
+    lines.push(
+      `- id: ${c.id}`,
+      `  recorded: ${new Date(c.created * 1e3).toISOString().slice(0, 10)}`,
+      `  text${c.truncated ? " (truncated)" : ""}: ${c.content.replace(/\s+/g, " ")}`
+    );
     if (c.newer) lines.push(`  newer note (${c.newer.id}): ${c.newer.content.replace(/\s+/g, " ")}`);
   }
   return lines.join("\n");
+}
+function batches(candidates) {
+  const out = [];
+  let cur = [];
+  let size = 0;
+  for (const c of candidates) {
+    const n = c.content.length + (c.newer?.content.length ?? 0);
+    if (cur.length && (cur.length >= BATCH_ITEMS || size + n > BATCH_CHARS)) {
+      out.push(cur);
+      cur = [];
+      size = 0;
+    }
+    cur.push(c);
+    size += n;
+  }
+  if (cur.length) out.push(cur);
+  return out;
 }
 function parseSweep(raw, batch) {
   const out = /* @__PURE__ */ new Map();
@@ -6079,27 +6107,43 @@ function parseSweep(raw, batch) {
     const c = e && typeof e === "object" ? byId.get(String(e.id)) : void 0;
     if (!c || out.has(c.id)) continue;
     const v = String(e.verdict);
-    const verdict = v === "progress" || v === "superseded" && c.newer ? v : "keep";
+    const verdict = !c.truncated && (v === "progress" || v === "superseded" && c.newer) ? v : "keep";
     out.set(c.id, { verdict, reason: String(e.reason ?? "").trim() });
   }
   return out;
 }
+function keepSupersededChains(items) {
+  for (let changed = true; changed; ) {
+    changed = false;
+    const closing = new Set(items.filter((i) => i.verdict !== "keep").map((i) => i.id));
+    for (const i of items) {
+      if (i.verdict === "superseded" && i.superseded_by && closing.has(i.superseded_by)) {
+        i.verdict = "keep";
+        i.reason = `its newer note ${i.superseded_by} is being closed too`;
+        delete i.superseded_by;
+        changed = true;
+      }
+    }
+  }
+}
 async function sweepFindings(opts, deps = {}) {
   const d = { call: callCurationLLM, updateMemory, queryDocuments: queryDocuments2, ...deps };
-  const stale2 = (await staleFindings(opts.collection, opts.minAgeDays ?? 2)).filter((f) => !isReadOnlyDoc(f.metadata)).sort((a, b) => Number(a.metadata.created_at ?? 0) - Number(b.metadata.created_at ?? 0)).slice(0, opts.limit ?? Infinity);
+  const stale2 = (await staleFindings(opts.collection, { minAgeDays: opts.minAgeDays, allOwners: opts.allOwners })).filter((f) => !isReadOnlyDoc(f.metadata)).sort((a, b) => Number(a.metadata.created_at ?? 0) - Number(b.metadata.created_at ?? 0)).slice(0, opts.limit ?? Infinity);
   const candidates = [];
   for (const f of stale2) {
+    const text = await wholeText(opts.collection, f);
     candidates.push({
       id: f.metadata.parent_id ?? f.id,
-      content: f.content.slice(0, 600),
+      content: text.slice(0, ITEM_CHARS),
+      truncated: text.length > ITEM_CHARS,
       created: Number(f.metadata.created_at ?? 0),
-      newer: await newerNeighbor(opts.collection, f, d.queryDocuments)
+      newer: await newerNeighbor(opts.collection, f, text, d.queryDocuments)
     });
   }
   const items = [];
-  for (let i = 0; i < candidates.length; i += BATCH) {
-    const batch = candidates.slice(i, i + BATCH);
+  for (const batch of batches(candidates)) {
     let verdicts = /* @__PURE__ */ new Map();
+    let error;
     try {
       const raw = await d.call({
         messages: [{ role: "system", content: SWEEP_SYSTEM_PROMPT }, { role: "user", content: prompt(batch) }],
@@ -6109,48 +6153,97 @@ async function sweepFindings(opts, deps = {}) {
       });
       verdicts = parseSweep(raw, batch);
     } catch (e) {
-      for (const c of batch) items.push({ id: c.id, verdict: "keep", reason: "", content: c.content, error: String(e) });
-      continue;
+      error = String(e);
     }
     for (const c of batch) {
-      const v = verdicts.get(c.id) ?? { verdict: "keep", reason: "no verdict" };
-      items.push({ id: c.id, verdict: v.verdict, reason: v.reason, content: c.content, ...v.verdict === "superseded" ? { superseded_by: c.newer.id } : {} });
+      const v = verdicts.get(c.id) ?? { verdict: "keep", reason: error ? "" : "no verdict" };
+      items.push({
+        id: c.id,
+        verdict: v.verdict,
+        reason: v.reason,
+        content: c.content,
+        ...c.truncated ? { truncated: true } : {},
+        ...v.verdict === "superseded" ? { superseded_by: c.newer.id } : {},
+        ...error ? { error } : {}
+      });
     }
   }
-  if (opts.apply) {
-    for (const it of items) {
-      if (it.verdict === "keep") continue;
-      const why = it.verdict === "progress" ? `progress note, not a finding${it.reason ? `: ${it.reason}` : ""}` : `superseded by ${it.superseded_by}${it.reason ? `: ${it.reason}` : ""}`;
-      try {
-        await d.updateMemory(it.id, { status: "resolved", disposition: "no-action", disposition_reason: why, note: `Swept: ${why}` }, opts.collection);
-        it.applied = true;
-      } catch (e) {
-        it.error = String(e);
-      }
-    }
-  }
+  keepSupersededChains(items);
+  if (opts.apply) await applySweep(opts.collection, items, { allOwners: opts.allOwners }, d);
   return { collection: opts.collection, considered: candidates.length, items, applied: !!opts.apply };
 }
-var DAY3, SWEEP_PROMPT_VERSION, BATCH, NEIGHBOR_MAX_DISTANCE, SWEEP_SYSTEM_PROMPT;
+async function findDoc2(collection, id) {
+  const [doc] = await getDocumentsByIds2(collection, [id]).catch(() => []);
+  if (doc) return doc;
+  const [chunk2] = await getDocumentsByIds2(collection, [`${id}-0`]).catch(() => []);
+  return chunk2;
+}
+async function applySweep(collection, items, opts = {}, deps = {}) {
+  const update = deps.updateMemory ?? updateMemory;
+  const me = getConfig().USERNAME;
+  const closing = new Set(items.filter((i) => i.verdict !== "keep").map((i) => i.id));
+  for (const it of items) {
+    if (it.verdict === "keep") continue;
+    const doc = await findDoc2(collection, it.id);
+    const m = doc?.metadata;
+    if (!m || m.type !== "memory" || m.kind !== "finding" || !isStale(m)) {
+      it.skipped = "no longer an open finding";
+      continue;
+    }
+    if (isReadOnlyDoc(m)) {
+      it.skipped = "read-only";
+      continue;
+    }
+    if (!opts.allOwners && !mine(m, me)) {
+      it.skipped = `recorded by ${author(m) || "someone else"}`;
+      continue;
+    }
+    if (it.verdict === "superseded") {
+      const n = it.superseded_by ? (await findDoc2(collection, it.superseded_by))?.metadata : void 0;
+      if (!n || !lasting(n) || closing.has(it.superseded_by)) {
+        it.skipped = "its newer note is gone or being closed";
+        continue;
+      }
+    }
+    const why = it.verdict === "progress" ? `progress note, not a finding${it.reason ? `: ${it.reason}` : ""}` : `superseded by ${it.superseded_by}${it.reason ? `: ${it.reason}` : ""}`;
+    try {
+      await update(it.id, { status: "resolved", disposition: "no-action", disposition_reason: why, note: `Swept: ${why}` }, collection);
+      it.applied = true;
+    } catch (e) {
+      it.error = String(e);
+    }
+  }
+  return items;
+}
+var DAY3, list5, author, mine, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
     init_store();
+    init_config();
     init_syncable();
     init_provider();
     init_update2();
     DAY3 = 86400;
+    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    author = (m) => String(m.origin_user ?? m.username ?? "");
+    mine = (m, me) => author(m).toLowerCase() === me.toLowerCase();
+    isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
     SWEEP_PROMPT_VERSION = "v1";
-    BATCH = 10;
+    BATCH_ITEMS = 10;
+    BATCH_CHARS = 12e3;
+    ITEM_CHARS = 4e3;
     NEIGHBOR_MAX_DISTANCE = 0.5;
+    NEIGHBOR_KINDS = ["finding", "decision", "limitation"];
     SWEEP_SYSTEM_PROMPT = `You clean up a team's open findings. A finding should be knowledge that stays true after the work moves on: a result, a root cause, a trap, a retraction. Some were recorded wrongly and only report progress. For each finding, answer one verdict:
 - "progress": it only records that work happened or where it stood at a moment (a review round, a commit pushed, a PR opened or merged, a release tagged, tests passing, next steps), and nothing in it stays useful or still needs deciding.
-- "superseded": the NEWER note shown with it says the same thing or makes it obsolete.
-- "keep": anything else, including a result or root cause that stays useful, something still unresolved, or when you are not sure.
+- "superseded": the NEWER note shown with it carries all of this finding's knowledge (it says the same thing, or corrects it), so closing this finding loses nothing. If the newer note is about something else, covers only part of it, or you would have to add "but" or "though", answer "keep".
+- "keep": anything else, including a result or root cause that stays useful (even inside a progress report), something still unresolved, or when you are not sure.
 reason: one short sentence.
 
 OUTPUT: valid JSON only, no commentary, no fences. One entry per finding:
 [{"id": "<finding id>", "verdict": "progress" | "superseded" | "keep", "reason": "<short sentence>"}]`;
+    lasting = (m) => NEIGHBOR_KINDS.includes(m.kind) && m.archived !== true && m.source !== "compaction" && !list5(m.tags).some((t) => t === "journal" || t === "compaction");
   }
 });
 
@@ -6171,7 +6264,7 @@ async function waitingOn(opts = {}) {
     ]);
     const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open2) for (const m of list6(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -6188,7 +6281,7 @@ async function waitingOn(opts = {}) {
         by: m.origin_user ?? m.username ?? "",
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list5(m.options).length ? { options: list5(m.options) } : {},
+        ...list6(m.options).length ? { options: list6(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -6197,7 +6290,7 @@ async function waitingOn(opts = {}) {
     for (const t of open2) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list5(m.tags));
+      const people = taskNeedsPeople(list6(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
@@ -6276,14 +6369,14 @@ function formatWaiting(w, opts = {}) {
 ${items.map((i) => waitingLine(i, opts)).join("\n")}`);
   return parts.length ? parts.join("\n\n") : "Nothing is waiting on anyone.";
 }
-var list5, firstLine, waitingCount, who;
+var list6, firstLine, waitingCount, who;
 var init_waiting = __esm({
   "packages/core/src/tasks/waiting.ts"() {
     "use strict";
     init_store();
     init_kinds();
     init_syncable();
-    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     firstLine = (s) => {
       const line = s.split("\n").find((l) => l.trim()) ?? "";
       const t = line.replace(/^#+\s*/, "").trim();
@@ -6437,7 +6530,7 @@ async function cleanupItems(collection, open2, claims, only) {
     items.push({
       key: "cleanup:findings",
       count: findings.length,
-      title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` closes the ones that are only progress notes`
+      title: `Give ${findings.length} of your open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes`
     });
   }
   const size = want("cleanup:compaction") ? await collectionSize(collection).catch(() => 0) : 0;
@@ -6714,7 +6807,7 @@ async function removeCollection(name, opts = {}) {
     }
   }
   const me = getConfig().USERNAME;
-  const mine = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
+  const mine2 = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
   if (shared && syncOn && scope === "local") {
     const stuck = docs.filter((d) => d.metadata.is_synced === false && isRejectedUnchanged(d));
     if (stuck.length && !confirmed) {
@@ -6732,9 +6825,9 @@ async function removeCollection(name, opts = {}) {
   }
   if (shared && syncOn && scope === "everyone") {
     const real = docs.filter((d) => d.metadata.type !== "journal_draft");
-    const own = real.filter(mine).map((d) => d.id);
+    const own = real.filter(mine2).map((d) => d.id);
     await queueSyncDeletes(own, name);
-    await addLocalTombstones(real.filter((d) => !mine(d)).map((d) => d.id));
+    await addLocalTombstones(real.filter((d) => !mine2(d)).map((d) => d.id));
     result.deletedRemotely = own.length;
   }
   if (shared) {
@@ -7516,7 +7609,7 @@ function toItem(collection, d) {
     status: m.status,
     content: d.content.slice(0, 600),
     ...m.owner ? { owner: String(m.owner) } : {},
-    ...list6(m.options).length ? { options: list6(m.options) } : {},
+    ...list7(m.options).length ? { options: list7(m.options) } : {},
     ...m.recommendation ? { recommendation: String(m.recommendation) } : {}
   };
 }
@@ -7525,7 +7618,7 @@ async function findOpenItems(collection, text, taskIds = []) {
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds2(collection, [tid]).catch(() => []);
-    for (const mid of [...list6(t?.metadata.waits_on), ...list6(t?.metadata.memory_ids)]) {
+    for (const mid of [...list7(t?.metadata.waits_on), ...list7(t?.metadata.memory_ids)]) {
       for (const name of [collection, ...names.filter((n) => n !== collection)]) {
         const direct = await getDocumentsByIds2(name, [mid]).catch(() => []);
         const [doc] = direct.length ? direct : await getDocumentsByIds2(name, [`${mid}-0`]).catch(() => []);
@@ -7623,7 +7716,7 @@ ${turn.assistantText}`, turn.taskIds ?? []);
   }
   return { judged: items.length, changes };
 }
-var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list6;
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list7;
 var init_follow_through = __esm({
   "packages/core/src/curation/follow-through.ts"() {
     "use strict";
@@ -7648,7 +7741,7 @@ Do not settle an item the turn merely mentions, discusses or plans to address.
 OUTPUT: valid JSON only, no commentary, no fences. An array:
 [{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
 Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
-    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list7 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -8242,9 +8335,9 @@ async function pullFromRemote() {
   if (recovering) {
     try {
       const unfollowed2 = await getUnfollowedCollections();
-      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
+      const mine2 = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
       const subs = await getSyncSubscriptions();
-      const add = mine.filter((c) => !subs.includes(c));
+      const add = mine2.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
@@ -10278,6 +10371,7 @@ __export(src_exports, {
   applyCompaction: () => applyCompaction,
   applyDecay: () => applyDecay,
   applyServerUsername: () => applyServerUsername,
+  applySweep: () => applySweep,
   artifactDir: () => artifactDir,
   artifactPath: () => artifactPath,
   assertWritable: () => assertWritable,
@@ -11334,10 +11428,10 @@ async function keepLeasesAlive(input2) {
 }
 function presenceLines(leases, now, mySessions, me) {
   if (!leases.length) return [];
-  const mine = new Set(mySessions.filter(Boolean));
+  const mine2 = new Set(mySessions.filter(Boolean));
   const out = ["", "## Work in progress (leases)"];
   for (const l of leases.slice(0, 10)) {
-    const who2 = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
+    const who2 = l.holder.user === me ? mine2.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
     const title = l.title ? ` ${l.title}` : "";
     out.push(`- **${l.key}**${title}: ${who2}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
   }
@@ -11375,12 +11469,12 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
     if (!all) return [];
     const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-    const mine = items.filter((i) => i.for.includes(user));
+    const mine2 = items.filter((i) => i.for.includes(user));
     const anyone = items.filter((i) => i.for.length === 0).length;
-    if (!mine.length && !anyone && !hidden) return [];
+    if (!mine2.length && !anyone && !hidden) return [];
     const out = ["", "## Waiting on you"];
-    for (const i of mine.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
-    if (mine.length > 8) out.push(`- _\u2026${mine.length - 8} more (call \`waiting\`)_`);
+    for (const i of mine2.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
+    if (mine2.length > 8) out.push(`- _\u2026${mine2.length - 8} more (call \`waiting\`)_`);
     if (anyone) out.push(`- _${anyone} item(s) wait on anyone with the role (call \`waiting\`)_`);
     if (hidden) out.push(`- _${hidden} more in private collections, not listed in this shared scope (call \`waiting\` to see them)_`);
     out.push("Tell the user about these when relevant; record a choice with `memory_update` (status accepted), never only in chat.");
@@ -11457,7 +11551,7 @@ async function sessionStart(input2) {
   try {
     const stale2 = (await staleFindings(collection)).length;
     if (stale2 >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
-      lines.push("", "## Findings backlog", `${stale2} open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes or superseded (\`--apply\` closes them); give the rest a disposition with \`memory_update\`.`);
+      lines.push("", "## Findings backlog", `${stale2} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`);
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] findings check failed: ${e}
@@ -11875,7 +11969,7 @@ async function dispatch(sub, args) {
   const session = flag(args, "--session");
   const claimOpts = {
     session,
-    scope: list7(flag(args, "--scope")),
+    scope: list8(flag(args, "--scope")),
     ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
     title: flag(args, "--title"),
     reclaim: args.includes("--reclaim") || void 0
@@ -11885,7 +11979,7 @@ async function dispatch(sub, args) {
       const status = flag(args, "--status");
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(", ")}`);
       const collection = flag(args, "--collection");
-      const wantTags = list7(flag(args, "--tag")) ?? [];
+      const wantTags = list8(flag(args, "--tag")) ?? [];
       const tasks = (await listTasks({ collection, status, includeComplete: args.includes("--include-complete") })).filter((t) => {
         if (!wantTags.length) return true;
         const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",");
@@ -11905,8 +11999,8 @@ async function dispatch(sub, args) {
       if (!collection) throw new UsageError("--collection is required");
       const r = await nextTasks({
         collection,
-        tags: list7(flag(args, "--tag")),
-        excludeTags: list7(flag(args, "--exclude-tag")),
+        tags: list8(flag(args, "--tag")),
+        excludeTags: list8(flag(args, "--exclude-tag")),
         claim: args.includes("--claim"),
         autoOnly: args.includes("--auto-only"),
         includeCleanup: args.includes("--include-cleanup"),
@@ -11949,11 +12043,11 @@ async function dispatch(sub, args) {
       const t = await getTask(positional2);
       if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
-      const addTags = list7(flag(args, "--tag")) ?? [];
+      const addTags = list8(flag(args, "--tag")) ?? [];
       const learned = jsonFile(flag(args, "--learned-file"), "array");
       const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
       const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
-      const waitsOn = list7(flag(args, "--waits-on"));
+      const waitsOn = list8(flag(args, "--waits-on"));
       if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
       validateLearned(learned);
       const listOf = (v) => Array.isArray(v) ? v : String(v ?? "").split(",").filter(Boolean);
@@ -12028,14 +12122,14 @@ function isFlagValue(args, a) {
   const i = args.indexOf(a);
   return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text", "--auto-only", "--include-cleanup"].includes(args[i - 1]);
 }
-var TASK_USAGE, list7, UsageError, STATUSES;
+var TASK_USAGE, list8, UsageError, STATUSES;
 var init_task = __esm({
   "packages/mcp/src/cli/task.ts"() {
     "use strict";
     init_src();
     init_coord();
     TASK_USAGE = 'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n                         [--waits-on MEM,..] [--learned-file F] [--follow-ups-file F] [--decision-needed-file F] [--session S]\n       yapa task release cleanup:KIND --collection C [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\nhold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\non it, pending). "-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
-    list7 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    list8 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
     UsageError = class extends Error {
     };
     STATUSES = ["pending", "in_progress", "blocked", "complete"];
@@ -12049,6 +12143,7 @@ __export(memory_exports, {
   runMemory: () => runMemory,
   runWaiting: () => runWaiting
 });
+import { readFileSync as readFileSync22, writeFileSync as writeFileSync13 } from "node:fs";
 function flag2(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -12180,21 +12275,40 @@ async function runMemory(sub, args) {
           if (!Number.isInteger(n) || n < 0) throw new UsageError2(`${name} must be a non-negative integer`);
           return n;
         };
-        const config = getConfig();
-        if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
-          setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
-        }
         const apply = args.includes("--apply");
-        const r = await sweepFindings({ collection, apply, limit: num("--limit"), minAgeDays: num("--min-age-days") });
-        if (apply) recordLastWrite(collection);
+        const allOwners = args.includes("--all-owners");
+        const from = flag2(args, "--from");
+        const save2 = flag2(args, "--save");
+        const ids = csv(flag2(args, "--ids"));
+        if (from && !apply) throw new UsageError2("--from applies a saved dry run: add --apply");
+        if (ids && !from) throw new UsageError2("--ids picks items of a saved dry run: add --from FILE");
+        let r;
+        if (from) {
+          let saved;
+          try {
+            saved = JSON.parse(readFileSync22(from, "utf8"));
+          } catch (e) {
+            throw new UsageError2(`cannot read ${from}: ${e instanceof Error ? e.message : e}`);
+          }
+          if (saved.collection !== collection || !Array.isArray(saved.items)) throw new UsageError2(`${from} is not a dry run of ${collection}`);
+          const items = saved.items.filter((i) => i.verdict !== "keep" && (!ids || ids.includes(i.id))).map((i) => ({ ...i, applied: void 0, skipped: void 0, error: void 0 }));
+          await applySweep(collection, items, { allOwners });
+          r = { collection, considered: items.length, items, applied: true };
+        } else {
+          const config = getConfig();
+          if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
+            setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
+          }
+          r = await sweepFindings({ collection, apply, allOwners, limit: num("--limit"), minAgeDays: num("--min-age-days") });
+          if (save2) writeFileSync13(save2, JSON.stringify(r, null, 2));
+        }
+        if (r.applied) recordLastWrite(collection);
         const count = (v) => r.items.filter((i) => i.verdict === v).length;
         const closed = r.items.filter((i) => i.applied).length;
-        const lines = [
-          `${r.considered} open finding(s) in ${collection}: ${count("progress")} progress note(s), ${count("superseded")} superseded, ${count("keep")} kept` + (apply ? `; ${closed} resolved as no-action` : " (dry run: --apply resolves them)"),
-          ...r.items.filter((i) => i.verdict !== "keep").map((i) => `- ${i.id} [${i.verdict}${i.superseded_by ? ` by ${i.superseded_by}` : ""}${i.error ? `, failed: ${i.error}` : ""}] ${i.reason} | ${i.content.replace(/\s+/g, " ").slice(0, 120)}`)
-        ];
+        const head = from ? `${closed} of ${r.items.length} reviewed finding(s) in ${collection} resolved as no-action` : `${r.considered} of your open finding(s) in ${collection}${allOwners ? " (everyone's)" : ""}: ${count("progress")} progress note(s), ${count("superseded")} superseded, ${count("keep")} kept` + (apply ? `; ${closed} resolved as no-action` : ` (dry run${save2 ? `, saved to ${save2}; apply it with --apply --from ${save2}` : ": --save FILE, then --apply --from FILE"})`);
+        const lines = [head, ...r.items.filter((i) => i.verdict !== "keep").map((i) => `- ${i.id} [${i.verdict}${i.superseded_by ? ` by ${i.superseded_by}` : ""}${i.skipped ? `, left open: ${i.skipped}` : ""}${i.error ? `, failed: ${i.error}` : ""}] ${i.reason} | ${i.content.replace(/\s+/g, " ").slice(0, 120)}`)];
         const failed = r.items.filter((i) => i.error).length;
-        return { exit: failed && failed === r.items.length && r.items.length ? 1 : 0, json: { ok: true, ...r }, text: lines.join("\n") };
+        return { exit: failed && failed === r.items.length ? 1 : 0, json: { ok: true, ...r }, text: lines.join("\n") };
       }
       default:
         throw new UsageError2(`unknown command
@@ -12225,7 +12339,7 @@ var init_memory = __esm({
   "packages/mcp/src/cli/memory.ts"() {
     "use strict";
     init_src();
-    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa memory sweep-findings --collection C [--apply] [--limit N] [--min-age-days N]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which open findings older than --min-age-days (default 2) are only\n  progress notes or superseded by a newer note, and lists them; --apply resolves those as no-action.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
+    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which of your open findings older than --min-age-days (default 2) are\n  only progress notes or superseded by a newer note, and lists them (--save FILE keeps the list). --apply --from FILE\n  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
     UsageError2 = class extends Error {
     };
     csv = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
@@ -12248,7 +12362,10 @@ var init_memory = __esm({
       "--exit-criteria",
       "--tags",
       "--for",
-      "--min-age-days"
+      "--min-age-days",
+      "--from",
+      "--save",
+      "--ids"
     ]);
   }
 });
@@ -12463,7 +12580,7 @@ function flag3(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
 }
-function list8(v) {
+function list9(v) {
   return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 function int2(v, name) {
@@ -12496,14 +12613,14 @@ async function runCoord(sub, args) {
           collection: need(collection, "--collection"),
           key: need(flag3(args, "--key"), "--key"),
           session,
-          scope: list8(flag3(args, "--scope")),
+          scope: list9(flag3(args, "--scope")),
           ttlSeconds: int2(flag3(args, "--ttl"), "--ttl"),
           title: flag3(args, "--title"),
           ...args.includes("--reclaim") ? { reclaim: true } : {}
         });
         break;
       case "heartbeat":
-        r = await coord.leaseHeartbeat(collection, session, list8(flag3(args, "--keys")));
+        r = await coord.leaseHeartbeat(collection, session, list9(flag3(args, "--keys")));
         break;
       case "release":
         r = await coord.leaseRelease(need(collection, "--collection"), need(flag3(args, "--key"), "--key"), session, flag3(args, "--outcome"));

@@ -8810,12 +8810,12 @@ function docLockPath(collection, id) {
 }
 async function withDocLock(collection, id, fn) {
   const path2 = docLockPath(collection, id);
-  const mine = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine.some((h) => h.paths.has(path2))) return fn();
+  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine2.some((h) => h.paths.has(path2))) return fn();
   return withFileLock(path2, async () => {
     const me = { paths: /* @__PURE__ */ new Set([path2]), active: true };
     try {
-      return await held.run([...mine, me], fn);
+      return await held.run([...mine2, me], fn);
     } finally {
       me.active = false;
     }
@@ -10782,13 +10782,13 @@ async function requireCoordination() {
     leaseAcquire: async (req) => (await pick2(req.collection)).leaseAcquire(req),
     leaseHeartbeat: async (collection, session, keys) => {
       if (collection !== void 0) return (await pick2(collection)).leaseHeartbeat(collection, session, keys);
-      const mine = await localCoordination().leaseHeartbeat(void 0, session);
-      if (!isSyncConfigured()) return mine;
+      const mine2 = await localCoordination().leaseHeartbeat(void 0, session);
+      if (!isSyncConfigured()) return mine2;
       try {
         const theirs = await (await serviceCoordination()).leaseHeartbeat(void 0, session);
-        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
+        return { renewed: [...mine2.renewed, ...theirs.renewed], lost: [] };
       } catch (e) {
-        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: e.message };
+        if (mine2.renewed.length && isCoordinationUnavailable(e)) return { ...mine2, unreachable: e.message };
         throw e;
       }
     },
@@ -11314,12 +11314,12 @@ async function retractSharedCopies(backend, collection) {
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
   const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
-  const mine = unchecked.filter((d) => {
+  const mine2 = unchecked.filter((d) => {
     const row = remote.get(d.id);
     const localCreated = Number(d.metadata.created_at);
     return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
   });
-  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
+  const removed = mine2.length > 0 ? await backend.delete(mine2.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
   for (const d of unchecked) await writeIfUnchanged(collection, d, (cur) => ({ ...cur, remote_checked_at: versionOf(d) }));
@@ -11530,8 +11530,8 @@ function claimNote(task, claims, mySessions = [currentSession()]) {
   if (!claims) return task.metadata.claim_unshared ? "claim not shared yet" : "";
   const l = claims.get(task.id);
   if (l) {
-    const mine = mySessions.find((s) => s && s === l.holder.session);
-    return `claimed by ${describeHolder(l, void 0, mine)}`;
+    const mine2 = mySessions.find((s) => s && s === l.holder.session);
+    return `claimed by ${describeHolder(l, void 0, mine2)}`;
   }
   if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
   return "";
@@ -42324,6 +42324,7 @@ init_claim();
 
 // packages/core/src/memory/sweep.ts
 init_store();
+init_config();
 init_syncable();
 
 // packages/core/src/curation/provider.ts
@@ -42535,9 +42536,14 @@ ${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
 
 // packages/core/src/memory/sweep.ts
 var DAY3 = 86400;
-async function staleFindings(collection, minAgeDays = 2, now = Math.floor(Date.now() / 1e3)) {
+var author = (m) => String(m.origin_user ?? m.username ?? "");
+var mine = (m, me) => author(m).toLowerCase() === me.toLowerCase();
+var isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
+async function staleFindings(collection, opts = {}) {
+  const now = opts.now ?? Math.floor(Date.now() / 1e3);
+  const me = getConfig().USERNAME;
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) <= now - minAgeDays * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0);
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
 }
 
 // packages/core/src/tasks/next.ts
@@ -42813,7 +42819,7 @@ async function cleanupItems(collection, open3, claims, only) {
     items.push({
       key: "cleanup:findings",
       count: findings.length,
-      title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` closes the ones that are only progress notes`
+      title: `Give ${findings.length} of your open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes`
     });
   }
   const size = want("cleanup:compaction") ? await collectionSize(collection).catch(() => 0) : 0;
@@ -43066,7 +43072,7 @@ async function removeCollection(name, opts = {}) {
     }
   }
   const me = getConfig().USERNAME;
-  const mine = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
+  const mine2 = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
   if (shared && syncOn && scope === "local") {
     const stuck = docs.filter((d) => d.metadata.is_synced === false && isRejectedUnchanged(d));
     if (stuck.length && !confirmed) {
@@ -43084,9 +43090,9 @@ async function removeCollection(name, opts = {}) {
   }
   if (shared && syncOn && scope === "everyone") {
     const real = docs.filter((d) => d.metadata.type !== "journal_draft");
-    const own2 = real.filter(mine).map((d) => d.id);
+    const own2 = real.filter(mine2).map((d) => d.id);
     await queueSyncDeletes(own2, name);
-    await addLocalTombstones(real.filter((d) => !mine(d)).map((d) => d.id));
+    await addLocalTombstones(real.filter((d) => !mine2(d)).map((d) => d.id));
     result.deletedRemotely = own2.length;
   }
   if (shared) {
@@ -44099,9 +44105,9 @@ async function pullFromRemote() {
   if (recovering) {
     try {
       const unfollowed2 = await getUnfollowedCollections();
-      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
+      const mine2 = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
       const subs = await getSyncSubscriptions();
-      const add = mine.filter((c) => !subs.includes(c));
+      const add = mine2.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
@@ -47246,12 +47252,12 @@ ${rec}`;
           const lines = [];
           const copyLine = (c) => `- ${c.id} [${c.collection}] ${c.type}, deleted ${c.by_you ? "" : `by ${c.deleted_by} `}${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, " ")}`;
           const theirs = t.upstream.filter((c) => !c.by_you);
-          const mine = t.upstream.filter((c) => c.by_you);
+          const mine2 = t.upstream.filter((c) => c.by_you);
           lines.push(theirs.length ? `**Deleted by their owners, kept here** (${theirs.length}):` : "No copies of documents deleted by their owners are kept here.");
           for (const c of theirs.slice(0, 50)) lines.push(copyLine(c));
-          if (mine.length) {
-            lines.push("", `**Deleted by you on another machine, kept here** (${mine.length}):`);
-            for (const c of mine.slice(0, 50)) lines.push(copyLine(c));
+          if (mine2.length) {
+            lines.push("", `**Deleted by you on another machine, kept here** (${mine2.length}):`);
+            for (const c of mine2.slice(0, 50)) lines.push(copyLine(c));
           }
           lines.push("");
           if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);

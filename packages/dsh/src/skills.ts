@@ -54,7 +54,7 @@ Repeat until step 1 finds nothing to do.
 ## Cleanup items
 
 - \`cleanup:triage\`: for each untriaged open task, \`yapa_task_update\` its \`tags\` (pass the full list: tags are replaced): \`auto\` if a session can do all of it unattended, otherwise \`needs-human\`, plus \`needs:<user>\` when one person must take it.
-- \`cleanup:findings\`: where the \`yapa\` CLI is available, first run \`yapa memory sweep-findings --collection <collection>\`, check its verdicts and rerun it with \`--apply\`. Then, for each open finding left (\`yapa_memory_list\` with \`kind: finding\`, \`status: open\`), decide what became of it and \`yapa_memory_update\` it to \`resolved\` with a \`disposition\` (decision, task or limitation, naming it in \`disposition_ids\`; or \`no-action\` with a \`disposition_reason\`). If that needs a person's call, record a needed decision instead.
+- \`cleanup:findings\`: where the \`yapa\` CLI is available, first run \`yapa memory sweep-findings --collection <collection> --save <file>\`, check its verdicts, and close the ones you agree with by \`yapa memory sweep-findings --collection <collection> --apply --from <file>\` (\`--ids a,b\` for only some). Then, for each open finding of yours left (\`yapa_memory_list\` with \`kind: finding\`, \`status: open\`; leave teammates' findings to them), decide what became of it and \`yapa_memory_update\` it to \`resolved\` with a \`disposition\` (decision, task or limitation, naming it in \`disposition_ids\`; or \`no-action\` with a \`disposition_reason\`). If that needs a person's call, record a needed decision instead.
 - \`cleanup:compaction\`: \`yapa_compaction_suggest\`, write a summary per group, \`yapa_compaction_apply\`.
 
 ## Stop, and leave it for a person, when

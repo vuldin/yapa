@@ -195,7 +195,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         }
         const stale = (await staleFindings(collection).catch(() => [])).length;
         if (stale >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
-          lines.push('', '## Findings backlog', `${stale} open findings in ${collection} have had no disposition for over two days: give each one a disposition with \`yapa_memory_update\` (\`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes).`);
+          lines.push('', '## Findings backlog', `${stale} of your open findings in ${collection} have had no disposition for over two days: give each one a disposition with \`yapa_memory_update\` (\`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes).`);
         }
       }
 

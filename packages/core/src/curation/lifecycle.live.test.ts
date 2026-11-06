@@ -17,6 +17,8 @@ import { setStore, resetStore, createLocalStore, getDocumentsByIds } from '../st
 import { extractMemories } from './extractor.js';
 import { followThrough } from './follow-through.js';
 import { storeMemory } from '../memory/store.js';
+import { sweepFindings } from '../memory/sweep.js';
+import { getDocumentsByFilter, patchDocument } from '../store/index.js';
 
 const LIVE = process.env.YAPA_LIVE_LLM === '1';
 const C = 'project-live';
@@ -65,6 +67,26 @@ describe.skipIf(!LIVE)('capture prompts against a real model (opt-in)', () => {
       assistantText: 'Tagged v2.4.0 on the merge commit and created the GitHub release from the CHANGELOG section. The plugin marketplace now offers 2.4.0.',
     });
     expect(release.filter(g => g.kind === 'decision' || g.kind === 'finding')).toEqual([]);
+  }, 180_000);
+
+  it('the sweep closes a progress note and keeps a root cause and a partly covered finding', async () => {
+    const S = 'project-live-sweep';
+    const old = Math.floor(Date.now() / 1000) - 5 * 86400;
+    const put = async (content: string, typed: any = { kind: 'finding' }) => {
+      const { ids: [id] } = await storeMemory(content, { collection: S, typed });
+      return id;
+    };
+    const progress = await put('Review round 3 of the export branch found nothing new; pushed the fixes as abc1234 and all 640 tests pass.');
+    const cause = await put('The nightly export fails because the reporting user\'s database password expires every 90 days, so every run after expiry fails at login.');
+    const partial = await put('Uploads over 5 GB fail because the client never switches to multipart, and retries also double-bill the egress.');
+    await put('Uploads over 5 GB fail because the client never switches to multipart upload.');
+    for (const id of [progress, cause, partial]) await patchDocument(S, id, { created_at: old });
+    expect((await getDocumentsByFilter(S, { type: 'memory' }, 100)).length).toBe(4);
+    const r = await sweepFindings({ collection: S });
+    const verdict = (id: string) => r.items.find(i => i.id === id)?.verdict;
+    expect(verdict(progress)).toBe('progress');
+    expect(verdict(cause)).toBe('keep');
+    expect(verdict(partial)).toBe('keep');
   }, 180_000);
 
   it('follow-through records the person\'s choice, and nothing when the turn only discusses it', async () => {
