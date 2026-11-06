@@ -101,7 +101,6 @@ function createConfig(env = process.env) {
     OLLAMA_URL: get(env, "OLLAMA_URL", "http://localhost:11434"),
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
-    SESSION_SUMMARY_RETENTION_DAYS: ((v) => /^\d+$/.test(v.trim()) ? Number(v) : 90)(get(env, "SESSION_SUMMARY_RETENTION_DAYS", "90")),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -1874,12 +1873,12 @@ function docLockPath(collection, id) {
 }
 async function withDocLock(collection, id, fn) {
   const path3 = docLockPath(collection, id);
-  const mine = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine.some((h) => h.paths.has(path3))) return fn();
+  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine2.some((h) => h.paths.has(path3))) return fn();
   return withFileLock(path3, async () => {
     const me = { paths: /* @__PURE__ */ new Set([path3]), active: true };
     try {
-      return await held.run([...mine, me], fn);
+      return await held.run([...mine2, me], fn);
     } finally {
       me.active = false;
     }
@@ -2148,7 +2147,7 @@ async function recallMemory(query, options = {}) {
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
   const boosts = /* @__PURE__ */ new Map();
   for (const r of results) {
-    if (options.boost === false || r.distance >= boostMaxDistance) continue;
+    if (options.boost === false || r.distance >= boostMaxDistance || isReadOnlyDoc(r.metadata)) continue;
     if (r.collection) {
       const lifecycleMeta = {
         salience: r.metadata.salience ?? 1,
@@ -2177,6 +2176,7 @@ var init_recall = __esm({
   "packages/core/src/memory/recall.ts"() {
     "use strict";
     init_store();
+    init_syncable();
     init_config();
     init_syncable();
     init_lifecycle();
@@ -3874,13 +3874,6 @@ function applyServerUsername(username) {
   configuredUsername = c.USERNAME;
   setConfig({ ...c, USERNAME: username });
 }
-function ownUsernames() {
-  return [...new Set([getConfig().USERNAME, configuredUsername].filter((u) => !!u).map((u) => u.toLowerCase()))];
-}
-function isOwnAuthor(metadata) {
-  const a = String(metadata.origin_user ?? metadata.username ?? "").toLowerCase();
-  return !!a && ownUsernames().includes(a);
-}
 async function resolveSyncUsername() {
   const b = await getSyncBackend();
   if (b?.identity) {
@@ -4370,13 +4363,13 @@ async function requireCoordination() {
     leaseAcquire: async (req) => (await pick(req.collection)).leaseAcquire(req),
     leaseHeartbeat: async (collection, session, keys) => {
       if (collection !== void 0) return (await pick(collection)).leaseHeartbeat(collection, session, keys);
-      const mine = await localCoordination().leaseHeartbeat(void 0, session);
-      if (!isSyncConfigured()) return mine;
+      const mine2 = await localCoordination().leaseHeartbeat(void 0, session);
+      if (!isSyncConfigured()) return mine2;
       try {
         const theirs = await (await serviceCoordination()).leaseHeartbeat(void 0, session);
-        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
+        return { renewed: [...mine2.renewed, ...theirs.renewed], lost: [] };
       } catch (e) {
-        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: e.message };
+        if (mine2.renewed.length && isCoordinationUnavailable(e)) return { ...mine2, unreachable: e.message };
         throw e;
       }
     },
@@ -4729,46 +4722,6 @@ var init_trash = __esm({
   }
 });
 
-// packages/core/src/memory/summary-retention.ts
-async function sweepSessionSummaries(now = Math.floor(Date.now() / 1e3)) {
-  const days = getConfig().SESSION_SUMMARY_RETENTION_DAYS;
-  if (!days) return 0;
-  const cutoff = now - days * DAY2;
-  let n = 0;
-  for (const c of (await listCollections2().catch(() => [])).map((x) => x.name)) {
-    const docs = await getDocumentsByFilter2(c, { type: "memory" }, 1e5).catch(() => []);
-    const expired = /* @__PURE__ */ new Set();
-    for (const d of docs) {
-      const m = d.metadata;
-      if (!isSessionSummary(m) || m.archived === true || isReadOnlyDoc(m)) continue;
-      if (!isOwnAuthor(m)) continue;
-      if (Number(m.created_at ?? now) > cutoff) continue;
-      expired.add(String(m.parent_id ?? d.id));
-    }
-    if (!expired.size) continue;
-    const updates = docs.filter((d) => expired.has(String(d.metadata.parent_id ?? d.id)) && d.metadata.archived !== true).map((d) => ({ id: d.id, patch: metadataDelta(d.metadata, archivedMetadata(d.metadata, { expired: "session_summary_retention" }, now)) }));
-    try {
-      await patchDocuments2(c, updates);
-      n += updates.length;
-    } catch {
-    }
-  }
-  return n;
-}
-var DAY2;
-var init_summary_retention = __esm({
-  "packages/core/src/memory/summary-retention.ts"() {
-    "use strict";
-    init_config();
-    init_store();
-    init_syncable();
-    init_backend();
-    init_archive();
-    init_filters();
-    DAY2 = 86400;
-  }
-});
-
 // packages/core/src/memory/decay.ts
 async function lastSweepAt() {
   try {
@@ -4780,15 +4733,16 @@ async function lastSweepAt() {
 }
 async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   const collections = await listCollections2();
-  const fallbackAnchor = await lastSweepAt() ?? now - DAY3;
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY2;
   let decayedCount = 0;
   for (const collection of collections) {
     try {
       const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
       const updates = [];
       for (const doc of docs) {
+        if (isReadOnlyDoc(doc.metadata)) continue;
         const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
-        const days = (now - anchor) / DAY3;
+        const days = (now - anchor) / DAY2;
         if (days <= 0) continue;
         const lifecycleMeta = {
           salience: doc.metadata.salience ?? 1,
@@ -4808,12 +4762,11 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
     }
   }
   await sweepDeletedUpstream(now).catch(() => 0);
-  await sweepSessionSummaries(now).catch(() => 0);
   return decayedCount;
 }
 async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
   const last = await lastSweepAt();
-  return last === void 0 || now - last > DAY3;
+  return last === void 0 || now - last > DAY2;
 }
 async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
   const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
@@ -4823,16 +4776,16 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
     last_run: now
   });
 }
-var DECAY_SENTINEL_ID, DAY3, SWEEP_LIMIT;
+var DECAY_SENTINEL_ID, DAY2, SWEEP_LIMIT;
 var init_decay = __esm({
   "packages/core/src/memory/decay.ts"() {
     "use strict";
     init_store();
+    init_syncable();
     init_trash();
-    init_summary_retention();
     init_lifecycle();
     DECAY_SENTINEL_ID = "__decay_sentinel__";
-    DAY3 = 86400;
+    DAY2 = 86400;
     SWEEP_LIMIT = 1e4;
   }
 });
@@ -4856,7 +4809,7 @@ function intersect(a, b) {
   return b.filter((t) => set.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -4865,7 +4818,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && !isReadOnlyDoc(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -4886,6 +4839,10 @@ async function suggestCompaction(collection) {
 }
 async function applyCompaction(input2) {
   input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
+  const members = await getDocumentsByIds2(input2.collection, input2.member_ids).catch(() => []);
+  if (input2.member_ids.length && members.length && members.every((m) => isReadOnlyDoc(m.metadata))) {
+    throw new Error("every member is owned by the remote (read_only): nothing to compact");
+  }
   const stored = await storeMemory(input2.summary, {
     collection: input2.collection,
     salience: 2,
@@ -4897,7 +4854,7 @@ async function applyCompaction(input2) {
   for (const id of input2.member_ids) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
       await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
@@ -4920,6 +4877,7 @@ var init_compact = __esm({
   "packages/core/src/memory/compact.ts"() {
     "use strict";
     init_filters();
+    init_syncable();
     init_config();
     init_archive();
     init_store();
@@ -5498,12 +5456,12 @@ async function retractSharedCopies(backend, collection) {
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
   const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
-  const mine = unchecked.filter((d) => {
+  const mine2 = unchecked.filter((d) => {
     const row = remote.get(d.id);
     const localCreated = Number(d.metadata.created_at);
     return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
   });
-  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
+  const removed = mine2.length > 0 ? await backend.delete(mine2.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
   for (const d of unchecked) await writeIfUnchanged(collection, d, (cur) => ({ ...cur, remote_checked_at: versionOf(d) }));
@@ -5714,8 +5672,8 @@ function claimNote(task, claims, mySessions = [currentSession()]) {
   if (!claims) return task.metadata.claim_unshared ? "claim not shared yet" : "";
   const l = claims.get(task.id);
   if (l) {
-    const mine = mySessions.find((s) => s && s === l.holder.session);
-    return `claimed by ${describeHolder(l, void 0, mine)}`;
+    const mine2 = mySessions.find((s) => s && s === l.holder.session);
+    return `claimed by ${describeHolder(l, void 0, mine2)}`;
   }
   if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
   return "";
@@ -6120,8 +6078,9 @@ var init_update2 = __esm({
 // packages/core/src/memory/sweep.ts
 async function staleFindings(collection, opts = {}) {
   const now = opts.now ?? Math.floor(Date.now() / 1e3);
+  const me = getConfig().USERNAME;
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY4 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
 }
 async function wholeText(collection, f) {
   if (!f.metadata.parent_id) return f.content;
@@ -6274,6 +6233,7 @@ async function findDoc2(collection, id) {
 }
 async function applySweep(collection, items, opts = {}, deps = {}) {
   const update = deps.updateMemory ?? updateMemory;
+  const me = getConfig().USERNAME;
   const closing = new Set(items.filter((i) => i.verdict !== "keep").map((i) => i.id));
   const held2 = await supersedingIds(collection);
   for (const it of items) {
@@ -6292,7 +6252,7 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
       it.skipped = "read-only";
       continue;
     }
-    if (!opts.allOwners && !isOwnAuthor(m)) {
+    if (!opts.allOwners && !mine(m, me)) {
       it.skipped = `recorded by ${author(m) || "someone else"}`;
       continue;
     }
@@ -6320,19 +6280,19 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   }
   return items;
 }
-var DAY4, list5, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
+var DAY3, list5, author, mine, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
     init_store();
     init_config();
     init_syncable();
-    init_backend();
     init_provider();
     init_update2();
-    DAY4 = 86400;
+    DAY3 = 86400;
     list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     author = (m) => String(m.origin_user ?? m.username ?? "");
+    mine = (m, me) => author(m).toLowerCase() === me.toLowerCase();
     isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
     SWEEP_PROMPT_VERSION = "v1";
     BATCH_ITEMS = 10;
@@ -6988,7 +6948,7 @@ async function removeCollection(name, opts = {}) {
     }
   }
   const me = getConfig().USERNAME;
-  const mine = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
+  const mine2 = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
   if (shared && syncOn && scope === "local") {
     const stuck = docs.filter((d) => d.metadata.is_synced === false && isRejectedUnchanged(d));
     if (stuck.length && !confirmed) {
@@ -7006,9 +6966,9 @@ async function removeCollection(name, opts = {}) {
   }
   if (shared && syncOn && scope === "everyone") {
     const real = docs.filter((d) => d.metadata.type !== "journal_draft");
-    const own = real.filter(mine).map((d) => d.id);
+    const own = real.filter(mine2).map((d) => d.id);
     await queueSyncDeletes(own, name);
-    await addLocalTombstones(real.filter((d) => !mine(d)).map((d) => d.id));
+    await addLocalTombstones(real.filter((d) => !mine2(d)).map((d) => d.id));
     result.deletedRemotely = own.length;
   }
   if (shared) {
@@ -7307,7 +7267,7 @@ function getCurationState() {
 }
 async function collectUnclassified(collection) {
   const docs = await getDocumentsByFilter2(collection, { type: "memory" }, MAX_PER_COLLECTION);
-  return docs.filter((d) => d.metadata.classified_at == null);
+  return docs.filter((d) => d.metadata.classified_at == null && !isReadOnlyDoc(d.metadata));
 }
 async function curationCycle() {
   if (running) {
@@ -7416,6 +7376,7 @@ var init_curation = __esm({
   "packages/core/src/curation/index.ts"() {
     "use strict";
     init_config();
+    init_syncable();
     init_store();
     init_classifier();
     timer = null;
@@ -7670,14 +7631,14 @@ Return valid JSON only. No commentary. No markdown fences:
 
 // packages/core/src/curation/janitor.ts
 async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
       const key = [doc.id, n.id].sort().join("|");
       if (seen.has(key)) continue;
       seen.add(key);
@@ -7771,6 +7732,7 @@ async function janitorSweep(options = {}) {
 var init_janitor = __esm({
   "packages/core/src/curation/janitor.ts"() {
     "use strict";
+    init_syncable();
     init_kinds();
     init_archive();
     init_config();
@@ -8524,6 +8486,7 @@ async function collectClassifiedMemories() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at != null) {
           out.push({
             id: d.id,
@@ -8673,6 +8636,7 @@ async function systemPromptActivate(version) {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -8717,6 +8681,7 @@ async function bucketStatus() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at == null) pendingClassification++;
         const sel = d.metadata.selected_for;
         const prom = d.metadata.promoted_to;
@@ -8734,6 +8699,7 @@ var init_buckets = __esm({
   "packages/core/src/buckets/index.ts"() {
     "use strict";
     init_config();
+    init_syncable();
     init_store();
     init_artifacts();
     init_router();
@@ -8758,9 +8724,9 @@ async function pullFromRemote() {
   if (recovering) {
     try {
       const unfollowed2 = await getUnfollowedCollections();
-      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
+      const mine2 = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
       const subs = await getSyncSubscriptions();
-      const add = mine.filter((c) => !subs.includes(c));
+      const add = mine2.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
@@ -10357,6 +10323,7 @@ async function adapterPromote(args) {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION4);
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.verification_last_result === "passed") {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -10413,6 +10380,7 @@ var init_promotion = __esm({
   "packages/core/src/training/promotion.ts"() {
     "use strict";
     init_store();
+    init_syncable();
     init_registry();
     MAX_PER_COLLECTION4 = 2e3;
   }
@@ -10925,7 +10893,6 @@ __export(src_exports, {
   isDetectionStale: () => isDetectionStale,
   isMemoryKind: () => isMemoryKind,
   isOpenTyped: () => isOpenTyped,
-  isOwnAuthor: () => isOwnAuthor,
   isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
   isRejectedUnchanged: () => isRejectedUnchanged,
@@ -10976,7 +10943,6 @@ __export(src_exports, {
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
   openWaits: () => openWaits,
-  ownUsernames: () => ownUsernames,
   ownerWaitsOn: () => ownerWaitsOn,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
@@ -11086,7 +11052,6 @@ __export(src_exports, {
   sweepDeletedUpstream: () => sweepDeletedUpstream,
   sweepFindings: () => sweepFindings,
   sweepLockDebris: () => sweepLockDebris,
-  sweepSessionSummaries: () => sweepSessionSummaries,
   syncBackendKind: () => syncBackendKind,
   syncCycle: () => syncCycle,
   syncFingerprint: () => syncFingerprint,
@@ -11203,7 +11168,6 @@ var init_src = __esm({
     init_verification();
     init_kinds();
     init_sweep();
-    init_summary_retention();
     init_owners();
     init_known_users();
     init_update2();
@@ -11899,10 +11863,10 @@ async function keepLeasesAlive(input2) {
 }
 function presenceLines(leases, now, mySessions, me) {
   if (!leases.length) return [];
-  const mine = new Set(mySessions.filter(Boolean));
+  const mine2 = new Set(mySessions.filter(Boolean));
   const out = ["", "## Work in progress (leases)"];
   for (const l of leases.slice(0, 10)) {
-    const who2 = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
+    const who2 = l.holder.user === me ? mine2.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
     const title = l.title ? ` ${l.title}` : "";
     out.push(`- **${l.key}**${title}: ${who2}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
   }
@@ -11940,12 +11904,12 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
     if (!all) return [];
     const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-    const mine = items.filter((i) => includesUser(i.for, user));
+    const mine2 = items.filter((i) => includesUser(i.for, user));
     const anyone = items.filter((i) => i.for.length === 0).length;
-    if (!mine.length && !anyone && !hidden) return [];
+    if (!mine2.length && !anyone && !hidden) return [];
     const out = ["", "## Waiting on you"];
-    for (const i of mine.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
-    if (mine.length > 8) out.push(`- _\u2026${mine.length - 8} more (call \`waiting\`)_`);
+    for (const i of mine2.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
+    if (mine2.length > 8) out.push(`- _\u2026${mine2.length - 8} more (call \`waiting\`)_`);
     if (anyone) out.push(`- _${anyone} item(s) wait on anyone with the role (call \`waiting\`)_`);
     if (hidden) out.push(`- _${hidden} more in private collections, not listed in this shared scope (call \`waiting\` to see them)_`);
     out.push("Tell the user about these when relevant; record a choice with `memory_update` (status accepted), never only in chat.");

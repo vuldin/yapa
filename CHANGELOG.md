@@ -2,8 +2,13 @@
 
 ## Unreleased
 
-### Features
-- **Old compaction summaries are archived.** Since 1.14.0 they stay out of recall and memory compaction, so nothing pruned them. The daily decay sweep now archives your own summaries older than `SESSION_SUMMARY_RETENTION_DAYS` (default 90; `0` keeps them forever), a chunked one whole. Teammates' summaries and read-only ones are left alone. Archived summaries stay reachable with `memory_list` `include_archived`, or with `memory_recall` `include_archived` plus `include_sessions`. Your summaries count as yours under the configured username too, after the sync service's username replaces it.
+### Fixes
+- **Background curation leaves documents the remote owns alone.** A remote can serve records it owns with `metadata.read_only: true`. Edits by hand were already refused, but curation still touched them. Now:
+  - the janitor never pairs or archives them as duplicates;
+  - `compaction_suggest` never groups them, and `compaction_apply` never archives one;
+  - the decay sweep and the recall salience boost leave their salience as served;
+  - the classifier never sends one to the curation model or scores it, so none is selected or promoted for training;
+  - `compaction_apply` refuses a group whose members are all read-only, instead of writing a summary that compacts nothing.
 
 ## 1.14.1 (2026-11-06)
 
