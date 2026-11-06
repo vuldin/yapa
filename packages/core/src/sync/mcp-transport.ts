@@ -86,6 +86,10 @@ export function pickSyncTool(names: string[], host: string, explicit = ''): stri
   if (prefixed.length > 1) {
     throw new ServiceError(`the MCP server at ${host} has several sync tools (${prefixed.join(', ')}). Set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to the one to use.`, 0, 'ambiguous_sync_tool');
   }
+  const near = names.filter(n => n.endsWith(SYNC_TOOL));
+  if (near.length) {
+    throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool, but has ${near.join(', ')}. If that is the sync tool, set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to it.`, 0, 'no_sync_tool');
+  }
   throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool. Check YAPA_SYNC_MCP_URL, and that your account may use it.`, 0, 'no_sync_tool');
 }
 

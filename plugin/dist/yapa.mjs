@@ -2944,7 +2944,8 @@ function runCommand(cmd, explain2, fallback) {
   });
 }
 function programOf(cmd) {
-  return cmd.trim().split(/\s+/)[0]?.split("/").pop() || "the token command";
+  const word = cmd.trim().split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+  return word?.split("/").pop() || "the token command";
 }
 function exitText(code) {
   return typeof code === "number" ? `exit code ${code}` : String(code ?? "failed");
@@ -2975,6 +2976,10 @@ function explain(status, code, message, transport) {
     case "cloud_run_unauthenticated":
       return "Cloud Run rejected the ID token (401). Run `gcloud auth login`.";
     default:
+      if (code.startsWith("http_")) {
+        const body = message.replace(/^HTTP \d+:?\s*/, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+        return `the ${transport.label} answered HTTP ${status}${body ? `: ${body}` : ""}`;
+      }
       return `sync service error ${status} ${code}: ${message}`;
   }
 }
@@ -3498,6 +3503,10 @@ function pickSyncTool(names, host, explicit = "") {
   if (prefixed.length === 1) return prefixed[0];
   if (prefixed.length > 1) {
     throw new ServiceError(`the MCP server at ${host} has several sync tools (${prefixed.join(", ")}). Set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to the one to use.`, 0, "ambiguous_sync_tool");
+  }
+  const near = names.filter((n) => n.endsWith(SYNC_TOOL));
+  if (near.length) {
+    throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool, but has ${near.join(", ")}. If that is the sync tool, set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to it.`, 0, "no_sync_tool");
   }
   throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool. Check YAPA_SYNC_MCP_URL, and that your account may use it.`, 0, "no_sync_tool");
 }

@@ -93,8 +93,10 @@ export function runCommand(cmd: string, explain: (detail: string) => string, fal
 }
 
 /** A command's program name, safe to show (its arguments may hold a secret). */
+/** The command's program name, never its arguments or leading `VAR=value` assignments (either can hold a secret). */
 export function programOf(cmd: string): string {
-  return cmd.trim().split(/\s+/)[0]?.split('/').pop() || 'the token command';
+  const word = cmd.trim().split(/\s+/).find(w => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+  return word?.split('/').pop() || 'the token command';
 }
 
 function exitText(code: unknown): string {
@@ -336,6 +338,10 @@ function explain(status: number, code: string, message: string, transport: SyncT
     case 'cloud_run_unauthenticated':
       return 'Cloud Run rejected the ID token (401). Run `gcloud auth login`.';
     default:
+      if (code.startsWith('http_')) {
+        const body = message.replace(/^HTTP \d+:?\s*/, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+        return `the ${transport.label} answered HTTP ${status}${body ? `: ${body}` : ''}`;
+      }
       return `sync service error ${status} ${code}: ${message}`;
   }
 }

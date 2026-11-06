@@ -16,7 +16,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { setConfig, createConfig, getConfig } from '../config.js';
-import { HttpBackend, IdTokenProvider } from './http-backend.js';
+import { HttpBackend, IdTokenProvider, programOf } from './http-backend.js';
 import { McpTransport, mcpTokenProvider, pickSyncTool, readSse } from './mcp-transport.js';
 import { setSyncBackend, getSyncBackend, isSyncConfigured, syncBackendKind, syncTransportKind, UnsupportedByRemoteError } from './backend.js';
 import { syncTargetKey } from './shared-cycle.js';
@@ -47,7 +47,7 @@ class Gateway {
   /** Delay every POST this long. */
   delayMs = 0;
   /** Answer tools/call POSTs with this HTTP status instead of running them. */
-  callStatus: { status: number; headers?: Record<string, string> } | undefined;
+  callStatus: { status: number; headers?: Record<string, string>; body?: string } | undefined;
   /** Session ids ended with DELETE. */
   ended: string[] = [];
   sessions = new Map<string, StreamableHTTPServerTransport>();
@@ -117,7 +117,7 @@ class Gateway {
     const body = JSON.parse(raw);
     if (this.delayMs) await new Promise(r => setTimeout(r, this.delayMs));
     if (this.callStatus && body.method === 'tools/call') {
-      res.writeHead(this.callStatus.status, { 'content-type': 'text/plain', ...(this.callStatus.headers ?? {}) }).end('gateway says no');
+      res.writeHead(this.callStatus.status, { 'content-type': 'text/plain', ...(this.callStatus.headers ?? {}) }).end(this.callStatus.body ?? 'gateway says no');
       return;
     }
     const sid = req.headers['mcp-session-id'];
@@ -309,11 +309,19 @@ describe('sync over MCP', () => {
     expect(tk.calls()).toBe(1);
   });
 
+  it('names only the token command\'s program in errors, never its arguments or env assignments', () => {
+    expect(programOf('TOKEN=s3cret A=1 /usr/local/bin/mycli get --key sk-123')).toBe('mycli');
+    expect(programOf('echo sk-123')).toBe('echo');
+    expect(programOf('TOKEN=s3cret')).toBe('the token command');
+    expect(programOf('  ')).toBe('the token command');
+  });
+
   it('finds yapa_sync or exactly one prefixed name; several are ambiguous; YAPA_SYNC_MCP_TOOL picks one', async () => {
     const pick = (names: string[], explicit?: string) => { try { return pickSyncTool(names, 'gw', explicit); } catch (e: any) { return e.code; } };
     expect(pick(['recall', 'yapa_sync', 'x__yapa_sync'])).toBe('yapa_sync');
     for (const name of ['remote__yapa_sync', 'remote.yapa_sync', 'remote/yapa_sync', 'remote-yapa_sync']) expect(pick(['recall', name])).toBe(name);
     expect(pick(['legacy_yapa_sync', 'notyapa_sync', 'yapa_sync_v2', '__yapa_sync'])).toBe('no_sync_tool');
+    expect(() => pickSyncTool(['remote-mcp_yapa_sync'], 'gw')).toThrow(/has remote-mcp_yapa_sync\. If that is the sync tool, set YAPA_SYNC_MCP_TOOL/);
     expect(pick(['staging__yapa_sync', 'prod__yapa_sync'])).toBe('ambiguous_sync_tool');
     expect(pick(['staging__yapa_sync', 'prod__yapa_sync'], 'prod__yapa_sync')).toBe('prod__yapa_sync');
     expect(pick(['yapa_sync'], 'prod__yapa_sync')).toBe('no_sync_tool');
@@ -422,6 +430,8 @@ describe('sync over MCP', () => {
     expect(await b.collections().catch(e => e)).toMatchObject({ code: 'http_503', status: 503 });
     gateway.callStatus = { status: 400 };
     expect(await b.collections().catch(e => e)).toMatchObject({ code: 'http_400', status: 400 });
+    gateway.callStatus = { status: 502, body: '<html><body><h1>502 Bad Gateway</h1></body></html>' };
+    expect((await b.collections().catch(e => e)).message).toMatch(/^the MCP gateway answered HTTP 502: 502 Bad Gateway$/);
     gateway.callStatus = undefined;
     gateway.intercept = () => { throw new Error('tool crashed'); };
     const err = await b.collections().catch(e => e);
