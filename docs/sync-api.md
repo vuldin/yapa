@@ -221,7 +221,7 @@ reads" lists the response fields the client uses; others are optional.
 Response: `{ "username": "jane-doe", "email": "jane.doe@example.com" }`.
 Client reads `username`, `email`. The reference also returns `device` and a
 `limits` object (not read; `limits.deleted_retention_days` is how long a
-deleted row stays restorable, section 5 "Soft delete").
+deleted row stays restorable, `null` for no limit, section 5 "Soft delete").
 
 Called at startup, before every push/pull cycle (cached per token), and for
 `sync status` ("Signed in as: <username> (<email>)").
@@ -321,10 +321,10 @@ The reference soft-deletes a `delete`: the row moves out of the live documents
 (pulls stop returning it, teammates get the deletion entry) into a store of
 deleted rows that only its owner can see, list and restore, for
 `YAPA_DELETED_RETENTION_DAYS` (default 30) days. See "Soft delete" below. A
-`retract` MUST NOT keep a copy: the doc moved into a local-only collection on
-the owner's machine (which keeps it), and the point of the move is that no
-shared copy of its content stays on the remote. Its deletion entry is written
-as for a delete, with `reason: "retract"`.
+`retract` MUST erase the doc (see "Erasure" below): the doc moved into a
+local-only collection on the owner's machine (which keeps it), and the point of
+the move is that no shared copy of its content stays on the remote. Its
+deletion entry is written as for a delete, with `reason: "retract"`.
 
 ### Soft delete: GET /v1/me/deleted, POST /v1/documents:restore, POST /v1/documents:purge
 
@@ -336,9 +336,20 @@ sees, restores or purges rows it owns.
 A deleted row stays restorable for the remote's retention window (reference:
 `YAPA_DELETED_RETENTION_DAYS`, default 30, reported as
 `limits.deleted_retention_days` by `GET /v1/me`). After that it is removed
-for good. The reference removes expired rows lazily, at most every 5 minutes
-per instance, from requests that touch deleted rows; rows past the window are
-never listed or restored even before the sweep runs.
+or erased. A remote that keeps history may keep deleted rows restorable until
+they are purged, and reports `"deleted_retention_days": null`. The reference
+removes expired rows lazily, at most every 5 minutes per instance, from
+requests that touch deleted rows; rows past the window are never listed or
+restored even before the sweep runs.
+
+**Erasure.** A retract and a purge erase: the remote MUST remove the content,
+metadata and embedding of the row, of every deleted copy, and of every earlier
+version it keeps (a remote that keeps revisions redacts them all). It MAY keep
+a stub holding only the id, collection, owner, timestamps, `reason` and who
+erased it when, for its own audit; a stub is never returned by a pull, a
+listing or a restore. The reference deletes the rows outright. How a remote
+stores a restored row is its own matter, as long as the id, `origin_user`,
+`created_at`, content and metadata come back as they were.
 
 `GET /v1/me/deleted?collection=<c>&limit=<n>`: the caller's own deleted rows
 within retention, newest first. `collection` is optional (a local-only name is
@@ -389,11 +400,11 @@ re-created, deleted again) appears once per deleted copy.
 ], "purged": 2 }
 ```
 
-Purge removes the id for good: the caller's live row (if any) and every
+Purge erases the id for good: the caller's live row (if any) and every
 deleted copy the caller owns. With no live row, the caller must have a deleted
 copy (else `not_found`). When the id is now someone else's live document
 (reused after the caller deleted theirs), the caller's deleted copies are
-still removed and the answer is `purged_copies`: the other user's row stays,
+still erased and the answer is `purged_copies`: the other user's row stays,
 the id is not recorded as purged, and no feed entry is written. With no copy
 of the caller's either, the answer is `not_owner` and nothing changes.
 Otherwise each affected collection's deletions feed gets an entry with
@@ -633,7 +644,8 @@ Per upsert item, in this order (the first failure is the item's error):
 
 Deletes are owner-only and recorded in the deletions feed (with `reason`);
 the reference keeps deleted rows restorable by their owner for its retention
-window, and purges are owner-only too. Task numbers come
+window, retracts and purges erase (section 5, "Erasure"), and purges are
+owner-only too. Task numbers come
 from one per-user sequence (`task-ids:next`), floored by the highest existing
 `<caller>-<n>`.
 

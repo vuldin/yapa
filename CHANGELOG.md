@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Sync API
+- **"Keeps no copy" is now "keeps no content".** A retract or purge must erase the content, metadata and embedding of the row, its deleted copies and every earlier version a remote keeps. A remote may keep a stub (id, collection, owner, timestamps, reason, who erased it) for its own audit, never served. A remote that keeps history may keep deleted rows restorable until purged and report `limits.deleted_retention_days: null`. The reference service is unchanged: it already deletes. See `docs/sync-api.md` section 5, "Erasure".
+
 ## 1.12.0 (2026-11-06)
 
 Deleted documents can be recovered: the sync service keeps your deleted documents restorable for 30 days, teammates' machines archive their copies instead of dropping them, and a new `trash` tool lists, restores, keeps and purges them.
