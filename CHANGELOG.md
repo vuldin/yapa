@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.13.0 (2026-11-06)
+
+YAPA can sync with a remote that serves the Sync API as an MCP tool behind a gateway, and with remotes that have stricter rules about deleting data.
+
+**Upgrading:** update the plugin and restart Claude Code. To sync over MCP, set `sync_mcp_url` and `sync_mcp_token_cmd` (and `sync_mcp_tool` if the gateway lists more than one sync tool). A self-hosted sync service should be redeployed for the purge fixes; there's no migration.
 
 ### Features
 - **Sync over MCP.** A remote can serve YAPA Sync API v1 as one MCP tool, `yapa_sync`, usually behind an MCP gateway that signs each person in, instead of over HTTPS. Set `sync_mcp_url` (`YAPA_SYNC_MCP_URL`) to its MCP URL and `sync_mcp_token_cmd` (`YAPA_SYNC_MCP_TOKEN_CMD`) to a command that prints your bearer token for the gateway; the MCP URL wins over `sync_service_url`, which wins over `sync_database_url`. Every request is one tool call carrying the HTTP request (method, path, body, device, idempotency key), and its `{status, body, headers}` result is handled exactly as the HTTP response, so errors, paging, soft delete and coordination behave the same. The token is cached until shortly before it expires and refreshed once on a 401 from the gateway or the tool. A single gateway-prefixed tool name (`remote__yapa_sync`) is found too; when there are several, `sync_mcp_tool` (`YAPA_SYNC_MCP_TOOL`) names the one to use. `sync status` reads `Backend: YAPA sync over MCP (<host>)`, and the status line says `sign in to the MCP gateway` when signed out. DSH: `syncMcpUrl`, `syncMcpTokenCmd`. See `docs/sync-api.md` section 3, "Over MCP", and `docs/connecting-to-a-remote.md`.
@@ -11,7 +15,8 @@
 - **Erasure keeps no content; a stub may stay.** A retract or purge removes the content, metadata and embedding of the row, its deleted copies and every earlier version a remote keeps. A remote may keep an audit stub (id, collection, owner, timestamps, reason, who erased it), never served. A remote that can't erase declares `erasure: "none"`, keeps the content hidden, and offers no purge route. The reference service keeps full control (30-day restore, rows deleted) and now declares `erasure: "delete"`. See `docs/sync-api.md` section 5, "Remotes with stricter data rules".
 
 ### Fixes
-- **Service: a write that waited on a purge is refused.** An upsert racing a purge of the same id could write it again; the two are now serialized per id.
+- **Service: a write that waited on a purge is refused.** An upsert racing a purge of the same id could write it again; the two are now serialized per id, and so is a restore.
+- **Service: overlapping purges, restores and deletes no longer deadlock.** Two requests with the same ids in different orders could fail with a 500; every request now locks ids in one order.
 
 ## 1.12.0 (2026-11-06)
 
