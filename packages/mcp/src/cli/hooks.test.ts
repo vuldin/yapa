@@ -330,6 +330,7 @@ describe('sync health (status line)', () => {
     expect(syncDownLine()).toBeUndefined();
     record({ status: 'signed_out', since: Date.UTC(2026, 10, 1, 9, 12) });
     expect(syncDownLine()).toBe('_YAPA sync is signed out since 2026-11-01 09:12 UTC: writes stay on this machine until the user runs `gcloud auth login` (sync resumes by itself, no restart)._');
+    expect(syncDownLine({ ...JSON.parse(readFileSync(health, 'utf-8')), sign_in: 'sign in to the MCP gateway' })).toContain('until the user signs in again (sign in to the MCP gateway)');
     record({ status: 'unreachable' });
     expect(syncDownLine()).toContain('unreachable');
     configure({ YAPA_SYNC_HEALTH_FILE: health, YAPA_SYNC_ENABLED: 'false' });

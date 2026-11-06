@@ -95,7 +95,7 @@ export function apply(ctx: Context, config: Config): void {
   // hot-reloaded; the cordis row config becomes the composition `base` layer.
   const scope = ctx.settings.register(settingsNamespace('yapa'), Config, { base: config, applies: 'live' });
   scope.watch(next => {
-    const syncTarget = (c: typeof resolved.core) => isSyncConfigured(c) && (c.SYNC_SERVICE_URL || c.SYNC_DATABASE_URL);
+    const syncTarget = (c: typeof resolved.core) => isSyncConfigured(c) && (c.SYNC_MCP_URL || c.SYNC_SERVICE_URL || c.SYNC_DATABASE_URL);
     const prevSync = syncTarget(resolved.core);
     const prevInterval = resolved.core.SYNC_INTERVAL_MS;
     const prevStore = `${resolved.core.STORAGE}:${resolved.core.LOCAL_STORE_PATH}`;

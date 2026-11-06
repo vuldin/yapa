@@ -68,6 +68,24 @@
       "description": "Base URL of a YAPA sync service (any remote implementing YAPA Sync API v1), e.g. https://sync.example.com or https://example.com/api/yapa. Sign in once with `gcloud auth login`. See docs/connecting-to-a-remote.md before the first sync.",
       "default": ""
     },
+    "sync_mcp_url": {
+      "type": "string",
+      "title": "Sync MCP URL",
+      "description": "URL of an MCP server (usually through an MCP gateway) that serves YAPA Sync API v1 as its yapa_sync tool. Wins over the service URL. Needs the MCP token command. See docs/connecting-to-a-remote.md before the first sync.",
+      "default": ""
+    },
+    "sync_mcp_token_cmd": {
+      "type": "string",
+      "title": "Sync MCP token command",
+      "description": "Command that prints your bearer token for the MCP gateway in Sync MCP URL. YAPA reruns it when the token expires or is rejected.",
+      "default": ""
+    },
+    "sync_mcp_tool": {
+      "type": "string",
+      "title": "Sync MCP tool name",
+      "description": "The sync tool's exact name on the MCP server, when it is neither yapa_sync nor a single prefixed name such as remote__yapa_sync (for example when the gateway lists several).",
+      "default": ""
+    },
     "sync_database_url": {
       "type": "string",
       "title": "Sync database URL (advanced)",

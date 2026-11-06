@@ -146,6 +146,9 @@ function createConfig(env = process.env) {
     SYNC_ENABLED: get(env, "SYNC_ENABLED", "false") === "true",
     SYNC_SERVICE_URL: get(env, "SYNC_SERVICE_URL", "").replace(/\/+$/, ""),
     SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
+    SYNC_MCP_URL: get(env, "SYNC_MCP_URL", "").trim(),
+    SYNC_MCP_TOKEN_CMD: get(env, "SYNC_MCP_TOKEN_CMD", ""),
+    SYNC_MCP_TOOL: get(env, "SYNC_MCP_TOOL", "").trim(),
     SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
     // Not recorded under vitest unless a test names a file: suites that fail
     // sync on purpose must not paint the developer's own status line red.
@@ -2397,6 +2400,7 @@ function recordSyncHealth(update, now = Date.now(), path3 = getConfig().SYNC_HEA
   const config = getConfig();
   const next = { status: update.status, at: now, interval_ms: config.SYNC_INTERVAL_MS, label: config.STATUS_LABEL };
   if (config.REMOTE_NAME) next.remote = config.REMOTE_NAME;
+  if (config.SYNC_MCP_URL) next.sign_in = "sign in to the MCP gateway";
   if (prev?.last_ok_at) next.last_ok_at = prev.last_ok_at;
   const unpushed = update.unpushed ?? prev?.unpushed;
   if (unpushed !== void 0) next.unpushed = unpushed;
@@ -2498,515 +2502,8 @@ var init_device = __esm({
   }
 });
 
-// packages/core/src/sync/http-backend.ts
-var http_backend_exports = {};
-__export(http_backend_exports, {
-  HttpBackend: () => HttpBackend,
-  IdTokenProvider: () => IdTokenProvider,
-  ServiceError: () => ServiceError,
-  decodeJwtPayload: () => decodeJwtPayload,
-  redactTokens: () => redactTokens
-});
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
-import { dirname as dirname4 } from "node:path";
-import { exec, execFile } from "node:child_process";
-import { randomUUID as randomUUID2 } from "node:crypto";
-function redactTokens(text) {
-  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, "<token>");
-}
-function decodeJwtPayload(token) {
-  const parts = token.split(".");
-  if (parts.length < 2) return void 0;
-  try {
-    const json = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-    return json && typeof json === "object" ? json : void 0;
-  } catch {
-    return void 0;
-  }
-}
-function runTokenCommand(cmd) {
-  return new Promise((resolve3, reject) => {
-    const done = (err, stdout, stderr) => {
-      if (err) {
-        const detail = redactTokens(String(stderr || err.message).trim().split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
-        reject(new Error(`could not get a Google ID token from \`${cmd || "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`));
-        return;
-      }
-      resolve3(String(stdout));
-    };
-    const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
-    if (cmd) exec(cmd, opts, done);
-    else execFile("gcloud", ["auth", "print-identity-token"], { ...opts, shell: process.platform === "win32" }, done);
-  });
-}
-function explain(status, code, message) {
-  switch (code) {
-    case "unauthenticated":
-      return "the sync service rejected the sign-in (401). Run `gcloud auth login` (or check YAPA_SYNC_ID_TOKEN_CMD).";
-    case "not_member":
-      return "your Google account is not mapped to a YAPA user; ask a YAPA admin to add you.";
-    case "user_inactive":
-      return "your YAPA user is disabled; ask a YAPA admin.";
-    case "rate_limited":
-      return `rate limited by the sync service (${message}); sync retries next cycle.`;
-    case "unavailable":
-      return "the sync service is temporarily unavailable; local changes stay unsynced and retry next cycle.";
-    case "cloud_run_forbidden":
-      return "Cloud Run refused the request (403): your Google account has no access to the sync service (roles/run.invoker). Ask a YAPA admin, then `gcloud auth login` with that account.";
-    case "cloud_run_unauthenticated":
-      return "Cloud Run rejected the ID token (401). Run `gcloud auth login`.";
-    default:
-      return `sync service error ${status} ${code}: ${message}`;
-  }
-}
-function toOutcome(id, r) {
-  if (!r) return { id, ok: false, code: "internal", message: "no result for this document", permanent: false };
-  if (r.status === "error") {
-    const err = r.error ?? {};
-    const code = String(err.code ?? "internal");
-    return {
-      id,
-      ok: false,
-      code,
-      message: String(err.message ?? code),
-      permanent: PERMANENT_ITEM_ERRORS.has(code),
-      ...typeof err.suggested_id === "string" ? { suggestedId: err.suggested_id } : {}
-    };
-  }
-  return { id, ok: true, status: String(r.status), ...r.stale ? { stale: true } : {}, similar: Array.isArray(r.similar) ? r.similar : [] };
-}
-function toDeletion(d) {
-  const out = { id: d.id, deleted_by: d.deleted_by, deleted_at: Number(d.deleted_at) };
-  if (d.reason === "delete" || d.reason === "retract") out.reason = d.reason;
-  if (typeof d.purged === "boolean") out.purged = d.purged;
-  return out;
-}
-function embeddingModelLabel() {
-  const c = getConfig();
-  if (c.EMBEDDING_PROVIDER === "chromadb") return "Xenova/all-MiniLM-L6-v2:q8";
-  const m = getEmbeddingModel(c);
-  return m ? `${c.EMBEDDING_PROVIDER}:${m}`.slice(0, 200) : void 0;
-}
-function byteBatches(items, maxItems, maxBytes) {
-  const out = [];
-  let cur = [];
-  let bytes = 0;
-  for (const item of items) {
-    const size = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
-    if (cur.length > 0 && (cur.length >= maxItems || bytes + size > maxBytes)) {
-      out.push(cur);
-      cur = [];
-      bytes = 0;
-    }
-    cur.push(item);
-    bytes += size;
-  }
-  if (cur.length) out.push(cur);
-  return out;
-}
-var REFRESH_MARGIN_MS, OPAQUE_TOKEN_TTL_MS, TOKEN_CMD_TIMEOUT_MS, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES, MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, PULL_PAGE_LIMIT, PERMANENT_ITEM_ERRORS, IdTokenProvider, ServiceError, HttpBackend;
-var init_http_backend = __esm({
-  "packages/core/src/sync/http-backend.ts"() {
-    "use strict";
-    init_config();
-    init_device();
-    init_backend();
-    REFRESH_MARGIN_MS = 5 * 6e4;
-    OPAQUE_TOKEN_TTL_MS = 6e4;
-    TOKEN_CMD_TIMEOUT_MS = 2e4;
-    MAX_UPSERT_DOCS = 50;
-    MAX_UPSERT_BODY_BYTES = 15e5;
-    MAX_DELETE_IDS = 500;
-    MAX_LOOKUP_IDS = 1e3;
-    MAX_RELATED_IDS = 100;
-    PULL_PAGE_LIMIT = 500;
-    PERMANENT_ITEM_ERRORS = /* @__PURE__ */ new Set([
-      "secret_detected",
-      "embedding_dimension",
-      "embedding_invalid",
-      "invalid_request",
-      "invalid_collection",
-      "local_only_collection",
-      "task_namespace",
-      "payload_too_large",
-      "not_owner",
-      // The owner purged the id: no write of it will ever be accepted.
-      "purged"
-    ]);
-    IdTokenProvider = class {
-      constructor(cmd = "", now = Date.now, cachePath = "") {
-        this.now = now;
-        this.cachePath = cachePath;
-        this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
-      }
-      now;
-      cachePath;
-      token;
-      validUntil = 0;
-      inFlight;
-      run;
-      /** Bumped on every newly minted token (identity caches key on it). */
-      generation = 0;
-      async get() {
-        if (this.token && this.now() < this.validUntil) return this.token;
-        if (this.loadCached()) return this.token;
-        this.inFlight ??= this.fetch().finally(() => {
-          this.inFlight = void 0;
-        });
-        return this.inFlight;
-      }
-      invalidate() {
-        this.token = void 0;
-        this.validUntil = 0;
-        if (this.cachePath) rmSync2(this.cachePath, { force: true });
-      }
-      validity(token, now) {
-        const exp = Number(decodeJwtPayload(token)?.exp);
-        if (!Number.isFinite(exp) || exp <= 0) return now + OPAQUE_TOKEN_TTL_MS;
-        const life = exp * 1e3 - now;
-        return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
-      }
-      /** Adopt a still-valid token cached by an earlier process (JWTs with `exp` only). */
-      loadCached() {
-        if (!this.cachePath) return false;
-        try {
-          const token = readFileSync5(this.cachePath, "utf-8").trim();
-          if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
-          const until = this.validity(token, this.now());
-          if (this.now() >= until) return false;
-          this.token = token;
-          this.validUntil = until;
-          this.generation++;
-          return true;
-        } catch {
-          return false;
-        }
-      }
-      saveCached(token) {
-        if (!this.cachePath) return;
-        try {
-          mkdirSync4(dirname4(this.cachePath), { recursive: true, mode: 448 });
-          const tmp = `${this.cachePath}.${process.pid}.tmp`;
-          writeFileSync3(tmp, token, { mode: 384 });
-          renameSync3(tmp, this.cachePath);
-        } catch {
-        }
-      }
-      /** `email` claim of the cached token, if any (display only; the service verifies). */
-      email() {
-        const e = this.token ? decodeJwtPayload(this.token)?.email : void 0;
-        return typeof e === "string" ? e : void 0;
-      }
-      async fetch() {
-        const out = (await this.run()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        const token = out[out.length - 1];
-        if (!token || /\s/.test(token)) throw new Error("the ID token command printed no token. Run `gcloud auth login`.");
-        this.token = token;
-        this.validUntil = this.validity(token, this.now());
-        this.generation++;
-        this.saveCached(token);
-        return token;
-      }
-    };
-    ServiceError = class extends Error {
-      constructor(message, status, code, requestId, details = {}) {
-        super(message);
-        this.status = status;
-        this.code = code;
-        this.requestId = requestId;
-        this.details = details;
-        this.name = "ServiceError";
-      }
-      status;
-      code;
-      requestId;
-      details;
-    };
-    HttpBackend = class {
-      kind = "service";
-      capabilities = { deletionsFeed: true };
-      target;
-      tokens;
-      timeoutMs;
-      device;
-      meCache;
-      constructor(opts = {}) {
-        const config = getConfig();
-        this.target = (opts.baseUrl ?? config.SYNC_SERVICE_URL).replace(/\/+$/, "");
-        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
-        this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD, Date.now, config.SYNC_ID_TOKEN_CACHE);
-        this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
-        this.device = opts.device ?? getDeviceId;
-      }
-      fail(err, quiet = false) {
-        if (!quiet || isSignedOutError(err)) noteSyncError(err);
-        throw err;
-      }
-      async request(method, path3, opts = {}) {
-        const url = `${this.target}${path3}`;
-        const idemKey = opts.idempotent ? randomUUID2() : void 0;
-        const body = opts.body === void 0 ? void 0 : JSON.stringify(opts.body);
-        for (let attempt2 = 0; ; attempt2++) {
-          let token;
-          try {
-            token = await this.tokens.get();
-          } catch (e) {
-            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"), opts.quiet);
-          }
-          const headers = {
-            authorization: `Bearer ${token}`,
-            "x-yapa-id-token": token,
-            "x-yapa-device": this.device(),
-            accept: "application/json"
-          };
-          if (body !== void 0) headers["content-type"] = "application/json";
-          if (idemKey) headers["idempotency-key"] = idemKey;
-          let res;
-          try {
-            res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
-          } catch (e) {
-            const why = e?.name === "TimeoutError" || e?.name === "AbortError" ? `timed out after ${this.timeoutMs} ms` : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
-            return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"), opts.quiet);
-          }
-          const text = await res.text().catch(() => "");
-          let json;
-          try {
-            json = text ? JSON.parse(text) : void 0;
-          } catch {
-            json = void 0;
-          }
-          if (res.ok) return json;
-          if (res.status === 404 && opts.allow404) return void 0;
-          const apiErr = json?.error;
-          const code = apiErr?.code ?? (res.status === 401 ? "cloud_run_unauthenticated" : res.status === 403 ? "cloud_run_forbidden" : `http_${res.status}`);
-          if (res.status === 401 && attempt2 === 0) {
-            this.tokens.invalidate();
-            continue;
-          }
-          const message = redactTokens(String(apiErr?.message ?? res.statusText ?? "")).slice(0, 300);
-          const details = { ...apiErr?.details ?? {} };
-          const retryAfter = res.headers.get("retry-after");
-          if (retryAfter) details.retry_after = Number(retryAfter);
-          return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details), opts.quiet);
-        }
-      }
-      /** GET /v1/me, cached per process until the token is re-minted. */
-      async me(refresh = false) {
-        if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
-          const r = await this.request("GET", "/v1/me");
-          this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
-        }
-        return { username: this.meCache.username, email: this.meCache.email };
-      }
-      identity() {
-        return this.me();
-      }
-      async pull(collection, req) {
-        const q = new URLSearchParams();
-        if (req.cursor) q.set("cursor", req.cursor);
-        else q.set("since", String(Math.max(0, Math.floor(req.since))));
-        q.set("limit", String(req.limit ?? PULL_PAGE_LIMIT));
-        if (req.includeOwnDevice) q.set("include_own_device", "true");
-        q.set("embeddings", "false");
-        const r = await this.request("GET", `/v1/collections/${encodeURIComponent(collection)}/documents?${q}`);
-        return {
-          documents: (r.documents ?? []).map((d) => ({ ...d, related_ids: d.related_ids ?? [], metadata: d.metadata ?? {} })),
-          deletions: (r.deletions ?? []).map(toDeletion),
-          nextCursor: r.next_cursor,
-          hasMore: Boolean(r.has_more)
-        };
-      }
-      async upsertMany(docs) {
-        const model = embeddingModelLabel();
-        const items = docs.map((d) => ({
-          id: d.id,
-          collection: d.collection,
-          content: d.content,
-          embedding: d.embedding,
-          ...model ? { embedding_model: model } : {},
-          metadata: d.metadata,
-          created_at: d.created_at,
-          updated_at: d.updated_at
-        }));
-        const out = [];
-        for (const batch of byteBatches(items, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES)) {
-          const r = await this.request("POST", "/v1/documents:batchUpsert", { body: { documents: batch }, idempotent: true });
-          batch.forEach((item, i) => out.push(toOutcome(item.id, r.results?.[i])));
-        }
-        return out;
-      }
-      async delete(ids, reason = "delete") {
-        let deleted = 0;
-        for (const part of chunk(ids, MAX_DELETE_IDS)) {
-          const r = await this.request("POST", "/v1/documents:batchDelete", { body: { ids: part, reason }, idempotent: true });
-          deleted += Number(r.deleted ?? 0);
-        }
-        return deleted;
-      }
-      /**
-       * Soft-delete routes (service schema v4) are user actions, not sync: they
-       * are quiet (a failure does not mark sync unhealthy, a sign-out still
-       * does), and an older service's `404 not_found` becomes an
-       * UnsupportedByRemoteError.
-       */
-      async softDeleteCall(feature, method, path3, opts = {}) {
-        try {
-          return await this.request(method, path3, { ...opts, quiet: true });
-        } catch (e) {
-          if (e instanceof ServiceError && e.status === 404 && e.code === "not_found") throw new UnsupportedByRemoteError(feature);
-          throw e;
-        }
-      }
-      async listDeleted(collection, limit) {
-        const q = new URLSearchParams();
-        if (collection) q.set("collection", collection);
-        if (limit !== void 0) q.set("limit", String(limit));
-        const qs = q.toString();
-        const r = await this.softDeleteCall("listing deleted documents", "GET", `/v1/me/deleted${qs ? `?${qs}` : ""}`);
-        return (r.documents ?? []).map((d) => ({
-          id: String(d.id),
-          collection: String(d.collection),
-          content: String(d.content ?? ""),
-          metadata: d.metadata ?? {},
-          deleted_at: Number(d.deleted_at),
-          reason: d.reason === "retract" ? "retract" : "delete"
-        }));
-      }
-      async restore(ids) {
-        const out = [];
-        for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
-          const r = await this.softDeleteCall("restoring deleted documents", "POST", "/v1/documents:restore", { body: { ids: part }, idempotent: true });
-          const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
-          for (const id of part) {
-            const x = byId.get(id);
-            if (x?.status === "restored") out.push({ id, status: "restored", synced_at: Number(x.synced_at ?? 0) });
-            else out.push({ id, status: x?.status === "id_taken" ? "id_taken" : "not_found" });
-          }
-        }
-        return out;
-      }
-      async purge(ids) {
-        const out = [];
-        for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
-          const r = await this.softDeleteCall("purging documents", "POST", "/v1/documents:purge", { body: { ids: part }, idempotent: true });
-          const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
-          for (const id of part) {
-            const x = byId.get(id);
-            if (x?.status === "purged" || x?.status === "purged_copies" || x?.status === "not_found") out.push({ id, status: x.status });
-            else {
-              const code = String(x?.error?.code ?? "internal");
-              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300), permanent: PERMANENT_ITEM_ERRORS.has(code) });
-            }
-          }
-        }
-        return out;
-      }
-      async collections() {
-        return (await this.request("GET", "/v1/collections")).collections ?? [];
-      }
-      async collectionsForUser() {
-        return (await this.request("GET", "/v1/me/collections")).collections ?? [];
-      }
-      async collectionsByIds(ids) {
-        const out = /* @__PURE__ */ new Map();
-        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
-          const r = await this.request("POST", "/v1/documents:collections", { body: { ids: part } });
-          for (const [id, c] of Object.entries(r.collections ?? {})) out.set(id, c);
-        }
-        return out;
-      }
-      async ownersByIds(ids) {
-        const out = /* @__PURE__ */ new Map();
-        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
-          const r = await this.request("POST", "/v1/documents:owners", { body: { ids: part } });
-          for (const [id, owner] of Object.entries(r.owners ?? {})) out.set(id, { owner, createdAt: Number(r.created_at?.[id] ?? 0) });
-        }
-        return out;
-      }
-      async createdAt(id) {
-        const r = await this.request("GET", `/v1/documents/${encodeURIComponent(id)}/created-at`, { allow404: true });
-        return r ? Number(r.created_at) : void 0;
-      }
-      async maxTaskNumber() {
-        return Number((await this.request("GET", "/v1/me/max-task-number")).max ?? 0);
-      }
-      coordination = {
-        leaseAcquire: (req) => this.request("POST", "/v1/leases:acquire", {
-          // scope and ttl_seconds only when given: an omitted one keeps a renewed lease's stored value.
-          body: {
-            collection: req.collection,
-            key: req.key,
-            session: req.session,
-            scope: req.scope,
-            ttl_seconds: req.ttlSeconds,
-            title: req.title,
-            ...req.reclaim ? { reclaim: true } : {}
-          },
-          quiet: true
-        }),
-        leaseHeartbeat: (collection, session, keys) => this.request("POST", "/v1/leases:heartbeat", { body: { collection, session, keys }, quiet: true }),
-        leaseRelease: (collection, key, session, outcome) => this.request("POST", "/v1/leases:release", { body: { collection, key, session, outcome }, quiet: true }),
-        leaseList: (collection, includeExpired = false) => {
-          const q = new URLSearchParams({ collection });
-          if (includeExpired) q.set("include_expired", "true");
-          return this.request("GET", `/v1/leases?${q}`, { quiet: true });
-        },
-        // Idempotent: a retried request (401 refresh) must not burn a second value.
-        counterNext: async (collection, name, floor) => Number((await this.request("POST", "/v1/counters:next", { body: { collection, name, floor }, idempotent: true, quiet: true })).value),
-        nextTaskId: async (floor) => (await this.request("POST", "/v1/me/task-ids:next", { body: { floor }, idempotent: true, quiet: true })).id
-      };
-      async similar(collection, embedding, threshold) {
-        const r = await this.request("POST", `/v1/collections/${encodeURIComponent(collection)}:similar`, {
-          body: { embedding, ...threshold !== void 0 ? { threshold } : {}, limit: 5 }
-        });
-        return r.matches ?? [];
-      }
-      async addRelatedIds(id, add) {
-        for (const part of chunk(add, MAX_RELATED_IDS)) {
-          await this.request("POST", `/v1/documents/${encodeURIComponent(id)}/related-ids`, { body: { add: part } });
-        }
-      }
-      async health() {
-        try {
-          await this.request("GET", "/v1/health");
-          return { ok: true };
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      }
-      /** Sign in once at startup; the service's username becomes the effective USERNAME. */
-      async prepare() {
-        applyServerUsername((await this.me(true)).username);
-        const note = syncUsernameNote();
-        if (note) process.stderr.write(`[yapa-sync] ${note}
-`);
-      }
-      async maintain() {
-      }
-      async describe() {
-        const lines = ["Backend: YAPA sync service", `Service: ${this.target}`];
-        try {
-          const me = await this.me(true);
-          applyServerUsername(me.username);
-          lines.push(`Signed in as: ${me.username} (${me.email})`);
-          const note = syncUsernameNote();
-          if (note) lines.push(note);
-          lines.push("Connection: healthy");
-        } catch (e) {
-          lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
-        }
-        return lines;
-      }
-      async close() {
-        this.tokens.invalidate();
-        this.meCache = void 0;
-      }
-    };
-  }
-});
-
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync6 } from "node:fs";
+import { readFileSync as readFileSync5 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url;
@@ -3018,7 +2515,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -3027,7 +2524,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -3400,17 +2897,865 @@ var init_postgres_backend = __esm({
   }
 });
 
+// packages/core/src/sync/http-backend.ts
+var http_backend_exports = {};
+__export(http_backend_exports, {
+  FetchTransport: () => FetchTransport,
+  HttpBackend: () => HttpBackend,
+  IdTokenProvider: () => IdTokenProvider,
+  ServiceError: () => ServiceError,
+  TransportError: () => TransportError,
+  decodeJwtPayload: () => decodeJwtPayload,
+  programOf: () => programOf,
+  redactTokens: () => redactTokens,
+  runCommand: () => runCommand
+});
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
+import { dirname as dirname4 } from "node:path";
+import { exec, execFile } from "node:child_process";
+import { randomUUID as randomUUID2 } from "node:crypto";
+function redactTokens(text) {
+  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, "<token>");
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2) return void 0;
+  try {
+    const json = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return json && typeof json === "object" ? json : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function runCommand(cmd, explain2, fallback) {
+  return new Promise((resolve3, reject) => {
+    const done = (err, stdout, stderr) => {
+      if (err) {
+        const why = String(stderr).trim() || (err.killed ? "timed out" : exitText(err.code));
+        const detail = redactTokens(why.split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
+        reject(new Error(explain2(detail)));
+        return;
+      }
+      resolve3(String(stdout));
+    };
+    const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
+    if (cmd || !fallback) exec(cmd, opts, done);
+    else execFile(fallback.file, fallback.args, { ...opts, shell: process.platform === "win32" }, done);
+  });
+}
+function programOf(cmd) {
+  const word = cmd.trim().split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+  return word && /^[\w./-]+$/.test(word) ? word.split("/").pop() || "the token command" : "the token command";
+}
+function exitText(code) {
+  return typeof code === "number" ? `exit code ${code}` : String(code ?? "failed");
+}
+function runTokenCommand(cmd) {
+  return runCommand(
+    cmd,
+    (detail) => `could not get a Google ID token from \`${cmd ? programOf(cmd) : "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`,
+    { file: "gcloud", args: ["auth", "print-identity-token"] }
+  );
+}
+function explain(status, code, message, transport) {
+  switch (code) {
+    case "unauthenticated":
+      return `the ${transport.label} rejected the sign-in (401). ${transport.signInHint}`;
+    case "gateway_forbidden":
+      return `the ${transport.label} refused the request (403): your account may not use this MCP server. Ask its admin.`;
+    case "not_member":
+      return "your Google account is not mapped to a YAPA user; ask a YAPA admin to add you.";
+    case "user_inactive":
+      return "your YAPA user is disabled; ask a YAPA admin.";
+    case "rate_limited":
+      return `rate limited by the sync service (${message}); sync retries next cycle.`;
+    case "unavailable":
+      return "the sync service is temporarily unavailable; local changes stay unsynced and retry next cycle.";
+    case "cloud_run_forbidden":
+      return "Cloud Run refused the request (403): your Google account has no access to the sync service (roles/run.invoker). Ask a YAPA admin, then `gcloud auth login` with that account.";
+    case "cloud_run_unauthenticated":
+      return "Cloud Run rejected the ID token (401). Run `gcloud auth login`.";
+    default:
+      if (code.startsWith("http_")) {
+        const body = message.replace(/^HTTP \d+:?\s*/, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+        return `the ${transport.label} answered HTTP ${status}${body ? `: ${body}` : ""}`;
+      }
+      return `sync service error ${status} ${code}: ${message}`;
+  }
+}
+function toOutcome(id, r) {
+  if (!r) return { id, ok: false, code: "internal", message: "no result for this document", permanent: false };
+  if (r.status === "error") {
+    const err = r.error ?? {};
+    const code = String(err.code ?? "internal");
+    return {
+      id,
+      ok: false,
+      code,
+      message: String(err.message ?? code),
+      permanent: PERMANENT_ITEM_ERRORS.has(code),
+      ...typeof err.suggested_id === "string" ? { suggestedId: err.suggested_id } : {}
+    };
+  }
+  return { id, ok: true, status: String(r.status), ...r.stale ? { stale: true } : {}, similar: Array.isArray(r.similar) ? r.similar : [] };
+}
+function toDeletion(d) {
+  const out = { id: d.id, deleted_by: d.deleted_by, deleted_at: Number(d.deleted_at) };
+  if (d.reason === "delete" || d.reason === "retract") out.reason = d.reason;
+  if (typeof d.purged === "boolean") out.purged = d.purged;
+  return out;
+}
+function embeddingModelLabel() {
+  const c = getConfig();
+  if (c.EMBEDDING_PROVIDER === "chromadb") return "Xenova/all-MiniLM-L6-v2:q8";
+  const m = getEmbeddingModel(c);
+  return m ? `${c.EMBEDDING_PROVIDER}:${m}`.slice(0, 200) : void 0;
+}
+function byteBatches(items, maxItems, maxBytes) {
+  const out = [];
+  let cur = [];
+  let bytes = 0;
+  for (const item of items) {
+    const size = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (cur.length > 0 && (cur.length >= maxItems || bytes + size > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(item);
+    bytes += size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+var REFRESH_MARGIN_MS, OPAQUE_TOKEN_TTL_MS, TOKEN_CMD_TIMEOUT_MS, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES, MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, PULL_PAGE_LIMIT, PERMANENT_ITEM_ERRORS, IdTokenProvider, ServiceError, TransportError, FetchTransport, HttpBackend;
+var init_http_backend = __esm({
+  "packages/core/src/sync/http-backend.ts"() {
+    "use strict";
+    init_config();
+    init_device();
+    init_backend();
+    REFRESH_MARGIN_MS = 5 * 6e4;
+    OPAQUE_TOKEN_TTL_MS = 6e4;
+    TOKEN_CMD_TIMEOUT_MS = 2e4;
+    MAX_UPSERT_DOCS = 50;
+    MAX_UPSERT_BODY_BYTES = 15e5;
+    MAX_DELETE_IDS = 500;
+    MAX_LOOKUP_IDS = 1e3;
+    MAX_RELATED_IDS = 100;
+    PULL_PAGE_LIMIT = 500;
+    PERMANENT_ITEM_ERRORS = /* @__PURE__ */ new Set([
+      "secret_detected",
+      "embedding_dimension",
+      "embedding_invalid",
+      "invalid_request",
+      "invalid_collection",
+      "local_only_collection",
+      "task_namespace",
+      "payload_too_large",
+      "not_owner",
+      // The owner purged the id: no write of it will ever be accepted.
+      "purged"
+    ]);
+    IdTokenProvider = class {
+      constructor(cmd = "", now = Date.now, cachePath = "", opaqueTtlMs) {
+        this.now = now;
+        this.cachePath = cachePath;
+        this.opaqueTtlMs = opaqueTtlMs;
+        this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
+      }
+      now;
+      cachePath;
+      opaqueTtlMs;
+      token;
+      validUntil = 0;
+      inFlight;
+      run;
+      /** Bumped on every newly minted token (identity caches key on it). */
+      generation = 0;
+      async get() {
+        if (this.token && this.now() < this.validUntil) return this.token;
+        if (this.loadCached()) return this.token;
+        this.inFlight ??= this.fetch().finally(() => {
+          this.inFlight = void 0;
+        });
+        return this.inFlight;
+      }
+      invalidate() {
+        this.token = void 0;
+        this.validUntil = 0;
+        if (this.cachePath) rmSync2(this.cachePath, { force: true });
+      }
+      validity(token, now) {
+        const exp = Number(decodeJwtPayload(token)?.exp);
+        if (!Number.isFinite(exp) || exp <= 0) return now + (this.opaqueTtlMs ?? OPAQUE_TOKEN_TTL_MS);
+        const life = exp * 1e3 - now;
+        return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
+      }
+      /** Adopt a still-valid token cached by an earlier process (JWTs with `exp`, or opaque ones stored with their expiry). */
+      loadCached() {
+        if (!this.cachePath) return false;
+        try {
+          const [first = "", stored] = readFileSync6(this.cachePath, "utf-8").split("\n");
+          const token = first.trim();
+          if (!token) return false;
+          const jwt = Number.isFinite(Number(decodeJwtPayload(token)?.exp));
+          if (!jwt && (this.opaqueTtlMs === void 0 || !Number.isFinite(Number(stored)))) return false;
+          const until = jwt ? this.validity(token, this.now()) : Number(stored);
+          if (this.now() >= until) return false;
+          this.token = token;
+          this.validUntil = until;
+          this.generation++;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      saveCached(token) {
+        if (!this.cachePath) return;
+        try {
+          mkdirSync4(dirname4(this.cachePath), { recursive: true, mode: 448 });
+          const tmp = `${this.cachePath}.${process.pid}.tmp`;
+          const opaque = this.opaqueTtlMs !== void 0 && !Number.isFinite(Number(decodeJwtPayload(token)?.exp));
+          writeFileSync3(tmp, opaque ? `${token}
+${this.validUntil}` : token, { mode: 384 });
+          renameSync3(tmp, this.cachePath);
+        } catch {
+        }
+      }
+      /** `email` claim of the cached token, if any (display only; the service verifies). */
+      email() {
+        const e = this.token ? decodeJwtPayload(this.token)?.email : void 0;
+        return typeof e === "string" ? e : void 0;
+      }
+      async fetch() {
+        const out = (await this.run()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const token = out[out.length - 1];
+        if (!token || /\s/.test(token)) throw new Error("the ID token command printed no token. Run `gcloud auth login`.");
+        this.token = token;
+        this.validUntil = this.validity(token, this.now());
+        this.generation++;
+        this.saveCached(token);
+        return token;
+      }
+    };
+    ServiceError = class extends Error {
+      constructor(message, status, code, requestId, details = {}) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.requestId = requestId;
+        this.details = details;
+        this.name = "ServiceError";
+      }
+      status;
+      code;
+      requestId;
+      details;
+    };
+    TransportError = class extends Error {
+    };
+    FetchTransport = class {
+      kind = "http";
+      label = "sync service";
+      signInHint = "Run `gcloud auth login` (or check YAPA_SYNC_ID_TOKEN_CMD).";
+      target;
+      constructor(baseUrl) {
+        this.target = baseUrl.replace(/\/+$/, "");
+        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
+      }
+      async send(req, timeoutMs) {
+        const body = req.body === void 0 ? void 0 : JSON.stringify(req.body);
+        const headers = {
+          authorization: `Bearer ${req.token}`,
+          "x-yapa-id-token": req.token,
+          "x-yapa-device": req.device,
+          accept: "application/json"
+        };
+        if (body !== void 0) headers["content-type"] = "application/json";
+        if (req.idempotencyKey) headers["idempotency-key"] = req.idempotencyKey;
+        let res;
+        try {
+          res = await fetch(`${this.target}${req.path}`, { method: req.method, headers, body, signal: AbortSignal.timeout(timeoutMs) });
+        } catch (e) {
+          throw new TransportError(e?.name === "TimeoutError" || e?.name === "AbortError" ? `timed out after ${timeoutMs} ms` : redactTokens(String(e?.cause?.message ?? e?.message ?? e)));
+        }
+        const text = await res.text().catch(() => "");
+        let json;
+        try {
+          json = text ? JSON.parse(text) : void 0;
+        } catch {
+          json = void 0;
+        }
+        return { status: res.status, statusText: res.statusText, json, header: (name) => res.headers.get(name) };
+      }
+      describe() {
+        return ["Backend: YAPA sync service", `Service: ${this.target}`];
+      }
+      async close() {
+      }
+    };
+    HttpBackend = class {
+      kind = "service";
+      capabilities = { deletionsFeed: true };
+      target;
+      transport;
+      tokens;
+      timeoutMs;
+      device;
+      meCache;
+      constructor(opts = {}) {
+        const config = getConfig();
+        this.transport = opts.transport ?? new FetchTransport(opts.baseUrl ?? config.SYNC_SERVICE_URL);
+        this.target = this.transport.target;
+        this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD, Date.now, config.SYNC_ID_TOKEN_CACHE);
+        this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
+        this.device = opts.device ?? getDeviceId;
+      }
+      get identitySource() {
+        return this.transport.kind === "mcp" ? "your sign-in" : "your Google account";
+      }
+      fail(err, quiet = false) {
+        if (!quiet || isSignedOutError(err)) noteSyncError(err);
+        throw err;
+      }
+      async request(method, path3, opts = {}) {
+        const idemKey = opts.idempotent ? randomUUID2() : void 0;
+        for (let attempt2 = 0; ; attempt2++) {
+          let token;
+          try {
+            token = await this.tokens.get();
+          } catch (e) {
+            return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, "token_command"), opts.quiet);
+          }
+          let res;
+          try {
+            res = await this.transport.send({ method, path: path3, body: opts.body, token, device: this.device(), idempotencyKey: idemKey }, this.timeoutMs);
+          } catch (e) {
+            if (e instanceof ServiceError) return this.fail(e, opts.quiet);
+            const why = e instanceof TransportError ? e.message : redactTokens(String(e?.message ?? e));
+            return this.fail(new ServiceError(`${this.transport.label} unreachable (${new URL(this.target).host}): ${why}`, 0, "unreachable"), opts.quiet);
+          }
+          const json = res.json;
+          if (res.status >= 200 && res.status < 300) return json;
+          if (res.status === 404 && opts.allow404) return void 0;
+          const apiErr = json?.error;
+          const iam = this.transport.kind === "http";
+          const code = apiErr?.code ?? (iam && res.status === 401 ? "cloud_run_unauthenticated" : iam && res.status === 403 ? "cloud_run_forbidden" : `http_${res.status}`);
+          if (res.status === 401 && attempt2 === 0) {
+            this.tokens.invalidate();
+            continue;
+          }
+          const message = redactTokens(String(apiErr?.message ?? res.statusText ?? "")).slice(0, 300);
+          const details = { ...apiErr?.details ?? {} };
+          const retryAfter = res.header("retry-after");
+          if (retryAfter) details.retry_after = Number(retryAfter);
+          return this.fail(new ServiceError(explain(res.status, code, message, this.transport), res.status, code, apiErr?.request_id, details), opts.quiet);
+        }
+      }
+      /** GET /v1/me, cached per process until the token is re-minted. */
+      async me(refresh = false) {
+        if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
+          const r = await this.request("GET", "/v1/me");
+          this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
+        }
+        return { username: this.meCache.username, email: this.meCache.email };
+      }
+      identity() {
+        return this.me();
+      }
+      async pull(collection, req) {
+        const q = new URLSearchParams();
+        if (req.cursor) q.set("cursor", req.cursor);
+        else q.set("since", String(Math.max(0, Math.floor(req.since))));
+        q.set("limit", String(req.limit ?? PULL_PAGE_LIMIT));
+        if (req.includeOwnDevice) q.set("include_own_device", "true");
+        q.set("embeddings", "false");
+        const r = await this.request("GET", `/v1/collections/${encodeURIComponent(collection)}/documents?${q}`);
+        return {
+          documents: (r.documents ?? []).map((d) => ({ ...d, related_ids: d.related_ids ?? [], metadata: d.metadata ?? {} })),
+          deletions: (r.deletions ?? []).map(toDeletion),
+          nextCursor: r.next_cursor,
+          hasMore: Boolean(r.has_more)
+        };
+      }
+      async upsertMany(docs) {
+        const model = embeddingModelLabel();
+        const items = docs.map((d) => ({
+          id: d.id,
+          collection: d.collection,
+          content: d.content,
+          embedding: d.embedding,
+          ...model ? { embedding_model: model } : {},
+          metadata: d.metadata,
+          created_at: d.created_at,
+          updated_at: d.updated_at
+        }));
+        const out = [];
+        for (const batch of byteBatches(items, MAX_UPSERT_DOCS, MAX_UPSERT_BODY_BYTES)) {
+          const r = await this.request("POST", "/v1/documents:batchUpsert", { body: { documents: batch }, idempotent: true });
+          batch.forEach((item, i) => out.push(toOutcome(item.id, r.results?.[i])));
+        }
+        return out;
+      }
+      async delete(ids, reason = "delete") {
+        let deleted = 0;
+        for (const part of chunk(ids, MAX_DELETE_IDS)) {
+          const r = await this.request("POST", "/v1/documents:batchDelete", { body: { ids: part, reason }, idempotent: true });
+          deleted += Number(r.deleted ?? 0);
+        }
+        return deleted;
+      }
+      /**
+       * Soft-delete routes (service schema v4) are user actions, not sync: they
+       * are quiet (a failure does not mark sync unhealthy, a sign-out still
+       * does), and an older service's `404 not_found` becomes an
+       * UnsupportedByRemoteError.
+       */
+      async softDeleteCall(feature, method, path3, opts = {}) {
+        try {
+          return await this.request(method, path3, { ...opts, quiet: true });
+        } catch (e) {
+          if (e instanceof ServiceError && e.status === 404 && e.code === "not_found") throw new UnsupportedByRemoteError(feature);
+          throw e;
+        }
+      }
+      async listDeleted(collection, limit) {
+        const q = new URLSearchParams();
+        if (collection) q.set("collection", collection);
+        if (limit !== void 0) q.set("limit", String(limit));
+        const qs = q.toString();
+        const r = await this.softDeleteCall("listing deleted documents", "GET", `/v1/me/deleted${qs ? `?${qs}` : ""}`);
+        return (r.documents ?? []).map((d) => ({
+          id: String(d.id),
+          collection: String(d.collection),
+          content: String(d.content ?? ""),
+          metadata: d.metadata ?? {},
+          deleted_at: Number(d.deleted_at),
+          reason: d.reason === "retract" ? "retract" : "delete"
+        }));
+      }
+      async restore(ids) {
+        const out = [];
+        for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
+          const r = await this.softDeleteCall("restoring deleted documents", "POST", "/v1/documents:restore", { body: { ids: part }, idempotent: true });
+          const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
+          for (const id of part) {
+            const x = byId.get(id);
+            if (x?.status === "restored") out.push({ id, status: "restored", synced_at: Number(x.synced_at ?? 0) });
+            else out.push({ id, status: x?.status === "id_taken" ? "id_taken" : "not_found" });
+          }
+        }
+        return out;
+      }
+      async purge(ids) {
+        const out = [];
+        for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
+          const r = await this.softDeleteCall("purging documents", "POST", "/v1/documents:purge", { body: { ids: part }, idempotent: true });
+          const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
+          for (const id of part) {
+            const x = byId.get(id);
+            if (x?.status === "purged" || x?.status === "purged_copies" || x?.status === "not_found") out.push({ id, status: x.status });
+            else {
+              const code = String(x?.error?.code ?? "internal");
+              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300), permanent: PERMANENT_ITEM_ERRORS.has(code) });
+            }
+          }
+        }
+        return out;
+      }
+      async collections() {
+        return (await this.request("GET", "/v1/collections")).collections ?? [];
+      }
+      async collectionsForUser() {
+        return (await this.request("GET", "/v1/me/collections")).collections ?? [];
+      }
+      async collectionsByIds(ids) {
+        const out = /* @__PURE__ */ new Map();
+        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
+          const r = await this.request("POST", "/v1/documents:collections", { body: { ids: part } });
+          for (const [id, c] of Object.entries(r.collections ?? {})) out.set(id, c);
+        }
+        return out;
+      }
+      async ownersByIds(ids) {
+        const out = /* @__PURE__ */ new Map();
+        for (const part of chunk(ids, MAX_LOOKUP_IDS)) {
+          const r = await this.request("POST", "/v1/documents:owners", { body: { ids: part } });
+          for (const [id, owner] of Object.entries(r.owners ?? {})) out.set(id, { owner, createdAt: Number(r.created_at?.[id] ?? 0) });
+        }
+        return out;
+      }
+      async createdAt(id) {
+        const r = await this.request("GET", `/v1/documents/${encodeURIComponent(id)}/created-at`, { allow404: true });
+        return r ? Number(r.created_at) : void 0;
+      }
+      async maxTaskNumber() {
+        return Number((await this.request("GET", "/v1/me/max-task-number")).max ?? 0);
+      }
+      coordination = {
+        leaseAcquire: (req) => this.request("POST", "/v1/leases:acquire", {
+          // scope and ttl_seconds only when given: an omitted one keeps a renewed lease's stored value.
+          body: {
+            collection: req.collection,
+            key: req.key,
+            session: req.session,
+            scope: req.scope,
+            ttl_seconds: req.ttlSeconds,
+            title: req.title,
+            ...req.reclaim ? { reclaim: true } : {}
+          },
+          quiet: true
+        }),
+        leaseHeartbeat: (collection, session, keys) => this.request("POST", "/v1/leases:heartbeat", { body: { collection, session, keys }, quiet: true }),
+        leaseRelease: (collection, key, session, outcome) => this.request("POST", "/v1/leases:release", { body: { collection, key, session, outcome }, quiet: true }),
+        leaseList: (collection, includeExpired = false) => {
+          const q = new URLSearchParams({ collection });
+          if (includeExpired) q.set("include_expired", "true");
+          return this.request("GET", `/v1/leases?${q}`, { quiet: true });
+        },
+        // Idempotent: a retried request (401 refresh) must not burn a second value.
+        counterNext: async (collection, name, floor) => Number((await this.request("POST", "/v1/counters:next", { body: { collection, name, floor }, idempotent: true, quiet: true })).value),
+        nextTaskId: async (floor) => (await this.request("POST", "/v1/me/task-ids:next", { body: { floor }, idempotent: true, quiet: true })).id
+      };
+      async similar(collection, embedding, threshold) {
+        const r = await this.request("POST", `/v1/collections/${encodeURIComponent(collection)}:similar`, {
+          body: { embedding, ...threshold !== void 0 ? { threshold } : {}, limit: 5 }
+        });
+        return r.matches ?? [];
+      }
+      async addRelatedIds(id, add) {
+        for (const part of chunk(add, MAX_RELATED_IDS)) {
+          await this.request("POST", `/v1/documents/${encodeURIComponent(id)}/related-ids`, { body: { add: part } });
+        }
+      }
+      async health() {
+        try {
+          await this.request("GET", "/v1/health");
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
+      /** Sign in once at startup; the service's username becomes the effective USERNAME. */
+      async prepare() {
+        applyServerUsername((await this.me(true)).username);
+        const note = syncUsernameNote(this.identitySource);
+        if (note) process.stderr.write(`[yapa-sync] ${note}
+`);
+      }
+      async maintain() {
+      }
+      async describe() {
+        const lines = this.transport.describe();
+        try {
+          const me = await this.me(true);
+          applyServerUsername(me.username);
+          lines.push(`Signed in as: ${me.username} (${me.email})`);
+          const note = syncUsernameNote(this.identitySource);
+          if (note) lines.push(note);
+          lines.push("Connection: healthy");
+        } catch (e) {
+          lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
+        }
+        return lines;
+      }
+      async close() {
+        this.tokens.invalidate();
+        this.meCache = void 0;
+        await this.transport.close();
+      }
+    };
+  }
+});
+
+// packages/core/src/sync/mcp-transport.ts
+var mcp_transport_exports = {};
+__export(mcp_transport_exports, {
+  McpTransport: () => McpTransport,
+  SYNC_TOOL: () => SYNC_TOOL,
+  mcpTokenProvider: () => mcpTokenProvider,
+  pickSyncTool: () => pickSyncTool,
+  readSse: () => readSse
+});
+import { join as join5, dirname as dirname5 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
+function mcpTokenProvider(config) {
+  const cmd = config.SYNC_MCP_TOKEN_CMD.trim();
+  const cache = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
+  return new IdTokenProvider(async () => {
+    if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
+    const out = await runCommand(cmd, (detail) => `could not get a token for the MCP gateway from \`${programOf(cmd)}\`: ${detail}. ${fix}`);
+    const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
+    if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
+    return token;
+  }, Date.now, cache, OPAQUE_TOKEN_TTL_MS2);
+}
+function pickSyncTool(names, host, explicit = "") {
+  if (explicit) {
+    if (names.includes(explicit)) return explicit;
+    throw new ServiceError(`the MCP server at ${host} has no tool named ${explicit} (YAPA_SYNC_MCP_TOOL).`, 0, "no_sync_tool");
+  }
+  if (names.includes(SYNC_TOOL)) return SYNC_TOOL;
+  const prefixed = [...new Set(names.filter((n) => PREFIX_SEPARATORS.some((sep) => n.endsWith(`${sep}${SYNC_TOOL}`) && n.length > sep.length + SYNC_TOOL.length)))];
+  if (prefixed.length === 1) return prefixed[0];
+  if (prefixed.length > 1) {
+    throw new ServiceError(`the MCP server at ${host} has several sync tools (${prefixed.join(", ")}). Set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to the one to use.`, 0, "ambiguous_sync_tool");
+  }
+  const near = names.filter((n) => n.endsWith(SYNC_TOOL));
+  if (near.length) {
+    throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool, but has ${near.join(", ")}. If that is the sync tool, set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to it.`, 0, "no_sync_tool");
+  }
+  throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool. Check YAPA_SYNC_MCP_URL, and that your account may use it.`, 0, "no_sync_tool");
+}
+async function readSse(res, id) {
+  if (!res.body) throw new Error("the MCP server sent an empty event stream");
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  let data = [];
+  const line = (l) => {
+    if (l !== "") {
+      if (l.startsWith("data:")) data.push(l.slice(5).replace(/^ /, ""));
+      return void 0;
+    }
+    const payload = data.join("\n");
+    data = [];
+    if (!payload) return void 0;
+    try {
+      const msg = JSON.parse(payload);
+      return msg?.id === id && ("result" in msg || "error" in msg) ? msg : void 0;
+    } catch {
+      return void 0;
+    }
+  };
+  try {
+    for (; ; ) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      for (let m = /\r\n|\r|\n/.exec(buf); m; m = /\r\n|\r|\n/.exec(buf)) {
+        if (m[0] === "\r" && m.index === buf.length - 1) break;
+        const found2 = line(buf.slice(0, m.index));
+        buf = buf.slice(m.index + m[0].length);
+        if (found2) return found2;
+      }
+    }
+    const found = (buf ? line(buf) : void 0) ?? line("");
+    if (found) return found;
+  } finally {
+    reader.cancel().catch(() => void 0);
+  }
+  throw new Error("the MCP server closed the event stream without a response");
+}
+function toResponse(result) {
+  const text = result?.content?.find((c) => c.type === "text")?.text ?? "";
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = void 0;
+  }
+  if (parsed && typeof parsed === "object" && Number.isInteger(parsed.status)) {
+    const headers = new Map(Object.entries(parsed.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
+    return { status: parsed.status, statusText: "", json: parsed.body ?? void 0, header: (name) => headers.get(name.toLowerCase()) ?? null };
+  }
+  const message = redactTokens(text).slice(0, 300) || "the tool returned no result";
+  if (result?.isError && /unauthori[sz]ed|unauthenticated|\b401\b|(expired|invalid) token/i.test(message)) return refusal(401, "unauthenticated", message);
+  return refusal(502, result?.isError ? "mcp_tool_error" : "bad_response", message);
+}
+function refusal(status, code, message, retryAfter = null) {
+  return { status, statusText: "", json: { error: { code, message } }, header: (name) => name.toLowerCase() === "retry-after" ? retryAfter : null };
+}
+function describeFailure(e, timeoutMs) {
+  const err = e;
+  if (err?.name === "TimeoutError" || err?.name === "AbortError") return `timed out after ${timeoutMs} ms`;
+  return redactTokens(String(err?.cause?.message ?? err?.message ?? e)).slice(0, 300);
+}
+var SYNC_TOOL, PROTOCOL_VERSION, MAX_TOOL_PAGES, OPAQUE_TOKEN_TTL_MS2, END_SESSION_TIMEOUT_MS, PREFIX_SEPARATORS, LOOPBACK, HttpStatusError, RpcError, McpTransport;
+var init_mcp_transport = __esm({
+  "packages/core/src/sync/mcp-transport.ts"() {
+    "use strict";
+    init_http_backend();
+    SYNC_TOOL = "yapa_sync";
+    PROTOCOL_VERSION = "2025-06-18";
+    MAX_TOOL_PAGES = 50;
+    OPAQUE_TOKEN_TTL_MS2 = 50 * 6e4;
+    END_SESSION_TIMEOUT_MS = 2e3;
+    PREFIX_SEPARATORS = ["__", ".", "/", "-"];
+    LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
+    HttpStatusError = class extends Error {
+      constructor(status, message, retryAfter) {
+        super(message);
+        this.status = status;
+        this.retryAfter = retryAfter;
+      }
+      status;
+      retryAfter;
+    };
+    RpcError = class extends Error {
+    };
+    McpTransport = class {
+      constructor(url, opts = {}) {
+        this.opts = opts;
+        this.target = url.trim();
+        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync MCP URL must start with https:// (got "${this.target}")`);
+        this.url = new URL(this.target);
+        if (this.url.protocol === "http:" && !LOOPBACK.has(this.url.hostname)) {
+          throw new Error(`sync MCP URL must use https:// (http:// only for localhost; got "${this.target}")`);
+        }
+      }
+      opts;
+      kind = "mcp";
+      label = "MCP gateway";
+      signInHint = "Sign in to the MCP gateway again (or check YAPA_SYNC_MCP_TOKEN_CMD).";
+      target;
+      url;
+      session;
+      opening;
+      nextId = 1;
+      async send(req, timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        const args = {
+          method: req.method,
+          // The tool's path pattern has no room for the characters encodeURIComponent and URLSearchParams leave alone.
+          path: req.path.replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`),
+          ...req.body === void 0 ? {} : { body: req.body },
+          device: req.device,
+          ...req.idempotencyKey ? { idempotency_key: req.idempotencyKey } : {},
+          request_id: randomUUID3()
+        };
+        for (let attempt2 = 0; ; attempt2++) {
+          const reused = this.session?.token === req.token;
+          let session;
+          try {
+            session = await this.connect(req.token, deadline);
+            const result = await this.rpc(session, "tools/call", { name: session.tool, arguments: args }, deadline);
+            return toResponse(result);
+          } catch (e) {
+            if (session && this.session === session) this.session = void 0;
+            if (e instanceof ServiceError) throw e;
+            if (e instanceof RpcError) return refusal(502, "mcp_error", redactTokens(e.message).slice(0, 300));
+            if (!(e instanceof HttpStatusError)) throw new TransportError(describeFailure(e, timeoutMs));
+            const { status } = e;
+            if (status === 401) return refusal(401, "unauthenticated", "the MCP gateway rejected the token");
+            if (status === 403) return refusal(403, "gateway_forbidden", "the MCP gateway refused the request");
+            if (status === 404 && reused && session?.id && attempt2 === 0) continue;
+            if (status === 429) return refusal(429, "rate_limited", "the MCP gateway is rate limiting requests", e.retryAfter);
+            return { status, statusText: e.message, json: void 0, header: () => null };
+          }
+        }
+      }
+      async connect(token, deadline) {
+        if (this.session?.token === token) return this.session;
+        if (this.session) this.end(this.session);
+        this.session = void 0;
+        if (this.opening?.token !== token) {
+          const promise = this.open(token, deadline).finally(() => {
+            if (this.opening?.promise === promise) this.opening = void 0;
+          });
+          this.opening = { token, promise };
+        }
+        return this.opening.promise;
+      }
+      async open(token, deadline) {
+        const session = { token, tool: "" };
+        try {
+          const init = await this.rpc(session, "initialize", {
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: { name: "yapa", version: "1" }
+          }, deadline);
+          session.protocol = typeof init?.protocolVersion === "string" ? init.protocolVersion : PROTOCOL_VERSION;
+          await this.post(session, { jsonrpc: "2.0", method: "notifications/initialized" }, deadline);
+          const names = [];
+          let cursor;
+          for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+            const r = await this.rpc(session, "tools/list", cursor ? { cursor } : {}, deadline);
+            names.push(...(r?.tools ?? []).map((t) => String(t?.name ?? "")));
+            cursor = r?.nextCursor;
+            if (!cursor) break;
+          }
+          session.tool = pickSyncTool(names, this.url.host, this.opts.tool);
+          this.session = session;
+          return session;
+        } catch (e) {
+          this.end(session);
+          throw e;
+        }
+      }
+      async rpc(session, method, params, deadline) {
+        const id = this.nextId++;
+        const msg = await this.post(session, { jsonrpc: "2.0", id, method, params }, deadline, id);
+        if (msg?.error) throw new RpcError(`MCP error ${msg.error.code}: ${msg.error.message}`);
+        return msg?.result;
+      }
+      headers(session) {
+        const headers = {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${session.token}`
+        };
+        if (session.id) headers["mcp-session-id"] = session.id;
+        if (session.protocol) headers["mcp-protocol-version"] = session.protocol;
+        return headers;
+      }
+      /** POST one JSON-RPC message; with `id`, resolve with the response to it (JSON body or SSE stream). */
+      async post(session, message, deadline, id) {
+        const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+        const res = await fetch(this.url, { method: "POST", headers: this.headers(session), body: JSON.stringify(message), signal });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new HttpStatusError(res.status, redactTokens(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`), res.headers.get("retry-after"));
+        }
+        session.id ??= res.headers.get("mcp-session-id") ?? void 0;
+        if (id === void 0) {
+          await res.body?.cancel();
+          return void 0;
+        }
+        const type = res.headers.get("content-type") ?? "";
+        if (type.includes("text/event-stream")) return readSse(res, id);
+        const body = await res.json();
+        const found = (Array.isArray(body) ? body : [body]).find((m) => m?.id === id);
+        if (!found) throw new Error("the MCP server answered without a response to the request");
+        return found;
+      }
+      /** Best effort: tell the server a session is over (DELETE), without waiting for it. */
+      end(session) {
+        if (!session.id) return;
+        fetch(this.url, { method: "DELETE", headers: this.headers(session), signal: AbortSignal.timeout(END_SESSION_TIMEOUT_MS) }).then((r) => r.body?.cancel()).catch(() => void 0);
+      }
+      describe() {
+        const lines = [`Backend: YAPA sync over MCP (${this.url.host})`, `MCP server: ${this.target}`];
+        if (this.session) lines.push(`Tool: ${this.session.tool}`);
+        return lines;
+      }
+      async close() {
+        this.opening = void 0;
+        if (this.session) this.end(this.session);
+        this.session = void 0;
+      }
+    };
+  }
+});
+
 // packages/core/src/sync/backend.ts
 function syncBackendKind(config = getConfig()) {
-  if (config.SYNC_SERVICE_URL) return "service";
+  if (config.SYNC_MCP_URL || config.SYNC_SERVICE_URL) return "service";
   if (config.SYNC_DATABASE_URL) return "postgres";
+  return void 0;
+}
+function syncTransportKind(config = getConfig()) {
+  if (config.SYNC_MCP_URL) return "mcp";
+  if (config.SYNC_SERVICE_URL) return "http";
   return void 0;
 }
 function isSyncConfigured(config = getConfig()) {
   return config.SYNC_ENABLED && syncBackendKind(config) !== void 0;
 }
 function keyOf(config) {
-  return JSON.stringify([config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
+  return JSON.stringify([config.SYNC_MCP_URL, config.SYNC_MCP_TOKEN_CMD, config.SYNC_MCP_TOOL, config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
 }
 async function getSyncBackend() {
   const b = await selectBackend();
@@ -3426,13 +3771,17 @@ async function selectBackend() {
   if (active3?.key === key) return active3.backend;
   if (active3) await active3.backend.close().catch(() => void 0);
   serverUsername = void 0;
-  const backend = kind === "service" ? new (await Promise.resolve().then(() => (init_http_backend(), http_backend_exports))).HttpBackend() : new (await Promise.resolve().then(() => (init_postgres_backend(), postgres_backend_exports))).PostgresBackend();
+  const backend = kind === "postgres" ? new (await Promise.resolve().then(() => (init_postgres_backend(), postgres_backend_exports))).PostgresBackend() : syncTransportKind(config) === "mcp" ? await mcpBackend(config) : new (await Promise.resolve().then(() => (init_http_backend(), http_backend_exports))).HttpBackend();
   active3 = { key, backend };
   return backend;
 }
+async function mcpBackend(config) {
+  const [{ HttpBackend: HttpBackend2 }, { McpTransport: McpTransport2, mcpTokenProvider: mcpTokenProvider2 }] = await Promise.all([Promise.resolve().then(() => (init_http_backend(), http_backend_exports)), Promise.resolve().then(() => (init_mcp_transport(), mcp_transport_exports))]);
+  return new HttpBackend2({ transport: new McpTransport2(config.SYNC_MCP_URL, { tool: config.SYNC_MCP_TOOL }), tokens: mcpTokenProvider2(config) });
+}
 async function requireSyncBackend() {
   const b = await getSyncBackend();
-  if (!b) throw new Error("sync has no target: set YAPA_SYNC_SERVICE_URL (plugin option sync_service_url)");
+  if (!b) throw new Error("sync has no target: set YAPA_SYNC_SERVICE_URL (plugin option sync_service_url) or YAPA_SYNC_MCP_URL (sync_mcp_url)");
   return b;
 }
 function setSyncBackend(backend) {
@@ -3478,7 +3827,10 @@ function isCycleFatal(e) {
     "user_inactive",
     "rate_limited",
     "unavailable",
-    "token_command"
+    "token_command",
+    "gateway_forbidden",
+    "no_sync_tool",
+    "ambiguous_sync_tool"
   ].includes(code);
 }
 function applyServerUsername(username) {
@@ -3498,9 +3850,9 @@ async function resolveSyncUsername() {
   }
   return getConfig().USERNAME;
 }
-function syncUsernameNote() {
+function syncUsernameNote(source = (override ?? active3?.backend)?.identitySource) {
   if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return void 0;
-  return `Username: using '${serverUsername}' from your Google account (the username option '${configuredUsername}' is informational with the sync service)`;
+  return `Username: using '${serverUsername}' from ${source ?? "your Google account"} (the username option '${configuredUsername}' is informational with the sync service)`;
 }
 var UnsupportedByRemoteError, override, active3, lastError, serverUsername, configuredUsername;
 var init_backend = __esm({
@@ -3522,7 +3874,7 @@ var init_backend = __esm({
 
 // packages/core/src/sync/local-coordination.ts
 import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 function assertMatch(v, re, what) {
   if (typeof v !== "string" || !re.test(v)) throw bad(`${what} must match ${re.source}`);
   return v;
@@ -3551,7 +3903,7 @@ function localCoordinationDir() {
   return getConfig().LOCAL_COORD_DIR;
 }
 function stateFile(dir, collection) {
-  return join5(dir, `${encodeURIComponent(collection)}.json`);
+  return join6(dir, `${encodeURIComponent(collection)}.json`);
 }
 function readState2(file) {
   try {
@@ -3761,7 +4113,7 @@ var init_local_coordination = __esm({
 
 // packages/core/src/sync/coordination.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync8, rmSync as rmSync3 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 function currentSession(explicit, env = process.env) {
   for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
     if (v && SESSION_RE2.test(v)) return v;
@@ -3769,7 +4121,7 @@ function currentSession(explicit, env = process.env) {
   return void 0;
 }
 function markerPath(session) {
-  return join6(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join7(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function readMarker(session) {
   try {
@@ -3843,7 +4195,7 @@ function sessionsHoldingLeases() {
   }
 }
 function noticesPath() {
-  return join6(getConfig().LEASE_STATE_DIR, "notices.state");
+  return join7(getConfig().LEASE_STATE_DIR, "notices.state");
 }
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
@@ -3910,7 +4262,7 @@ async function heartbeatIfDue(sessions, now = Math.floor(Date.now() / 1e3)) {
 }
 async function serviceCoordination() {
   if (!isSyncConfigured()) {
-    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url)");
+    throw new CoordinationUnavailableError("not_configured", "leases and counters need the YAPA sync service (sync_enabled + sync_service_url or sync_mcp_url)");
   }
   const backend = await getSyncBackend();
   if (!backend?.coordination) {
@@ -3922,7 +4274,7 @@ function localCoordination() {
   if (!local) {
     const dir = getConfig().LOCAL_COORD_DIR;
     sweepLockDebris(dir);
-    sweepLockDebris(join6(dir, "locks"));
+    sweepLockDebris(join7(dir, "locks"));
     sweepLockDebris(getConfig().LEASE_STATE_DIR);
     local = guardLocal(createLocalCoordination());
   }
@@ -7238,9 +7590,9 @@ var init_capture = __esm({
 
 // packages/core/src/buckets/artifacts.ts
 import { existsSync, mkdirSync as mkdirSync5, readdirSync as readdirSync4, readFileSync as readFileSync9, writeFileSync as writeFileSync4 } from "fs";
-import { join as join7 } from "path";
+import { join as join8 } from "path";
 function artifactDir(kind) {
-  return join7(getConfig().ARTIFACTS_DIR, kind);
+  return join8(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
@@ -7272,17 +7624,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path3 = join7(dir, filename);
+  const path3 = join8(dir, filename);
   writeFileSync4(path3, content);
   return path3;
 }
 function readArtifact(kind, filename) {
-  const path3 = join7(artifactDir(kind), filename);
+  const path3 = join8(artifactDir(kind), filename);
   if (!existsSync(path3)) return null;
   return readFileSync9(path3, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join7(artifactDir(kind), filename);
+  return join8(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -7963,10 +8315,11 @@ var init_pull = __esm({
 // packages/core/src/sync/shared-cycle.ts
 import { createHash as createHash3 } from "node:crypto";
 import { closeSync as closeSync2, mkdirSync as mkdirSync6, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
-import { dirname as dirname5, join as join8 } from "node:path";
+import { dirname as dirname6, join as join9 } from "node:path";
 function syncTargetKey(config = getConfig()) {
   let remote = "";
-  if (config.SYNC_SERVICE_URL) remote = `service:${config.SYNC_SERVICE_URL}`;
+  if (config.SYNC_MCP_URL) remote = `mcp:${config.SYNC_MCP_URL}`;
+  else if (config.SYNC_SERVICE_URL) remote = `service:${config.SYNC_SERVICE_URL}`;
   else if (config.SYNC_DATABASE_URL) {
     try {
       const u = new URL(config.SYNC_DATABASE_URL);
@@ -7980,7 +8333,7 @@ function syncTargetKey(config = getConfig()) {
 }
 function sharedDir(config = getConfig()) {
   if (!config.SYNC_COORDINATE || !config.SYNC_HEALTH_FILE) return void 0;
-  return dirname5(config.SYNC_HEALTH_FILE);
+  return dirname6(config.SYNC_HEALTH_FILE);
 }
 function paths(config = getConfig()) {
   const dir = sharedDir(config);
@@ -7988,9 +8341,9 @@ function paths(config = getConfig()) {
   const key = syncTargetKey(config);
   return {
     dir,
-    record: join8(dir, `sync-cycle-${key}.json`),
-    lock: join8(dir, `sync-cycle-${key}.lock`),
-    pulls: join8(dir, `sync-pulls-${key}.json`)
+    record: join9(dir, `sync-cycle-${key}.json`),
+    lock: join9(dir, `sync-cycle-${key}.lock`),
+    pulls: join9(dir, `sync-pulls-${key}.json`)
   };
 }
 function readJson(path3) {
@@ -8002,7 +8355,7 @@ function readJson(path3) {
 }
 function writeJson(path3, value) {
   try {
-    mkdirSync6(dirname5(path3), { recursive: true, mode: 448 });
+    mkdirSync6(dirname6(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     writeFileSync5(tmp, JSON.stringify(value) + "\n", { mode: 384 });
     renameSync4(tmp, path3);
@@ -8103,7 +8456,7 @@ var init_shared_cycle = __esm({
 
 // packages/core/src/update-check.ts
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname6, join as join9 } from "node:path";
+import { dirname as dirname7, join as join10 } from "node:path";
 function compareVersions(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
   const pb = SEMVER.exec(String(b ?? "").trim());
@@ -8118,7 +8471,7 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join9(dirname6(health), "update-check.json") : void 0;
+  return health ? join10(dirname7(health), "update-check.json") : void 0;
 }
 function readUpdateState(path3 = updateStatePath()) {
   if (!path3) return void 0;
@@ -8132,7 +8485,7 @@ function readUpdateState(path3 = updateStatePath()) {
 function writeUpdateState(s, path3 = updateStatePath()) {
   if (!path3) return;
   try {
-    mkdirSync7(dirname6(path3), { recursive: true, mode: 448 });
+    mkdirSync7(dirname7(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.tmp`;
     writeFileSync6(tmp, JSON.stringify(s) + "\n", { mode: 384 });
     renameSync5(tmp, path3);
@@ -8358,12 +8711,16 @@ async function startSync(opts = {}) {
   }
   const kind = syncBackendKind();
   if (!kind) {
-    process.stderr.write("[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n");
+    process.stderr.write("[yapa-sync] YAPA_SYNC_SERVICE_URL (or YAPA_SYNC_MCP_URL) not set: sync disabled\n");
     recordSyncHealth({ status: "disabled" });
     return;
   }
+  const transport = syncTransportKind();
   if (kind === "service" && getConfig().SYNC_DATABASE_URL) {
     process.stderr.write("[yapa-sync] Using the sync service; YAPA_SYNC_DATABASE_URL is ignored\n");
+  }
+  if (transport === "mcp" && getConfig().SYNC_SERVICE_URL) {
+    process.stderr.write("[yapa-sync] Using sync over MCP; YAPA_SYNC_SERVICE_URL is ignored\n");
   }
   if (kind !== "service" && !process.env.YAPA_USERNAME) {
     process.stderr.write(`[yapa-sync] Username defaults to the OS login '${getConfig().USERNAME}'. Set YAPA_USERNAME (plugin option username) to a name unique on your team: task ids and ownership are keyed on it.
@@ -8372,7 +8729,8 @@ async function startSync(opts = {}) {
   try {
     const backend = await getSyncBackend();
     await backend?.prepare();
-    process.stderr.write(`[yapa-sync] Connected to ${kind === "service" ? "the sync service" : "the remote database"} (${backend?.target})
+    const what = transport === "mcp" ? "the sync service over MCP" : kind === "service" ? "the sync service" : "the remote database";
+    process.stderr.write(`[yapa-sync] Connected to ${what} (${backend?.target})
 `);
   } catch (e) {
     process.stderr.write(`[yapa-sync] Sync not connected: ${e}
@@ -8594,12 +8952,12 @@ ${jobResult.stdout}`);
 
 // packages/core/src/training/registry.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync12, writeFileSync as writeFileSync7 } from "fs";
-import { join as join10 } from "path";
+import { join as join11 } from "path";
 function registryPath() {
-  return join10(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join11(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join10(getConfig().ARTIFACTS_DIR, "adapters");
+  const dir = join11(getConfig().ARTIFACTS_DIR, "adapters");
   if (!existsSync2(dir)) mkdirSync8(dir, { recursive: true });
 }
 function load() {
@@ -8789,7 +9147,7 @@ RULES
 // packages/core/src/training/index.ts
 import { createHash as createHash4 } from "crypto";
 import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync14, writeFileSync as writeFileSync8 } from "fs";
-import { join as join11 } from "path";
+import { join as join12 } from "path";
 function getBackend() {
   switch (getConfig().TRAINING_BACKEND) {
     case "fireworks":
@@ -8799,7 +9157,7 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join11(getConfig().ARTIFACTS_DIR, "training-runs");
+  const dir = join12(getConfig().ARTIFACTS_DIR, "training-runs");
   if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
   return dir;
 }
@@ -8833,7 +9191,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join11(dir, filename);
+  const previewPath = join12(dir, filename);
   writeFileSync8(previewPath, jsonl);
   return {
     manifestVersion,
@@ -9519,13 +9877,13 @@ var init_external = __esm({
 
 // packages/core/src/last-write.ts
 import { mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname7, join as join12 } from "node:path";
+import { dirname as dirname8, join as join13 } from "node:path";
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join12(dirname7(health), "last-write") : "";
+  return health ? join13(dirname8(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join12(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -9558,7 +9916,7 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync5(dir)) {
-      const p = join12(dir, name);
+      const p = join13(dir, name);
       try {
         if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
@@ -9580,13 +9938,13 @@ var init_last_write = __esm({
 
 // packages/core/src/session-record.ts
 import { readdirSync as readdirSync6, readFileSync as readFileSync17, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
-import { dirname as dirname8, join as join13 } from "node:path";
+import { dirname as dirname9, join as join14 } from "node:path";
 function sessionRecordDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join13(dirname8(health), "sessions") : "";
+  return health ? join14(dirname9(health), "sessions") : "";
 }
 function sessionRecordFile(session, dir = sessionRecordDir()) {
-  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function sessionId(explicit) {
   const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
@@ -9643,7 +10001,7 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      const p = join13(dir, name);
+      const p = join14(dir, name);
       if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
           if (now - statSync3(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
@@ -10010,6 +10368,7 @@ __export(src_exports, {
   syncFingerprint: () => syncFingerprint,
   syncTargetKey: () => syncTargetKey,
   syncTick: () => syncTick,
+  syncTransportKind: () => syncTransportKind,
   syncUsernameNote: () => syncUsernameNote,
   synthesizeMemory: () => synthesizeMemory,
   systemPromptActivate: () => systemPromptActivate,
@@ -10217,7 +10576,7 @@ __export(statusline_exports, {
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync18, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname9, join as join14, resolve } from "node:path";
+import { dirname as dirname10, join as join15, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -10274,7 +10633,7 @@ function renderSegment(health, now, opts = {}) {
     case "disabled":
       return state("dim", "\u25CB local only");
     case "signed_out":
-      return state("red", `\u25CF signed out${since}${push} \xB7 run: gcloud auth login`);
+      return state("red", `\u25CF signed out${since}${push} \xB7 ${cleanLabel(health.sign_in) ?? "run: gcloud auth login"}`);
     case "unreachable":
       return state("yellow", `\u25CF offline${since}${push}`);
     case "error": {
@@ -10305,7 +10664,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -10347,7 +10706,7 @@ function readSessionRecord(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.version === "string" && typeof r.pid === "number" && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
     } catch {
     }
@@ -10359,7 +10718,7 @@ function readSessionScope(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
+      const r = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
       if (typeof r?.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -10371,7 +10730,7 @@ function readSessionStarting(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const at = JSON.parse(readFileSync18(join14(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
+      const at = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
       if (typeof at === "number" && (best === void 0 || at > best)) best = at;
     } catch {
     }
@@ -10442,7 +10801,7 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join14(process.env.CLAUDE_CONFIG_DIR ?? join14(homedir3(), ".claude"), "settings.json");
+  return join15(process.env.CLAUDE_CONFIG_DIR ?? join15(homedir3(), ".claude"), "settings.json");
 }
 function readSettings(path3) {
   try {
@@ -10453,7 +10812,7 @@ function readSettings(path3) {
   }
 }
 function writeSettings(path3, settings) {
-  mkdirSync11(dirname9(path3), { recursive: true });
+  mkdirSync11(dirname10(path3), { recursive: true });
   const tmp = `${path3}.${process.pid}.tmp`;
   writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
   renameSync7(tmp, path3);
@@ -10484,14 +10843,14 @@ function copyScript(from, to) {
     if (readFileSync18(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync11(dirname9(to), { recursive: true, mode: 448 });
+  mkdirSync11(dirname10(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
   renameSync7(tmp, to);
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join14(dir, REMOVED_MARKER);
+  const p = join15(dir, REMOVED_MARKER);
   try {
     if (removed) {
       mkdirSync11(dir, { recursive: true, mode: 448 });
@@ -10518,13 +10877,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
-    setRemovedMarker(dirname9(self2), false);
+    setRemovedMarker(dirname10(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
     process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
-    setRemovedMarker(dirname9(self2), true);
+    setRemovedMarker(dirname10(self2), true);
     return;
   }
   const input2 = await readStdin();
@@ -10535,12 +10894,12 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join14(dirname9(self2), "sync-health.json");
-  const update = readUpdate(join14(dirname9(healthPath), "update-check.json"));
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join15(dirname10(self2), "sync-health.json");
+  const update = readUpdate(join15(dirname10(healthPath), "update-check.json"));
   const info = stdinInfo(input2);
   const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
-  const last = readLastWrite2(join14(dirname9(healthPath), "last-write"), ids);
-  const sessionsDir = join14(dirname9(healthPath), "sessions");
+  const last = readLastWrite2(join15(dirname10(healthPath), "last-write"), ids);
+  const sessionsDir = join15(dirname10(healthPath), "sessions");
   const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
   const collection = last?.collection ?? readSessionScope(sessionsDir, ids);
   const color = !process.env.NO_COLOR;
@@ -10615,7 +10974,7 @@ __export(hooks_exports, {
 });
 import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync19, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname10, join as join15 } from "node:path";
+import { dirname as dirname11, join as join16 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -10671,7 +11030,7 @@ function syncDownLine(health = readSyncHealth()) {
   const since = health.since ? ` since ${new Date(health.since).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
   switch (health.status) {
     case "signed_out":
-      return `_YAPA sync is signed out${since}: writes stay on this machine until the user runs \`gcloud auth login\` (sync resumes by itself, no restart)._`;
+      return `_YAPA sync is signed out${since}: writes stay on this machine until the user ${health.sign_in ? `signs in again (${health.sign_in})` : "runs `gcloud auth login`"} (sync resumes by itself, no restart)._`;
     case "unreachable":
       return `_YAPA sync service is unreachable${since}: writes stay on this machine and push when it is back._`;
     case "error":
@@ -10682,11 +11041,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join15(dirname10(health), "statusline.mjs") : void 0;
+  return health ? join16(dirname11(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
-  const here = dirname10(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join15(here, f)).find((p) => existsSync4(p));
+  const here = dirname11(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join16(here, f)).find((p) => existsSync4(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -10700,8 +11059,8 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join15(dirname10(to), "statusline-added");
-    if (existsSync4(join15(dirname10(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    const added = join16(dirname11(to), "statusline-added");
+    if (existsSync4(join16(dirname11(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
@@ -10717,7 +11076,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join15(dirname10(to), "statusline-hint");
+  const marker = join16(dirname11(to), "statusline-hint");
   if (existsSync4(marker)) return void 0;
   try {
     writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
@@ -10736,13 +11095,13 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join15(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join15(base, "sessions");
+  const base = process.env.CLAUDE_PLUGIN_DATA || join16(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join16(base, "sessions");
   mkdirSync12(dir, { recursive: true });
   return dir;
 }
 function stateFile2(sessionId2, kind) {
-  return join15(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join16(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId2) {
   try {
@@ -11052,7 +11411,7 @@ __export(install_hooks_exports, {
 });
 import { mkdirSync as mkdirSync13, readFileSync as readFileSync20, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname11, join as join16 } from "node:path";
+import { dirname as dirname12, join as join17 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -11079,7 +11438,7 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join16(process.env.CLAUDE_CONFIG_DIR ?? join16(homedir4(), ".claude"), "settings.json");
+  return join17(process.env.CLAUDE_CONFIG_DIR ?? join17(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
@@ -11094,7 +11453,7 @@ function readSettings2(path3) {
 }
 function installHooks(path3 = defaultSettingsPath2(), command = selfCommand()) {
   const merged = mergeHooks(readSettings2(path3), command);
-  mkdirSync13(dirname11(path3), { recursive: true });
+  mkdirSync13(dirname12(path3), { recursive: true });
   writeFileSync12(path3, JSON.stringify(merged, null, 2) + "\n");
   return path3;
 }
@@ -11705,7 +12064,7 @@ var init_scope2 = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname12, join as join17 } from "node:path";
+import { dirname as dirname13, join as join18 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 import { readFileSync } from "node:fs";
@@ -11850,18 +12209,18 @@ async function runStatusLineCommand(action, args) {
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path3)} (runs ${script})
 `);
-      sl.setRemovedMarker(dirname12(script), false);
+      sl.setRemovedMarker(dirname13(script), false);
       return;
     }
     case "uninstall":
       process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path3, script)}
 `);
-      if (script) sl.setRemovedMarker(dirname12(script), true);
+      if (script) sl.setRemovedMarker(dirname13(script), true);
       return;
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join17(dirname12(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join18(dirname13(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,

@@ -50,6 +50,9 @@ dsh plugin --profile web add link:/absolute/path/to/yapa/packages/dsh
                                               # checked first; longest path wins
         # syncEnabled: false
         # syncDatabaseUrl: postgres://…    # optional remote sync
+        # syncMcpUrl: https://…            # or: a remote serving the Sync API over MCP
+        # syncMcpTokenCmd: '…'             # command printing its bearer token
+        # syncMcpTool: remote__yapa_sync   # only if the tool name is ambiguous
 ```
 
 Restart DSH. You should see the `yapa_*` tools in the tool list and a

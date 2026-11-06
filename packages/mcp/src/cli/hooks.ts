@@ -174,7 +174,7 @@ export function syncDownLine(health: SyncHealth | undefined = readSyncHealth()):
   const since = health.since ? ` since ${new Date(health.since).toISOString().slice(0, 16).replace('T', ' ')} UTC` : '';
   switch (health.status) {
     case 'signed_out':
-      return `_YAPA sync is signed out${since}: writes stay on this machine until the user runs \`gcloud auth login\` (sync resumes by itself, no restart)._`;
+      return `_YAPA sync is signed out${since}: writes stay on this machine until the user ${health.sign_in ? `signs in again (${health.sign_in})` : 'runs `gcloud auth login`'} (sync resumes by itself, no restart)._`;
     case 'unreachable':
       return `_YAPA sync service is unreachable${since}: writes stay on this machine and push when it is back._`;
     case 'error':

@@ -21,6 +21,8 @@ describe('renderSegment', () => {
     expect(renderSegment(rec({ last_ok_at: NOW - 120_000, unpushed: 3 }), NOW, v)).toBe('yapa@v1.6.0 ● synced 2m ago · 3 to push');
     expect(renderSegment(rec({ status: 'signed_out', since: at(9, 12), unpushed: 4 }), NOW, v))
       .toBe('yapa@v1.6.0 ● signed out since 09:12 · 4 to push · run: gcloud auth login');
+    expect(renderSegment(rec({ status: 'signed_out', since: at(9, 12), sign_in: 'sign in to the MCP gateway' }), NOW, v))
+      .toBe('yapa@v1.6.0 ● signed out since 09:12 · sign in to the MCP gateway');
     expect(renderSegment(rec({ status: 'unreachable', since: at(9, 12), unpushed: 4 }), NOW, v)).toBe('yapa@v1.6.0 ● offline since 09:12 · 4 to push');
     expect(renderSegment(rec({ status: 'error', since: at(9, 12), message: 'rate limit\nexceeded' }), NOW, v))
       .toBe('yapa@v1.6.0 ● sync error since 09:12: rate limit exceeded');
