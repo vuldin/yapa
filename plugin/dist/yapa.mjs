@@ -1518,6 +1518,23 @@ async function updateSyncSubscriptions(collections) {
     collections: deduped.join(",")
   });
 }
+async function addSyncSubscriptions(names) {
+  return withDocLock("global", SYNC_SUBSCRIPTIONS_ID, async () => {
+    const before = await getSyncSubscriptions();
+    const added = [...new Set(names)].filter((n) => !before.includes(n));
+    if (added.length) await updateSyncSubscriptions([...before, ...added]);
+    return { before, added };
+  });
+}
+async function removeSyncSubscriptions(names) {
+  return withDocLock("global", SYNC_SUBSCRIPTIONS_ID, async () => {
+    const before = await getSyncSubscriptions();
+    const drop = new Set(names);
+    const removed = before.filter((n) => drop.has(n));
+    if (removed.length) await updateSyncSubscriptions(before.filter((n) => !drop.has(n)));
+    return { before, removed };
+  });
+}
 async function getCollectionRedirects() {
   try {
     const results = await getDocumentsByFilter2("global", {
@@ -1635,10 +1652,7 @@ async function clearPendingBackfill(name) {
 async function rejoinCollection(name) {
   if (!(await getLeftCollections()).includes(name)) return false;
   await clearLeftCollection(name);
-  await withDocLock("global", SYNC_SUBSCRIPTIONS_ID, async () => {
-    const subs = await getSyncSubscriptions();
-    if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
-  });
+  await addSyncSubscriptions([name]);
   await addPendingBackfill(name);
   return true;
 }
@@ -4438,19 +4452,21 @@ function wrap(c) {
     nextTaskId: guard(c.nextTaskId)
   };
 }
-async function moveOwnLeases(from, into, now = Math.floor(Date.now() / 1e3)) {
+async function moveOwnLeases(from, into, keys, now = Math.floor(Date.now() / 1e3)) {
   const out = { moved: 0, kept: [] };
   let coord;
   let leases;
+  const wanted = new Set(keys);
+  if (!wanted.size) return out;
   try {
     coord = await requireCoordination();
     leases = (await coord.leaseList(from)).leases;
   } catch {
-    return out;
+    return { ...out, unchecked: true };
   }
   const me = getConfig().USERNAME.toLowerCase();
   for (const l of leases) {
-    if (l.expired || l.holder.user.toLowerCase() !== me) continue;
+    if (l.expired || l.holder.user.toLowerCase() !== me || !wanted.has(l.key)) continue;
     try {
       const r = await coord.leaseAcquire({
         collection: into,
@@ -5356,13 +5372,8 @@ async function pushAll() {
   }
   if (pushedCollections.length > 0) {
     try {
-      const existing = await getSyncSubscriptions();
-      const existingSet = new Set(existing);
       const unfollowed = await getUnfollowedCollections();
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !unfollowed.has(c));
-      if (newSubs.length > 0) {
-        await updateSyncSubscriptions([...existing, ...newSubs]);
-      }
+      await addSyncSubscriptions(pushedCollections.filter((c) => !unfollowed.has(c)));
     } catch (e) {
       process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
 `);
@@ -7015,8 +7026,7 @@ async function removeCollection(name, opts = {}) {
     result.deletedRemotely = own.length;
   }
   if (shared) {
-    const subs = await getSyncSubscriptions();
-    if (subs.includes(name)) await updateSyncSubscriptions(subs.filter((s) => s !== name));
+    await removeSyncSubscriptions([name]);
     if (scope === "local" && (opts.markLeft ?? true)) await addLeftCollection(name);
   }
   await deleteCollection2(name);
@@ -7109,9 +7119,13 @@ async function mergeCollections(from, into, opts = {}) {
   }
   await removeCollection(from, { force: true, markLeft: false });
   result.sourceRemoved = true;
-  await addCollectionRedirect(from, into);
-  const leases = await moveOwnLeases(from, into);
-  if (leases.moved || leases.kept.length) result.leases = leases;
+  try {
+    await addCollectionRedirect(from, into);
+  } catch (e) {
+    result.redirectError = e instanceof Error ? e.message : String(e);
+  }
+  const leases = await moveOwnLeases(from, into, docs.filter((d) => d.metadata.type === "task").map((d) => d.id));
+  if (leases.moved || leases.kept.length || leases.unchecked) result.leases = leases;
   return result;
 }
 function erasureLines(r) {
@@ -7144,8 +7158,10 @@ function mergeReportLines(r) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
     }
   }
+  if (r.redirectError) lines.push(`Could not record that "${r.from}" moved here (${r.redirectError}): a prompt in its folder may recreate it; run collection_merge again to record it.`);
   if (r.leases?.moved) lines.push(`${r.leases.moved} of your claims moved with their tasks to "${r.into}".`);
   if (r.leases?.kept.length) lines.push(`Claims still on "${r.from}" (the target refused them): ${r.leases.kept.join(", ")}.`);
+  if (r.leases?.unchecked) lines.push(`Your claims in "${r.from}" could not be checked (the sync service did not answer): claim the moved tasks you were working on again in "${r.into}".`);
   if (isSyncable2(r.from)) {
     lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
     lines.push(
@@ -8767,9 +8783,7 @@ async function pullFromRemote() {
     try {
       const unfollowed2 = await getUnfollowedCollections();
       const mine2 = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
-      const subs = await getSyncSubscriptions();
-      const add = mine2.filter((c) => !subs.includes(c));
-      if (add.length) await updateSyncSubscriptions([...subs, ...add]);
+      await addSyncSubscriptions(mine2);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
 `);
@@ -10799,6 +10813,7 @@ __export(src_exports, {
   addLocalTombstone: () => addLocalTombstone,
   addLocalTombstones: () => addLocalTombstones,
   addPendingBackfill: () => addPendingBackfill,
+  addSyncSubscriptions: () => addSyncSubscriptions,
   applyCaptureEvent: () => applyCaptureEvent,
   applyCompaction: () => applyCompaction,
   applyDecay: () => applyDecay,
@@ -11044,6 +11059,7 @@ __export(src_exports, {
   removeDependency: () => removeDependency,
   removeReport: () => removeReport,
   removeSessionRecord: () => removeSessionRecord,
+  removeSyncSubscriptions: () => removeSyncSubscriptions,
   requestDecision: () => requestDecision,
   requireCoordination: () => requireCoordination,
   requireSyncBackend: () => requireSyncBackend,
@@ -11775,8 +11791,7 @@ async function freshenFromRemote(collection, opts = {}) {
       if (pendingBackfill) await clearPendingBackfill(collection);
     }
     if (!followed && stats.errors === 0) {
-      const subs = await getSyncSubscriptions();
-      if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
+      await addSyncSubscriptions([collection]);
     }
     return stats.pulled + stats.updated;
   } catch (e) {

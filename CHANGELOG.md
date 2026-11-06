@@ -3,8 +3,10 @@
 ## Unreleased
 
 ### Fixes
-- **A merge keeps your claims.** `collection_merge` used to leave the source collection's leases behind, so another session could claim a moved task in the target. Now your live claims move with their tasks: same session, title, scope and remaining time, and the merge report says how many. Teammates' claims on the sync service stay where they are.
-- **Merge redirects, left collections and pending backfills no longer lose an entry to a concurrent write.** Their read-modify-writes take a per-document lock, so two merges at once in different processes keep both redirects.
+- **A merge keeps your claims.** `collection_merge` used to leave the source collection's leases behind, so another session could claim a moved task in the target.
+  - Now your live claims on the moved tasks move with them: same session, title, scope and remaining time. The merge report says how many moved, or that they couldn't be checked when the sync service didn't answer.
+  - Other leases, such as a project's own `yapa coord` leases, stay in the collection they name. So do teammates' claims.
+- **Sync subscriptions, merge redirects, left collections and pending backfills no longer lose an entry to a concurrent write.** Their read-modify-writes take a per-document lock, and every subscription change goes through locked add and remove helpers, so a prompt's subscribe and the server's auto-subscribe at the same moment keep both.
 
 ## 1.14.1 (2026-11-06)
 

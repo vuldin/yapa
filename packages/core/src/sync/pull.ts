@@ -3,7 +3,7 @@ import { getConfig } from '../config.js';
 import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument, patchDocument } from '../store/index.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type RemoteDeletion, type RemoteDocument, type SyncBackend } from './backend.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections, getPendingBackfills, clearPendingBackfill } from './sentinel.js';
+import { addSyncSubscriptions, getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections, getPendingBackfills, clearPendingBackfill } from './sentinel.js';
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
 
@@ -61,9 +61,7 @@ export async function pullFromRemote(): Promise<PullStats> {
       // still lists it for this user (teammates' rows, or rows not yet moved).
       const unfollowed = await getUnfollowedCollections();
       const mine = (await backend.collectionsForUser()).filter(c => isSyncable(c) && !unfollowed.has(c));
-      const subs = await getSyncSubscriptions();
-      const add = mine.filter(c => !subs.includes(c));
-      if (add.length) await updateSyncSubscriptions([...subs, ...add]);
+      await addSyncSubscriptions(mine);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}\n`);
       noteSyncError(e);

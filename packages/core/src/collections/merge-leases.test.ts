@@ -11,7 +11,7 @@ import { updateTask } from '../tasks/update.js';
 import { TaskClaimedError } from '../tasks/claim.js';
 import { createNewCollection, mergeCollections, mergeReportLines } from './manage.js';
 import { heldKeys, requireCoordination } from '../sync/coordination.js';
-import { getCollectionRedirects } from '../sync/sentinel.js';
+import { getCollectionRedirects, getSyncSubscriptions } from '../sync/sentinel.js';
 
 let dir: string;
 
@@ -47,6 +47,36 @@ describe('merging moves your claims with the tasks', () => {
 
     await expect(updateTask(task, { status: 'in_progress' }, { session: 's2' })).rejects.toBeInstanceOf(TaskClaimedError);
   });
+
+  it('leaves a project\'s own lease in the source collection, where its script looks for it', async () => {
+    await createNewCollection('private-ops-old');
+    await createNewCollection('private-ops');
+    const task = await createTask('Tidy the runbook', {}, 'private-ops-old');
+    await updateTask(task, { status: 'in_progress' }, { session: 's1' });
+    const coord = await requireCoordination();
+    await coord.leaseAcquire({ collection: 'private-ops-old', key: 'deploy:prod', session: 'script-1' });
+
+    const r = await mergeCollections('private-ops-old', 'private-ops');
+    expect(r.leases).toEqual({ moved: 1, kept: [] });
+    expect((await coord.leaseList('private-ops-old')).leases.filter(l => !l.expired).map(l => l.key)).toEqual(['deploy:prod']);
+    expect((await coord.leaseList('private-ops')).leases.map(l => l.key)).toEqual([task]);
+  });
+
+  it('says so when the source\'s claims could not be read', async () => {
+    const { moveOwnLeases } = await import('../sync/coordination.js');
+    setConfig(createConfig({
+      YAPA_USERNAME: 'tester', YAPA_LOCAL_COORD_DIR: join(dir, 'coord'), YAPA_LEASE_STATE_DIR: join(dir, 'leases'),
+      YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'http://127.0.0.1:9', YAPA_SYNC_ID_TOKEN_CMD: 'echo x.y.z',
+    }));
+    try {
+      const r = await moveOwnLeases('project-shared-old', 'private-ops', ['tester-99']);
+      expect(r.unchecked).toBe(true);
+      expect(mergeReportLines({ from: 'project-shared-old', into: 'private-ops', moved: 1, byType: { task: 1 }, dryRun: false, sourceRemoved: true, teammateRowsKept: 0, ownRowsRetracted: 0, leases: r }).join('\n'))
+        .toContain('could not be checked');
+    } finally {
+      setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_LOCAL_COORD_DIR: join(dir, 'coord'), YAPA_LEASE_STATE_DIR: join(dir, 'leases') }));
+    }
+  }, 30_000);
 });
 
 describe('sentinel lists under concurrent writers', () => {
@@ -58,7 +88,7 @@ describe('sentinel lists under concurrent writers', () => {
         contents: `
           import { setConfig, createConfig } from '../config.js';
           import { setStore, createLocalStore } from '../store/index.js';
-          export { addCollectionRedirect } from '../sync/sentinel.js';
+          export { addCollectionRedirect, addSyncSubscriptions } from '../sync/sentinel.js';
           export function setup(store, coord) {
             setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_LOCAL_COORD_DIR: coord }));
             setStore(createLocalStore(store));
@@ -69,7 +99,7 @@ describe('sentinel lists under concurrent writers', () => {
   });
   afterAll(() => { rmSync(bundle, { force: true }); rmSync(worker, { force: true }); });
 
-  it('loses no redirect when 6 processes record one each at once', async () => {
+  it('loses no redirect or subscription when 6 processes record one each at once', async () => {
     const store = join(dir, 'store-multi');
     writeFileSync(worker, `
       const m = await import(${JSON.stringify(bundle)});
@@ -77,6 +107,7 @@ describe('sentinel lists under concurrent writers', () => {
       m.setup(store, coord);
       while (Date.now() < Number(startAt)) await new Promise(r => setTimeout(r, 1));
       await m.addCollectionRedirect(name, 'project-target');
+      await m.addSyncSubscriptions([name]);
     `);
     const startAt = Date.now() + 800;
     await Promise.all(Array.from({ length: 6 }, (_, i) => new Promise<void>((resolve, reject) => {
@@ -87,7 +118,9 @@ describe('sentinel lists under concurrent writers', () => {
     })));
     setStore(createLocalStore(store));
     try {
-      expect(Object.keys(await getCollectionRedirects()).sort()).toEqual(Array.from({ length: 6 }, (_, i) => `project-old-${i}`).sort());
+      const names = Array.from({ length: 6 }, (_, i) => `project-old-${i}`).sort();
+      expect(Object.keys(await getCollectionRedirects()).sort()).toEqual(names);
+      expect([...(await getSyncSubscriptions())].sort()).toEqual(names);
     } finally {
       setStore(createLocalStore(join(dir, 'store')));
     }

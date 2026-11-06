@@ -380,27 +380,32 @@ export interface LeaseMoveResult {
   moved: number;
   /** Keys left in the source: the target refused them, or the move failed. */
   kept: string[];
+  /** The source's leases could not be read (the sync service did not answer). */
+  unchecked?: boolean;
 }
 
 /**
- * After a merge: re-acquire this user's live leases on `from` in `into` (same
- * session, key, title, scope and remaining time), release them in `from` and
- * move the sessions' held markers, so a claim on a moved task still guards it.
- * Other users' leases stay where they are. Best effort: never throws.
+ * After a merge: re-acquire this user's live claims on the moved tasks
+ * (`keys`) in `into` (same session, key, title, scope and remaining time),
+ * release them in `from` and move the sessions' held markers. Other leases
+ * stay where they are: a project's own lease names its collection. Best
+ * effort: never throws.
  */
-export async function moveOwnLeases(from: string, into: string, now = Math.floor(Date.now() / 1000)): Promise<LeaseMoveResult> {
+export async function moveOwnLeases(from: string, into: string, keys: string[], now = Math.floor(Date.now() / 1000)): Promise<LeaseMoveResult> {
   const out: LeaseMoveResult = { moved: 0, kept: [] };
   let coord: Coordination;
   let leases: Lease[];
+  const wanted = new Set(keys);
+  if (!wanted.size) return out;
   try {
     coord = await requireCoordination();
     leases = (await coord.leaseList(from)).leases;
   } catch {
-    return out;
+    return { ...out, unchecked: true };
   }
   const me = getConfig().USERNAME.toLowerCase();
   for (const l of leases) {
-    if (l.expired || l.holder.user.toLowerCase() !== me) continue;
+    if (l.expired || l.holder.user.toLowerCase() !== me || !wanted.has(l.key)) continue;
     try {
       const r = await coord.leaseAcquire({
         collection: into, key: l.key, session: l.holder.session, scope: l.scope,

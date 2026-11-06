@@ -56,6 +56,8 @@ import {
   getSyncState,
   readSyncHealth,
   getSyncSubscriptions,
+  addSyncSubscriptions,
+  removeSyncSubscriptions,
   getTask,
   recordLastWrite,
   janitorSweep,
@@ -1687,8 +1689,7 @@ export function registerTools(server: McpServer): void {
             if (valid.length === 0) {
               return text(`None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}`);
             }
-            const existing = await getSyncSubscriptions();
-            await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
+            await addSyncSubscriptions(valid);
             // Asked for by name: a collection merged away or left here is followed again.
             for (const name of valid) {
               await clearCollectionRedirect(name);
@@ -1711,9 +1712,7 @@ export function registerTools(server: McpServer): void {
         case 'unsubscribe': {
           if (!collections?.length) return text('Refused — `collections` is required for unsubscribe.');
           try {
-            const existing = await getSyncSubscriptions();
-            const removeSet = new Set(collections);
-            await updateSyncSubscriptions(existing.filter(c => !removeSet.has(c)));
+            const { before: existing } = await removeSyncSubscriptions(collections);
             const removed = collections.filter(c => existing.includes(c));
             const notFound = collections.filter(c => !existing.includes(c));
             const lines: string[] = [];

@@ -62,6 +62,27 @@ export async function updateSyncSubscriptions(collections: string[]): Promise<vo
   });
 }
 
+/** Subscribe to `names` (read and written under the subscriptions lock). Returns the list before and the names added. */
+export async function addSyncSubscriptions(names: string[]): Promise<{ before: string[]; added: string[] }> {
+  return withDocLock('global', SYNC_SUBSCRIPTIONS_ID, async () => {
+    const before = await getSyncSubscriptions();
+    const added = [...new Set(names)].filter(n => !before.includes(n));
+    if (added.length) await updateSyncSubscriptions([...before, ...added]);
+    return { before, added };
+  });
+}
+
+/** Unsubscribe from `names` under the subscriptions lock. Returns the list before and the names removed. */
+export async function removeSyncSubscriptions(names: string[]): Promise<{ before: string[]; removed: string[] }> {
+  return withDocLock('global', SYNC_SUBSCRIPTIONS_ID, async () => {
+    const before = await getSyncSubscriptions();
+    const drop = new Set(names);
+    const removed = before.filter(n => drop.has(n));
+    if (removed.length) await updateSyncSubscriptions(before.filter(n => !drop.has(n)));
+    return { before, removed };
+  });
+}
+
 const COLLECTION_REDIRECTS_ID = '__collection_redirects__';
 
 /**
@@ -267,10 +288,7 @@ export async function clearPendingBackfill(name: string): Promise<void> {
 export async function rejoinCollection(name: string): Promise<boolean> {
   if (!(await getLeftCollections()).includes(name)) return false;
   await clearLeftCollection(name);
-  await withDocLock('global', SYNC_SUBSCRIPTIONS_ID, async () => {
-    const subs = await getSyncSubscriptions();
-    if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
-  });
+  await addSyncSubscriptions([name]);
   await addPendingBackfill(name);
   return true;
 }
