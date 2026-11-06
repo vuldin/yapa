@@ -96,3 +96,74 @@ describe('owners', () => {
     expect(includesUser(['Josh'], 'josh')).toBe(true);
   });
 });
+
+describe('findOpenItems', () => {
+  it('judges what the turn is about, not every item a long-running held task collected', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { setConfig, resetConfig, createConfig } = await import('../config.js');
+    const { setStore, resetStore, createLocalStore } = await import('../store/index.js');
+    const { storeMemory } = await import('../memory/store.js');
+    const { createTask } = await import('../tasks/create.js');
+    const { updateTask } = await import('../tasks/update.js');
+    const { findOpenItems } = await import('./follow-through.js');
+    const dir = mkdtempSync(join(tmpdir(), 'yapa-ft-items-'));
+    setConfig(createConfig({ YAPA_USERNAME: 'josh' }));
+    setStore(createLocalStore(dir));
+    try {
+      const C = 'project-acme';
+      const task = await createTask('Ship the importer', {}, C);
+      const old: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        old.push((await storeMemory(`Importer finding ${i}: batch ${i} retries on shard ${i} time out after ${i + 3} seconds.`, {
+          collection: C, typed: { kind: 'finding', task_ids: [task] },
+        })).ids[0]);
+      }
+      const { ids: [waiting] } = await storeMemory('Ship the importer on Friday, or wait for the retry fix?', {
+        collection: C, typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['Friday', 'wait'] },
+      });
+      await updateTask(task, { waits_on: [waiting] } as any);
+      const { ids: [question] } = await storeMemory('Which region does the billing export run in?', { collection: C, typed: { kind: 'question' } });
+
+      const items = await findOpenItems(C, 'Which region does the billing export run in? It runs in us-east-2.', [task]);
+      expect(items[0].id).toBe(waiting);
+      expect(items.map(i => i.id)).toContain(question);
+      expect(items.length).toBeLessThanOrEqual(8);
+
+      // Linked records nearer the turn than the question it answers still leave it room.
+      const { queryDocuments } = await import('../store/index.js');
+      const task2 = await createTask('Tune the export retries', {}, C);
+      const turn2 = 'The export retry backoff on shard 7 doubles each attempt up to 30 seconds, and the export region is us-east-2.';
+      for (let i = 0; i < 9; i++) {
+        await storeMemory(`The export retry backoff on shard 7 doubles each attempt up to 30 seconds (note ${i}).`, {
+          collection: C, typed: { kind: 'finding', task_ids: [task2] },
+        });
+      }
+      const { ids: [region] } = await storeMemory('Which region does the export run in?', { collection: C, typed: { kind: 'question' } });
+      const near = await queryDocuments(C, turn2, 40, { type: 'memory' });
+      const qd = near.find(n => n.id === region)!.distance;
+      const linkedNear = near.filter(n => String(n.metadata.task_ids ?? '').includes(task2));
+      expect(linkedNear.length).toBe(9);
+      expect(linkedNear.every(n => n.distance < qd)).toBe(true);
+      expect(qd).toBeLessThan(0.75);
+      expect((await findOpenItems(C, turn2, [task2])).map(i => i.id)).toContain(region);
+
+      // Every open wait is judged while there is room, not only the first four.
+      const task3 = await createTask('Plan the launch', {}, C);
+      const decisions: string[] = [];
+      for (const topic of ['the venue', 'the date', 'the budget', 'the speakers', 'the catering', 'the swag']) {
+        decisions.push((await storeMemory(`Which option for ${topic}?`, {
+          collection: C, typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['a', 'b'] },
+        })).ids[0]);
+      }
+      await updateTask(task3, { waits_on: decisions } as any);
+      const waits = await findOpenItems(C, 'yes, go with b', [task3]);
+      expect(decisions.every(d => waits.some(i => i.id === d))).toBe(true);
+    } finally {
+      resetStore();
+      resetConfig();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

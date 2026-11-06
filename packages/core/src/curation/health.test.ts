@@ -21,7 +21,7 @@ describe('capture health records', () => {
     h = applyCaptureEvent(h, { kind: 'turn', stored: 0, skipped: 0, settled: 0, followThroughError: new Error('judge timed out') }, NOW - 2 * H);
     h = applyCaptureEvent(h, { kind: 'turn_failed', error: new Error('claude -p exited 1:\n  model not found') }, NOW - H);
     h = applyCaptureEvent(h, { kind: 'compaction' }, NOW - H / 2);
-    expect(h.days[dayKey(NOW)]).toEqual({ turns: 2, clean: 1, stored: 2, skipped: 1, settled: 1, failed: 1, follow_through_failed: 1, store_failed: 0, compactions: 1, compactions_failed: 0 });
+    expect(h.days[dayKey(NOW)]).toEqual({ turns: 2, clean: 1, stored: 2, skipped: 1, settled: 1, judged: 0, failed: 1, follow_through_failed: 1, store_failed: 0, compactions: 1, compactions_failed: 0 });
     expect(h.last_error).toEqual({ at: NOW - H, stage: 'extractor', message: 'claude -p exited 1: model not found' });
     expect(h.last_ok_at).toBe(NOW - H / 2);
   });

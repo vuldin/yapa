@@ -95,11 +95,11 @@ export async function captureTurn(
     d.record({ kind: 'turn_failed', error: e });
     throw e;
   }
-  const state: { followThroughError?: unknown; storeError?: unknown } = {};
+  const state: { followThroughError?: unknown; storeError?: unknown; judged?: number } = {};
   try {
     const r = await runCapture(input, options, d, state);
     d.record({
-      kind: 'turn', stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0,
+      kind: 'turn', stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0, judged: state.judged ?? 0,
       ...(state.followThroughError !== undefined ? { followThroughError: state.followThroughError } : {}),
       ...(state.storeError !== undefined ? { storeError: state.storeError } : {}),
     });
@@ -114,7 +114,7 @@ async function runCapture(
   input: CaptureTurnInput,
   options: CaptureTurnOptions,
   d: CaptureDeps,
-  state: { followThroughError?: unknown; storeError?: unknown },
+  state: { followThroughError?: unknown; storeError?: unknown; judged?: number },
 ): Promise<CaptureTurnResult> {
   const { collection, sessionId, turn } = input;
 
@@ -124,6 +124,7 @@ async function runCapture(
   try {
     const f = await d.followThrough({ collection, userText: input.userText, assistantText: input.assistantText, taskIds: options.taskIds });
     settled = f.changes.map(c => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
+    state.judged = f.judged;
   } catch (e) {
     state.followThroughError = e;
     d.log(`Follow-through failed in ${collection}: ${e}`);

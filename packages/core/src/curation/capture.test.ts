@@ -34,12 +34,12 @@ describe('captureTurn', () => {
   it('records each turn\'s outcome for capture health, failures included', async () => {
     let d = deps();
     await captureTurn(input, options, d);
-    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0 });
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0, judged: 0 });
 
     const ftError = new Error('judge timed out');
     d = deps({ followThrough: vi.fn(async () => { throw ftError; }) as any, extractMemories: vi.fn(async () => []) as any });
     await captureTurn(input, options, d);
-    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 0, skipped: 0, settled: 0, followThroughError: ftError });
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 0, skipped: 0, settled: 0, judged: 0, followThroughError: ftError });
 
     const exError = new Error('claude -p exited 1');
     d = deps({ extractMemories: vi.fn(async () => { throw exError; }) as any });
@@ -71,7 +71,7 @@ describe('captureTurn', () => {
     });
     const r = await captureTurn(input, options, d);
     expect(r.stored).toBe(1);
-    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0, storeError: refusal });
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0, judged: 0, storeError: refusal });
   });
 
   it('supersedes a stale neighbor when the resolver says the fact changed', async () => {
