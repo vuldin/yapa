@@ -1,4 +1,5 @@
 import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
+import { isReadOnlyDoc } from '../sync/syncable.js';
 import { getAdapter, updateAdapter } from './registry.js';
 
 const MAX_PER_COLLECTION = 2000;
@@ -56,6 +57,7 @@ export async function adapterPromote(args: PromoteArgs): Promise<PromoteResult> 
       const docs = await getDocumentsByFilter(c.name, { type: 'memory' }, MAX_PER_COLLECTION);
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
+        if (isReadOnlyDoc(d.metadata)) continue;
 
         if (d.metadata.verification_last_result === 'passed') {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });

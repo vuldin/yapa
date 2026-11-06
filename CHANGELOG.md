@@ -6,7 +6,9 @@
 - **Background curation leaves documents the remote owns alone.** A remote can serve records it owns with `metadata.read_only: true`. Edits by hand were already refused, but curation still touched them. Now:
   - the janitor never pairs or archives them as duplicates;
   - `compaction_suggest` never groups them, and `compaction_apply` never archives one;
-  - the decay sweep and the recall salience boost leave their salience as served.
+  - the decay sweep and the recall salience boost leave their salience as served;
+  - the classifier never sends one to the curation model or scores it, so none is selected or promoted for training;
+  - `compaction_apply` refuses a group whose members are all read-only, instead of writing a summary that compacts nothing.
 
 ## 1.14.1 (2026-11-06)
 

@@ -41975,6 +41975,10 @@ async function suggestCompaction(collection) {
 }
 async function applyCompaction(input2) {
   input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
+  const members2 = await getDocumentsByIds2(input2.collection, input2.member_ids).catch(() => []);
+  if (input2.member_ids.length && members2.length && members2.every((m) => isReadOnlyDoc(m.metadata))) {
+    throw new Error("every member is owned by the remote (read_only): nothing to compact");
+  }
   const stored = await storeMemory(input2.summary, {
     collection: input2.collection,
     salience: 2,
@@ -43326,6 +43330,7 @@ function mergeReportLines(r) {
 
 // packages/core/src/curation/index.ts
 init_config();
+init_syncable();
 init_store();
 
 // packages/core/src/curation/prompts.ts
@@ -43457,7 +43462,7 @@ function getCurationState() {
 var MAX_PER_COLLECTION = 500;
 async function collectUnclassified(collection) {
   const docs = await getDocumentsByFilter2(collection, { type: "memory" }, MAX_PER_COLLECTION);
-  return docs.filter((d) => d.metadata.classified_at == null);
+  return docs.filter((d) => d.metadata.classified_at == null && !isReadOnlyDoc(d.metadata));
 }
 async function curationCycle() {
   if (running) {
@@ -43766,6 +43771,7 @@ init_sentinel();
 
 // packages/core/src/buckets/index.ts
 init_config();
+init_syncable();
 init_store();
 
 // packages/core/src/buckets/artifacts.ts
@@ -43972,6 +43978,7 @@ async function collectClassifiedMemories() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at != null) {
           out.push({
             id: d.id,
@@ -44121,6 +44128,7 @@ async function systemPromptActivate(version2) {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -44165,6 +44173,7 @@ async function bucketStatus() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at == null) pendingClassification++;
         const sel = d.metadata.selected_for;
         const prom = d.metadata.promoted_to;
@@ -45664,6 +45673,7 @@ async function evalCompare(adapterRefA, adapterRefB, manifestVersion, options = 
 
 // packages/core/src/training/promotion.ts
 init_store();
+init_syncable();
 var MAX_PER_COLLECTION4 = 2e3;
 async function adapterPromote(args) {
   if (args.confirm !== true) {
@@ -45684,6 +45694,7 @@ async function adapterPromote(args) {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION4);
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.verification_last_result === "passed") {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;

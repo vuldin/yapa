@@ -115,6 +115,10 @@ export interface ApplyCompactionResult {
 export async function applyCompaction(input: ApplyCompactionInput): Promise<ApplyCompactionResult> {
   // A collection merged away here is followed: its members moved with it.
   input = { ...input, collection: (await resolveWriteCollection(input.collection)).collection };
+  const members = await getDocumentsByIds(input.collection, input.member_ids).catch(() => []);
+  if (input.member_ids.length && members.length && members.every(m => isReadOnlyDoc(m.metadata))) {
+    throw new Error('every member is owned by the remote (read_only): nothing to compact');
+  }
   const stored = await storeMemory(input.summary, {
     collection: input.collection,
     salience: 2.0,

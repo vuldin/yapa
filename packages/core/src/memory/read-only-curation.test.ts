@@ -9,6 +9,9 @@ import { applyCompaction, suggestCompaction } from './compact.js';
 import { runDecaySweep } from './decay.js';
 import { recallMemory, settleRecallBoosts } from './recall.js';
 import { findDuplicatePairs } from '../curation/janitor.js';
+import { curationCycle } from '../curation/index.js';
+import { collectClassifiedMemories } from '../buckets/index.js';
+import { setHostLLMCaller } from '../curation/provider.js';
 
 let dir: string;
 
@@ -55,6 +58,39 @@ describe('curation leaves documents the remote owns alone', () => {
     const r = await applyCompaction({ collection: C, member_ids: [mine1, remote], summary: 'The importer retries a failed batch three times.' });
     expect(r.archived_ids).toEqual([mine1]);
     expect((await getDocumentsByIds(C, [remote]))[0].metadata.archived).not.toBe(true);
+  });
+
+  it('compaction refuses when every member is read-only, writing no summary', async () => {
+    const C = 'project-ro-compact-all';
+    const r1 = await remoteOwned(C, 'Remote note one about the importer.');
+    const r2 = await remoteOwned(C, 'Remote note two about the importer.');
+    await expect(applyCompaction({ collection: C, member_ids: [r1, r2], summary: 'Both remote notes.' })).rejects.toThrow(/read_only/);
+    const { listMemories } = await import('./list.js');
+    expect((await listMemories({ collection: C, limit: 50 })).map(m => m.id).sort()).toEqual([r1, r2].sort());
+  });
+
+  it('the classifier never sends a read-only document to the model or marks it, so it is never selected for training', async () => {
+    const C = 'project-ro-classify';
+    const remote = await remoteOwned(C, 'REMOTE-OWNED: acme contract renewal terms.');
+    const { ids: [mine] } = await storeMemory('Acme prefers Thursday maintenance windows.', { collection: C });
+    const prompts: string[] = [];
+    setHostLLMCaller(async o => {
+      const user = o.messages.map(m => m.content).join('\n');
+      prompts.push(user);
+      const ids = [...user.matchAll(/mem-[\w-]+/g)].map(m => m[0]);
+      return JSON.stringify([...new Set(ids)].map(id => ({ id, trainable: 0.9, durability: 0.9, generalizability: 0.9, rationale: 'x' })));
+    });
+    try {
+      await curationCycle();
+    } finally {
+      setHostLLMCaller(undefined);
+    }
+    expect(prompts.join('\n')).not.toContain('REMOTE-OWNED');
+    expect((await getDocumentsByIds(C, [remote]))[0].metadata.classified_at).toBeUndefined();
+    await patchDocument(C, remote, { classified_at: 1, trainable: 0.9 });
+    const listed = (await collectClassifiedMemories()).map(m => m.id);
+    expect(listed).not.toContain(remote);
+    expect(prompts.join('\n')).toContain(mine);
   });
 
   it('decay and the recall boost leave a read-only document\'s salience as it is', async () => {
