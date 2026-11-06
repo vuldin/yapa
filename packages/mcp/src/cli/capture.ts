@@ -22,7 +22,7 @@ export function runCapture(sub: string | undefined, args: string[], now = Date.n
   const s = summarizeCapture(readCaptureHealth(file), now, days);
   const lines = [
     `Capture over the last ${days} day(s): ${s.turns} turn(s) judged, ${s.stored} stored, ${s.skipped} skipped as known, ${s.settled} settled`,
-    `Failures: ${s.failed} extraction, ${s.follow_through_failed} follow-through, ${s.compactions_failed} of ${s.compactions} compaction capture(s)`,
+    `Failures: ${s.failed} extraction, ${s.store_failed} store, ${s.follow_through_failed} follow-through, ${s.compactions_failed} of ${s.compactions} compaction capture(s)`,
     `Last success: ${when(s.last_ok_at, now)}`,
     ...(s.last_error ? [`Last error (${s.last_error.stage}, ${when(s.last_error.at, now)}): ${s.last_error.message}`] : []),
     ...(s.failing ? ['Status: FAILING'] : []),

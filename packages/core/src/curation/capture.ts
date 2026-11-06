@@ -21,6 +21,7 @@ import { storeMemory } from '../memory/store.js';
 import { isMemoryKind } from '../memory/kinds.js';
 import { followThrough } from './follow-through.js';
 import { recordCapture, type CaptureEvent } from './health.js';
+import { CollectionLeftError, resolveWriteCollection } from '../sync/sentinel.js';
 import { extractMemories, EXTRACTOR_PROMPT_VERSION } from './extractor.js';
 import { resolveConflict, RESOLVER_PROMPT_VERSION } from './resolver.js';
 
@@ -55,6 +56,8 @@ export interface CaptureDeps {
   log: (msg: string) => void;
   /** Capture health (curation/health.ts). */
   record: (e: CaptureEvent) => void;
+  /** Refuses a collection removed from this machine (CollectionLeftError). */
+  writable: (collection: string) => Promise<unknown>;
 }
 
 export interface CaptureTurnResult {
@@ -75,6 +78,7 @@ const defaultDeps: CaptureDeps = {
   storeMemory,
   log: msg => process.stderr.write(`[yapa] ${msg}\n`),
   record: e => recordCapture(e),
+  writable: resolveWriteCollection,
 };
 
 export async function captureTurn(
@@ -83,14 +87,24 @@ export async function captureTurn(
   deps: Partial<CaptureDeps> = {},
 ): Promise<CaptureTurnResult> {
   const d = { ...defaultDeps, ...deps };
-  const state: { followThroughError?: unknown } = {};
-  const ft = () => (state.followThroughError !== undefined ? { followThroughError: state.followThroughError } : {});
+  try {
+    await d.writable(input.collection);
+  } catch (e) {
+    // A collection removed from this machine takes no writes: nothing to capture, nothing failed.
+    if (e instanceof CollectionLeftError) return { stored: 0, skipped: 0, superseded: 0 };
+    throw e;
+  }
+  const state: { followThroughError?: unknown; storeError?: unknown } = {};
   try {
     const r = await runCapture(input, options, d, state);
-    d.record({ kind: 'turn', stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0, ...ft() });
+    d.record({
+      kind: 'turn', stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0,
+      ...(state.followThroughError !== undefined ? { followThroughError: state.followThroughError } : {}),
+      ...(state.storeError !== undefined ? { storeError: state.storeError } : {}),
+    });
     return r;
   } catch (e) {
-    d.record({ kind: 'turn_failed', error: e, ...ft() });
+    d.record({ kind: 'turn_failed', error: e });
     throw e;
   }
 }
@@ -99,7 +113,7 @@ async function runCapture(
   input: CaptureTurnInput,
   options: CaptureTurnOptions,
   d: CaptureDeps,
-  state: { followThroughError?: unknown },
+  state: { followThroughError?: unknown; storeError?: unknown },
 ): Promise<CaptureTurnResult> {
   const { collection, sessionId, turn } = input;
 
@@ -184,25 +198,31 @@ async function runCapture(
     const typed = candidate.kind
       ? { kind: candidate.kind, ...(candidate.kind === 'decision' ? { status: 'accepted' } : {}), ...(candidate.owner ? { owner: candidate.owner } : {}), ...(options.taskIds?.length ? { task_ids: options.taskIds } : {}) }
       : undefined;
-    await d.storeMemory(content, {
-      collection,
-      ...(typed ? { typed } : {}),
-      tags: [...new Set([...candidate.tags, 'auto-capture'])],
-      salience: Math.min(candidate.salience, options.maxSalience),
-      sector: candidate.sector,
-      supersedes,
-      metadata: {
-        source: 'auto-capture',
-        session_id: sessionId,
-        turn,
-        extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
-        rationale: candidate.rationale,
-        ...(resolverRationale !== undefined && {
-          resolver_prompt_version: RESOLVER_PROMPT_VERSION,
-          resolver_rationale: resolverRationale,
-        }),
-      },
-    });
+    try {
+      await d.storeMemory(content, {
+        collection,
+        ...(typed ? { typed } : {}),
+        tags: [...new Set([...candidate.tags, 'auto-capture'])],
+        salience: Math.min(candidate.salience, options.maxSalience),
+        sector: candidate.sector,
+        supersedes,
+        metadata: {
+          source: 'auto-capture',
+          session_id: sessionId,
+          turn,
+          extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
+          rationale: candidate.rationale,
+          ...(resolverRationale !== undefined && {
+            resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+            resolver_rationale: resolverRationale,
+          }),
+        },
+      });
+    } catch (e) {
+      state.storeError = e;
+      d.log(`Storing a captured memory failed in ${collection}: ${e}`);
+      continue;
+    }
     stored++;
     if (supersedes) superseded++;
   }

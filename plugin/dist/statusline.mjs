@@ -201,12 +201,13 @@ function captureFailingAt(path, now) {
   }
   if (!h || typeof h.at !== "number" || !h.days) return false;
   const err = h.last_error;
-  if (err && typeof err.at === "number" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
+  if (err && typeof err.at === "number" && err.stage !== "follow-through" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
   const d = h.days[localDay(now)];
   if (!d) return false;
   const n = (k) => Number(d[k] ?? 0);
-  const bad = n("failed") + n("follow_through_failed") + n("compactions_failed");
-  const good = n("turns") - n("follow_through_failed") + n("compactions") - n("compactions_failed");
+  const clean = d.clean === void 0 ? n("turns") - n("follow_through_failed") : n("clean");
+  const bad = n("failed") + (n("turns") - clean) + n("compactions_failed");
+  const good = clean + n("compactions") - n("compactions_failed");
   return bad >= 2 && bad > good;
 }
 function readHealth(path) {

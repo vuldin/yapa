@@ -4,11 +4,15 @@
 
 ### Features
 - **You can tell when capture is failing.** The per-turn capture and the compaction capture run in hook processes whose errors used to go only to a stderr nobody sees, so a broken aux model, a missing `claude` CLI or a bad `CURATION_MODEL` failed silently.
-  - Each run is now counted in `capture-health.json`, beside `sync-health.json`. That covers turns judged, memories stored, those skipped as known, items settled, and extraction, follow-through and compaction failures per day, plus the last error. The Claude Code hooks and DSH both record.
+  - Each run is now counted in `capture-health.json`, beside `sync-health.json`. That covers turns judged, memories stored, those skipped as known, items settled, and extraction, store, follow-through and compaction failures per day, plus the last error, with the model's reply and any token removed. The Claude Code hooks and DSH both record.
   - `yapa capture status [--days N]` prints the counts and the last error.
-  - The status line adds `· capture ✗` when the latest run failed within the hour, or more runs failed than succeeded today.
-  - Session start says when capture failed in the last day and hasn't succeeded since.
+  - The status line adds `· capture ✗` when the latest run failed within the hour (a follow-through failure alone doesn't count, since memories were still stored), or when more runs failed than succeeded today.
+  - Session start says when capture failed in the last day and hasn't succeeded since, and what that means: memories missing, some not stored, open items not updated, or session summaries missing.
   - Recording never fails or slows a turn.
+
+### Fixes
+- Capture in a folder whose collection was removed from this machine (`collection_delete`) now does nothing, without calling the aux model. Before, it ran the model and then failed to store.
+- When one captured memory is refused (an invalid typed memory, say), the turn's other memories are still stored.
 
 ## 1.13.0 (2026-11-06)
 

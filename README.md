@@ -375,7 +375,7 @@ yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago | project-acme
 | `● offline since 09:12` (yellow) | the remote is unreachable |
 | `● sync error since 09:12: ...` (yellow) | any other failure; `sync status` has details |
 | `○ local only` / `○ sync status unknown` (dim) | sync is off / no recent check |
-| `· capture ✗` (red, after any state) | the per-turn capture is failing: its latest run failed within the hour, or more runs failed than succeeded today; `yapa capture status` has the error |
+| `· capture ✗` (red, after any state) | the per-turn capture is failing: its latest run failed within the hour (a follow-through failure alone doesn't count), or more runs failed than succeeded today; `yapa capture status` has the error |
 
 - **Install:** automatic. With the option `statusline` on (the default), the session-start hook writes `statusLine` in `~/.claude/settings.json`, pointing at a stable copy of the script (`~/.local/share/yapa/statusline.mjs`, refreshed by the session-start hook so plugin updates reach it). A status line you already had keeps running, with the YAPA segment as a line beneath it. `node ~/.local/share/yapa/statusline.mjs --uninstall` (or `yapa statusline uninstall`) restores it, and YAPA then leaves it removed; `/yapa:statusline` or `yapa statusline install` adds it back.
 - **Which YAPA this session runs:** the version is the one this session's own MCP server reported when it started (`~/.local/share/yapa/sessions/<session id>.json`), not the installed script's. A session still running an older YAPA after an update shows `yapa@v1.8.0 (restart for v1.10.1)`; one whose server never reported (older than 1.10.1, or no YAPA server) shows `yapa (restart for v1.10.1)` once it has run a minute.

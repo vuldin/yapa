@@ -21,7 +21,7 @@ describe('yapa capture status', () => {
     const r = runCapture('status', [], now);
     expect(r.exit).toBe(0);
     expect(r.text).toContain('1 turn(s) judged, 2 stored, 1 skipped as known, 1 settled');
-    expect(r.text).toContain('Failures: 1 extraction, 0 follow-through, 0 of 0 compaction capture(s)');
+    expect(r.text).toContain('Failures: 1 extraction, 0 store, 0 follow-through, 0 of 0 compaction capture(s)');
     expect(r.text).toContain('Last error (extractor, 10 min ago): claude -p: command not found');
     expect(r.text).toContain('Status: FAILING');
     expect(r.json).toMatchObject({ ok: true, file, turns: 1, failed: 1, failing: true });

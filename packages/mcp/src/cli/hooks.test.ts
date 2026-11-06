@@ -276,7 +276,7 @@ describe('postCompact / sessionEnd', () => {
     recordCapture({ kind: 'turn_failed', error: new Error('claude -p: command not found') }, Date.now(), capFile);
     capture();
     await sessionStart({ session_id: 's7', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
-    expect(restore().hookSpecificOutput.additionalContext).toContain('**YAPA capture is failing** (extractor, 1 failure(s) today): claude -p: command not found.');
+    expect(restore().hookSpecificOutput.additionalContext).toContain('**YAPA capture is failing** (extractor, 1 failed run(s) today): claude -p: command not found. So memories from recent turns may be missing');
   });
 
   it('removes the session\'s hook state on session end', async () => {

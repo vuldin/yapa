@@ -21,7 +21,7 @@ describe('capture health records', () => {
     h = applyCaptureEvent(h, { kind: 'turn', stored: 0, skipped: 0, settled: 0, followThroughError: new Error('judge timed out') }, NOW - 2 * H);
     h = applyCaptureEvent(h, { kind: 'turn_failed', error: new Error('claude -p exited 1:\n  model not found') }, NOW - H);
     h = applyCaptureEvent(h, { kind: 'compaction' }, NOW - H / 2);
-    expect(h.days[dayKey(NOW)]).toEqual({ turns: 2, stored: 2, skipped: 1, settled: 1, failed: 1, follow_through_failed: 1, compactions: 1, compactions_failed: 0 });
+    expect(h.days[dayKey(NOW)]).toEqual({ turns: 2, clean: 1, stored: 2, skipped: 1, settled: 1, failed: 1, follow_through_failed: 1, store_failed: 0, compactions: 1, compactions_failed: 0 });
     expect(h.last_error).toEqual({ at: NOW - H, stage: 'extractor', message: 'claude -p exited 1: model not found' });
     expect(h.last_ok_at).toBe(NOW - H / 2);
   });
@@ -31,6 +31,40 @@ describe('capture health records', () => {
     for (let i = 20; i >= 0; i--) h = applyCaptureEvent(h, { kind: 'turn', stored: 1, skipped: 0, settled: 0 }, NOW - i * 24 * H);
     expect(Object.keys(h!.days)).toHaveLength(14);
     expect(summarizeCapture(h, NOW, 7)).toMatchObject({ days: 7, turns: 7, stored: 7, failing: false });
+  });
+
+  it('counts one failed turn once, and a follow-through failure alone does not light it within the hour', () => {
+    let h = applyCaptureEvent(undefined, { kind: 'turn_failed', error: 'bad model' }, NOW - 2 * H);
+    expect(captureFailing(h, NOW)).toBe(false);
+    h = applyCaptureEvent(undefined, { kind: 'turn', stored: 1, skipped: 0, settled: 0, followThroughError: 'judge timed out' }, NOW - 60_000);
+    expect(captureFailing(h, NOW)).toBe(false);
+    expect(captureDownLine(h, NOW)).toContain('So open decisions, questions and findings may not have been updated');
+    h = applyCaptureEvent(h, { kind: 'turn', stored: 0, skipped: 0, settled: 0, storeError: new Error('collection is read-only') }, NOW - 30_000);
+    expect(captureFailing(h, NOW)).toBe(true);
+    expect(h.days[dayKey(NOW)]).toMatchObject({ turns: 2, clean: 0, store_failed: 1, follow_through_failed: 1 });
+    expect(captureDownLine(h, NOW)).toContain('(store, 2 failed run(s) today)');
+  });
+
+  it('keeps the model\'s reply and tokens out of the stored message', () => {
+    const h1 = applyCaptureEvent(undefined, { kind: 'turn_failed', error: new Error('Extractor response was not a JSON array: the password is hunter2') }, NOW);
+    expect(h1.last_error?.message).toBe('Extractor response was not a JSON array');
+    const h2 = applyCaptureEvent(undefined, { kind: 'turn_failed', error: new Error('Could not extract JSON array from extractor response: {"secret": 1}') }, NOW);
+    expect(h2.last_error?.message).toBe('Could not extract JSON array from extractor response');
+    const h3 = applyCaptureEvent(undefined, { kind: 'turn_failed', error: new Error('401 for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl') }, NOW);
+    expect(h3.last_error?.message).toBe('401 for <token>');
+  });
+
+  it('steps calendar days, so a short DST day is never skipped', () => {
+    const tz = process.env.TZ;
+    process.env.TZ = 'America/Chicago';
+    try {
+      const at = new Date(2026, 2, 9, 0, 30).getTime();
+      let h: CaptureHealth | undefined;
+      for (const day of [7, 8, 9]) h = applyCaptureEvent(h, { kind: 'turn', stored: 1, skipped: 0, settled: 0 }, new Date(2026, 2, day, 0, 10).getTime());
+      expect(summarizeCapture(h, at, 3).turns).toBe(3);
+    } finally {
+      if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
+    }
   });
 
   it('is failing when the latest run failed within the hour, or failures outnumber successes today', () => {
@@ -47,7 +81,7 @@ describe('capture health records', () => {
 
   it('says so at session start for a day after a failure, until a run succeeds', () => {
     let h = applyCaptureEvent(undefined, { kind: 'turn_failed', error: 'claude -p: command not found' }, NOW - 3 * H);
-    expect(captureDownLine(h, NOW)).toBe('**YAPA capture is failing** (extractor, 1 failure(s) today): claude -p: command not found. Memories from recent turns may be missing; `yapa capture status` for details.');
+    expect(captureDownLine(h, NOW)).toBe('**YAPA capture is failing** (extractor, 1 failed run(s) today): claude -p: command not found. So memories from recent turns may be missing; `yapa capture status` for details.');
     expect(captureDownLine(h, NOW + 30 * H)).toBeUndefined();
     h = applyCaptureEvent(h, { kind: 'turn', stored: 0, skipped: 0, settled: 0 }, NOW - H);
     expect(captureDownLine(h, NOW)).toBeUndefined();

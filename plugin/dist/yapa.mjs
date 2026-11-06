@@ -7568,12 +7568,17 @@ function applyCaptureEvent(h, e, now) {
     if (e.followThroughError !== void 0) {
       day.follow_through_failed++;
       fail2("follow-through", e.followThroughError);
-    } else {
+    }
+    if (e.storeError !== void 0) {
+      day.store_failed++;
+      fail2("store", e.storeError);
+    }
+    if (e.followThroughError === void 0 && e.storeError === void 0) {
+      day.clean++;
       next.last_ok_at = now;
     }
   } else if (e.kind === "turn_failed") {
     day.failed++;
-    if (e.followThroughError !== void 0) day.follow_through_failed++;
     fail2("extractor", e.error);
   } else {
     day.compactions++;
@@ -7604,61 +7609,97 @@ function summarizeCapture(h, now = Date.now(), days = 7) {
     settled: 0,
     failed: 0,
     follow_through_failed: 0,
+    store_failed: 0,
     compactions: 0,
     compactions_failed: 0,
     failing: false
   };
   if (!h) return out;
-  const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(now - i * 864e5)));
+  const t = new Date(now);
+  const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(new Date(t.getFullYear(), t.getMonth(), t.getDate() - i, 12).getTime())));
   for (const [k, d] of Object.entries(h.days)) {
     if (!keys.has(k)) continue;
-    for (const f of ["turns", "stored", "skipped", "settled", "failed", "follow_through_failed", "compactions", "compactions_failed"]) out[f] += Number(d[f] ?? 0);
+    for (const f of ["turns", "stored", "skipped", "settled", "failed", "follow_through_failed", "store_failed", "compactions", "compactions_failed"]) out[f] += Number(d[f] ?? 0);
   }
   out.last_ok_at = h.last_ok_at;
   out.last_error = h.last_error;
   out.failing = captureFailing(h, now);
   return out;
 }
+function dayRuns(d) {
+  const n = (k) => Number(d[k] ?? 0);
+  const clean = d.clean === void 0 ? n("turns") - n("follow_through_failed") : n("clean");
+  return { bad: n("failed") + (n("turns") - clean) + n("compactions_failed"), good: clean + n("compactions") - n("compactions_failed") };
+}
 function captureFailing(h, now = Date.now()) {
   if (!h) return false;
   const err = h.last_error;
-  if (err && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
+  if (err && err.stage !== "follow-through" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
   const d = h.days[dayKey(now)];
   if (!d) return false;
-  const bad2 = d.failed + d.follow_through_failed + d.compactions_failed;
-  const good = d.turns - d.follow_through_failed + d.compactions - d.compactions_failed;
+  const { bad: bad2, good } = dayRuns(d);
   return bad2 >= 2 && bad2 > good;
 }
 function captureDownLine(h = readCaptureHealth(), now = Date.now()) {
   const err = h?.last_error;
   if (!h || !err || now - err.at > 864e5 || (h.last_ok_at ?? 0) > err.at) return void 0;
-  const d = h.days[dayKey(now)] ?? emptyDay();
-  const failed = d.failed + d.follow_through_failed + d.compactions_failed;
-  return `**YAPA capture is failing** (${err.stage}${failed ? `, ${failed} failure(s) today` : ""}): ${err.message.slice(0, 160)}. Memories from recent turns may be missing; \`yapa capture status\` for details.`;
+  const { bad: bad2 } = dayRuns(h.days[dayKey(now)] ?? {});
+  const why = CONSEQUENCE[err.stage] ?? CONSEQUENCE.extractor;
+  return `**YAPA capture is failing** (${err.stage}${bad2 ? `, ${bad2} failed run(s) today` : ""}): ${err.message.slice(0, 160)}. So ${why}; \`yapa capture status\` for details.`;
 }
-var KEEP_DAYS, emptyDay, message;
+var KEEP_DAYS, emptyDay, message, CONSEQUENCE;
 var init_health2 = __esm({
   "packages/core/src/curation/health.ts"() {
     "use strict";
     init_config();
     init_fs_lock();
+    init_http_backend();
     KEEP_DAYS = 14;
-    emptyDay = () => ({ turns: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, compactions: 0, compactions_failed: 0 });
-    message = (e) => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 300);
+    emptyDay = () => ({
+      turns: 0,
+      clean: 0,
+      stored: 0,
+      skipped: 0,
+      settled: 0,
+      failed: 0,
+      follow_through_failed: 0,
+      store_failed: 0,
+      compactions: 0,
+      compactions_failed: 0
+    });
+    message = (e) => redactTokens((e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ")).replace(/^(.*?extractor response[^:]*):.*$/i, "$1").slice(0, 300);
+    CONSEQUENCE = {
+      extractor: "memories from recent turns may be missing",
+      store: "some memories from recent turns could not be stored",
+      "follow-through": "open decisions, questions and findings may not have been updated",
+      compaction: "session summaries may be missing"
+    };
   }
 });
 
 // packages/core/src/curation/capture.ts
 async function captureTurn(input2, options, deps = {}) {
   const d = { ...defaultDeps, ...deps };
+  try {
+    await d.writable(input2.collection);
+  } catch (e) {
+    if (e instanceof CollectionLeftError) return { stored: 0, skipped: 0, superseded: 0 };
+    throw e;
+  }
   const state = {};
-  const ft = () => state.followThroughError !== void 0 ? { followThroughError: state.followThroughError } : {};
   try {
     const r = await runCapture(input2, options, d, state);
-    d.record({ kind: "turn", stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0, ...ft() });
+    d.record({
+      kind: "turn",
+      stored: r.stored,
+      skipped: r.skipped,
+      settled: r.settled?.length ?? 0,
+      ...state.followThroughError !== void 0 ? { followThroughError: state.followThroughError } : {},
+      ...state.storeError !== void 0 ? { storeError: state.storeError } : {}
+    });
     return r;
   } catch (e) {
-    d.record({ kind: "turn_failed", error: e, ...ft() });
+    d.record({ kind: "turn_failed", error: e });
     throw e;
   }
 }
@@ -7724,25 +7765,31 @@ async function runCapture(input2, options, d, state) {
       }
     }
     const typed = candidate.kind ? { kind: candidate.kind, ...candidate.kind === "decision" ? { status: "accepted" } : {}, ...candidate.owner ? { owner: candidate.owner } : {}, ...options.taskIds?.length ? { task_ids: options.taskIds } : {} } : void 0;
-    await d.storeMemory(content, {
-      collection,
-      ...typed ? { typed } : {},
-      tags: [.../* @__PURE__ */ new Set([...candidate.tags, "auto-capture"])],
-      salience: Math.min(candidate.salience, options.maxSalience),
-      sector: candidate.sector,
-      supersedes,
-      metadata: {
-        source: "auto-capture",
-        session_id: sessionId2,
-        turn,
-        extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
-        rationale: candidate.rationale,
-        ...resolverRationale !== void 0 && {
-          resolver_prompt_version: RESOLVER_PROMPT_VERSION,
-          resolver_rationale: resolverRationale
+    try {
+      await d.storeMemory(content, {
+        collection,
+        ...typed ? { typed } : {},
+        tags: [.../* @__PURE__ */ new Set([...candidate.tags, "auto-capture"])],
+        salience: Math.min(candidate.salience, options.maxSalience),
+        sector: candidate.sector,
+        supersedes,
+        metadata: {
+          source: "auto-capture",
+          session_id: sessionId2,
+          turn,
+          extractor_prompt_version: EXTRACTOR_PROMPT_VERSION,
+          rationale: candidate.rationale,
+          ...resolverRationale !== void 0 && {
+            resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+            resolver_rationale: resolverRationale
+          }
         }
-      }
-    });
+      });
+    } catch (e) {
+      state.storeError = e;
+      d.log(`Storing a captured memory failed in ${collection}: ${e}`);
+      continue;
+    }
     stored++;
     if (supersedes) superseded++;
   }
@@ -7763,6 +7810,7 @@ var init_capture = __esm({
     init_kinds();
     init_follow_through();
     init_health2();
+    init_sentinel();
     init_extractor();
     init_resolver();
     MAX_EXTRACT_CHARS = 12e3;
@@ -7774,7 +7822,8 @@ var init_capture = __esm({
       storeMemory,
       log: (msg) => process.stderr.write(`[yapa] ${msg}
 `),
-      record: (e) => recordCapture(e)
+      record: (e) => recordCapture(e),
+      writable: resolveWriteCollection
     };
   }
 });
@@ -10342,6 +10391,7 @@ __export(src_exports, {
   curationCycle: () => curationCycle,
   currentSession: () => currentSession,
   dayKey: () => dayKey,
+  dayRuns: () => dayRuns,
   decayFactor: () => decayFactor,
   defaultInferenceCaller: () => defaultInferenceCaller,
   deleteCollection: () => deleteCollection2,
@@ -10966,12 +11016,13 @@ function captureFailingAt(path3, now) {
   }
   if (!h || typeof h.at !== "number" || !h.days) return false;
   const err = h.last_error;
-  if (err && typeof err.at === "number" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
+  if (err && typeof err.at === "number" && err.stage !== "follow-through" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
   const d = h.days[localDay(now)];
   if (!d) return false;
   const n = (k) => Number(d[k] ?? 0);
-  const bad2 = n("failed") + n("follow_through_failed") + n("compactions_failed");
-  const good = n("turns") - n("follow_through_failed") + n("compactions") - n("compactions_failed");
+  const clean = d.clean === void 0 ? n("turns") - n("follow_through_failed") : n("clean");
+  const bad2 = n("failed") + (n("turns") - clean) + n("compactions_failed");
+  const good = clean + n("compactions") - n("compactions_failed");
   return bad2 >= 2 && bad2 > good;
 }
 function readHealth(path3) {
@@ -12279,7 +12330,7 @@ function runCapture2(sub, args, now = Date.now()) {
   const s = summarizeCapture(readCaptureHealth(file), now, days);
   const lines = [
     `Capture over the last ${days} day(s): ${s.turns} turn(s) judged, ${s.stored} stored, ${s.skipped} skipped as known, ${s.settled} settled`,
-    `Failures: ${s.failed} extraction, ${s.follow_through_failed} follow-through, ${s.compactions_failed} of ${s.compactions} compaction capture(s)`,
+    `Failures: ${s.failed} extraction, ${s.store_failed} store, ${s.follow_through_failed} follow-through, ${s.compactions_failed} of ${s.compactions} compaction capture(s)`,
     `Last success: ${when(s.last_ok_at, now)}`,
     ...s.last_error ? [`Last error (${s.last_error.stage}, ${when(s.last_error.at, now)}): ${s.last_error.message}`] : [],
     ...s.failing ? ["Status: FAILING"] : [],

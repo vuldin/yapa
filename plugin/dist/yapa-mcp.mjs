@@ -43643,6 +43643,10 @@ ${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
 // packages/core/src/curation/health.ts
 init_config();
 init_fs_lock();
+init_http_backend();
+
+// packages/core/src/curation/capture.ts
+init_sentinel();
 
 // packages/core/src/buckets/index.ts
 init_config();

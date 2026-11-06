@@ -27,6 +27,8 @@ describe('capture health in the status line', () => {
       expect(captureFailingAt(file, NOW)).toBe(false);
       writeFileSync(file, JSON.stringify({ at: NOW - 60_000, last_ok_at: NOW - 30_000, days: { [day]: { turns: 1, failed: 3 } } }));
       expect(captureFailingAt(file, NOW)).toBe(true);
+      writeFileSync(file, JSON.stringify({ at: NOW - 60_000, last_ok_at: NOW - 3_600_000, last_error: { at: NOW - 60_000, stage: 'follow-through', message: 'x' }, days: { [day]: { turns: 2, clean: 1, follow_through_failed: 1 } } }));
+      expect(captureFailingAt(file, NOW)).toBe(false);
       writeFileSync(file, 'not json');
       expect(captureFailingAt(file, NOW)).toBe(false);
     } finally {

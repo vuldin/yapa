@@ -12,22 +12,27 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfig } from '../config.js';
 import { lockFileFor, withFileLockSync, writeJsonAtomic } from '../fs-lock.js';
+import { redactTokens } from '../sync/http-backend.js';
 
 export interface CaptureDay {
   /** Turns judged (extractor ran to the end). */
   turns: number;
+  /** Of those, turns with no failure at all. */
+  clean: number;
   stored: number;
   skipped: number;
   settled: number;
   /** Turns whose extraction failed (no memories stored). */
   failed: number;
-  /** Turns whose follow-through failed (extraction may still have run). */
+  /** Judged turns whose follow-through failed. */
   follow_through_failed: number;
+  /** Judged turns where a memory could not be stored. */
+  store_failed: number;
   compactions: number;
   compactions_failed: number;
 }
 
-export type CaptureStage = 'extractor' | 'follow-through' | 'compaction';
+export type CaptureStage = 'extractor' | 'store' | 'follow-through' | 'compaction';
 
 export interface CaptureHealth {
   /** Local dates (YYYY-MM-DD), the last KEEP_DAYS of them. */
@@ -39,8 +44,8 @@ export interface CaptureHealth {
 }
 
 export type CaptureEvent =
-  | { kind: 'turn'; stored: number; skipped: number; settled: number; followThroughError?: unknown }
-  | { kind: 'turn_failed'; error: unknown; followThroughError?: unknown }
+  | { kind: 'turn'; stored: number; skipped: number; settled: number; followThroughError?: unknown; storeError?: unknown }
+  | { kind: 'turn_failed'; error: unknown }
   | { kind: 'compaction'; error?: unknown };
 
 const KEEP_DAYS = 14;
@@ -56,9 +61,13 @@ export function dayKey(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-const emptyDay = (): CaptureDay => ({ turns: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, compactions: 0, compactions_failed: 0 });
+const emptyDay = (): CaptureDay => ({
+  turns: 0, clean: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, store_failed: 0, compactions: 0, compactions_failed: 0,
+});
 
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').slice(0, 300);
+/** The error, without the model's reply an extractor parse error quotes (it can repeat the turn), and with tokens redacted. */
+const message = (e: unknown) => redactTokens((e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' '))
+  .replace(/^(.*?extractor response[^:]*):.*$/i, '$1').slice(0, 300);
 
 export function readCaptureHealth(path: string = captureHealthFile()): CaptureHealth | undefined {
   if (!path) return undefined;
@@ -86,12 +95,17 @@ export function applyCaptureEvent(h: CaptureHealth | undefined, e: CaptureEvent,
     if (e.followThroughError !== undefined) {
       day.follow_through_failed++;
       fail('follow-through', e.followThroughError);
-    } else {
+    }
+    if (e.storeError !== undefined) {
+      day.store_failed++;
+      fail('store', e.storeError);
+    }
+    if (e.followThroughError === undefined && e.storeError === undefined) {
+      day.clean++;
       next.last_ok_at = now;
     }
   } else if (e.kind === 'turn_failed') {
     day.failed++;
-    if (e.followThroughError !== undefined) day.follow_through_failed++;
     fail('extractor', e.error);
   } else {
     day.compactions++;
@@ -124,6 +138,7 @@ export interface CaptureSummary {
   settled: number;
   failed: number;
   follow_through_failed: number;
+  store_failed: number;
   compactions: number;
   compactions_failed: number;
   last_ok_at?: number;
@@ -134,13 +149,14 @@ export interface CaptureSummary {
 
 export function summarizeCapture(h: CaptureHealth | undefined, now = Date.now(), days = 7): CaptureSummary {
   const out: CaptureSummary = {
-    days, turns: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, compactions: 0, compactions_failed: 0, failing: false,
+    days, turns: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, store_failed: 0, compactions: 0, compactions_failed: 0, failing: false,
   };
   if (!h) return out;
-  const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(now - i * 86_400_000)));
+  const t = new Date(now);
+  const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(new Date(t.getFullYear(), t.getMonth(), t.getDate() - i, 12).getTime())));
   for (const [k, d] of Object.entries(h.days)) {
     if (!keys.has(k)) continue;
-    for (const f of ['turns', 'stored', 'skipped', 'settled', 'failed', 'follow_through_failed', 'compactions', 'compactions_failed'] as const) out[f] += Number(d[f] ?? 0);
+    for (const f of ['turns', 'stored', 'skipped', 'settled', 'failed', 'follow_through_failed', 'store_failed', 'compactions', 'compactions_failed'] as const) out[f] += Number(d[f] ?? 0);
   }
   out.last_ok_at = h.last_ok_at;
   out.last_error = h.last_error;
@@ -148,23 +164,40 @@ export function summarizeCapture(h: CaptureHealth | undefined, now = Date.now(),
   return out;
 }
 
-/** Same rule as the status line: the latest run failed within the hour, or today's failures outnumber its successes. */
+/** Runs today that had a failure, and runs that had none. */
+export function dayRuns(d: Partial<CaptureDay>): { bad: number; good: number } {
+  const n = (k: keyof CaptureDay) => Number(d[k] ?? 0);
+  const clean = d.clean === undefined ? n('turns') - n('follow_through_failed') : n('clean');
+  return { bad: n('failed') + (n('turns') - clean) + n('compactions_failed'), good: clean + n('compactions') - n('compactions_failed') };
+}
+
+/**
+ * Same rule as the status line: the latest run failed within the hour (a
+ * follow-through failure alone doesn't count: memories were still stored),
+ * or today's runs with a failure outnumber those without, two or more.
+ */
 export function captureFailing(h: CaptureHealth | undefined, now = Date.now()): boolean {
   if (!h) return false;
   const err = h.last_error;
-  if (err && err.at >= (h.last_ok_at ?? 0) && now - err.at < 3_600_000) return true;
+  if (err && err.stage !== 'follow-through' && err.at >= (h.last_ok_at ?? 0) && now - err.at < 3_600_000) return true;
   const d = h.days[dayKey(now)];
   if (!d) return false;
-  const bad = d.failed + d.follow_through_failed + d.compactions_failed;
-  const good = d.turns - d.follow_through_failed + d.compactions - d.compactions_failed;
+  const { bad, good } = dayRuns(d);
   return bad >= 2 && bad > good;
 }
+
+const CONSEQUENCE: Record<CaptureStage, string> = {
+  extractor: 'memories from recent turns may be missing',
+  store: 'some memories from recent turns could not be stored',
+  'follow-through': 'open decisions, questions and findings may not have been updated',
+  compaction: 'session summaries may be missing',
+};
 
 /** One line for session start when capture failed in the last day, else undefined. */
 export function captureDownLine(h: CaptureHealth | undefined = readCaptureHealth(), now = Date.now()): string | undefined {
   const err = h?.last_error;
   if (!h || !err || now - err.at > 86_400_000 || (h.last_ok_at ?? 0) > err.at) return undefined;
-  const d = h.days[dayKey(now)] ?? emptyDay();
-  const failed = d.failed + d.follow_through_failed + d.compactions_failed;
-  return `**YAPA capture is failing** (${err.stage}${failed ? `, ${failed} failure(s) today` : ''}): ${err.message.slice(0, 160)}. Memories from recent turns may be missing; \`yapa capture status\` for details.`;
+  const { bad } = dayRuns(h.days[dayKey(now)] ?? {});
+  const why = CONSEQUENCE[err.stage] ?? CONSEQUENCE.extractor;
+  return `**YAPA capture is failing** (${err.stage}${bad ? `, ${bad} failed run(s) today` : ''}): ${err.message.slice(0, 160)}. So ${why}; \`yapa capture status\` for details.`;
 }
