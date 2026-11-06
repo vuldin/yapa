@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Open findings no longer pile up unseen.**
+  - Capture stops recording progress as findings (extractor prompt v3). A review round, a push, a merge, a release or tests passing is never a finding, and a release or a merge is never a decision. When such an update is worth keeping, it's stored as an ordinary episodic note.
+  - `task_next` used to offer `cleanup:findings` only when no task was ready, which in an active collection meant never. It now offers it beside ready tasks once a collection holds `FINDINGS_CLEANUP_THRESHOLD` (default 20) open findings older than two days with no disposition. Session start (and DSH) says so too.
+- **`yapa memory sweep-findings --collection C`** works through that backlog. The curation model reads each open finding older than `--min-age-days` (default 2), with the newest similar note beside it, and calls it a progress note, superseded or kept. The command lists the verdicts, and `--apply` resolves the first two as no-action with the reason. Findings the model doesn't judge, or when it is unsure, are kept. Read-only documents are skipped.
+
 ## 1.13.0 (2026-11-06)
 
 YAPA can sync with a remote that serves the Sync API as an MCP tool behind a gateway, and with remotes that have stricter rules about deleting data.

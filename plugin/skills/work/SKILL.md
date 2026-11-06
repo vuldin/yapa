@@ -31,7 +31,7 @@ Repeat until step 1 finds nothing to do.
 ## Cleanup items
 
 - `cleanup:triage`: for each untriaged open task, `task_update` its `tags` (pass the full list: tags are replaced): `auto` if a session can do all of it unattended, otherwise `needs-human`, plus `needs:<user>` when one person must take it.
-- `cleanup:findings`: for each open finding (`memory_list` with `kind: finding`, `status: open`), decide what became of it and `memory_update` it to `resolved` with a `disposition` (decision, task or limitation, naming it in `disposition_ids`; or `no-action` with a `disposition_reason`). If that needs a person's call, record a needed decision instead.
+- `cleanup:findings`: first run `yapa memory sweep-findings --collection <collection>` (a dry run), check its verdicts, and rerun it with `--apply` to close the progress notes and superseded findings. Then, for each open finding left (`memory_list` with `kind: finding`, `status: open`), decide what became of it and `memory_update` it to `resolved` with a `disposition` (decision, task or limitation, naming it in `disposition_ids`; or `no-action` with a `disposition_reason`). If that needs a person's call, record a needed decision instead.
 - `cleanup:compaction`: `compaction_suggest`, write a summary per group, `compaction_apply`.
 
 ## Stop, and leave it for a person, when

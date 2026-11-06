@@ -9,6 +9,7 @@
  * overlaps something claimed), then priority, then due date (earliest first,
  * none last), then how many open tasks each one unblocks, then age.
  */
+import { staleFindings } from '../memory/sweep.js';
 import { getDocumentsByFilter } from '../store/index.js';
 import { getConfig } from '../config.js';
 import { collectionSize } from '../memory/compact.js';
@@ -32,7 +33,7 @@ export interface NextOptions extends ClaimOptions {
   claim?: boolean;
   /** Only tasks tagged `auto` (an unattended session may do all of it). */
   autoOnly?: boolean;
-  /** Offer cleanup items even when tasks are ready (default: only when none is). */
+  /** Offer cleanup items even when tasks are ready (default: only when none is, or the findings backlog is over FINDINGS_CLEANUP_THRESHOLD). */
   includeCleanup?: boolean;
 }
 
@@ -41,6 +42,8 @@ export interface NextOptions extends ClaimOptions {
  *   cleanup:triage      open tasks not yet tagged auto or needs-human (only in
  *                       a collection that already uses those tags)
  *   cleanup:findings    open findings older than two days with no disposition
+ *                       (also offered beside ready tasks once there are
+ *                       FINDINGS_CLEANUP_THRESHOLD of them)
  *   cleanup:compaction  the collection is over the compaction threshold
  */
 export interface CleanupItem {
@@ -202,6 +205,8 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
 
   const result: NextResult = { ready, skipped, claimsKnown: claims !== undefined, cleanup: [] };
   if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open, claims);
+  else result.cleanup = (await cleanupItems(opts.collection, open, claims, ['cleanup:findings']))
+    .filter(c => c.count >= getConfig().FINDINGS_CLEANUP_THRESHOLD);
   if (!opts.claim) return result;
 
   const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a, includeCleanup: _i, ...claimOpts } = opts;
@@ -230,22 +235,26 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
   return result;
 }
 
-const DAY = 86400;
 
-async function cleanupItems(collection: string, open: Array<{ id: string; metadata: Record<string, any> }>, claims: Map<string, Lease> | undefined): Promise<CleanupItem[]> {
+async function cleanupItems(
+  collection: string, open: Array<{ id: string; metadata: Record<string, any> }>, claims: Map<string, Lease> | undefined, only?: string[],
+): Promise<CleanupItem[]> {
   const items: CleanupItem[] = [];
+  const want = (key: string) => !only || only.includes(key);
   const triageTag = (tags: string[]) => tags.includes('auto') || tags.includes('needs-human') || tags.some(t => t.startsWith('needs:'));
-  if (open.some(d => triageTag(norm(d.metadata.tags)))) {
+  if (want('cleanup:triage') && open.some(d => triageTag(norm(d.metadata.tags)))) {
     const untriaged = open.filter(d => !triageTag(norm(d.metadata.tags))).length;
     if (untriaged) items.push({ key: 'cleanup:triage', title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
-  const now = Math.floor(Date.now() / 1000);
-  const findings = (await getDocumentsByFilter(collection, { type: 'memory', kind: 'finding' }, 2000).catch(() => []))
-    .filter(f => f.metadata.archived !== true && (f.metadata.status ?? 'open') === 'open' && !f.metadata.disposition
-      && Number(f.metadata.created_at ?? now) < now - 2 * DAY && (f.metadata.chunk_index ?? 0) === 0);
-  if (findings.length) items.push({ key: 'cleanup:findings', title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
-  const size = await collectionSize(collection).catch(() => 0);
-  if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: 'cleanup:compaction', title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
+  const findings = want('cleanup:findings') ? await staleFindings(collection) : [];
+  if (findings.length) {
+    items.push({
+      key: 'cleanup:findings', count: findings.length,
+      title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` closes the ones that are only progress notes`,
+    });
+  }
+  const size = want('cleanup:compaction') ? await collectionSize(collection).catch(() => 0) : 0;
+  if (want('cleanup:compaction') && size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: 'cleanup:compaction', title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
   for (const it of items) {
     const l = claims?.get(it.key);
     if (l) it.held_by = describeHolder(l);

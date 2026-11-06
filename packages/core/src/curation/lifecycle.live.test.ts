@@ -52,6 +52,21 @@ describe.skipIf(!LIVE)('capture prompts against a real model (opt-in)', () => {
     expect(got.every(g => g.kind !== 'decision')).toBe(true); // nothing was decided
   }, 120_000);
 
+  it('the extractor types no progress note as a finding and no release as a decision', async () => {
+    const review = await extractMemories({
+      collection: C,
+      userText: 'reviewer is done with round 4?',
+      assistantText: 'Yes: round 4 of the review found nothing, so the export branch is clear. I pushed the fixes as abc1234 and opened PR #82; all 640 tests pass.',
+    });
+    expect(review.filter(g => g.kind === 'finding' || g.kind === 'decision')).toEqual([]);
+    const release = await extractMemories({
+      collection: C,
+      userText: 'merged, tag and release it',
+      assistantText: 'Tagged v2.4.0 on the merge commit and created the GitHub release from the CHANGELOG section. The plugin marketplace now offers 2.4.0.',
+    });
+    expect(release.filter(g => g.kind === 'decision' || g.kind === 'finding')).toEqual([]);
+  }, 180_000);
+
   it('follow-through records the person\'s choice, and nothing when the turn only discusses it', async () => {
     const { ids: [decision] } = await storeMemory('Should the nightly export run as a dedicated service account, or keep the reporting user and rotate its password monthly?', {
       collection: C,

@@ -9,7 +9,7 @@
  * export can run as often as it likes.
  */
 import {
-  getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError,
+  getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings,
   recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, redirectNote, type TypedFields,
 } from '@yapa/core';
 
@@ -17,10 +17,13 @@ export const MEMORY_USAGE =
   'Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n' +
   '       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n' +
   '       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n' +
+  '       yapa memory sweep-findings --collection C [--apply] [--limit N] [--min-age-days N]\n' +
   '       yapa waiting       [--collection C] [--for U | --everyone]\n' +
   'Typed fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n' +
   '  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n' +
   '  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\n' +
+  'sweep-findings asks the curation model which open findings older than --min-age-days (default 2) are only\n' +
+  '  progress notes or superseded by a newer note, and lists them; --apply resolves those as no-action.\n' +
   'Prints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n';
 
 export interface MemoryCliResult {
@@ -46,7 +49,7 @@ const csv = (v: string | undefined) => (v === undefined ? undefined : v.split(',
 
 const VALUE_FLAGS = new Set([
   '--collection', '--kind', '--status', '--owner', '--tag', '--limit', '--ref', '--content', '--note', '--task-ids', '--option',
-  '--recommendation', '--disposition', '--disposition-ids', '--disposition-reason', '--exit-criteria', '--tags', '--for',
+  '--recommendation', '--disposition', '--disposition-ids', '--disposition-reason', '--exit-criteria', '--tags', '--for', '--min-age-days',
 ]);
 
 function positional(args: string[]): string | undefined {
@@ -166,6 +169,34 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         const r = await updateMemory(id, { ...typed, ...(content !== undefined ? { content } : {}), ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, flag(args, '--collection'));
         recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
+      }
+      case 'sweep-findings': {
+        const collection = flag(args, '--collection');
+        if (!collection) throw new UsageError('--collection is required');
+        const num = (name: string) => {
+          const v = flag(args, name);
+          if (v === undefined) return undefined;
+          const n = Number(v);
+          if (!Number.isInteger(n) || n < 0) throw new UsageError(`${name} must be a non-negative integer`);
+          return n;
+        };
+        const config = getConfig();
+        if (config.CURATION_LLM_PROVIDER === 'anthropic' && !config.ANTHROPIC_API_KEY) {
+          setConfig({ ...config, CURATION_LLM_PROVIDER: 'claude-cli', CURATION_MODEL: config.CURATION_MODEL || 'haiku' });
+        }
+        const apply = args.includes('--apply');
+        const r = await sweepFindings({ collection, apply, limit: num('--limit'), minAgeDays: num('--min-age-days') });
+        if (apply) recordLastWrite(collection);
+        const count = (v: string) => r.items.filter(i => i.verdict === v).length;
+        const closed = r.items.filter(i => i.applied).length;
+        const lines = [
+          `${r.considered} open finding(s) in ${collection}: ${count('progress')} progress note(s), ${count('superseded')} superseded, ${count('keep')} kept`
+            + (apply ? `; ${closed} resolved as no-action` : ' (dry run: --apply resolves them)'),
+          ...r.items.filter(i => i.verdict !== 'keep').map(i =>
+            `- ${i.id} [${i.verdict}${i.superseded_by ? ` by ${i.superseded_by}` : ''}${i.error ? `, failed: ${i.error}` : ''}] ${i.reason} | ${i.content.replace(/\s+/g, ' ').slice(0, 120)}`),
+        ];
+        const failed = r.items.filter(i => i.error).length;
+        return { exit: failed && failed === r.items.length && r.items.length ? 1 : 0, json: { ok: true, ...r }, text: lines.join('\n') };
       }
       default:
         throw new UsageError(`unknown command\n${MEMORY_USAGE}`);

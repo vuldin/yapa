@@ -92,6 +92,7 @@ export * from './training/registry.js';
 export * from './training/synthesis.js';
 export * from './training/verification.js';
 export * from './memory/kinds.js';
+export * from './memory/sweep.js';
 export * from './memory/update.js';
 export * from './memory/external.js';
 export * from './memory/links.js';

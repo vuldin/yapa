@@ -117,6 +117,7 @@ function createConfig(env = process.env) {
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
+    FINDINGS_CLEANUP_THRESHOLD: parseInt(get(env, "FINDINGS_CLEANUP_THRESHOLD", "20"), 10),
     COMPACTION_MIN_GROUP_SIZE: parseInt(get(env, "COMPACTION_MIN_GROUP_SIZE", "3"), 10),
     COMPACTION_SIMILARITY_DISTANCE: parseFloat(get(env, "COMPACTION_SIMILARITY_DISTANCE", "0.30")),
     CURATION_ENABLED: get(env, "CURATION_ENABLED", "false") === "true",
@@ -5818,6 +5819,341 @@ var init_update = __esm({
   }
 });
 
+// packages/core/src/curation/provider.ts
+import { spawn } from "node:child_process";
+function setHostLLMCaller(caller) {
+  hostCaller = caller;
+}
+async function callCurationLLM(options) {
+  if (hostCaller) return hostCaller(options);
+  const model = getCurationModel();
+  switch (getConfig().CURATION_LLM_PROVIDER) {
+    case "fireworks":
+      return fetchOpenAICompatible2(
+        "https://api.fireworks.ai/inference/v1/chat/completions",
+        getConfig().FIREWORKS_API_KEY,
+        model,
+        options
+      );
+    case "openai":
+      return fetchOpenAICompatible2(
+        "https://api.openai.com/v1/chat/completions",
+        getConfig().OPENAI_API_KEY,
+        model,
+        options
+      );
+    case "anthropic":
+      return fetchAnthropic(getConfig().ANTHROPIC_API_KEY, model, options);
+    case "ollama":
+      return fetchOllama2(getConfig().OLLAMA_URL, model, options);
+    case "claude-cli":
+      return callClaudeCli(model, options);
+    default:
+      throw new Error(`Unknown curation LLM provider: ${getConfig().CURATION_LLM_PROVIDER}`);
+  }
+}
+async function fetchOpenAICompatible2(url, apiKey, model, options) {
+  if (!apiKey) throw new Error(`Missing API key for ${getConfig().CURATION_LLM_PROVIDER}`);
+  const body = {
+    model,
+    messages: options.messages,
+    temperature: options.temperature ?? 0,
+    max_tokens: options.max_tokens ?? 4096
+  };
+  if (options.json_mode) body.response_format = { type: "json_object" };
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw new Error(`LLM API error: ${response.status} ${await response.text()}`);
+  }
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new Error(`Unexpected LLM response shape: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  return content;
+}
+async function fetchAnthropic(apiKey, model, options) {
+  if (!apiKey) throw new Error("Missing getConfig().ANTHROPIC_API_KEY for curation");
+  const systemMsgs = options.messages.filter((m) => m.role === "system").map((m) => m.content);
+  const chatMsgs = options.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: options.max_tokens ?? 4096,
+      temperature: options.temperature ?? 0,
+      system: systemMsgs.join("\n\n") || void 0,
+      messages: chatMsgs
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Anthropic API error: ${response.status} ${await response.text()}`);
+  }
+  const data = await response.json();
+  const block = data.content?.[0];
+  if (!block || block.type !== "text" || typeof block.text !== "string") {
+    throw new Error(`Unexpected Anthropic response shape: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  return block.text;
+}
+async function fetchOllama2(ollamaUrl, model, options) {
+  const response = await fetch(`${ollamaUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      messages: options.messages,
+      stream: false,
+      options: {
+        temperature: options.temperature ?? 0,
+        num_predict: options.max_tokens ?? 4096
+      }
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Ollama API error: ${response.status} ${await response.text()}`);
+  }
+  const data = await response.json();
+  if (typeof data.message?.content !== "string") {
+    throw new Error(`Unexpected Ollama response shape: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  return data.message.content;
+}
+function buildClaudeCliArgs(model, system) {
+  const args = ["-p", "--safe-mode", "--model", model, "--tools", "", "--no-session-persistence", "--output-format", "text"];
+  if (system) args.push("--system-prompt", system);
+  return args;
+}
+async function callClaudeCli(model, options) {
+  const system = options.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+  const prompt2 = options.messages.filter((m) => m.role !== "system").map((m) => m.role === "assistant" ? `Assistant: ${m.content}` : m.content).join("\n\n");
+  return new Promise((resolve3, reject) => {
+    const child = spawn("claude", buildClaudeCliArgs(model, system), {
+      env: { ...process.env, [HOOK_CHILD_ENV]: "1" },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let out = "";
+    let err = "";
+    const timer3 = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`claude -p timed out after ${CLAUDE_CLI_TIMEOUT_MS}ms`));
+    }, CLAUDE_CLI_TIMEOUT_MS);
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    child.stderr.on("data", (d) => {
+      err += d;
+    });
+    child.on("error", (e) => {
+      clearTimeout(timer3);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer3);
+      if (code === 0) resolve3(out.trim());
+      else reject(new Error(`claude -p exited ${code}: ${err.trim().slice(0, 300)}`));
+    });
+    child.stdin.end(prompt2);
+  });
+}
+var hostCaller, HOOK_CHILD_ENV, CLAUDE_CLI_TIMEOUT_MS;
+var init_provider = __esm({
+  "packages/core/src/curation/provider.ts"() {
+    "use strict";
+    init_config();
+    HOOK_CHILD_ENV = "YAPA_HOOK_CHILD";
+    CLAUDE_CLI_TIMEOUT_MS = 12e4;
+  }
+});
+
+// packages/core/src/memory/update.ts
+async function locate(id, collection) {
+  const names = collection ? [(await resolveWriteCollection(collection)).collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const name of names) {
+    const [doc] = await getDocumentsByIds2(name, [id]).catch(() => []);
+    if (doc) return { collection: name, doc };
+    const chunks = await getDocumentsByFilter2(name, { parent_id: id }, 1).catch(() => []);
+    if (chunks.length) return { collection: name, doc: chunks[0] };
+  }
+  return null;
+}
+async function updateMemory(id, patch, collection) {
+  const found = await locate(id, collection);
+  if (!found || found.doc.metadata.type !== "memory") throw new MemoryNotFoundError(id);
+  assertWritable(id, found.doc.metadata);
+  const { note, tags, content, ...typedPatch } = patch;
+  if (content !== void 0 && found.doc.metadata.parent_id) {
+    throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
+  }
+  const typed = normalizeTyped(typedPatch, found.doc.metadata);
+  const now = Math.floor(Date.now() / 1e3);
+  const baseId = found.doc.metadata.parent_id ?? found.doc.id;
+  const metadata = await withDocLock(found.collection, baseId, async () => {
+    const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : await getDocumentsByIds2(found.collection, [found.doc.id]);
+    if (!docs.length) throw new MemoryNotFoundError(id);
+    let metadata2 = docs[docs.length - 1].metadata;
+    for (const [i, d] of docs.entries()) {
+      metadata2 = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+      const last = i === docs.length - 1;
+      if ((note?.trim() || content !== void 0) && last) {
+        const day = new Date(now * 1e3).toISOString().slice(0, 10);
+        const text = content ?? d.content;
+        await addDocument2(found.collection, d.id, note?.trim() ? `${text}
+
+${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
+      } else {
+        await patchDocument(found.collection, d.id, metadataDelta(d.metadata, metadata2));
+      }
+    }
+    return metadata2;
+  });
+  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
+  return { id: baseId, collection: found.collection, metadata };
+}
+var MemoryNotFoundError;
+var init_update2 = __esm({
+  "packages/core/src/memory/update.ts"() {
+    "use strict";
+    init_store();
+    init_config();
+    init_doc_lock();
+    init_syncable();
+    init_sentinel();
+    init_kinds();
+    init_links();
+    MemoryNotFoundError = class extends Error {
+      constructor(id) {
+        super(`memory ${id} not found`);
+        this.name = "MemoryNotFoundError";
+      }
+    };
+  }
+});
+
+// packages/core/src/memory/sweep.ts
+async function staleFindings(collection, minAgeDays = 2, now = Math.floor(Date.now() / 1e3)) {
+  const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
+  return docs.filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) <= now - minAgeDays * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0);
+}
+async function newerNeighbor(collection, f, q) {
+  const created = Number(f.metadata.created_at ?? 0);
+  const near = await q(collection, f.content.slice(0, 2e3), 5, { type: "memory" }).catch(() => []);
+  const own = f.metadata.parent_id ?? f.id;
+  const n = near.find((d) => (d.metadata.parent_id ?? d.id) !== own && d.distance < NEIGHBOR_MAX_DISTANCE && d.metadata.archived !== true && Number(d.metadata.created_at ?? 0) > created);
+  return n ? { id: n.metadata.parent_id ?? n.id, content: n.content.slice(0, 600) } : void 0;
+}
+function prompt(batch) {
+  const lines = [];
+  for (const c of batch) {
+    lines.push(`- id: ${c.id}`, `  recorded: ${new Date(c.created * 1e3).toISOString().slice(0, 10)}`, `  text: ${c.content.replace(/\s+/g, " ")}`);
+    if (c.newer) lines.push(`  newer note (${c.newer.id}): ${c.newer.content.replace(/\s+/g, " ")}`);
+  }
+  return lines.join("\n");
+}
+function parseSweep(raw, batch) {
+  const out = /* @__PURE__ */ new Map();
+  const s = raw.replace(/```(?:json)?/g, "").trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  let parsed;
+  try {
+    parsed = JSON.parse(start >= 0 && end > start ? s.slice(start, end + 1) : s);
+  } catch {
+    return out;
+  }
+  if (!Array.isArray(parsed)) return out;
+  const byId = new Map(batch.map((c) => [c.id, c]));
+  for (const e of parsed) {
+    const c = e && typeof e === "object" ? byId.get(String(e.id)) : void 0;
+    if (!c || out.has(c.id)) continue;
+    const v = String(e.verdict);
+    const verdict = v === "progress" || v === "superseded" && c.newer ? v : "keep";
+    out.set(c.id, { verdict, reason: String(e.reason ?? "").trim() });
+  }
+  return out;
+}
+async function sweepFindings(opts, deps = {}) {
+  const d = { call: callCurationLLM, updateMemory, queryDocuments: queryDocuments2, ...deps };
+  const stale2 = (await staleFindings(opts.collection, opts.minAgeDays ?? 2)).filter((f) => !isReadOnlyDoc(f.metadata)).sort((a, b) => Number(a.metadata.created_at ?? 0) - Number(b.metadata.created_at ?? 0)).slice(0, opts.limit ?? Infinity);
+  const candidates = [];
+  for (const f of stale2) {
+    candidates.push({
+      id: f.metadata.parent_id ?? f.id,
+      content: f.content.slice(0, 600),
+      created: Number(f.metadata.created_at ?? 0),
+      newer: await newerNeighbor(opts.collection, f, d.queryDocuments)
+    });
+  }
+  const items = [];
+  for (let i = 0; i < candidates.length; i += BATCH) {
+    const batch = candidates.slice(i, i + BATCH);
+    let verdicts = /* @__PURE__ */ new Map();
+    try {
+      const raw = await d.call({
+        messages: [{ role: "system", content: SWEEP_SYSTEM_PROMPT }, { role: "user", content: prompt(batch) }],
+        temperature: 0,
+        max_tokens: 1500,
+        json_mode: true
+      });
+      verdicts = parseSweep(raw, batch);
+    } catch (e) {
+      for (const c of batch) items.push({ id: c.id, verdict: "keep", reason: "", content: c.content, error: String(e) });
+      continue;
+    }
+    for (const c of batch) {
+      const v = verdicts.get(c.id) ?? { verdict: "keep", reason: "no verdict" };
+      items.push({ id: c.id, verdict: v.verdict, reason: v.reason, content: c.content, ...v.verdict === "superseded" ? { superseded_by: c.newer.id } : {} });
+    }
+  }
+  if (opts.apply) {
+    for (const it of items) {
+      if (it.verdict === "keep") continue;
+      const why = it.verdict === "progress" ? `progress note, not a finding${it.reason ? `: ${it.reason}` : ""}` : `superseded by ${it.superseded_by}${it.reason ? `: ${it.reason}` : ""}`;
+      try {
+        await d.updateMemory(it.id, { status: "resolved", disposition: "no-action", disposition_reason: why, note: `Swept: ${why}` }, opts.collection);
+        it.applied = true;
+      } catch (e) {
+        it.error = String(e);
+      }
+    }
+  }
+  return { collection: opts.collection, considered: candidates.length, items, applied: !!opts.apply };
+}
+var DAY3, SWEEP_PROMPT_VERSION, BATCH, NEIGHBOR_MAX_DISTANCE, SWEEP_SYSTEM_PROMPT;
+var init_sweep = __esm({
+  "packages/core/src/memory/sweep.ts"() {
+    "use strict";
+    init_store();
+    init_syncable();
+    init_provider();
+    init_update2();
+    DAY3 = 86400;
+    SWEEP_PROMPT_VERSION = "v1";
+    BATCH = 10;
+    NEIGHBOR_MAX_DISTANCE = 0.5;
+    SWEEP_SYSTEM_PROMPT = `You clean up a team's open findings. A finding should be knowledge that stays true after the work moves on: a result, a root cause, a trap, a retraction. Some were recorded wrongly and only report progress. For each finding, answer one verdict:
+- "progress": it only records that work happened or where it stood at a moment (a review round, a commit pushed, a PR opened or merged, a release tagged, tests passing, next steps), and nothing in it stays useful or still needs deciding.
+- "superseded": the NEWER note shown with it says the same thing or makes it obsolete.
+- "keep": anything else, including a result or root cause that stays useful, something still unresolved, or when you are not sure.
+reason: one short sentence.
+
+OUTPUT: valid JSON only, no commentary, no fences. One entry per finding:
+[{"id": "<finding id>", "verdict": "progress" | "superseded" | "keep", "reason": "<short sentence>"}]`;
+  }
+});
+
 // packages/core/src/tasks/waiting.ts
 function taskNeedsPeople(tags) {
   const named = tags.filter((t) => t.startsWith("needs:")).map((t) => t.slice("needs:".length)).filter(Boolean);
@@ -6063,6 +6399,7 @@ async function nextTasks(opts) {
   ready.sort((a, b) => (a.near.length ? 1 : 0) - (b.near.length ? 1 : 0) || (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2) || (a.due_date ?? Infinity) - (b.due_date ?? Infinity) || b.unblocks - a.unblocks || created(a.id) - created(b.id));
   const result = { ready, skipped, claimsKnown: claims !== void 0, cleanup: [] };
   if (!ready.length || opts.includeCleanup) result.cleanup = await cleanupItems(opts.collection, open2, claims);
+  else result.cleanup = (await cleanupItems(opts.collection, open2, claims, ["cleanup:findings"])).filter((c) => c.count >= getConfig().FINDINGS_CLEANUP_THRESHOLD);
   if (!opts.claim) return result;
   const { collection: _c, tags: _t, excludeTags: _x, claim: _k, autoOnly: _a, includeCleanup: _i, ...claimOpts } = opts;
   for (const r of ready) {
@@ -6087,28 +6424,35 @@ async function nextTasks(opts) {
   }
   return result;
 }
-async function cleanupItems(collection, open2, claims) {
+async function cleanupItems(collection, open2, claims, only) {
   const items = [];
+  const want = (key) => !only || only.includes(key);
   const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
-  if (open2.some((d) => triageTag(norm(d.metadata.tags)))) {
+  if (want("cleanup:triage") && open2.some((d) => triageTag(norm(d.metadata.tags)))) {
     const untriaged = open2.filter((d) => !triageTag(norm(d.metadata.tags))).length;
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
-  const now = Math.floor(Date.now() / 1e3);
-  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY3 && (f.metadata.chunk_index ?? 0) === 0);
-  if (findings.length) items.push({ key: "cleanup:findings", title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
-  const size = await collectionSize(collection).catch(() => 0);
-  if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: "cleanup:compaction", title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
+  const findings = want("cleanup:findings") ? await staleFindings(collection) : [];
+  if (findings.length) {
+    items.push({
+      key: "cleanup:findings",
+      count: findings.length,
+      title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action); \`yapa memory sweep-findings --collection ${collection}\` closes the ones that are only progress notes`
+    });
+  }
+  const size = want("cleanup:compaction") ? await collectionSize(collection).catch(() => 0) : 0;
+  if (want("cleanup:compaction") && size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: "cleanup:compaction", title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
   for (const it of items) {
     const l = claims?.get(it.key);
     if (l) it.held_by = describeHolder(l);
   }
   return items;
 }
-var PRIORITY_RANK, norm, DAY3;
+var PRIORITY_RANK, norm;
 var init_next = __esm({
   "packages/core/src/tasks/next.ts"() {
     "use strict";
+    init_sweep();
     init_store();
     init_config();
     init_compact();
@@ -6120,7 +6464,6 @@ var init_next = __esm({
     init_waiting();
     PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
     norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
-    DAY3 = 86400;
   }
 });
 
@@ -6556,165 +6899,6 @@ var init_manage = __esm({
   }
 });
 
-// packages/core/src/curation/provider.ts
-import { spawn } from "node:child_process";
-function setHostLLMCaller(caller) {
-  hostCaller = caller;
-}
-async function callCurationLLM(options) {
-  if (hostCaller) return hostCaller(options);
-  const model = getCurationModel();
-  switch (getConfig().CURATION_LLM_PROVIDER) {
-    case "fireworks":
-      return fetchOpenAICompatible2(
-        "https://api.fireworks.ai/inference/v1/chat/completions",
-        getConfig().FIREWORKS_API_KEY,
-        model,
-        options
-      );
-    case "openai":
-      return fetchOpenAICompatible2(
-        "https://api.openai.com/v1/chat/completions",
-        getConfig().OPENAI_API_KEY,
-        model,
-        options
-      );
-    case "anthropic":
-      return fetchAnthropic(getConfig().ANTHROPIC_API_KEY, model, options);
-    case "ollama":
-      return fetchOllama2(getConfig().OLLAMA_URL, model, options);
-    case "claude-cli":
-      return callClaudeCli(model, options);
-    default:
-      throw new Error(`Unknown curation LLM provider: ${getConfig().CURATION_LLM_PROVIDER}`);
-  }
-}
-async function fetchOpenAICompatible2(url, apiKey, model, options) {
-  if (!apiKey) throw new Error(`Missing API key for ${getConfig().CURATION_LLM_PROVIDER}`);
-  const body = {
-    model,
-    messages: options.messages,
-    temperature: options.temperature ?? 0,
-    max_tokens: options.max_tokens ?? 4096
-  };
-  if (options.json_mode) body.response_format = { type: "json_object" };
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    throw new Error(`LLM API error: ${response.status} ${await response.text()}`);
-  }
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error(`Unexpected LLM response shape: ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  return content;
-}
-async function fetchAnthropic(apiKey, model, options) {
-  if (!apiKey) throw new Error("Missing getConfig().ANTHROPIC_API_KEY for curation");
-  const systemMsgs = options.messages.filter((m) => m.role === "system").map((m) => m.content);
-  const chatMsgs = options.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: options.max_tokens ?? 4096,
-      temperature: options.temperature ?? 0,
-      system: systemMsgs.join("\n\n") || void 0,
-      messages: chatMsgs
-    })
-  });
-  if (!response.ok) {
-    throw new Error(`Anthropic API error: ${response.status} ${await response.text()}`);
-  }
-  const data = await response.json();
-  const block = data.content?.[0];
-  if (!block || block.type !== "text" || typeof block.text !== "string") {
-    throw new Error(`Unexpected Anthropic response shape: ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  return block.text;
-}
-async function fetchOllama2(ollamaUrl, model, options) {
-  const response = await fetch(`${ollamaUrl}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      messages: options.messages,
-      stream: false,
-      options: {
-        temperature: options.temperature ?? 0,
-        num_predict: options.max_tokens ?? 4096
-      }
-    })
-  });
-  if (!response.ok) {
-    throw new Error(`Ollama API error: ${response.status} ${await response.text()}`);
-  }
-  const data = await response.json();
-  if (typeof data.message?.content !== "string") {
-    throw new Error(`Unexpected Ollama response shape: ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  return data.message.content;
-}
-function buildClaudeCliArgs(model, system) {
-  const args = ["-p", "--safe-mode", "--model", model, "--tools", "", "--no-session-persistence", "--output-format", "text"];
-  if (system) args.push("--system-prompt", system);
-  return args;
-}
-async function callClaudeCli(model, options) {
-  const system = options.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-  const prompt = options.messages.filter((m) => m.role !== "system").map((m) => m.role === "assistant" ? `Assistant: ${m.content}` : m.content).join("\n\n");
-  return new Promise((resolve3, reject) => {
-    const child = spawn("claude", buildClaudeCliArgs(model, system), {
-      env: { ...process.env, [HOOK_CHILD_ENV]: "1" },
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    let out = "";
-    let err = "";
-    const timer3 = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`claude -p timed out after ${CLAUDE_CLI_TIMEOUT_MS}ms`));
-    }, CLAUDE_CLI_TIMEOUT_MS);
-    child.stdout.on("data", (d) => {
-      out += d;
-    });
-    child.stderr.on("data", (d) => {
-      err += d;
-    });
-    child.on("error", (e) => {
-      clearTimeout(timer3);
-      reject(e);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer3);
-      if (code === 0) resolve3(out.trim());
-      else reject(new Error(`claude -p exited ${code}: ${err.trim().slice(0, 300)}`));
-    });
-    child.stdin.end(prompt);
-  });
-}
-var hostCaller, HOOK_CHILD_ENV, CLAUDE_CLI_TIMEOUT_MS;
-var init_provider = __esm({
-  "packages/core/src/curation/provider.ts"() {
-    "use strict";
-    init_config();
-    HOOK_CHILD_ENV = "YAPA_HOOK_CHILD";
-    CLAUDE_CLI_TIMEOUT_MS = 12e4;
-  }
-});
-
 // packages/core/src/curation/prompts.ts
 function buildClassifierUserPrompt(memories) {
   const lines = [`Classify these ${memories.length} memories:`, ""];
@@ -7059,7 +7243,7 @@ var init_extractor = __esm({
   "packages/core/src/curation/extractor.ts"() {
     "use strict";
     init_provider();
-    EXTRACTOR_PROMPT_VERSION = "v2";
+    EXTRACTOR_PROMPT_VERSION = "v3";
     EXTRACTOR_SYSTEM_PROMPT = `You are a memory extractor for a long-term memory system. Given ONE conversation turn \u2014 the user's message and the assistant's response \u2014 decide whether anything said is worth storing in long-term memory, and extract it.
 
 STORE a candidate when the turn contains:
@@ -7072,6 +7256,7 @@ STORE a candidate when the turn contains:
 
 DO NOT STORE:
 - Ephemeral conversation state (plans for this turn, progress narration, acknowledgments)
+- Status updates (a commit pushed, a PR opened or merged, a release tagged, a review round's outcome, tests passing), unless someone will need that later: then store it untyped, sector "episodic"
 - Obvious code patterns or anything readable from the code/git history itself
 - Restatements of the user's message with no new information
 - Generic advice, boilerplate, or filler
@@ -7086,8 +7271,8 @@ RULES
 - sector is "semantic" for durable facts/patterns, "episodic" for events, decisions, and things tied to a moment in time.
 - tags: 1-4 short lowercase tags for categorization.
 - kind (optional; omit for an ordinary fact or preference):
-  - "finding": a result, a root cause, a retraction of something believed before, or a methodology trap
-  - "decision": a choice that WAS MADE in this turn (by the user, or agreed with them)
+  - "finding": a result, a root cause, a retraction of something believed before, or a methodology trap, that stays true after the work moves on. Progress is never a finding.
+  - "decision": a choice that WAS MADE in this turn (by the user, or agreed with them). A release, a merge or a deploy is an event, not a decision.
   - "limitation": something the system cannot do yet, and what would change that
   - "question": an open question that someone outside this conversation (a person or another team) has to answer
   - "idea": a proposed capability or change nobody has committed to
@@ -7318,70 +7503,6 @@ var init_janitor = __esm({
     init_store();
     init_store2();
     init_resolver();
-  }
-});
-
-// packages/core/src/memory/update.ts
-async function locate(id, collection) {
-  const names = collection ? [(await resolveWriteCollection(collection)).collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
-  for (const name of names) {
-    const [doc] = await getDocumentsByIds2(name, [id]).catch(() => []);
-    if (doc) return { collection: name, doc };
-    const chunks = await getDocumentsByFilter2(name, { parent_id: id }, 1).catch(() => []);
-    if (chunks.length) return { collection: name, doc: chunks[0] };
-  }
-  return null;
-}
-async function updateMemory(id, patch, collection) {
-  const found = await locate(id, collection);
-  if (!found || found.doc.metadata.type !== "memory") throw new MemoryNotFoundError(id);
-  assertWritable(id, found.doc.metadata);
-  const { note, tags, content, ...typedPatch } = patch;
-  if (content !== void 0 && found.doc.metadata.parent_id) {
-    throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
-  }
-  const typed = normalizeTyped(typedPatch, found.doc.metadata);
-  const now = Math.floor(Date.now() / 1e3);
-  const baseId = found.doc.metadata.parent_id ?? found.doc.id;
-  const metadata = await withDocLock(found.collection, baseId, async () => {
-    const docs = found.doc.metadata.parent_id ? (await getDocumentsByFilter2(found.collection, { parent_id: baseId }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : await getDocumentsByIds2(found.collection, [found.doc.id]);
-    if (!docs.length) throw new MemoryNotFoundError(id);
-    let metadata2 = docs[docs.length - 1].metadata;
-    for (const [i, d] of docs.entries()) {
-      metadata2 = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
-      const last = i === docs.length - 1;
-      if ((note?.trim() || content !== void 0) && last) {
-        const day = new Date(now * 1e3).toISOString().slice(0, 10);
-        const text = content ?? d.content;
-        await addDocument2(found.collection, d.id, note?.trim() ? `${text}
-
-${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
-      } else {
-        await patchDocument(found.collection, d.id, metadataDelta(d.metadata, metadata2));
-      }
-    }
-    return metadata2;
-  });
-  if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
-  return { id: baseId, collection: found.collection, metadata };
-}
-var MemoryNotFoundError;
-var init_update2 = __esm({
-  "packages/core/src/memory/update.ts"() {
-    "use strict";
-    init_store();
-    init_config();
-    init_doc_lock();
-    init_syncable();
-    init_sentinel();
-    init_kinds();
-    init_links();
-    MemoryNotFoundError = class extends Error {
-      constructor(id) {
-        super(`memory ${id} not found`);
-        this.name = "MemoryNotFoundError";
-      }
-    };
   }
 });
 
@@ -10130,6 +10251,8 @@ __export(src_exports, {
   SALIENCE_MAX: () => SALIENCE_MAX,
   SALIENCE_START: () => SALIENCE_START,
   SESSION_ID: () => SESSION_ID,
+  SWEEP_PROMPT_VERSION: () => SWEEP_PROMPT_VERSION,
+  SWEEP_SYSTEM_PROMPT: () => SWEEP_SYSTEM_PROMPT,
   SYNTHESIS_PROMPT_VERSION: () => SYNTHESIS_PROMPT_VERSION,
   SYNTHESIS_SYSTEM_PROMPT: () => SYNTHESIS_SYSTEM_PROMPT,
   ServiceError: () => ServiceError,
@@ -10334,6 +10457,7 @@ __export(src_exports, {
   parseFollowThrough: () => parseFollowThrough,
   parseRelativeDate: () => parseRelativeDate,
   parseResolverResponse: () => parseResolverResponse,
+  parseSweep: () => parseSweep,
   parseSynthesisResponse: () => parseSynthesisResponse,
   parseVerifyJudge: () => parseVerifyJudge,
   passesPromotedFilter: () => passesPromotedFilter,
@@ -10415,6 +10539,7 @@ __export(src_exports, {
   shouldRunDecay: () => shouldRunDecay,
   splitCollectionMap: () => splitCollectionMap,
   splitManifest: () => splitManifest,
+  staleFindings: () => staleFindings,
   startCuration: () => startCuration,
   startSync: () => startSync,
   startUpdateChecks: () => startUpdateChecks,
@@ -10425,6 +10550,7 @@ __export(src_exports, {
   storeMemory: () => storeMemory,
   suggestCompaction: () => suggestCompaction,
   sweepDeletedUpstream: () => sweepDeletedUpstream,
+  sweepFindings: () => sweepFindings,
   sweepLockDebris: () => sweepLockDebris,
   syncBackendKind: () => syncBackendKind,
   syncCycle: () => syncCycle,
@@ -10540,6 +10666,7 @@ var init_src = __esm({
     init_synthesis();
     init_verification();
     init_kinds();
+    init_sweep();
     init_update2();
     init_external();
     init_links();
@@ -11173,11 +11300,11 @@ function readTurn(sessionId2) {
     return void 0;
   }
 }
-function recordPrompt(sessionId2, prompt) {
+function recordPrompt(sessionId2, prompt2) {
   if (!sessionId2) return;
   try {
     const turn = (readTurn(sessionId2)?.turn ?? 0) + 1;
-    writeFileSync11(stateFile2(sessionId2, "turn"), JSON.stringify({ prompt, turn }));
+    writeFileSync11(stateFile2(sessionId2, "turn"), JSON.stringify({ prompt: prompt2, turn }));
   } catch (e) {
     process.stderr.write(`[yapa-hook] could not buffer prompt: ${e}
 `);
@@ -11327,6 +11454,15 @@ async function sessionStart(input2) {
     process.stderr.write(`[yapa-hook] compaction check failed: ${e}
 `);
   }
+  try {
+    const stale2 = (await staleFindings(collection)).length;
+    if (stale2 >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
+      lines.push("", "## Findings backlog", `${stale2} open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection}\` lists the ones that are only progress notes or superseded (\`--apply\` closes them); give the rest a disposition with \`memory_update\`.`);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] findings check failed: ${e}
+`);
+  }
   if (input2.source !== "compact") {
     await withTimeout(consolidateStaleDrafts().catch(() => []), STALE_JOURNAL_BUDGET_MS);
   }
@@ -11336,14 +11472,14 @@ async function sessionStart(input2) {
   );
   context("SessionStart", lines);
 }
-function userText(prompt) {
-  if (!prompt.includes("<task-notification") && !prompt.includes("[SYSTEM NOTIFICATION")) return prompt.trim();
-  return prompt.replace(/<task-notification>[\s\S]*?(<\/task-notification>|$)/g, "").replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\][\s\S]*?(\n\s*\n|$)/g, "").replace(/<system-reminder>\s*<\/system-reminder>/g, "").trim();
+function userText(prompt2) {
+  if (!prompt2.includes("<task-notification") && !prompt2.includes("[SYSTEM NOTIFICATION")) return prompt2.trim();
+  return prompt2.replace(/<task-notification>[\s\S]*?(<\/task-notification>|$)/g, "").replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\][\s\S]*?(\n\s*\n|$)/g, "").replace(/<system-reminder>\s*<\/system-reminder>/g, "").trim();
 }
 async function userPromptSubmit(input2) {
   const raw = (input2.prompt ?? "").trim();
-  const prompt = userText(raw);
-  if (!prompt) {
+  const prompt2 = userText(raw);
+  if (!prompt2) {
     emit({});
     if (raw) await keepLeasesAlive(input2);
     return;
@@ -11351,9 +11487,9 @@ async function userPromptSubmit(input2) {
   const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
   recordSessionScope(input2.session_id, collection);
-  recordPrompt(input2.session_id, prompt);
+  recordPrompt(input2.session_id, prompt2);
   await Promise.all([freshenFromRemote(collection, { gate: true }), keepLeasesAlive(input2)]);
-  const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt.slice(0, 120)}${prompt.length > 120 ? "\u2026" : ""}`];
+  const lines = ["# YAPA Recall", "", `${scopeLine(detection)}  **Query:** ${prompt2.slice(0, 120)}${prompt2.length > 120 ? "\u2026" : ""}`];
   const notice = takeNotice(input2.session_id);
   if (notice) lines.push(`_${notice}_`);
   const down = syncDownLine();
@@ -11361,7 +11497,7 @@ async function userPromptSubmit(input2) {
   const claimNotices = claimNoticeLines();
   lines.push(...claimNotices);
   try {
-    const recall = await recallMemory(prompt, { collection, nResults: 3, crossCollection: getConfig().CROSS_COLLECTION_RESULTS });
+    const recall = await recallMemory(prompt2, { collection, nResults: 3, crossCollection: getConfig().CROSS_COLLECTION_RESULTS });
     if (recall.length === 0 && !notice && !down && !claimNotices.length) {
       emit({});
       return;
@@ -12034,6 +12170,32 @@ async function runMemory(sub, args) {
         recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
       }
+      case "sweep-findings": {
+        const collection = flag2(args, "--collection");
+        if (!collection) throw new UsageError2("--collection is required");
+        const num = (name) => {
+          const v = flag2(args, name);
+          if (v === void 0) return void 0;
+          const n = Number(v);
+          if (!Number.isInteger(n) || n < 0) throw new UsageError2(`${name} must be a non-negative integer`);
+          return n;
+        };
+        const config = getConfig();
+        if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
+          setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
+        }
+        const apply = args.includes("--apply");
+        const r = await sweepFindings({ collection, apply, limit: num("--limit"), minAgeDays: num("--min-age-days") });
+        if (apply) recordLastWrite(collection);
+        const count = (v) => r.items.filter((i) => i.verdict === v).length;
+        const closed = r.items.filter((i) => i.applied).length;
+        const lines = [
+          `${r.considered} open finding(s) in ${collection}: ${count("progress")} progress note(s), ${count("superseded")} superseded, ${count("keep")} kept` + (apply ? `; ${closed} resolved as no-action` : " (dry run: --apply resolves them)"),
+          ...r.items.filter((i) => i.verdict !== "keep").map((i) => `- ${i.id} [${i.verdict}${i.superseded_by ? ` by ${i.superseded_by}` : ""}${i.error ? `, failed: ${i.error}` : ""}] ${i.reason} | ${i.content.replace(/\s+/g, " ").slice(0, 120)}`)
+        ];
+        const failed = r.items.filter((i) => i.error).length;
+        return { exit: failed && failed === r.items.length && r.items.length ? 1 : 0, json: { ok: true, ...r }, text: lines.join("\n") };
+      }
       default:
         throw new UsageError2(`unknown command
 ${MEMORY_USAGE}`);
@@ -12063,7 +12225,7 @@ var init_memory = __esm({
   "packages/mcp/src/cli/memory.ts"() {
     "use strict";
     init_src();
-    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
+    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa memory sweep-findings --collection C [--apply] [--limit N] [--min-age-days N]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which open findings older than --min-age-days (default 2) are only\n  progress notes or superseded by a newer note, and lists them; --apply resolves those as no-action.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
     UsageError2 = class extends Error {
     };
     csv = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
@@ -12085,7 +12247,8 @@ var init_memory = __esm({
       "--disposition-reason",
       "--exit-criteria",
       "--tags",
-      "--for"
+      "--for",
+      "--min-age-days"
     ]);
   }
 });
