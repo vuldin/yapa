@@ -2084,6 +2084,9 @@ function normalizedSalience(salience) {
 function rankScore(distance, salience) {
   return distance - getConfig().SALIENCE_RANKING_WEIGHT * normalizedSalience(salience);
 }
+function isSessionSummary(metadata) {
+  return metadata?.source === "compaction";
+}
 var init_filters = __esm({
   "packages/core/src/memory/filters.ts"() {
     "use strict";
@@ -2101,19 +2104,21 @@ async function recallMemory(query, options = {}) {
   const filter = { type: "memory" };
   if (options.kind) filter.kind = options.kind;
   if (options.status) filter.status = options.status;
+  const sessions = options.include_sessions ?? options.tags?.includes("compaction") ?? false;
+  const fetch2 = sessions ? nResults : nResults * 3;
+  const kept = (docs) => sessions ? docs : docs.filter((d) => !isSessionSummary(d.metadata));
   let results;
   if (options.collection) {
-    const docs = await queryDocuments2(options.collection, query, nResults, filter);
+    const docs = kept(await queryDocuments2(options.collection, query, fetch2, filter)).slice(0, nResults);
     results = docs.map((d) => ({ ...d, collection: options.collection }));
     const extra = options.crossCollection ?? 0;
     if (extra > 0) {
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
-      const others = (await queryAllCollections2(query, nResults + extra * 4, filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
+      const others = kept(await queryAllCollections2(query, (nResults + extra * 4) * (sessions ? 1 : 2), filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
       results = [...results, ...others];
     }
   } else {
-    const docs = await queryAllCollections2(query, nResults, filter);
-    results = docs;
+    results = kept(await queryAllCollections2(query, fetch2, filter)).slice(0, nResults);
   }
   if (options.tags?.length) {
     results = results.filter((r) => {
@@ -4766,7 +4771,7 @@ var init_decay = __esm({
 async function collectionSize(collection) {
   try {
     const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e4);
-    return docs.filter((d) => d.metadata.archived !== true).length;
+    return docs.filter((d) => d.metadata.archived !== true && !isSessionSummary(d.metadata)).length;
   } catch {
     return 0;
   }
@@ -4781,7 +4786,7 @@ function intersect(a, b) {
   return b.filter((t) => set.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -4790,7 +4795,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -4844,6 +4849,7 @@ async function applyCompaction(input2) {
 var init_compact = __esm({
   "packages/core/src/memory/compact.ts"() {
     "use strict";
+    init_filters();
     init_config();
     init_archive();
     init_store();
@@ -10281,6 +10287,7 @@ __export(src_exports, {
   isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
   isRejectedUnchanged: () => isRejectedUnchanged,
+  isSessionSummary: () => isSessionSummary,
   isSignedOutError: () => isSignedOutError,
   isSyncConfigured: () => isSyncConfigured,
   isSyncableCollection: () => isSyncableCollection,

@@ -41549,6 +41549,9 @@ function normalizedSalience(salience) {
 function rankScore(distance, salience) {
   return distance - getConfig().SALIENCE_RANKING_WEIGHT * normalizedSalience(salience);
 }
+function isSessionSummary(metadata) {
+  return metadata?.source === "compaction";
+}
 
 // packages/core/src/memory/recall.ts
 function isFenced(collection) {
@@ -41560,19 +41563,21 @@ async function recallMemory(query, options = {}) {
   const filter = { type: "memory" };
   if (options.kind) filter.kind = options.kind;
   if (options.status) filter.status = options.status;
+  const sessions = options.include_sessions ?? options.tags?.includes("compaction") ?? false;
+  const fetch2 = sessions ? nResults : nResults * 3;
+  const kept = (docs) => sessions ? docs : docs.filter((d) => !isSessionSummary(d.metadata));
   let results;
   if (options.collection) {
-    const docs = await queryDocuments2(options.collection, query, nResults, filter);
+    const docs = kept(await queryDocuments2(options.collection, query, fetch2, filter)).slice(0, nResults);
     results = docs.map((d) => ({ ...d, collection: options.collection }));
     const extra = options.crossCollection ?? 0;
     if (extra > 0) {
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
-      const others = (await queryAllCollections2(query, nResults + extra * 4, filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
+      const others = kept(await queryAllCollections2(query, (nResults + extra * 4) * (sessions ? 1 : 2), filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
       results = [...results, ...others];
     }
   } else {
-    const docs = await queryAllCollections2(query, nResults, filter);
-    results = docs;
+    results = kept(await queryAllCollections2(query, fetch2, filter)).slice(0, nResults);
   }
   if (options.tags?.length) {
     results = results.filter((r) => {
@@ -41901,7 +41906,7 @@ init_sentinel();
 async function collectionSize(collection) {
   try {
     const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e4);
-    return docs.filter((d) => d.metadata.archived !== true).length;
+    return docs.filter((d) => d.metadata.archived !== true && !isSessionSummary(d.metadata)).length;
   } catch {
     return 0;
   }
@@ -41916,7 +41921,7 @@ function intersect(a, b) {
   return b.filter((t) => set2.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -41925,7 +41930,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -46065,7 +46070,7 @@ ${result.instructions}`
   );
   server2.tool(
     "memory_recall",
-    "Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. With `collection`, a few strongly relevant hits from OTHER collections are included too (labeled with their collection) \u2014 a fix found for one customer often applies to another. Omit `collection` to search everything. Promoted memories (already moved to the system-prompt companion or a trained adapter) are excluded by default.",
+    "Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. With `collection`, a few strongly relevant hits from OTHER collections are included too (labeled with their collection) \u2014 a fix found for one customer often applies to another. Omit `collection` to search everything. Promoted memories (already moved to the system-prompt companion or a trained adapter) and compaction summaries of past sessions are excluded by default.",
     {
       query: external_exports.string().describe("Semantic search query"),
       collection: external_exports.string().optional().describe("Primary collection to search (omit to search all collections equally)"),
@@ -46075,6 +46080,7 @@ ${result.instructions}`
       kind: external_exports.enum(MEMORY_KINDS).optional().describe("Only typed memories of this kind"),
       status: external_exports.string().optional().describe("Only typed memories with this status"),
       include_promoted: external_exports.boolean().optional().describe("Include memories already promoted to system-prompt or training buckets. Default: false."),
+      include_sessions: external_exports.boolean().optional().describe('Include compaction summaries of past sessions (for "what happened in the session where..."). Default: false.'),
       filters: external_exports.object({
         trainable_min: external_exports.number().min(0).max(1).optional().describe("Minimum trainable score (0-1)"),
         durability_min: external_exports.number().min(0).max(1).optional().describe("Minimum durability score (0-1)"),
@@ -46082,7 +46088,7 @@ ${result.instructions}`
         classified: external_exports.boolean().optional().describe("If true, only classified memories. If false, only unclassified.")
       }).optional().describe("Optional range filters on classifier scores")
     },
-    async ({ query, collection, other_collections, n_results, tags, kind, status, include_promoted, filters }) => {
+    async ({ query, collection, other_collections, n_results, tags, kind, status, include_promoted, include_sessions, filters }) => {
       const results = await recallMemory(query, {
         collection,
         crossCollection: other_collections ?? getConfig().CROSS_COLLECTION_RESULTS,
@@ -46091,6 +46097,7 @@ ${result.instructions}`
         kind,
         status,
         include_promoted,
+        include_sessions,
         filters
       });
       if (results.length === 0) {

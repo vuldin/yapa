@@ -262,7 +262,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'memory_recall',
-    'Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. With `collection`, a few strongly relevant hits from OTHER collections are included too (labeled with their collection) — a fix found for one customer often applies to another. Omit `collection` to search everything. Promoted memories (already moved to the system-prompt companion or a trained adapter) are excluded by default.',
+    'Semantic search for memories with optional collection/tag filters. Results are ranked by a combination of vector distance and salience. With `collection`, a few strongly relevant hits from OTHER collections are included too (labeled with their collection) — a fix found for one customer often applies to another. Omit `collection` to search everything. Promoted memories (already moved to the system-prompt companion or a trained adapter) and compaction summaries of past sessions are excluded by default.',
     {
       query: z.string().describe('Semantic search query'),
       collection: z.string().optional().describe('Primary collection to search (omit to search all collections equally)'),
@@ -272,6 +272,7 @@ export function registerTools(server: McpServer): void {
       kind: z.enum(MEMORY_KINDS).optional().describe('Only typed memories of this kind'),
       status: z.string().optional().describe('Only typed memories with this status'),
       include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
+      include_sessions: z.boolean().optional().describe('Include compaction summaries of past sessions (for "what happened in the session where..."). Default: false.'),
       filters: z.object({
         trainable_min: z.number().min(0).max(1).optional().describe('Minimum trainable score (0-1)'),
         durability_min: z.number().min(0).max(1).optional().describe('Minimum durability score (0-1)'),
@@ -279,7 +280,7 @@ export function registerTools(server: McpServer): void {
         classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
       }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ query, collection, other_collections, n_results, tags, kind, status, include_promoted, filters }) => {
+    async ({ query, collection, other_collections, n_results, tags, kind, status, include_promoted, include_sessions, filters }) => {
       const results = await recallMemory(query, {
         collection,
         crossCollection: other_collections ?? getConfig().CROSS_COLLECTION_RESULTS,
@@ -288,6 +289,7 @@ export function registerTools(server: McpServer): void {
         kind,
         status,
         include_promoted,
+        include_sessions,
         filters,
       });
       if (results.length === 0) {

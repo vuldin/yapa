@@ -136,6 +136,18 @@ describe('userPromptSubmit', () => {
     expect(pullCollection).toHaveBeenCalledOnce();
   });
 
+  it('leaves compaction summaries of past sessions out of prompt recall', async () => {
+    await storeMemory('# Conversation compaction summary\n\nWe looked at when gamma prod maintenance happens and moved the gamma window.', {
+      collection: 'project-gamma', tags: ['compaction', 'journal'], metadata: { source: 'compaction' },
+    });
+    await storeMemory('gamma prod maintenance is Tuesdays 04:00 UTC', { collection: 'project-gamma', salience: 2 });
+    capture();
+    await userPromptSubmit({ session_id: 's1', cwd: join(dir, 'proj', 'gamma'), prompt: 'when is gamma prod maintenance?' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toMatch(/Tuesdays 04:00 UTC/);
+    expect(ctx).not.toContain('Conversation compaction summary');
+  });
+
   it('adds strongly relevant hits from other customers, labeled with their collection', async () => {
     await storeMemory('acme prod maintenance window also applies to the globex prod cluster: Thursdays 02:00 UTC', { collection: 'customer-globex', salience: 2 });
     capture();

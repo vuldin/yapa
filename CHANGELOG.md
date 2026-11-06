@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Compaction summaries no longer crowd recall.**
+  - Each `PostCompact` summary is long, so it's stored in many chunks, and they made up about a third of a busy store. Their mid-sentence fragments surfaced in the prompt hook's recall ahead of real findings: 6 of 28 hits across eight sample prompts in a real store, and all three hits on one prompt.
+  - Recall now leaves them out by default and fetches extra candidates, so it still returns the number asked for. That covers the prompt hook, `memory_recall`, DSH `yapa_memory_recall` and the reference remote's `memory_recall`, including its "latest" candidates.
+  - Pass `include_sessions: true`, or filter on the `compaction` tag, to search them. Journals stay in recall.
+  - The summaries are still stored (`CAPTURE_COMPACTION`), and they no longer count toward `COMPACTION_THRESHOLD` or get grouped by `compaction_suggest`.
+
 ## 1.13.0 (2026-11-06)
 
 YAPA can sync with a remote that serves the Sync API as an MCP tool behind a gateway, and with remotes that have stricter rules about deleting data.

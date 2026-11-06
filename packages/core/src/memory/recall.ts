@@ -3,6 +3,7 @@ import { getConfig } from '../config.js';
 import { isSyncableCollection } from '../sync/syncable.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
 import {
+  isSessionSummary,
   passesPromotedFilter,
   passesScoreFilters,
   rankScore,
@@ -18,6 +19,8 @@ export interface RecallOptions {
   status?: string;
   include_promoted?: boolean;
   include_archived?: boolean;
+  /** Include compaction summaries of past sessions (default false, or true when `tags` asks for `compaction`). */
+  include_sessions?: boolean;
   filters?: RecallFilters;
   /**
    * Count relevant hits as a "use" and boost their salience (default true).
@@ -71,16 +74,20 @@ export async function recallMemory(
   if (options.kind) filter.kind = options.kind;
   if (options.status) filter.status = options.status;
 
+  const sessions = options.include_sessions ?? options.tags?.includes('compaction') ?? false;
+  const fetch = sessions ? nResults : nResults * 3;
+  const kept = <T extends { metadata: Record<string, any> }>(docs: T[]) => (sessions ? docs : docs.filter(d => !isSessionSummary(d.metadata)));
+
   let results: RecallResult[];
 
   if (options.collection) {
-    const docs = await queryDocuments(options.collection, query, nResults, filter);
+    const docs = kept(await queryDocuments(options.collection, query, fetch, filter)).slice(0, nResults);
     results = docs.map(d => ({ ...d, collection: options.collection }));
     const extra = options.crossCollection ?? 0;
     if (extra > 0) {
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
       // Over-fetch: the scope's own hits and weak matches are dropped below.
-      const others = (await queryAllCollections(query, nResults + extra * 4, filter).catch(() => []))
+      const others = kept(await queryAllCollections(query, (nResults + extra * 4) * (sessions ? 1 : 2), filter).catch(() => []))
         .filter(r => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true
           && !isFenced(r.collection))
         .slice(0, extra);
@@ -90,8 +97,7 @@ export async function recallMemory(
     // No collection: the caller asked to search everything, so private and
     // local collections are included. The fence only keeps them out of
     // another scope's cross-collection extras.
-    const docs = await queryAllCollections(query, nResults, filter);
-    results = docs;
+    results = kept(await queryAllCollections(query, fetch, filter)).slice(0, nResults);
   }
 
   // Client-side tag filter (ChromaDB can't match comma-separated tag strings natively)

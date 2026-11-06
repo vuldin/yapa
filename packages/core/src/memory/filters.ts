@@ -55,3 +55,8 @@ export function normalizedSalience(salience: number | undefined): number {
 export function rankScore(distance: number, salience: number | undefined): number {
   return distance - getConfig().SALIENCE_RANKING_WEIGHT * normalizedSalience(salience);
 }
+
+/** A compaction summary of a past session: long, episodic, and recalled only on request. */
+export function isSessionSummary(metadata: Record<string, any> | undefined | null): boolean {
+  return metadata?.source === 'compaction';
+}

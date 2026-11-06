@@ -107,3 +107,40 @@ describe('recall boost and concurrent edits', () => {
   });
 });
 
+
+describe('compaction summaries in recall', () => {
+  it('are left out by default, without shrinking the result, and returned on request', async () => {
+    const C = 'project-sessions';
+    for (let i = 0; i < 4; i++) {
+      await storeMemory(`# Conversation compaction summary\n\nThe shard rebalance session ${i}: we moved partitions and watched the leader balancer.`, {
+        collection: C, tags: ['compaction', 'journal'], sector: 'episodic', metadata: { source: 'compaction' },
+      });
+    }
+    const facts: string[] = [];
+    for (const t of ['The leader balancer moves partitions off a shard over 80% CPU.', 'Partition moves are throttled to 50 MB/s per broker.', 'Rebalancing pauses while a broker is in maintenance mode.']) {
+      facts.push((await storeMemory(t, { collection: C })).ids[0]);
+    }
+    const q = 'shard rebalance session moving partitions with the leader balancer';
+    const plain = await recallMemory(q, { collection: C, nResults: 3, boost: false });
+    expect(plain.map(r => r.id).sort()).toEqual([...facts].sort());
+    const all = await recallMemory(q, { nResults: 3, boost: false });
+    expect(all.every(r => r.metadata.source !== 'compaction')).toBe(true);
+
+    const withSessions = await recallMemory(q, { collection: C, nResults: 7, boost: false, include_sessions: true });
+    expect(withSessions.filter(r => r.metadata.source === 'compaction')).toHaveLength(4);
+    const tagged = await recallMemory(q, { collection: C, nResults: 3, boost: false, tags: ['compaction'] });
+    expect(tagged.length).toBeGreaterThan(0);
+    expect(tagged.every(r => r.metadata.source === 'compaction')).toBe(true);
+  });
+
+  it('are not counted or grouped for memory compaction', async () => {
+    const C = 'project-sessions-size';
+    const { collectionSize, suggestCompaction } = await import('./compact.js');
+    for (let i = 0; i < 3; i++) {
+      await storeMemory(`# Conversation compaction summary\n\nSession ${i} about the importer retry loop.`, { collection: C, tags: ['compaction'], metadata: { source: 'compaction' } });
+    }
+    await storeMemory('The importer retries a failed batch three times.', { collection: C });
+    expect(await collectionSize(C)).toBe(1);
+    expect((await suggestCompaction(C)).flatMap(g => g.member_ids)).toEqual([]);
+  });
+});
