@@ -36,8 +36,8 @@ async function remoteOwned(collection: string, content: string, salience = 1.5):
 describe('curation leaves documents the remote owns alone', () => {
   it('the janitor never pairs a read-only document', async () => {
     const C = 'project-ro-janitor';
-    const remote = await remoteOwned(C, 'The acme cluster runs Redpanda 26.1 on three brokers in us-east-1.');
-    await storeMemory('The acme cluster runs Redpanda 26.1 on three brokers in us-east-1.', { collection: C });
+    const remote = await remoteOwned(C, 'The acme cluster runs version 26.1 on three brokers in us-east-1.');
+    await storeMemory('The acme cluster runs version 26.1 on three brokers in us-east-1.', { collection: C });
     expect(await findDuplicatePairs(C, 0.5)).toEqual([]);
     const { ids: [a] } = await storeMemory('Acme rotates its TLS certificates every 90 days.', { collection: C });
     const { ids: [b] } = await storeMemory('Acme rotates its TLS certificates every 90 days.', { collection: C });
