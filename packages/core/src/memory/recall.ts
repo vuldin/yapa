@@ -1,4 +1,5 @@
 import { metadataDelta, patchDocuments, queryDocuments, queryAllCollections } from '../store/index.js';
+import { isReadOnlyDoc } from '../sync/syncable.js';
 import { getConfig } from '../config.js';
 import { isSyncableCollection } from '../sync/syncable.js';
 import { touchDocument, type LifecycleMetadata } from '../lifecycle.js';
@@ -138,7 +139,7 @@ export async function recallMemory(
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
   const boosts = new Map<string, Array<{ id: string; patch: Record<string, any> }>>();
   for (const r of results) {
-    if (options.boost === false || r.distance >= boostMaxDistance) continue;
+    if (options.boost === false || r.distance >= boostMaxDistance || isReadOnlyDoc(r.metadata)) continue;
     if (r.collection) {
       const lifecycleMeta: LifecycleMetadata = {
         salience: r.metadata.salience ?? 1.0,

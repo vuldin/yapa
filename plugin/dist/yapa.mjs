@@ -2147,7 +2147,7 @@ async function recallMemory(query, options = {}) {
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
   const boosts = /* @__PURE__ */ new Map();
   for (const r of results) {
-    if (options.boost === false || r.distance >= boostMaxDistance) continue;
+    if (options.boost === false || r.distance >= boostMaxDistance || isReadOnlyDoc(r.metadata)) continue;
     if (r.collection) {
       const lifecycleMeta = {
         salience: r.metadata.salience ?? 1,
@@ -2176,6 +2176,7 @@ var init_recall = __esm({
   "packages/core/src/memory/recall.ts"() {
     "use strict";
     init_store();
+    init_syncable();
     init_config();
     init_syncable();
     init_lifecycle();
@@ -4739,6 +4740,7 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
       const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
       const updates = [];
       for (const doc of docs) {
+        if (isReadOnlyDoc(doc.metadata)) continue;
         const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
         const days = (now - anchor) / DAY2;
         if (days <= 0) continue;
@@ -4779,6 +4781,7 @@ var init_decay = __esm({
   "packages/core/src/memory/decay.ts"() {
     "use strict";
     init_store();
+    init_syncable();
     init_trash();
     init_lifecycle();
     DECAY_SENTINEL_ID = "__decay_sentinel__";
@@ -4806,7 +4809,7 @@ function intersect(a, b) {
   return b.filter((t) => set.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -4815,7 +4818,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && !isReadOnlyDoc(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -4836,6 +4839,10 @@ async function suggestCompaction(collection) {
 }
 async function applyCompaction(input2) {
   input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
+  const members = await getDocumentsByIds2(input2.collection, input2.member_ids).catch(() => []);
+  if (input2.member_ids.length && members.length && members.every((m) => isReadOnlyDoc(m.metadata))) {
+    throw new Error("every member is owned by the remote (read_only): nothing to compact");
+  }
   const stored = await storeMemory(input2.summary, {
     collection: input2.collection,
     salience: 2,
@@ -4847,7 +4854,7 @@ async function applyCompaction(input2) {
   for (const id of input2.member_ids) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
       await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
@@ -4870,6 +4877,7 @@ var init_compact = __esm({
   "packages/core/src/memory/compact.ts"() {
     "use strict";
     init_filters();
+    init_syncable();
     init_config();
     init_archive();
     init_store();
@@ -7259,7 +7267,7 @@ function getCurationState() {
 }
 async function collectUnclassified(collection) {
   const docs = await getDocumentsByFilter2(collection, { type: "memory" }, MAX_PER_COLLECTION);
-  return docs.filter((d) => d.metadata.classified_at == null);
+  return docs.filter((d) => d.metadata.classified_at == null && !isReadOnlyDoc(d.metadata));
 }
 async function curationCycle() {
   if (running) {
@@ -7368,6 +7376,7 @@ var init_curation = __esm({
   "packages/core/src/curation/index.ts"() {
     "use strict";
     init_config();
+    init_syncable();
     init_store();
     init_classifier();
     timer = null;
@@ -7622,14 +7631,14 @@ Return valid JSON only. No commentary. No markdown fences:
 
 // packages/core/src/curation/janitor.ts
 async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
       const key = [doc.id, n.id].sort().join("|");
       if (seen.has(key)) continue;
       seen.add(key);
@@ -7723,6 +7732,7 @@ async function janitorSweep(options = {}) {
 var init_janitor = __esm({
   "packages/core/src/curation/janitor.ts"() {
     "use strict";
+    init_syncable();
     init_kinds();
     init_archive();
     init_config();
@@ -8113,11 +8123,9 @@ async function captureTurn(input2, options, deps = {}) {
 async function runCapture(input2, options, d, state) {
   const { collection, sessionId: sessionId2, turn } = input2;
   let settled = [];
-  let settledWritten = [];
   try {
     const f = await d.followThrough({ collection, userText: input2.userText, assistantText: input2.assistantText, taskIds: options.taskIds });
     settled = f.changes.map((c) => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
-    settledWritten = f.changes.map((c) => ({ collection: c.collection, id: c.id }));
     state.judged = f.judged;
   } catch (e) {
     state.followThroughError = e;
@@ -8134,12 +8142,11 @@ async function runCapture(input2, options, d, state) {
   );
   if (!candidates.length) {
     if (settledNotice) d.log(`${settledNotice} [session ${sessionId2}, turn ${turn}]`);
-    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice, written: settledWritten } : {} };
+    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice } : {} };
   }
   let stored = 0;
   let skipped = 0;
   let superseded = 0;
-  const written = [...settledWritten];
   for (const candidate of candidates) {
     const neighbors = await d.queryDocuments(collection, candidate.content, 3, { type: "memory" }).then((results) => results.filter((r) => r.distance < options.dedupeDistance && r.metadata?.archived !== true)).catch(() => []);
     let content = candidate.content;
@@ -8177,7 +8184,7 @@ async function runCapture(input2, options, d, state) {
     }
     const typed = candidate.kind ? { kind: candidate.kind, ...candidate.kind === "decision" ? { status: "accepted" } : {}, ...candidate.owner ? { owner: candidate.owner } : {}, ...options.taskIds?.length ? { task_ids: options.taskIds } : {} } : void 0;
     try {
-      const r = await d.storeMemory(content, {
+      await d.storeMemory(content, {
         collection,
         ...typed ? { typed } : {},
         tags: [.../* @__PURE__ */ new Set([...candidate.tags, "auto-capture"])],
@@ -8196,7 +8203,6 @@ async function runCapture(input2, options, d, state) {
           }
         }
       });
-      for (const id of [...r?.ids ?? [], ...supersedes ? [supersedes] : []]) written.push({ collection, id });
     } catch (e) {
       state.storeError = e;
       d.log(`Storing a captured memory failed in ${collection}: ${e}`);
@@ -8211,7 +8217,7 @@ async function runCapture(input2, options, d, state) {
     d.log(`${notice} [session ${sessionId2}, turn ${turn}]`);
   }
   if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
-  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice, ...written.length ? { written } : {} };
+  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice };
 }
 var MAX_EXTRACT_CHARS, defaultDeps;
 var init_capture = __esm({
@@ -8480,6 +8486,7 @@ async function collectClassifiedMemories() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at != null) {
           out.push({
             id: d.id,
@@ -8629,6 +8636,7 @@ async function systemPromptActivate(version) {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -8673,6 +8681,7 @@ async function bucketStatus() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at == null) pendingClassification++;
         const sel = d.metadata.selected_for;
         const prom = d.metadata.promoted_to;
@@ -8690,6 +8699,7 @@ var init_buckets = __esm({
   "packages/core/src/buckets/index.ts"() {
     "use strict";
     init_config();
+    init_syncable();
     init_store();
     init_artifacts();
     init_router();
@@ -10313,6 +10323,7 @@ async function adapterPromote(args) {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION4);
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.verification_last_result === "passed") {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -10369,6 +10380,7 @@ var init_promotion = __esm({
   "packages/core/src/training/promotion.ts"() {
     "use strict";
     init_store();
+    init_syncable();
     init_registry();
     MAX_PER_COLLECTION4 = 2e3;
   }
@@ -11668,7 +11680,6 @@ __export(hooks_exports, {
   postCompact: () => postCompact,
   prepareStatusLine: () => prepareStatusLine,
   presenceLines: () => presenceLines,
-  pushWritten: () => pushWritten,
   reloadConfig: () => reloadConfig,
   sessionEnd: () => sessionEnd,
   sessionStart: () => sessionStart,
@@ -11700,19 +11711,6 @@ function attribution(metadata) {
 }
 function withTimeout(work, ms) {
   return Promise.race([work, new Promise((resolve3) => setTimeout(() => resolve3(void 0), ms).unref())]);
-}
-async function pushWritten(collection, ids, timeoutMs = HOOK_PUSH_TIMEOUT_MS) {
-  if (!ids?.length || !isSyncConfigured(getConfig()) || !isSyncableCollection(collection)) return;
-  const health = readSyncHealth();
-  if (health && Date.now() - health.at < HEALTH_FRESH_MS && (health.status === "signed_out" || health.status === "unreachable")) return;
-  try {
-    const r = await withTimeout(pushDocsNow(collection, ids), timeoutMs);
-    if (!r) process.stderr.write(`[yapa-hook] push to ${collection} timed out; the next sync cycle pushes it
-`);
-  } catch (e) {
-    process.stderr.write(`[yapa-hook] push to ${collection} failed (non-fatal): ${e}
-`);
-  }
 }
 async function freshenFromRemote(collection, opts = {}) {
   const config = getConfig();
@@ -12076,9 +12074,6 @@ async function stop(input2) {
       }
     );
     if (result.notice) writeFileSync11(stateFile2(input2.session_id, "notice"), result.notice);
-    const byCollection = /* @__PURE__ */ new Map();
-    for (const w of result.written ?? []) byCollection.set(w.collection, [...byCollection.get(w.collection) ?? [], w.id]);
-    for (const [c, ids] of byCollection) await pushWritten(c, [...new Set(ids)]);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -12090,7 +12085,7 @@ async function postCompact(input2) {
   if (!getConfig().CAPTURE_COMPACTION || !summary) return;
   try {
     const { collection } = await detectCollection(input2.cwd);
-    const written = await storeMemory(`# Conversation compaction summary
+    await storeMemory(`# Conversation compaction summary
 
 ${summary}`, {
       collection,
@@ -12100,9 +12095,7 @@ ${summary}`, {
       metadata: { source: "compaction", session_id: input2.session_id, trigger: input2.trigger }
     });
     recordCapture({ kind: "compaction" });
-    await pushWritten(collection, written.ids);
   } catch (e) {
-    if (e instanceof CollectionLeftError) return;
     recordCapture({ kind: "compaction", error: e });
     process.stderr.write(`[yapa-hook] compaction capture failed (non-fatal): ${e}
 `);
@@ -12121,7 +12114,7 @@ async function sessionEnd(input2) {
 function reloadConfig() {
   setConfig(createConfig(process.env));
 }
-var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, HOOK_PUSH_TIMEOUT_MS, HEALTH_FRESH_MS, relTime;
+var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, relTime;
 var init_hooks = __esm({
   "packages/mcp/src/cli/hooks.ts"() {
     "use strict";
@@ -12133,8 +12126,6 @@ var init_hooks = __esm({
     STALE_JOURNAL_BUDGET_MS = 2e3;
     LEASE_LIST_BUDGET_MS = 1500;
     HEARTBEAT_BUDGET_MS = 1500;
-    HOOK_PUSH_TIMEOUT_MS = 5e3;
-    HEALTH_FRESH_MS = 10 * 6e4;
     relTime = (secs) => secs < 120 ? `${secs}s` : secs < 7200 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`;
   }
 });

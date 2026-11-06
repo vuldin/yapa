@@ -3,11 +3,12 @@
 ## Unreleased
 
 ### Fixes
-- **Captured memories reach teammates right away.**
-  - The Stop hook's auto-captures (and the memories they supersede), the items it settles, and the PostCompact hook's summary were written locally and waited for the MCP server's next sync cycle, up to five minutes, before teammates saw them.
-  - The hook now pushes exactly what it wrote, to each shared collection it wrote to. It skips this while sync was seen signed out or offline in the last ten minutes.
-  - It waits at most five seconds, and anything it doesn't push stays for the next cycle.
-- A compaction summary in a folder whose collection was removed from this machine is now skipped quietly instead of showing as a capture failure.
+- **Background curation leaves documents the remote owns alone.** A remote can serve records it owns with `metadata.read_only: true`. Edits by hand were already refused, but curation still touched them. Now:
+  - the janitor never pairs or archives them as duplicates;
+  - `compaction_suggest` never groups them, and `compaction_apply` never archives one;
+  - the decay sweep and the recall salience boost leave their salience as served;
+  - the classifier never sends one to the curation model or scores it, so none is selected or promoted for training;
+  - `compaction_apply` refuses a group whose members are all read-only, instead of writing a summary that compacts nothing.
 
 ## 1.14.1 (2026-11-06)
 

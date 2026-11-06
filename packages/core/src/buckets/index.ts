@@ -1,4 +1,5 @@
 import { getConfig } from '../config.js';
+import { isReadOnlyDoc } from '../sync/syncable.js';
 import { getDocumentsByFilter, listCollections, metadataDelta, patchDocument } from '../store/index.js';
 
 import { nextVersion, writeArtifact } from './artifacts.js';
@@ -50,6 +51,7 @@ export async function collectClassifiedMemories(): Promise<ClassifiedMemory[]> {
     try {
       const docs = await getDocumentsByFilter(c.name, { type: 'memory' }, MAX_PER_COLLECTION);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at != null) {
           out.push({
             id: d.id,
@@ -227,6 +229,7 @@ export async function systemPromptActivate(version: number): Promise<{ promoted:
     try {
       const docs = await getDocumentsByFilter(c.name, { type: 'memory' }, MAX_PER_COLLECTION);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -280,6 +283,7 @@ export async function bucketStatus(): Promise<{
     try {
       const docs = await getDocumentsByFilter(c.name, { type: 'memory' }, MAX_PER_COLLECTION);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at == null) pendingClassification++;
         const sel = d.metadata.selected_for;
         const prom = d.metadata.promoted_to;
