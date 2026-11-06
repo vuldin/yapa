@@ -4,17 +4,19 @@ import { withDocLock } from '../doc-lock.js';
 import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
-import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
-import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
+import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, UnsupportedByRemoteError, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
+import { getPendingDeletes, clearPendingDeletes, getPendingPurges, clearPendingPurges } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
-import { isSyncableCollection as isSyncable, isReadOnlyDoc } from './syncable.js';
+import { isSyncableCollection as isSyncable, isDeletedUpstream, isReadOnlyDoc } from './syncable.js';
 
 export interface PushStats {
   pushed: number;
   linked: number;
   deleted: number;
+  /** Ids purged for good on the remote (memory/trash.ts purgeDocuments). */
+  purged: number;
   /** Shared rows removed because this user's doc now lives in a private-/local- collection. */
   retracted: number;
   /** Docs the remote refused (secret, bad embedding, ...): kept local and unsynced until they change. */
@@ -25,7 +27,7 @@ export interface PushStats {
 }
 
 export function emptyPushStats(): PushStats {
-  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+  return { pushed: 0, linked: 0, deleted: 0, purged: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 
 /** Local bookkeeping that never leaves this machine. */
@@ -64,13 +66,14 @@ export function isRejectedUnchanged(doc: DocumentResult): boolean {
 
 /**
  * Would a push send this doc? Unsynced, and not skipped for good: sentinels,
- * journal drafts (per-session scratch), docs the remote owns (read_only), and
- * docs it refused that are unchanged since. One rule for every push path and
+ * journal drafts (per-session scratch), docs the remote owns (read_only),
+ * copies kept after their owner deleted them upstream, and docs it refused
+ * that are unchanged since. One rule for every push path and
  * for anything that asks "is this only on this machine?".
  */
 export function isPushable(doc: DocumentResult): boolean {
   return doc.metadata.is_synced === false && !doc.id.startsWith('__') && doc.metadata.type !== 'journal_draft'
-    && !isReadOnlyDoc(doc.metadata) && !isRejectedUnchanged(doc);
+    && !isReadOnlyDoc(doc.metadata) && !isDeletedUpstream(doc.metadata) && !isRejectedUnchanged(doc);
 }
 
 function stripLocalOnly(metadata: Record<string, any>): Record<string, any> {
@@ -148,12 +151,51 @@ async function pushAll(): Promise<PushStats> {
   // Owner checks, origin_user and task renames use the remote's name for us.
   await resolveSyncUsername();
 
+  // Step 0: purges first (a purged id must not be pushed again by step 3).
+  try {
+    const purges = await getPendingPurges();
+    if (purges.length > 0) {
+      // A temporary failure stays queued and is retried on the next push.
+      let done = purges;
+      if (backend.purge) {
+        try {
+          const results = await backend.purge(purges);
+          const retry = new Set(results.filter(r => r.status === 'error' && !r.permanent).map(r => r.id));
+          done = purges.filter(id => !retry.has(id));
+          if (retry.size) {
+            stats.errors += retry.size;
+            process.stderr.write(`[yapa-sync] Purge of ${[...retry].join(', ')} failed for now; kept queued for the next push\n`);
+          }
+          for (const r of results) {
+            if (r.status === 'error' && r.permanent) process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}\n`);
+            // The id is now someone else's live document: only our deleted copies went.
+            if (r.status === 'purged_copies') process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays\n`);
+          }
+          stats.purged = results.filter(r => r.status === 'purged' || r.status === 'purged_copies').length;
+        } catch (e) {
+          if (!(e instanceof UnsupportedByRemoteError)) throw e;
+          // An older service: delete instead (its copy may stay restorable there).
+          process.stderr.write(`[yapa-sync] The sync service can't purge yet: deleting ${purges.length} doc(s) instead\n`);
+          stats.deleted += await backend.delete(purges, 'delete');
+        }
+      } else {
+        stats.deleted += await backend.delete(purges, 'delete');
+      }
+      await clearPendingPurges(done);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Purge error: ${e}\n`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+
   // Step 1: Process pending deletes
   try {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
       const docIds = pendingDeletes.map(entry => entry.split(':')[1]).filter(Boolean);
-      stats.deleted = await backend.delete(docIds, 'delete');
+      stats.deleted += await backend.delete(docIds, 'delete');
       // Only the entries handled here: a delete queued during the await stays.
       await clearPendingDeletes(pendingDeletes);
     }
@@ -194,7 +236,7 @@ async function pushAll(): Promise<PushStats> {
       const batch: Array<{ doc: DocumentResult; upsert: UpsertDoc }> = [];
 
       for (const unsynced of unsyncedDocs) {
-        // Sentinels, journal drafts, read-only docs, refused-and-unchanged docs (isPushable).
+        // Sentinels, journal drafts, read-only docs, copies deleted upstream, refused-and-unchanged docs (isPushable).
         if (!isPushable(unsynced)) continue;
         // Stamp the last writer's device: pull on this device skips its own
         // echoes, while the same user's other devices still receive the row.

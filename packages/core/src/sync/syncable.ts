@@ -19,6 +19,16 @@ export function looksPrivateButShared(name: string): boolean {
 }
 
 /**
+ * A copy kept here after its owner deleted the document on the sync service
+ * (sync/pull.ts): archived, hidden from recall and task lists, never pushed
+ * (even after a local edit), and removed after the retention period. A
+ * restore on the service brings the live document back on the next pull.
+ */
+export function isDeletedUpstream(metadata: Record<string, any> | undefined | null): boolean {
+  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== '';
+}
+
+/**
  * A document the remote owns and serves with `metadata.read_only: true`
  * (docs/sync-api.md, "Read-only documents"). It is pulled like any other doc
  * but never edited, deleted, pushed or queued for a remote delete from here.

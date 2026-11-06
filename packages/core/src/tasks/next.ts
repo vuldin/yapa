@@ -90,7 +90,7 @@ async function expiredLeaseKeys(collection: string): Promise<Set<string>> {
 }
 
 export async function nextTasks(opts: NextOptions): Promise<NextResult> {
-  const docs = await getDocumentsByFilter(opts.collection, { type: 'task' }, 5000).catch(() => []);
+  const docs = (await getDocumentsByFilter(opts.collection, { type: 'task' }, 5000).catch(() => [])).filter(d => d.metadata.archived !== true);
   const open = docs.filter(d => d.metadata.status !== 'complete');
   const byId = new Map(docs.map(d => [d.id, d]));
   const claims = await claimsFor(opts.collection);

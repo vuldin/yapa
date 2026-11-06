@@ -17,6 +17,8 @@ export interface TaskListFilters {
   project?: string;
   collection?: string;
   includeComplete?: boolean;
+  /** Also tasks archived here after their owner deleted them on the sync service. */
+  includeArchived?: boolean;
   /** Return at most this many (after sorting). Default: all of them. */
   limit?: number;
 }
@@ -45,6 +47,8 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
       const tasks = await getDocumentsByFilter(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === 'complete') continue;
+        // Deleted on the sync service by its owner, kept here archived.
+        if (task.metadata.archived === true && !filters.includeArchived) continue;
         allTasks.push({
           id: task.id,
           title: task.content,

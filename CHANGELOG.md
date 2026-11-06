@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Features
+- **Nothing a teammate deletes is lost on your machine.** When a document's owner deletes it on the sync service, your copy is archived instead of dropped: it is hidden from recall, task lists, the ready queue and `waiting`, never pushed back (even if you edit it), and removed after 30 days (`YAPA_DELETED_RETENTION_DAYS`). If the owner restores it, the live document comes back on the next pull. A teammate's retract (they moved the document into a private collection) still drops a clean copy, so no shared copy stays; your own retract is archived on your other machines, where it may be your only copy.
+- **`trash` tool (DSH `yapa_trash`):**
+  - `list`: copies kept after their owner deleted them, and your own deleted documents on the sync service.
+  - `restore`: bring yours back for everyone.
+  - `keep`: turn a copy someone else deleted into a document of your own.
+  - `purge`: remove documents of yours for good, for mistakes such as a leaked secret. No restorable copy remains, teammates' copies are dropped even with local edits, and the id can never be written again. A memory stored in chunks is purged whole, by its id or any chunk's. The purge is sent to the service at once; a temporary failure stays queued and is retried on every sync. An older service without purge gets an ordinary delete instead. DSH asks for approval before a purge.
+  - `list` shows your own documents deleted on another machine separately from teammates' deletions.
+- **`memory_forget` deletes a chunked memory whole**, by its id or any chunk's. It removed only the one chunk named, so the other chunks stayed here and on the sync service.
+- `memory_forget` and `task_delete` say that one of your documents in a shared collection is deleted for teammates too, and how to restore it.
+
 ### Service
 - **Deletes are soft: the owner can list, restore and purge deleted rows.** `documents:batchDelete` now moves a row into `deleted_documents` instead of dropping it; its owner can list their deleted rows (`GET /v1/me/deleted`), restore one (`POST /v1/documents:restore`, back as an update with a new `updated_at`; `id_taken` when the id is live again) or remove an id for good (`POST /v1/documents:purge`, after which any upsert of it is refused with the permanent item error `purged`; if the id is now another user's live document, only your deleted copies go and the answer is `purged_copies`). Deleted rows stay restorable for `YAPA_DELETED_RETENTION_DAYS` (default 30). A retract (an author taking a document out of the team copy, as in a shared-to-private merge) keeps no copy: the author still has it locally. Pull deletion entries now carry `reason` (`delete` or `retract`) and `purged`; older clients ignore them. The client library has the matching optional `listDeleted`/`restore`/`purge` backend methods; an older service answers them with `UnsupportedByRemoteError`. See `docs/sync-api.md` section 5, "Soft delete".
 - **Deploy order:** apply `infra/cloudsql/sql/07_soft_delete.sql` (schema v4, by hand with psql, see `infra/cloudsql/README.md`) BEFORE deploying a `yapa-service` or `yapa-mcp` built from this release: the new pull reads the new `deletions` columns. Clients must not rely on restore or purge until both are done.

@@ -71,7 +71,8 @@ export type RestoreResult =
 export type PurgeResult =
   /** `purged_copies`: the id is now someone else's live document; only your deleted copies were purged. */
   | { id: string; status: 'purged' | 'purged_copies' | 'not_found' }
-  | { id: string; status: 'error'; code: string; message: string };
+  /** `permanent`: retrying can't help (not_owner, a bad request); otherwise the purge stays queued. */
+  | { id: string; status: 'error'; code: string; message: string; permanent?: boolean };
 
 /**
  * The remote does not have this route (an older sync service answers

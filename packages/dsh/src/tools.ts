@@ -37,6 +37,10 @@ import {
   recallMemory,
   removeCollection,
   removeReport,
+  keepDeletedUpstream,
+  listTrash,
+  purgeDocuments,
+  restoreDeleted,
   removeDependency,
   runDecaySweep,
   searchTasks,
@@ -447,7 +451,7 @@ export function registerTools(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'yapa_memory_forget',
-    description: 'Delete a memory by ID (searches across all collections).',
+    description: 'Delete a memory by ID (searches across all collections). One of yours in a shared collection is deleted for teammates too, restorable (`yapa_trash` restore) for the retention period; to remove a leaked secret for good, use `yapa_trash` purge.',
     parameters: {
       id: { type: 'string', required: true, description: 'Memory document ID to delete' },
     },
@@ -467,6 +471,48 @@ export function registerTools(ctx: Context): void {
       return { id: args.id, collection };
     },
     presentCall: args => ({ card: 'generic', title: `Forget memory ${args.id}`, kind: 'delete' }),
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'yapa_trash',
+    description: 'Deleted documents. list: copies kept here after their owner deleted them on the sync service, and your own deleted documents there (restorable). '
+      + 'restore (ids): bring your own back on the sync service. keep (id, collection): keep a copy someone else deleted as your own. '
+      + 'purge (ids): remove documents of yours for good (only for mistakes such as a leaked secret; teammates drop their copies, the ids can never be written again). Confirm with the user before purging.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'restore', 'keep', 'purge'] },
+      collection: { type: 'string', description: 'list: only this collection; keep: the copy\'s collection' },
+      ids: { type: 'array', items: { type: 'string' }, description: 'restore / purge: document ids' },
+      id: { type: 'string', description: 'keep: the copy to keep' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { report: { type: 'string', required: true } } },
+      render: (_args, v) => text(v.report),
+    },
+    async execute(args) {
+      const action = String(args.action);
+      if (action === 'list') {
+        const t = await listTrash(args.collection);
+        const lines = [`Deleted by their owners, kept here: ${t.upstream.filter(c => !c.by_you).length}`];
+        for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] deleted by ${c.by_you ? 'you on another machine' : c.deleted_by}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`);
+        lines.push(t.remoteUnavailable ? `Your deleted documents on the sync service: unknown (${t.remoteUnavailable})` : `Your deleted documents on the sync service: ${t.remote.length}`);
+        for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}]: ${d.content.slice(0, 100).replace(/\s+/g, ' ')}`);
+        return { report: lines.join('\n') };
+      }
+      if (action === 'keep') {
+        if (!args.id || !args.collection) return { report: 'keep needs id and collection' };
+        const r = await keepDeletedUpstream(args.id, args.collection);
+        return { report: `Kept ${args.id} as your ${r.type} ${r.id} in ${args.collection}.` };
+      }
+      const ids: string[] = Array.isArray(args.ids) ? args.ids.map(String) : [];
+      if (!ids.length) return { report: `${action} needs ids` };
+      if (action === 'restore') {
+        const results = await restoreDeleted(ids);
+        return { report: results.map(r => `${r.id}: ${r.status}`).join('\n') };
+      }
+      const r = await purgeDocuments(ids);
+      return { report: [`queued for purge on the next sync (retried until the service purges them): ${r.queued.join(', ') || 'none'}`, `removed (local only): ${r.local.join(', ') || 'none'}`, `not yours: ${r.refused.map(x => x.id).join(', ') || 'none'}`].join('\n') };
+    },
+    presentCall: args => ({ card: 'generic', title: `Trash ${args.action}${args.ids ? ` ${args.ids.join(', ')}` : ''}`, kind: args.action === 'purge' ? 'delete' : 'read' }),
   }));
 
   ctx.tools.register(defineTool({

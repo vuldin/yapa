@@ -7,7 +7,7 @@ import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, up
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
 
-import { isSyncableCollection as isSyncable } from './syncable.js';
+import { isDeletedUpstream, isSyncableCollection as isSyncable } from './syncable.js';
 
 export interface PullStats {
   pulled: number;
@@ -19,13 +19,15 @@ export interface PullStats {
   skipped: number;
   /** Clean local copies removed because the doc was deleted remotely. */
   deleted: number;
+  /** Clean copies of docs deleted remotely: archived here as deleted upstream (restorable). */
+  archived: number;
   /** Docs deleted remotely whose local copy has unpushed edits: kept (the next push re-creates them). */
   keptDirty: number;
   errors: number;
 }
 
 export function emptyPullStats(): PullStats {
-  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, archived: 0, keptDirty: 0, errors: 0 };
 }
 
 /** Safety cap on pages per collection per call (500 docs each). */
@@ -203,20 +205,50 @@ export async function pullCollection(
 }
 
 /**
- * A doc deleted remotely by its owner: drop the clean local copy. A copy with
- * unpushed local edits is kept and reported (its next push re-creates the
- * shared row), so nothing is lost silently.
+ * A doc deleted remotely by its owner. Nothing is lost here:
+ * - a copy with unpushed local edits is kept live (its next push re-creates
+ *   the shared row), as before;
+ * - a clean copy is archived as deleted upstream (isDeletedUpstream): hidden,
+ *   never pushed, restorable, removed after DELETED_RETENTION_DAYS.
+ * Two exceptions drop the copy instead:
+ * - a purge (the owner removing a mistake such as a leaked secret), edited
+ *   or not;
+ * - a teammate's retract (they moved the doc to a private collection, so no
+ *   shared copy should stay), when this copy is clean. Your own retract is
+ *   archived: a private collection doesn't sync between your machines, so
+ *   this may be your only copy here.
  */
 async function applyRemoteDeletion(collectionName: string, del: RemoteDeletion, stats: PullStats): Promise<void> {
-  const [existing] = await getDocumentsByIds(collectionName, [del.id]).catch(() => []);
-  if (!existing) return;
-  if (existing.metadata.is_synced === false) {
-    stats.keptDirty++;
-    process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)\n`);
-    return;
-  }
-  await deleteDocument(collectionName, del.id);
-  stats.deleted++;
+  await withDocLock(collectionName, del.id, async () => {
+    const [existing] = await getDocumentsByIds(collectionName, [del.id]).catch(() => []);
+    if (!existing) return;
+    if (del.purged) {
+      await deleteDocument(collectionName, del.id);
+      stats.deleted++;
+      if (existing.metadata.is_synced === false) process.stderr.write(`[yapa-sync] ${del.id} was purged by ${del.deleted_by}: dropped here, with its unpushed edits\n`);
+      return;
+    }
+    if (existing.metadata.is_synced === false && !isDeletedUpstream(existing.metadata)) {
+      stats.keptDirty++;
+      process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)\n`);
+      return;
+    }
+    if (del.reason === 'retract' && del.deleted_by !== getConfig().USERNAME) {
+      await deleteDocument(collectionName, del.id);
+      stats.deleted++;
+      return;
+    }
+    if (isDeletedUpstream(existing.metadata)) return;
+    await patchDocument(collectionName, del.id, {
+      archived: true,
+      // Equality-filterable marker, so the trash and its sweep needn't scan every archived doc.
+      deleted_upstream: true,
+      deleted_upstream_by: del.deleted_by,
+      deleted_upstream_at: Number(del.deleted_at) || Math.floor(Date.now() / 1000),
+      deleted_upstream_reason: del.reason ?? 'delete',
+    });
+    stats.archived++;
+  });
 }
 
 function toUnixSeconds(value: Date | number | string | undefined | null): number {
@@ -304,9 +336,12 @@ async function applyRemoteDocLocked(backend: SyncBackend, collectionName: string
     // Remote edits (a teammate completing a task, a re-stored correction) win
     // when they're newer AND this copy has no unpushed local edits — a dirty
     // local copy is pushed next cycle and becomes the newer version instead.
-    const localDirty = existing.metadata.is_synced === false;
+    // A copy archived as deleted upstream never goes back, so its local edits
+    // don't count: the owner restoring the doc brings the live one back.
+    const upstreamGone = isDeletedUpstream(existing.metadata);
+    const localDirty = existing.metadata.is_synced === false && !upstreamGone;
     const localUpdated = toUnixSeconds(existing.metadata.updated_at ?? existing.metadata.created_at);
-    if (!localDirty && toUnixSeconds(remoteDoc.updated_at) > localUpdated) {
+    if (upstreamGone || (!localDirty && toUnixSeconds(remoteDoc.updated_at) > localUpdated)) {
       await addDocument(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
       stats.updated++;
     } else {

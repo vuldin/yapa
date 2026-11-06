@@ -105,3 +105,43 @@ export async function getLocalTombstones(): Promise<Set<string>> {
     return new Set();
   }
 }
+
+const SYNC_PURGES_ID = '__sync_purges__';
+
+/**
+ * Queue ids for a purge on the next push (memory/trash.ts purgeDocuments):
+ * the owner removing a mistake, such as a leaked secret, for good. Unlike a
+ * delete, the remote keeps no restorable copy, teammates drop theirs even
+ * with local edits, and the id can never be written again.
+ */
+export async function queueSyncPurges(docIds: string[]): Promise<void> {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection('global');
+  const existing = new Set(await getPendingPurges());
+  for (const id of docIds) existing.add(id);
+  await addDocument('global', SYNC_PURGES_ID, 'sync purge queue', {
+    type: 'sync_sentinel',
+    pending_purges: [...existing].join(','),
+  });
+}
+
+export async function getPendingPurges(): Promise<string[]> {
+  try {
+    const results = await getDocumentsByFilter('global', { type: 'sync_sentinel' }, 10);
+    const raw = results.find(r => r.id === SYNC_PURGES_ID)?.metadata.pending_purges;
+    return typeof raw === 'string' ? raw.split(',').filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Remove handled ids from the purge queue (re-reads it, so ids queued meanwhile stay). */
+export async function clearPendingPurges(processed: string[]): Promise<void> {
+  try {
+    const done = new Set(processed);
+    const remaining = (await getPendingPurges()).filter(id => !done.has(id));
+    await addDocument('global', SYNC_PURGES_ID, 'sync purge queue', { type: 'sync_sentinel', pending_purges: remaining.join(',') });
+  } catch {
+    // no queue yet
+  }
+}

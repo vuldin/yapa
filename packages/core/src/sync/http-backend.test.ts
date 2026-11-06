@@ -366,7 +366,7 @@ describe('soft delete (service schema v4)', () => {
 
     expect(await b.purge(['p1', 'theirs', 'gone', 'reused'])).toEqual([
       { id: 'p1', status: 'purged' },
-      { id: 'theirs', status: 'error', code: 'not_owner', message: 'only the owner can purge a row' },
+      { id: 'theirs', status: 'error', code: 'not_owner', message: 'only the owner can purge a row', permanent: true },
       { id: 'gone', status: 'not_found' },
       { id: 'reused', status: 'purged_copies' },
     ]);
@@ -410,7 +410,7 @@ describe('soft delete (service schema v4)', () => {
  */
 class FakeService {
   docs = new Map<string, any>();
-  deletions: Array<{ id: string; collection: string; deleted_by: string; deleted_at: number; seq: number }> = [];
+  deletions: Array<{ id: string; collection: string; deleted_by: string; deleted_at: number; seq: number; purged?: boolean; reason?: string }> = [];
   seq = 0;
   pageSize = 2;
   /** Ids whose content the server refuses as a secret. */
@@ -459,7 +459,7 @@ class FakeService {
       const next = { d: page.at(-1)?.seq ?? cur.d, x: dpage.at(-1)?.seq ?? cur.x };
       return { json: {
         documents: page.map(d => ({ id: d.id, collection: d.collection, content: d.content, metadata: d.metadata, origin_user: d.origin_user, last_editor: d.origin_user, related_ids: d.related_ids, created_at: d.created_at, updated_at: d.updated_at, synced_at: d.seq })),
-        deletions: dpage.map(({ id, deleted_by, deleted_at }) => ({ id, deleted_by, deleted_at })),
+        deletions: dpage.map(({ id, deleted_by, deleted_at, purged, reason }) => ({ id, deleted_by, deleted_at, ...(purged ? { purged } : {}), ...(reason ? { reason } : {}) })),
         next_cursor: JSON.stringify(next),
         has_more: docs.length > page.length || dels.length > dpage.length,
       } };
@@ -482,10 +482,10 @@ class FakeService {
     this.docs.set(id, { id, collection, content, embedding: [], metadata: { type: 'memory' }, origin_user: 'mate', related_ids: [], created_at: t, updated_at: t, seq: ++this.seq, device: 'dev-mate' });
   }
 
-  deleteAs(id: string, who: string) {
+  deleteAs(id: string, who: string, extra: { purged?: boolean; reason?: string } = {}) {
     const d = this.docs.get(id);
     this.docs.delete(id);
-    this.deletions.push({ id, collection: d.collection, deleted_by: who, deleted_at: 1_800_000_100, seq: ++this.seq });
+    this.deletions.push({ id, collection: d.collection, deleted_by: who, deleted_at: 1_800_000_100, seq: ++this.seq, ...extra });
   }
 }
 
@@ -518,7 +518,7 @@ describe('push and pull through the service', () => {
     expect((await getDocumentsByIds('project-pages', ['page-0', 'page-4'])).length).toBe(2);
   });
 
-  it('applies the deletions feed: drops clean copies, keeps (and reports) dirty ones', async () => {
+  it('applies the deletions feed: archives clean copies (kept, hidden, never pushed), keeps dirty ones live', async () => {
     fake.putTeammate('del-clean', 'project-dels', 'a note that gets deleted');
     fake.putTeammate('del-dirty', 'project-dels', 'a note edited here before the delete');
     await pullCollection('project-dels', 0);
@@ -528,10 +528,55 @@ describe('push and pull through the service', () => {
     fake.deleteAs('del-clean', 'mate');
     fake.deleteAs('del-dirty', 'mate');
     const stats = await pullCollection('project-dels', 0);
-    expect(stats.deleted).toBe(1);
+    expect(stats.archived).toBe(1);
+    expect(stats.deleted).toBe(0);
     expect(stats.keptDirty).toBe(1);
-    expect(await getDocumentsByIds('project-dels', ['del-clean'])).toEqual([]);
+    const [kept] = await getDocumentsByIds('project-dels', ['del-clean']);
+    expect(kept.content).toBe('a note that gets deleted');
+    expect(kept.metadata).toMatchObject({ archived: true, deleted_upstream: true, deleted_upstream_by: 'mate', deleted_upstream_at: 1_800_000_100, deleted_upstream_reason: 'delete', is_synced: true });
     expect((await getDocumentsByIds('project-dels', ['del-dirty']))[0].content).toBe('my local edit');
+
+    // Edited here afterwards: still never pushed back.
+    await getStore().addDocument('project-dels', 'del-clean', 'edited after the delete', { ...kept.metadata, is_synced: false });
+    const before = fake.docs.has('del-clean');
+    await pushToRemote();
+    expect(before).toBe(false);
+    expect(fake.docs.has('del-clean')).toBe(false);
+
+    // The owner restores it on the service: the live doc replaces the archived copy.
+    fake.putTeammate('del-clean', 'project-dels', 'a note that gets deleted (restored)', 1_800_000_900);
+    await pullCollection('project-dels', 0);
+    const [back] = await getDocumentsByIds('project-dels', ['del-clean']);
+    expect(back.content).toBe('a note that gets deleted (restored)');
+    expect(back.metadata.archived).not.toBe(true);
+    expect(back.metadata.deleted_upstream_at).toBeUndefined();
+  });
+
+  it('a purge drops every copy, edited or not', async () => {
+    fake.putTeammate('purge-clean', 'project-purge', 'a pasted token');
+    fake.putTeammate('purge-dirty', 'project-purge', 'another pasted token');
+    await pullCollection('project-purge', 0);
+    const [d] = await getDocumentsByIds('project-purge', ['purge-dirty']);
+    await getStore().addDocument('project-purge', 'purge-dirty', 'edited here', { ...d.metadata, is_synced: false });
+    fake.deleteAs('purge-clean', 'mate', { purged: true });
+    fake.deleteAs('purge-dirty', 'mate', { purged: true });
+    const stats = await pullCollection('project-purge', 0);
+    expect(stats.deleted).toBe(2);
+    expect(await getDocumentsByIds('project-purge', ['purge-clean', 'purge-dirty'])).toEqual([]);
+  });
+
+  it('a teammate\'s retract drops a clean copy (no shared copy stays); your own retract is archived', async () => {
+    fake.putTeammate('ret-theirs', 'project-ret', 'a note dana moved to her private collection');
+    fake.putTeammate('ret-mine', 'project-ret', 'a note I moved to my private collection');
+    fake.docs.get('ret-mine').origin_user = 'tester';
+    await pullCollection('project-ret', 0);
+    fake.deleteAs('ret-theirs', 'dana', { reason: 'retract' });
+    fake.deleteAs('ret-mine', 'tester', { reason: 'retract' });
+    const stats = await pullCollection('project-ret', 0);
+    expect([stats.deleted, stats.archived]).toEqual([1, 1]);
+    expect(await getDocumentsByIds('project-ret', ['ret-theirs'])).toEqual([]);
+    const [mine] = await getDocumentsByIds('project-ret', ['ret-mine']);
+    expect(mine.metadata).toMatchObject({ archived: true, deleted_upstream: true, deleted_upstream_by: 'tester', deleted_upstream_reason: 'retract' });
   });
 
   it('a delete and re-create of the same id in one pull keeps the live row', async () => {

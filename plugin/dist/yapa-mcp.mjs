@@ -7271,6 +7271,9 @@ function isSyncableCollection(name) {
 function looksPrivateButShared(name) {
   return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
 }
+function isDeletedUpstream(metadata) {
+  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== "";
+}
 function isReadOnlyDoc(metadata) {
   return metadata?.read_only === true;
 }
@@ -7346,6 +7349,7 @@ function createConfig(env = process.env) {
     VOYAGE_API_KEY: get(env, "VOYAGE_API_KEY"),
     OLLAMA_URL: get(env, "OLLAMA_URL", "http://localhost:11434"),
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
+    DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -8894,13 +8898,41 @@ async function getLocalTombstones() {
     return /* @__PURE__ */ new Set();
   }
 }
-var SYNC_DELETES_ID, SYNC_TOMBSTONES_ID;
+async function queueSyncPurges(docIds) {
+  if (docIds.length === 0) return;
+  await getOrCreateCollection2("global");
+  const existing = new Set(await getPendingPurges());
+  for (const id of docIds) existing.add(id);
+  await addDocument2("global", SYNC_PURGES_ID, "sync purge queue", {
+    type: "sync_sentinel",
+    pending_purges: [...existing].join(",")
+  });
+}
+async function getPendingPurges() {
+  try {
+    const results = await getDocumentsByFilter2("global", { type: "sync_sentinel" }, 10);
+    const raw = results.find((r) => r.id === SYNC_PURGES_ID)?.metadata.pending_purges;
+    return typeof raw === "string" ? raw.split(",").filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+async function clearPendingPurges(processed) {
+  try {
+    const done = new Set(processed);
+    const remaining = (await getPendingPurges()).filter((id) => !done.has(id));
+    await addDocument2("global", SYNC_PURGES_ID, "sync purge queue", { type: "sync_sentinel", pending_purges: remaining.join(",") });
+  } catch {
+  }
+}
+var SYNC_DELETES_ID, SYNC_TOMBSTONES_ID, SYNC_PURGES_ID;
 var init_deletes = __esm({
   "packages/core/src/sync/deletes.ts"() {
     "use strict";
     init_store();
     SYNC_DELETES_ID = "__sync_deletes__";
     SYNC_TOMBSTONES_ID = "__sync_tombstones__";
+    SYNC_PURGES_ID = "__sync_purges__";
   }
 });
 
@@ -9402,7 +9434,7 @@ var init_http_backend = __esm({
             if (x?.status === "purged" || x?.status === "purged_copies" || x?.status === "not_found") out.push({ id, status: x.status });
             else {
               const code = String(x?.error?.code ?? "internal");
-              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300) });
+              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300), permanent: PERMANENT_ITEM_ERRORS.has(code) });
             }
           }
         }
@@ -10569,7 +10601,7 @@ var init_create = __esm({
 // packages/core/src/sync/push.ts
 import { createHash as createHash2 } from "node:crypto";
 function emptyPushStats() {
-  return { pushed: 0, linked: 0, deleted: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
+  return { pushed: 0, linked: 0, deleted: 0, purged: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 function syncFingerprint(doc) {
   const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
@@ -10588,7 +10620,7 @@ function isRejectedUnchanged(doc) {
   return !!doc.metadata.sync_rejected && doc.metadata.sync_rejected_fp === syncFingerprint(doc);
 }
 function isPushable(doc) {
-  return doc.metadata.is_synced === false && !doc.id.startsWith("__") && doc.metadata.type !== "journal_draft" && !isReadOnlyDoc(doc.metadata) && !isRejectedUnchanged(doc);
+  return doc.metadata.is_synced === false && !doc.id.startsWith("__") && doc.metadata.type !== "journal_draft" && !isReadOnlyDoc(doc.metadata) && !isDeletedUpstream(doc.metadata) && !isRejectedUnchanged(doc);
 }
 function stripLocalOnly(metadata) {
   const out = { ...metadata };
@@ -10646,10 +10678,49 @@ async function pushAll() {
   if (!backend) return stats;
   await resolveSyncUsername();
   try {
+    const purges = await getPendingPurges();
+    if (purges.length > 0) {
+      let done = purges;
+      if (backend.purge) {
+        try {
+          const results = await backend.purge(purges);
+          const retry = new Set(results.filter((r) => r.status === "error" && !r.permanent).map((r) => r.id));
+          done = purges.filter((id) => !retry.has(id));
+          if (retry.size) {
+            stats.errors += retry.size;
+            process.stderr.write(`[yapa-sync] Purge of ${[...retry].join(", ")} failed for now; kept queued for the next push
+`);
+          }
+          for (const r of results) {
+            if (r.status === "error" && r.permanent) process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}
+`);
+            if (r.status === "purged_copies") process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays
+`);
+          }
+          stats.purged = results.filter((r) => r.status === "purged" || r.status === "purged_copies").length;
+        } catch (e) {
+          if (!(e instanceof UnsupportedByRemoteError)) throw e;
+          process.stderr.write(`[yapa-sync] The sync service can't purge yet: deleting ${purges.length} doc(s) instead
+`);
+          stats.deleted += await backend.delete(purges, "delete");
+        }
+      } else {
+        stats.deleted += await backend.delete(purges, "delete");
+      }
+      await clearPendingPurges(done);
+    }
+  } catch (e) {
+    process.stderr.write(`[yapa-sync] Purge error: ${e}
+`);
+    noteSyncError(e);
+    stats.errors++;
+    if (isCycleFatal(e)) return stats;
+  }
+  try {
     const pendingDeletes = await getPendingDeletes();
     if (pendingDeletes.length > 0) {
       const docIds = pendingDeletes.map((entry) => entry.split(":")[1]).filter(Boolean);
-      stats.deleted = await backend.delete(docIds, "delete");
+      stats.deleted += await backend.delete(docIds, "delete");
       await clearPendingDeletes(pendingDeletes);
     }
   } catch (e) {
@@ -41148,33 +41219,46 @@ function track(p) {
 // packages/core/src/memory/forget.ts
 init_config();
 init_store();
+
+// packages/core/src/memory/chunks.ts
+init_store();
+var byChunk = (a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0);
+async function docGroupIn(collection, id) {
+  const [doc] = await getDocumentsByIds2(collection, [id]).catch(() => []);
+  const baseId = doc ? doc.metadata.parent_id ?? doc.id : id;
+  const chunks = await getDocumentsByFilter2(collection, { parent_id: baseId }, 1e4).catch(() => []);
+  if (!doc && !chunks.length) return void 0;
+  const docs = doc && !chunks.some((c) => c.id === doc.id) ? [doc, ...chunks] : chunks;
+  return { collection, baseId, docs: docs.sort(byChunk) };
+}
+async function findDocGroup(id, collections) {
+  for (const c of collections ?? (await listCollections2().catch(() => [])).map((x) => x.name)) {
+    const g = await docGroupIn(c, id);
+    if (g) return g;
+  }
+  return void 0;
+}
+
+// packages/core/src/memory/forget.ts
 init_deletes();
 init_syncable();
 function isSyncable(collection) {
   return !collection.startsWith("private-") && !collection.startsWith("local-");
 }
 async function deleteDocumentEverywhere(id) {
-  for (const collection of await listCollections2()) {
-    let found;
-    try {
-      [found] = await getDocumentsByIds2(collection.name, [id]);
-    } catch {
-      continue;
+  const group = await findDocGroup(id);
+  if (!group) throw new Error(`Document '${id}' not found in any collection`);
+  for (const d of group.docs) assertWritable(d.id, d.metadata);
+  const { collection, docs } = group;
+  for (const d of docs) await deleteDocument2(collection, d.id);
+  if (getConfig().SYNC_ENABLED && isSyncable(collection)) {
+    for (const d of docs) {
+      const owner = d.metadata.origin_user;
+      if (!owner || owner === getConfig().USERNAME) await queueSyncDelete(d.id, collection);
+      else await addLocalTombstone(d.id);
     }
-    if (!found) continue;
-    assertWritable(id, found.metadata);
-    await deleteDocument2(collection.name, id);
-    if (getConfig().SYNC_ENABLED && isSyncable(collection.name)) {
-      const owner = found.metadata.origin_user;
-      if (!owner || owner === getConfig().USERNAME) {
-        await queueSyncDelete(id, collection.name);
-      } else {
-        await addLocalTombstone(id);
-      }
-    }
-    return collection.name;
   }
-  throw new Error(`Document '${id}' not found in any collection`);
+  return collection;
 }
 async function forgetMemory(id) {
   return deleteDocumentEverywhere(id);
@@ -41219,8 +41303,145 @@ async function listMemories(options = {}) {
 
 // packages/core/src/memory/decay.ts
 init_store();
-var DECAY_SENTINEL_ID = "__decay_sentinel__";
+
+// packages/core/src/memory/trash.ts
+init_config();
+init_doc_lock();
+init_store();
+init_syncable();
+init_backend();
+init_deletes();
+init_create();
 var DAY = 86400;
+function toCopy(collection, d) {
+  const at = Number(d.metadata.deleted_upstream_at) || 0;
+  return {
+    id: d.id,
+    collection,
+    type: String(d.metadata.type ?? "memory"),
+    content: d.content,
+    deleted_by: String(d.metadata.deleted_upstream_by ?? ""),
+    deleted_at: at,
+    reason: String(d.metadata.deleted_upstream_reason ?? "delete"),
+    expires_at: at + getConfig().DELETED_RETENTION_DAYS * DAY,
+    by_you: String(d.metadata.deleted_upstream_by ?? "") === getConfig().USERNAME
+  };
+}
+async function listDeletedUpstream(collection) {
+  const names = collection ? [collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const out = [];
+  for (const c of names) {
+    for (const d of await getDocumentsByFilter2(c, { deleted_upstream: true }, 1e5).catch(() => [])) {
+      if (isDeletedUpstream(d.metadata) && !(d.metadata.parent_id && (d.metadata.chunk_index ?? 0) !== 0)) out.push(toCopy(c, d));
+    }
+  }
+  return out.sort((a, b) => b.deleted_at - a.deleted_at);
+}
+async function sweepDeletedUpstream(now = Math.floor(Date.now() / 1e3)) {
+  const cutoff = now - getConfig().DELETED_RETENTION_DAYS * DAY;
+  let n = 0;
+  for (const c of (await listCollections2().catch(() => [])).map((x) => x.name)) {
+    for (const d of await getDocumentsByFilter2(c, { deleted_upstream: true }, 1e5).catch(() => [])) {
+      if (!isDeletedUpstream(d.metadata) || Number(d.metadata.deleted_upstream_at) > cutoff) continue;
+      await deleteDocument2(c, d.id).catch(() => void 0);
+      n++;
+    }
+  }
+  return n;
+}
+async function keepDeletedUpstream(id, collection) {
+  return withDocLock(collection, id, async () => {
+    const [d] = await getDocumentsByIds2(collection, [id]);
+    if (!d || !isDeletedUpstream(d.metadata)) throw new Error(`${id} is not a deleted copy in ${collection}`);
+    const m = d.metadata;
+    const tags = Array.isArray(m.tags) ? m.tags : String(m.tags ?? "").split(",").filter(Boolean);
+    let newId;
+    if (m.type === "task") {
+      newId = await createTask(d.content, { priority: m.priority, tags, notes: m.notes ? `${m.notes}
+(kept from ${id}, deleted by ${m.deleted_upstream_by})` : `(kept from ${id}, deleted by ${m.deleted_upstream_by})` }, collection);
+    } else {
+      const base = m.parent_id ?? d.id;
+      const chunks = m.parent_id ? (await getDocumentsByFilter2(collection, { parent_id: base }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : [d];
+      newId = (await storeMemory(chunks.map((c) => c.content).join("\n"), { collection, tags, salience: m.salience })).ids[0];
+      for (const c of chunks) if (c.id !== id) await deleteDocument2(collection, c.id);
+    }
+    await deleteDocument2(collection, id);
+    return { id: newId, type: String(m.type ?? "memory") };
+  });
+}
+async function listTrash(collection) {
+  const out = { upstream: await listDeletedUpstream(collection), remote: [] };
+  if (!isSyncConfigured()) {
+    out.remoteUnavailable = "sync is off";
+    return out;
+  }
+  try {
+    const backend = await getSyncBackend();
+    if (!backend?.listDeleted) out.remoteUnavailable = "this sync target has no soft delete";
+    else out.remote = await backend.listDeleted(collection);
+  } catch (e) {
+    out.remoteUnavailable = e instanceof UnsupportedByRemoteError ? e.message : `the sync service could not be asked: ${e.message}`;
+  }
+  return out;
+}
+async function restoreDeleted(ids) {
+  if (!isSyncConfigured()) throw new Error("restore needs the sync service (sync is off)");
+  const backend = await getSyncBackend();
+  if (!backend?.restore) throw new UnsupportedByRemoteError("restore");
+  return backend.restore([...new Set(ids)]);
+}
+async function remoteGroup(id, deleted) {
+  if (!deleted) return [];
+  const row = deleted.find((d) => d.id === id);
+  const base = row?.metadata?.parent_id ?? id;
+  return deleted.filter((d) => d.id === base || d.metadata?.parent_id === base || d.id === id).map((d) => d.id);
+}
+async function purgeDocuments(ids) {
+  const me = getConfig().USERNAME;
+  const out = { queued: [], local: [], refused: [] };
+  const collections = (await listCollections2().catch(() => [])).map((c) => c.name);
+  let deleted = null;
+  const queue = (xs) => {
+    for (const x of xs) if (!out.queued.includes(x)) out.queued.push(x);
+  };
+  for (const id of [...new Set(ids)]) {
+    const group = await findDocGroup(id, collections);
+    if (!group) {
+      if (deleted === null) {
+        deleted = void 0;
+        try {
+          const backend = isSyncConfigured() ? await getSyncBackend() : void 0;
+          if (backend?.listDeleted) deleted = await backend.listDeleted(void 0, 500);
+        } catch {
+        }
+      }
+      const rows = await remoteGroup(id, deleted);
+      queue(rows.length ? rows : [id]);
+      continue;
+    }
+    const theirs = group.docs.find((d) => d.metadata.origin_user && d.metadata.origin_user !== me);
+    if (theirs) {
+      out.refused.push({ id, collection: group.collection, owner: String(theirs.metadata.origin_user) });
+      continue;
+    }
+    await withDocLock(group.collection, group.baseId, async () => {
+      for (const d of group.docs) await deleteDocument2(group.collection, d.id);
+    });
+    const docIds = group.docs.map((d) => d.id);
+    if (!isSyncableCollection(group.collection) || !isSyncConfigured()) out.local.push(...docIds);
+    else queue(docIds);
+  }
+  await queueSyncPurges(out.queued);
+  return out;
+}
+async function stillQueuedForPurge(ids) {
+  const pending = new Set(await getPendingPurges());
+  return ids.filter((id) => pending.has(id));
+}
+
+// packages/core/src/memory/decay.ts
+var DECAY_SENTINEL_ID = "__decay_sentinel__";
+var DAY2 = 86400;
 var SWEEP_LIMIT = 1e4;
 async function lastSweepAt() {
   try {
@@ -41232,7 +41453,7 @@ async function lastSweepAt() {
 }
 async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   const collections = await listCollections2();
-  const fallbackAnchor = await lastSweepAt() ?? now - DAY;
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY2;
   let decayedCount = 0;
   for (const collection of collections) {
     try {
@@ -41240,7 +41461,7 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
       const updates = [];
       for (const doc of docs) {
         const anchor2 = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
-        const days = (now - anchor2) / DAY;
+        const days = (now - anchor2) / DAY2;
         if (days <= 0) continue;
         const lifecycleMeta = {
           salience: doc.metadata.salience ?? 1,
@@ -41259,11 +41480,12 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
       continue;
     }
   }
+  await sweepDeletedUpstream(now).catch(() => 0);
   return decayedCount;
 }
 async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
   const last = await lastSweepAt();
-  return last === void 0 || now - last > DAY;
+  return last === void 0 || now - last > DAY2;
 }
 async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
   const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
@@ -41455,6 +41677,7 @@ async function listTasks(filters = {}) {
       const tasks = await getDocumentsByFilter2(name, where, READ_LIMIT);
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
+        if (task.metadata.archived === true && !filters.includeArchived) continue;
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -41730,7 +41953,7 @@ async function waitingOn(opts = {}) {
       getDocumentsByFilter2(collection, { type: "memory", kind: "question" }, 2e3).catch(() => []),
       getDocumentsByFilter2(collection, { type: "task" }, 5e3).catch(() => [])
     ]);
-    const open3 = tasks.filter((t) => t.metadata.status !== "complete");
+    const open3 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
     for (const t of open3) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
@@ -41840,7 +42063,7 @@ async function expiredLeaseKeys(collection) {
   }
 }
 async function nextTasks(opts) {
-  const docs = await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => []);
+  const docs = (await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => [])).filter((d) => d.metadata.archived !== true);
   const open3 = docs.filter((d) => d.metadata.status !== "complete");
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
@@ -41959,7 +42182,7 @@ async function nextTasks(opts) {
   }
   return result;
 }
-var DAY2 = 86400;
+var DAY3 = 86400;
 async function cleanupItems(collection, open3, claims) {
   const items = [];
   const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
@@ -41968,7 +42191,7 @@ async function cleanupItems(collection, open3, claims) {
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const now = Math.floor(Date.now() / 1e3);
-  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY2 && (f.metadata.chunk_index ?? 0) === 0);
+  const findings = (await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 2e3).catch(() => [])).filter((f) => f.metadata.archived !== true && (f.metadata.status ?? "open") === "open" && !f.metadata.disposition && Number(f.metadata.created_at ?? now) < now - 2 * DAY3 && (f.metadata.chunk_index ?? 0) === 0);
   if (findings.length) items.push({ key: "cleanup:findings", title: `Give ${findings.length} open finding(s) a disposition (decision, task, limitation or no-action)`, count: findings.length });
   const size = await collectionSize(collection).catch(() => 0);
   if (size >= getConfig().COMPACTION_THRESHOLD) items.push({ key: "cleanup:compaction", title: `Compact the collection (${size} memories): compaction_suggest, then compaction_apply`, count: size });
@@ -43433,7 +43656,7 @@ init_sentinel();
 init_deletes();
 init_syncable();
 function emptyPullStats() {
-  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, keptDirty: 0, errors: 0 };
+  return { pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, deleted: 0, archived: 0, keptDirty: 0, errors: 0 };
 }
 var MAX_PULL_PAGES = 200;
 async function pullFromRemote() {
@@ -43557,16 +43780,38 @@ async function pullCollection(collectionName, since, stats = emptyPullStats(), o
   return stats;
 }
 async function applyRemoteDeletion(collectionName, del, stats) {
-  const [existing] = await getDocumentsByIds2(collectionName, [del.id]).catch(() => []);
-  if (!existing) return;
-  if (existing.metadata.is_synced === false) {
-    stats.keptDirty++;
-    process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)
+  await withDocLock(collectionName, del.id, async () => {
+    const [existing] = await getDocumentsByIds2(collectionName, [del.id]).catch(() => []);
+    if (!existing) return;
+    if (del.purged) {
+      await deleteDocument2(collectionName, del.id);
+      stats.deleted++;
+      if (existing.metadata.is_synced === false) process.stderr.write(`[yapa-sync] ${del.id} was purged by ${del.deleted_by}: dropped here, with its unpushed edits
 `);
-    return;
-  }
-  await deleteDocument2(collectionName, del.id);
-  stats.deleted++;
+      return;
+    }
+    if (existing.metadata.is_synced === false && !isDeletedUpstream(existing.metadata)) {
+      stats.keptDirty++;
+      process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)
+`);
+      return;
+    }
+    if (del.reason === "retract" && del.deleted_by !== getConfig().USERNAME) {
+      await deleteDocument2(collectionName, del.id);
+      stats.deleted++;
+      return;
+    }
+    if (isDeletedUpstream(existing.metadata)) return;
+    await patchDocument(collectionName, del.id, {
+      archived: true,
+      // Equality-filterable marker, so the trash and its sweep needn't scan every archived doc.
+      deleted_upstream: true,
+      deleted_upstream_by: del.deleted_by,
+      deleted_upstream_at: Number(del.deleted_at) || Math.floor(Date.now() / 1e3),
+      deleted_upstream_reason: del.reason ?? "delete"
+    });
+    stats.archived++;
+  });
 }
 function toUnixSeconds(value) {
   if (value == null) return 0;
@@ -43626,9 +43871,10 @@ async function applyRemoteDocLocked(backend, collectionName, remoteDoc, stats, a
     }
   }
   if (existing) {
-    const localDirty = existing.metadata.is_synced === false;
+    const upstreamGone = isDeletedUpstream(existing.metadata);
+    const localDirty = existing.metadata.is_synced === false && !upstreamGone;
     const localUpdated = toUnixSeconds(existing.metadata.updated_at ?? existing.metadata.created_at);
-    if (!localDirty && toUnixSeconds(remoteDoc.updated_at) > localUpdated) {
+    if (upstreamGone || !localDirty && toUnixSeconds(remoteDoc.updated_at) > localUpdated) {
       await addDocument2(collectionName, remoteDoc.id, remoteDoc.content, localMetadataFor(remoteDoc));
       stats.updated++;
     } else {
@@ -43903,8 +44149,8 @@ async function syncCycle() {
 `);
       pullStats.errors++;
     }
-    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.keptDirty > 0;
+    const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.purged > 0 || pushStats.retracted > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.archived > 0 || pullStats.keptDirty > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
     if (hasPushActivity || hasPullActivity || pushStats.rejected > 0) {
       process.stderr.write(`[yapa-sync] ${formatSyncStats({ push: pushStats, pull: pullStats })}
@@ -44064,10 +44310,10 @@ async function startSync(opts = {}) {
 `);
 }
 function formatSyncStats({ push, pull }) {
-  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
+  let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.purged ?? 0} purged, ${push.retracted} retracted`;
   if (push.renamed) line += `, ${push.renamed} renamed`;
   if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
-  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.skipped} skipped`;
+  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.archived ?? 0} archived, ${pull.skipped} skipped`;
   if (pull.keptDirty) line += `, ${pull.keptDirty} remote deletions not applied (local edits kept)`;
   return `${line}, ${pull.errors} errors`;
 }
@@ -45268,7 +45514,8 @@ var SYNC_ON_WRITE_TOOLS = /* @__PURE__ */ new Set([
   "task_add_dependency",
   "task_next",
   "task_remove_dependency",
-  "collection_merge"
+  "collection_merge",
+  "trash"
 ]);
 function withSyncOnWrite(server2) {
   const register = server2.tool.bind(server2);
@@ -45441,7 +45688,7 @@ ${r.content}`
   );
   server2.tool(
     "memory_forget",
-    "Delete a memory by ID (searches across all collections)",
+    "Delete a memory by ID (searches across all collections). One of yours in a shared collection is deleted for teammates too: the sync service keeps it restorable (`trash restore`) and teammates keep an archived copy, both for the retention period. To remove a leaked secret for good, use `trash purge`.",
     {
       id: external_exports.string().describe("Memory document ID to delete")
     },
@@ -46393,7 +46640,7 @@ ${rec}`;
   );
   server2.tool(
     "task_delete",
-    "Remove a task permanently",
+    "Delete a task. One of yours in a shared collection is deleted for teammates too, restorable on the sync service (`trash restore`) for the retention period.",
     {
       id: external_exports.string().describe("Task ID to delete")
     },
@@ -46544,6 +46791,73 @@ ${rec}`;
     async ({ name, scope, confirm }) => {
       const r = await removeCollection(name, { scope, confirm });
       return { content: [{ type: "text", text: removeReport(r) }] };
+    }
+  );
+  server2.tool(
+    "trash",
+    "Deleted documents. `list`: copies kept here after their owner deleted them on the sync service (hidden, never pushed, removed after the retention period), and your own deleted documents on the sync service (restorable within its retention). `restore` (ids): bring your own deleted documents back on the sync service; every machine, teammates' included, gets them on its next pull. `keep` (id, collection): keep a copy someone else deleted as a new document of yours. `purge` (ids): remove documents of yours for good, only for mistakes such as a leaked secret: no restorable copy remains, teammates' copies are dropped even with local edits, and the id can never be written again. Confirm with the user before purging.",
+    {
+      action: external_exports.enum(["list", "restore", "keep", "purge"]),
+      collection: external_exports.string().optional().describe("list: only this collection; keep: the copy's collection"),
+      ids: external_exports.array(external_exports.string()).optional().describe("restore / purge: document ids"),
+      id: external_exports.string().optional().describe("keep: the copy to keep")
+    },
+    async ({ action, collection, ids, id }) => {
+      const text = (t, isError = false) => ({ content: [{ type: "text", text: t }], ...isError ? { isError: true } : {} });
+      const when = (t) => new Date(t * 1e3).toISOString().slice(0, 10);
+      try {
+        if (action === "list") {
+          const t = await listTrash(collection);
+          const lines = [];
+          const copyLine = (c) => `- ${c.id} [${c.collection}] ${c.type}, deleted ${c.by_you ? "" : `by ${c.deleted_by} `}${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, " ")}`;
+          const theirs = t.upstream.filter((c) => !c.by_you);
+          const mine = t.upstream.filter((c) => c.by_you);
+          lines.push(theirs.length ? `**Deleted by their owners, kept here** (${theirs.length}):` : "No copies of documents deleted by their owners are kept here.");
+          for (const c of theirs.slice(0, 50)) lines.push(copyLine(c));
+          if (mine.length) {
+            lines.push("", `**Deleted by you on another machine, kept here** (${mine.length}):`);
+            for (const c of mine.slice(0, 50)) lines.push(copyLine(c));
+          }
+          lines.push("");
+          if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);
+          else {
+            lines.push(t.remote.length ? `**Your deleted documents on the sync service** (${t.remote.length}, restorable):` : "You have no deleted documents on the sync service.");
+            for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}] ${d.reason === "retract" ? "moved into a private collection" : "deleted"} ${when(d.deleted_at)}: ${d.content.slice(0, 100).replace(/\s+/g, " ")}`);
+          }
+          return text(lines.join("\n").trim());
+        }
+        if (action === "keep") {
+          if (!id || !collection) return text("trash keep needs id and collection", true);
+          const r2 = await keepDeletedUpstream(id, collection);
+          recordLastWrite(collection);
+          return text(`Kept ${id} as your ${r2.type} ${r2.id} in ${collection}; the deleted copy is gone.`);
+        }
+        if (!ids?.length) return text(`trash ${action} needs ids`, true);
+        if (action === "restore") {
+          const results = await restoreDeleted(ids);
+          const by = (s) => results.filter((r2) => r2.status === s).map((r2) => r2.id);
+          const parts2 = [
+            by("restored").length ? `Restored on the sync service: ${by("restored").join(", ")} (back here and on teammates' machines with the next pull).` : "",
+            by("not_found").length ? `Not found among your deleted documents (past retention, or not yours): ${by("not_found").join(", ")}.` : "",
+            by("id_taken").length ? `Not restored, the id is in use again: ${by("id_taken").join(", ")}.` : ""
+          ].filter(Boolean);
+          await syncCycle().catch(() => void 0);
+          return text(parts2.join("\n"));
+        }
+        const r = await purgeDocuments(ids);
+        if (r.queued.length) await syncCycle().catch(() => void 0);
+        const waiting = r.queued.length ? await stillQueuedForPurge(r.queued) : [];
+        const sent = r.queued.filter((x) => !waiting.includes(x));
+        const parts = [
+          sent.length ? `Purged here and on the sync service: ${sent.join(", ")}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : "",
+          waiting.length ? `Purged here; the sync service couldn't purge yet: ${waiting.join(", ")}. It stays queued and is retried on every sync.` : "",
+          r.local.length ? `Removed for good (it never left this machine): ${r.local.join(", ")}.` : "",
+          r.refused.length ? `Not yours, not purged: ${r.refused.map((x) => `${x.id} (${x.owner})`).join(", ")}. Ask the owner to purge it.` : ""
+        ].filter(Boolean);
+        return text(parts.join("\n"));
+      } catch (e) {
+        return text(`trash ${action}: ${e.message}`, true);
+      }
     }
   );
   server2.tool(
