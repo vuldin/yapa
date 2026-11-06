@@ -29,6 +29,7 @@ Files:
 | `sql/04_rls.sql` | row-level security; apply with the first josh-311 release |
 | `sql/05_mcp_runtime.sql` | read-only grants + RLS read policy for the remote MCP IAM user (josh-313) |
 | `sql/06_coordination.sql` | schema v3: leases, lease log and counters, with their runtime grants (josh-631) |
+| `sql/07_soft_delete.sql` | schema v4: deleted_documents, purged_ids, deletions.reason/purged, retention function, grants + RLS |
 | `sql/verify_counts.sql` | read-only fingerprint for migration and restore checks |
 | `../../scripts/migrate-db.mjs` | copy + verify from the current database |
 | `RESTORE.md` | PITR restore drill |
@@ -112,6 +113,25 @@ psql "$ADMIN" -v ON_ERROR_STOP=1 --single-transaction \
   -v runtime_user="$(terraform output -raw runtime_db_user)" \
   -f sql/06_coordination.sql
 psql "$ADMIN" -c 'SELECT max(version) FROM schema_version'   # 3
+```
+
+### Soft delete (schema v4)
+
+Deleted rows kept restorable by their owner (`deleted_documents`), purged ids
+(`purged_ids`), `reason`/`purged` on the deletions feed, and the retention
+function the service calls (`docs/service-design.md` section 6). Nothing
+applies migrations automatically (no Terraform resource, no service start-up
+step): run it by hand, like 06. Apply it BEFORE deploying a `yapa-service`
+(or `yapa-mcp`) release built from this code: the new pull reads
+`deletions.reason`/`purged` and fails without them. An older service keeps
+working on a v4 database (its DELETE and deletions INSERT get the defaults).
+Re-run it after any re-run of `03_grants.sql`.
+
+```sh
+psql "$ADMIN" -v ON_ERROR_STOP=1 --single-transaction \
+  -v runtime_user="$(terraform output -raw runtime_db_user)" \
+  -f sql/07_soft_delete.sql
+psql "$ADMIN" -c 'SELECT max(version) FROM schema_version'   # 4
 ```
 
 ## Migrate the data

@@ -8,7 +8,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type pg from 'pg';
 import { APP_TOKEN_HEADER, authenticate, type Caller, type TokenVerifier, type UserLookup } from './auth.js';
-import { PULL_MAX_BYTES_DEFAULT, type RateLimitClass, type RateLimits, type ServiceConfig } from './config.js';
+import { DELETED_RETENTION_DAYS_DEFAULT, PULL_MAX_BYTES_DEFAULT, type RateLimitClass, type RateLimits, type ServiceConfig } from './config.js';
 import { decodeCursor, posFromSince } from './cursor.js';
 import { isUnavailableError } from './db.js';
 import { ApiError, statusFor, type ErrorCode } from './errors.js';
@@ -17,8 +17,9 @@ import { DailyCounter, TokenBuckets } from './ratelimit.js';
 import {
   assertCollection, assertDocId, assertEmbedding, assertIdList, checkDevice, checkUpsertItem, clamp,
   MAX_DELETE_IDS, MAX_LOOKUP_IDS, MAX_RELATED_IDS, MAX_UPSERT_BYTES, MAX_UPSERT_DOCS, PULL_LIMIT_DEFAULT, PULL_LIMIT_MAX,
-  EMBEDDING_DIMS, MAX_CONTENT_BYTES, MAX_FUTURE_SECONDS, MAX_METADATA_BYTES,
+  EMBEDDING_DIMS, LIST_DELETED_LIMIT_DEFAULT, LIST_DELETED_LIMIT_MAX, MAX_CONTENT_BYTES, MAX_FUTURE_SECONDS, MAX_METADATA_BYTES,
 } from './rules.js';
+import { RetentionSweeper } from './retention.js';
 import * as coord from './coord.js';
 import * as store from './store.js';
 import type { RequestCtx, UpsertResult } from './store.js';
@@ -36,10 +37,12 @@ type Env = {
 
 export interface AppDeps {
   pool: pg.Pool;
-  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes' | 'autoProvision' | 'allowedHd' | 'readerPrincipals'>>;
+  config: Pick<ServiceConfig, 'similarityThreshold' | 'rateLimits' | 'dailyWriteAlert'> & Partial<Pick<ServiceConfig, 'pullMaxBytes' | 'autoProvision' | 'allowedHd' | 'readerPrincipals' | 'deletedRetentionDays'>>;
   verifier: TokenVerifier;
   /** Defaults to the users table. */
   lookupUser?: UserLookup;
+  /** Defaults to one that removes expired soft-deleted rows at most every 5 minutes. */
+  sweeper?: RetentionSweeper;
   /** Injectable clock for rate-limit tests. */
   now?: () => number;
 }
@@ -60,6 +63,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
   const daily = new DailyCounter(deps.now);
   const limits: RateLimits | false = config.rateLimits;
   const pullMaxBytes = config.pullMaxBytes ?? PULL_MAX_BYTES_DEFAULT;
+  const retentionDays = config.deletedRetentionDays ?? DELETED_RETENTION_DAYS_DEFAULT;
+  const sweeper = deps.sweeper ?? new RetentionSweeper(() => store.purgeExpiredDeleted(pool, retentionDays));
   const nowMs = () => deps.now?.() ?? Date.now();
   const sweep = setInterval(() => buckets.sweep(), 5 * 60_000);
   sweep.unref();
@@ -233,6 +238,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         pull_limit_max: PULL_LIMIT_MAX,
         pull_max_bytes: pullMaxBytes,
         similarity_threshold: config.similarityThreshold,
+        deleted_retention_days: retentionDays,
       },
     });
   });
@@ -273,6 +279,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       }
       docsPos = delsPos = posFromSince(since);
     }
+    sweeper.maybeSweep();
     const result = await store.pull(pool, ctxOf(c), {
       collection,
       docsPos,
@@ -339,8 +346,49 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (reason !== 'delete' && reason !== 'retract') throw new ApiError('invalid_request', 'reason must be "delete" or "retract"');
     return idempotent(c, raw, async () => {
       if (limits) take(c, limits.writeDocs, 'docs', ids.length);
+      sweeper.maybeSweep();
       const out = await store.deleteMany(pool, ctxOf(c), ids, reason);
       countWrites(c, out.deleted);
+      return { status: 200, body: out };
+    });
+  });
+
+  // ------------------------------------------------ soft delete (schema v4)
+  // Owner-only: a caller lists, restores and purges only rows they own.
+
+  route('get', '/v1/me/deleted', async c => {
+    limit(c, 'read');
+    const q = c.req.query();
+    const collection = q.collection === undefined || q.collection === '' ? undefined : assertCollection(q.collection);
+    const lim = q.limit === undefined || q.limit === '' ? LIST_DELETED_LIMIT_DEFAULT : Number(q.limit);
+    if (!Number.isInteger(lim) || lim < 1) throw new ApiError('invalid_request', 'limit must be a positive integer');
+    sweeper.maybeSweep();
+    const documents = await store.listDeleted(pool, ctxOf(c), { collection, limit: Math.min(lim, LIST_DELETED_LIMIT_MAX), retentionDays });
+    return c.json({ documents });
+  });
+
+  route('post', '/v1/documents:restore', async c => {
+    limit(c, 'write');
+    const { raw, body } = await jsonBody(c);
+    const ids = assertIdList(body.ids, MAX_DELETE_IDS);
+    return idempotent(c, raw, async () => {
+      if (limits) take(c, limits.writeDocs, 'docs', ids.length);
+      sweeper.maybeSweep();
+      const out = await store.restoreMany(pool, ctxOf(c), ids, retentionDays);
+      countWrites(c, out.restored);
+      return { status: 200, body: out };
+    });
+  });
+
+  route('post', '/v1/documents:purge', async c => {
+    limit(c, 'write');
+    const { raw, body } = await jsonBody(c);
+    const ids = assertIdList(body.ids, MAX_DELETE_IDS);
+    return idempotent(c, raw, async () => {
+      if (limits) take(c, limits.writeDocs, 'docs', ids.length);
+      sweeper.maybeSweep();
+      const out = await store.purgeMany(pool, ctxOf(c), ids);
+      countWrites(c, out.purged);
       return { status: 200, body: out };
     });
   });

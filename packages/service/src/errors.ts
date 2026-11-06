@@ -13,6 +13,7 @@ export type ErrorCode =
   | 'read_only_principal'
   | 'not_found'
   | 'id_taken'
+  | 'purged'
   | 'payload_too_large'
   | 'secret_detected'
   | 'rate_limited'
@@ -33,6 +34,7 @@ const STATUS: Record<ErrorCode, number> = {
   read_only_principal: 403,
   not_found: 404,
   id_taken: 409,
+  purged: 410,
   payload_too_large: 413,
   secret_detected: 422,
   rate_limited: 429,

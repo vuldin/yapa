@@ -81,9 +81,19 @@ export interface PullParams {
   maxBytes: number;
 }
 
+export interface DeletionOut {
+  id: string;
+  deleted_by: string;
+  deleted_at: number;
+  /** Why the row left: a user's delete, or a retract (moved into a local-only collection). */
+  reason: 'delete' | 'retract';
+  /** The owner purged the id: clients drop every copy. */
+  purged: boolean;
+}
+
 export interface PullResult {
   documents: DocumentOut[];
-  deletions: Array<{ id: string; deleted_by: string; deleted_at: number }>;
+  deletions: DeletionOut[];
   next_cursor: string;
   has_more: boolean;
 }
@@ -158,7 +168,7 @@ export async function pull(pool: pg.Pool, ctx: RequestCtx, p: PullParams): Promi
     const dparam = (v: unknown) => { dvalues.push(v); return `$${dvalues.length}`; };
     const dwhere = `collection = $1 AND ${posClause('deleted_at', p.delsPos, dparam)}`;
     const dels = await c.query(
-      `SELECT id, deleted_by, ${SECS('deleted_at')}, ${MICROS('deleted_at', 'deleted_us')}
+      `SELECT id, deleted_by, reason, purged, ${SECS('deleted_at')}, ${MICROS('deleted_at', 'deleted_us')}
          FROM deletions WHERE ${dwhere} ORDER BY deletions.deleted_at, deletions.id LIMIT ${dparam(p.limit + 1)}`,
       dvalues,
     );
@@ -178,7 +188,10 @@ export async function pull(pool: pg.Pool, ctx: RequestCtx, p: PullParams): Promi
     };
     return {
       documents: outs.slice(0, take),
-      deletions: delRows.map(r => ({ id: r.id, deleted_by: r.deleted_by, deleted_at: Number(r.deleted_at) })),
+      deletions: delRows.map(r => ({
+        id: r.id, deleted_by: r.deleted_by, deleted_at: Number(r.deleted_at),
+        reason: r.reason === 'retract' ? 'retract' as const : 'delete' as const, purged: r.purged === true,
+      })),
       next_cursor: encodeCursor(cursor),
       has_more: docRows.length < totalCandidates || dels.rows.length > p.limit,
     };
@@ -248,6 +261,9 @@ export async function upsertOne(pool: pg.Pool, ctx: RequestCtx, doc: UpsertInput
   const vec = toPgVector(doc.embedding);
 
   return withUserTx(pool, me, async c => {
+    if ((await c.query('SELECT 1 FROM purged_ids WHERE id = $1', [doc.id])).rowCount! > 0) {
+      return { id: doc.id, status: 'error' as const, error: itemError('purged', 'this id was purged by its owner and cannot be written again; use a new id') };
+    }
     for (let attempt = 0; attempt < 3; attempt++) {
       const cur = await c.query(
         `SELECT id, collection, origin_user, last_editor, metadata, ${SECS('created_at')}, ${SECS('updated_at')}
@@ -360,11 +376,18 @@ export async function deleteMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], 
         results.push({ id, status: 'error', error: itemError('not_owner', 'only the owner can delete a shared row; keep a local tombstone instead') });
         continue;
       }
-      const del = await c.query('DELETE FROM documents WHERE id = $1 AND origin_user = $2', [id, me]);
+      // Soft delete: the row moves to deleted_documents (restorable by its
+      // owner within the retention window) in the same statement.
+      const del = await c.query(
+        `WITH gone AS (DELETE FROM documents WHERE id = $1 AND origin_user = $2 RETURNING *)
+         INSERT INTO deleted_documents (${DOC_COLUMNS}, deleted_by, deleted_at, reason)
+         SELECT ${DOC_COLUMNS}, $2, clock_timestamp(), $3 FROM gone`,
+        [id, me, action],
+      );
       if (del.rowCount === 0) { results.push({ id, status: 'not_found' }); continue; }
       await c.query(
-        'INSERT INTO deletions (id, collection, deleted_by, deleted_at) VALUES ($1, $2, $3, clock_timestamp())',
-        [id, r.collection, me],
+        'INSERT INTO deletions (id, collection, deleted_by, deleted_at, reason) VALUES ($1, $2, $3, clock_timestamp(), $4)',
+        [id, r.collection, me, action],
       );
       await audit(c, {
         ...auditBase(ctx), action, doc_id: id, collection: r.collection, row_owner: me, change_class: 'own',
@@ -375,6 +398,173 @@ export async function deleteMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], 
     }
     return { results, deleted };
   });
+}
+
+// ------------------------------------------------- soft delete (schema v4)
+
+/** Every column of documents, in the order deleted_documents repeats them. */
+const DOC_COLUMNS = 'id, collection, content, embedding, metadata, origin_user, related_ids, synced_at, created_at, updated_at, last_editor, last_device';
+
+/**
+ * last_device of a restored row. It can never equal an X-Yapa-Device value
+ * (`@` is outside the header pattern), so the restore is not an echo for any
+ * device: the one that restored it pulls it back too.
+ */
+export const RESTORE_DEVICE = '@restore';
+
+/** Characters of content shown per row by listDeleted. */
+export const DELETED_PREVIEW_CHARS = 300;
+
+const withinRetention = (param: string) => `deleted_at > now() - make_interval(days => ${param}::int)`;
+
+export interface DeletedDocumentOut {
+  id: string;
+  collection: string;
+  /** The first DELETED_PREVIEW_CHARS characters. */
+  content: string;
+  metadata: Record<string, unknown>;
+  deleted_at: number;
+  reason: 'delete' | 'retract';
+}
+
+/** The caller's own soft-deleted rows within retention, newest first. */
+export async function listDeleted(pool: pg.Pool, ctx: RequestCtx, p: { collection?: string; limit: number; retentionDays: number }): Promise<DeletedDocumentOut[]> {
+  const me = ctx.caller.username;
+  return withUserTx(pool, me, async c => {
+    const values: unknown[] = [me, p.retentionDays, p.limit];
+    let where = `origin_user = $1 AND ${withinRetention('$2')}`;
+    if (p.collection !== undefined) {
+      values.push(p.collection);
+      where += ` AND collection = $${values.length}`;
+    }
+    const r = await c.query(
+      `SELECT id, collection, left(content, ${DELETED_PREVIEW_CHARS}) AS content, metadata, reason, ${SECS('deleted_at')}
+         FROM deleted_documents WHERE ${where}
+        ORDER BY deleted_documents.deleted_at DESC, id LIMIT $3`,
+      values,
+    );
+    return r.rows.map(row => ({
+      id: row.id, collection: row.collection, content: row.content, metadata: row.metadata ?? {},
+      deleted_at: Number(row.deleted_at), reason: row.reason === 'retract' ? 'retract' as const : 'delete' as const,
+    }));
+  });
+}
+
+export type RestoreResult =
+  | { id: string; status: 'restored'; synced_at: number }
+  | { id: string; status: 'not_found' | 'id_taken' };
+
+/**
+ * Move the caller's newest deleted copy of each id back into documents, with
+ * updated_at = now() so clients pull it as an update. `id_taken`: a live row
+ * with that id exists now. No deletions feed entry is written.
+ */
+export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], retentionDays: number): Promise<{ results: RestoreResult[]; restored: number }> {
+  const me = ctx.caller.username;
+  return withUserTx(pool, me, async c => {
+    const done = new Map<string, RestoreResult>();
+    let restored = 0;
+    const one = async (id: string): Promise<RestoreResult> => {
+      const found = await c.query(
+        `SELECT ${MICROS('deleted_at', 'deleted_us')}, collection, last_editor, origin_user, content
+           FROM deleted_documents
+          WHERE id = $1 AND origin_user = $2 AND ${withinRetention('$3')}
+            AND NOT EXISTS (SELECT 1 FROM purged_ids p WHERE p.id = $1)
+          ORDER BY deleted_documents.deleted_at DESC LIMIT 1`,
+        [id, me, retentionDays],
+      );
+      const row = found.rows[0];
+      if (!row) return { id, status: 'not_found' };
+      const liveNow = async () => (await c.query('SELECT 1 FROM documents WHERE id = $1', [id])).rowCount! > 0;
+      if (await liveNow()) return { id, status: 'id_taken' };
+      const at = `deleted_at = ('epoch'::timestamptz + $2::bigint * interval '1 microsecond')`;
+      // A savepoint per id: a race (an upsert of the id, a concurrent restore
+      // or purge) undoes only this id.
+      await c.query('SAVEPOINT restore_one');
+      const ins = await c.query(
+        `INSERT INTO documents (id, collection, content, embedding, metadata, origin_user, related_ids,
+                                created_at, updated_at, last_editor, last_device, synced_at)
+         SELECT id, collection, content, embedding, metadata, origin_user, related_ids,
+                created_at, now(), $3, $4, clock_timestamp()
+           FROM deleted_documents WHERE id = $1 AND ${at}
+         ON CONFLICT (id) DO NOTHING
+         RETURNING ${SECS('synced_at')}`,
+        [id, row.deleted_us, me, RESTORE_DEVICE],
+      );
+      if (ins.rowCount === 0) {
+        await c.query('ROLLBACK TO SAVEPOINT restore_one');
+        return { id, status: (await liveNow()) ? 'id_taken' : 'not_found' };
+      }
+      const del = await c.query(`DELETE FROM deleted_documents WHERE id = $1 AND ${at}`, [id, row.deleted_us]);
+      if (del.rowCount === 0) {
+        await c.query('ROLLBACK TO SAVEPOINT restore_one');
+        return { id, status: 'not_found' };
+      }
+      await c.query('RELEASE SAVEPOINT restore_one');
+      await audit(c, {
+        ...auditBase(ctx), action: 'restore', doc_id: id, collection: row.collection, row_owner: me, change_class: 'own',
+        prev_editor: row.last_editor ?? row.origin_user, content_sha256: sha256(row.content),
+      });
+      restored++;
+      return { id, status: 'restored', synced_at: Number(ins.rows[0].synced_at) };
+    };
+    for (const id of ids) if (!done.has(id)) done.set(id, await one(id));
+    return { results: ids.map(id => done.get(id)!), restored };
+  });
+}
+
+export type PurgeResult =
+  | { id: string; status: 'purged' | 'not_found' }
+  | { id: string; status: 'error'; error: ItemError };
+
+/**
+ * Remove an id for good: the caller's live row and every deleted copy they
+ * own. The id goes into purged_ids (later upserts are refused with `purged`)
+ * and the deletions feed of each affected collection gets an entry with
+ * purged = true, so clients drop every copy.
+ */
+export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): Promise<{ results: PurgeResult[]; purged: number }> {
+  const me = ctx.caller.username;
+  return withUserTx(pool, me, async c => {
+    const done = new Map<string, PurgeResult>();
+    let purged = 0;
+    const one = async (id: string): Promise<PurgeResult> => {
+      const live = (await c.query('SELECT collection, origin_user, last_editor FROM documents WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      if (live && live.origin_user !== me) {
+        return { id, status: 'error', error: itemError('not_owner', 'only the owner can purge a row') };
+      }
+      // RLS shows only the caller's deleted rows; the filter says so explicitly.
+      const gone = await c.query(
+        'DELETE FROM deleted_documents WHERE id = $1 AND origin_user = $2 RETURNING collection, last_editor, origin_user',
+        [id, me],
+      );
+      if (!live && gone.rowCount === 0) return { id, status: 'not_found' };
+      if (live) await c.query('DELETE FROM documents WHERE id = $1 AND origin_user = $2', [id, me]);
+      await c.query('INSERT INTO purged_ids (id, purged_by) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [id, me]);
+      const collections = [...new Set<string>([...(live ? [live.collection as string] : []), ...gone.rows.map(r => r.collection as string)])];
+      for (const coll of collections) {
+        await c.query(
+          "INSERT INTO deletions (id, collection, deleted_by, deleted_at, reason, purged) VALUES ($1, $2, $3, clock_timestamp(), 'delete', true)",
+          [id, coll, me],
+        );
+      }
+      const prev = live ?? gone.rows[0];
+      await audit(c, {
+        ...auditBase(ctx), action: 'purge', doc_id: id, collection: collections[0], row_owner: me, change_class: 'own',
+        prev_editor: prev.last_editor ?? prev.origin_user,
+      });
+      purged++;
+      return { id, status: 'purged' };
+    };
+    for (const id of ids) if (!done.has(id)) done.set(id, await one(id));
+    return { results: ids.map(id => done.get(id)!), purged };
+  });
+}
+
+/** Remove soft-deleted rows of every user older than `days` (07's SECURITY DEFINER function). */
+export async function purgeExpiredDeleted(pool: pg.Pool, days: number): Promise<number> {
+  const r = await pool.query('SELECT yapa_purge_expired_deleted($1::int) AS n', [days]);
+  return Number(r.rows[0]?.n ?? 0);
 }
 
 // ---------------------------------------------------------------- lookups

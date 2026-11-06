@@ -14,6 +14,10 @@
 - **Deleting a collection that has no other copy needs `confirm`.** A non-empty local-only collection (`private-*`, `local-*`, `global`), or any collection while sync is off, was deleted without confirmation, and that is permanent.
 - A claim in a local-only collection says "this machine: your other sessions see it as yours" instead of "teammates see it as yours".
 
+### Service
+- **Deletes are soft: the owner can list, restore and purge deleted rows.** `documents:batchDelete` now moves a row into `deleted_documents` instead of dropping it; its owner can list their deleted rows (`GET /v1/me/deleted`), restore one (`POST /v1/documents:restore`, back as an update with a new `updated_at`; `id_taken` when the id is live again) or remove an id for good (`POST /v1/documents:purge`, after which any upsert of it is refused with the permanent item error `purged`). Deleted rows stay restorable for `YAPA_DELETED_RETENTION_DAYS` (default 30). Pull deletion entries now carry `reason` (`delete` or `retract`) and `purged`; older clients ignore them. The client library has the matching optional `listDeleted`/`restore`/`purge` backend methods; an older service answers them with `UnsupportedByRemoteError`. See `docs/sync-api.md` section 5, "Soft delete".
+- **Deploy order:** apply `infra/cloudsql/sql/07_soft_delete.sql` (schema v4, by hand with psql, see `infra/cloudsql/README.md`) BEFORE deploying a `yapa-service` or `yapa-mcp` built from this release: the new pull reads the new `deletions` columns. Clients must not rely on restore or purge until both are done.
+
 ## 1.10.3 (2026-11-03)
 
 The status line always says which collection a session writes to and whether it stays on this machine, and `yapa scope` tells a project's scripts which collection their folder uses.

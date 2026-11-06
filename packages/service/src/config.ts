@@ -52,10 +52,14 @@ export interface ServiceConfig {
   dailyWriteAlert: number;
   /** Byte budget of serialized documents per pull page. */
   pullMaxBytes: number;
+  /** Days a soft-deleted row stays restorable before it is removed for good. */
+  deletedRetentionDays: number;
 }
 
 /** 8 MiB: well under Cloud Run's 32 MiB response cap, even with embeddings. */
 export const PULL_MAX_BYTES_DEFAULT = 8 * 1024 * 1024;
+
+export const DELETED_RETENTION_DAYS_DEFAULT = 30;
 
 export const DEFAULT_RATE_LIMITS: RateLimits = {
   read: { ratePerSec: 20, burst: 100 },
@@ -163,5 +167,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     rateLimits: rl === 'off' ? false : DEFAULT_RATE_LIMITS,
     dailyWriteAlert: int(env, 'YAPA_DAILY_WRITE_ALERT', 20000),
     pullMaxBytes: int(env, 'YAPA_PULL_MAX_BYTES', PULL_MAX_BYTES_DEFAULT, 64 * 1024),
+    deletedRetentionDays: int(env, 'YAPA_DELETED_RETENTION_DAYS', DELETED_RETENTION_DAYS_DEFAULT),
   };
 }
