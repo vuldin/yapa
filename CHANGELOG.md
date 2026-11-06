@@ -5,7 +5,7 @@
 ### Fixes
 - **Follow-through judges what a turn is about.**
   - It used to list every open item linked to the tasks the session holds before any item near the turn, then cut the list at eight. Auto-capture links each typed memory to the held task, so a session working one task for a while ended up judging that task's oldest eight records on every turn. A question the turn answered was never shown.
-  - Now the list is what the held tasks wait on, then the items nearest the turn (task-linked ones ranked a little ahead), then the tasks' other open records, newest first, if there's room.
+  - Now the list is up to four items the held tasks wait on, then the items nearest the turn (task-linked records win near-ties but always leave two slots for others), then, if there's room, the remaining waits and the tasks' most recently linked records.
   - Capture health also counts the open items judged, so `yapa capture status` can tell "nothing to judge" from "the judge said no".
 
 ## 1.14.0 (2026-11-06)

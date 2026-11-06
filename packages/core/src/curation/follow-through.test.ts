@@ -130,6 +130,36 @@ describe('findOpenItems', () => {
       expect(items[0].id).toBe(waiting);
       expect(items.map(i => i.id)).toContain(question);
       expect(items.length).toBeLessThanOrEqual(8);
+
+      // Linked records nearer the turn than the question it answers still leave it room.
+      const { queryDocuments } = await import('../store/index.js');
+      const task2 = await createTask('Tune the export retries', {}, C);
+      const turn2 = 'The export retry backoff on shard 7 doubles each attempt up to 30 seconds, and the export region is us-east-2.';
+      for (let i = 0; i < 9; i++) {
+        await storeMemory(`The export retry backoff on shard 7 doubles each attempt up to 30 seconds (note ${i}).`, {
+          collection: C, typed: { kind: 'finding', task_ids: [task2] },
+        });
+      }
+      const { ids: [region] } = await storeMemory('Which region does the export run in?', { collection: C, typed: { kind: 'question' } });
+      const near = await queryDocuments(C, turn2, 40, { type: 'memory' });
+      const qd = near.find(n => n.id === region)!.distance;
+      const linkedNear = near.filter(n => String(n.metadata.task_ids ?? '').includes(task2));
+      expect(linkedNear.length).toBe(9);
+      expect(linkedNear.every(n => n.distance < qd)).toBe(true);
+      expect(qd).toBeLessThan(0.75);
+      expect((await findOpenItems(C, turn2, [task2])).map(i => i.id)).toContain(region);
+
+      // Every open wait is judged while there is room, not only the first four.
+      const task3 = await createTask('Plan the launch', {}, C);
+      const decisions: string[] = [];
+      for (const topic of ['the venue', 'the date', 'the budget', 'the speakers', 'the catering', 'the swag']) {
+        decisions.push((await storeMemory(`Which option for ${topic}?`, {
+          collection: C, typed: { kind: 'decision', status: 'needed', owner: 'josh', options: ['a', 'b'] },
+        })).ids[0]);
+      }
+      await updateTask(task3, { waits_on: decisions } as any);
+      const waits = await findOpenItems(C, 'yes, go with b', [task3]);
+      expect(decisions.every(d => waits.some(i => i.id === d))).toBe(true);
     } finally {
       resetStore();
       resetConfig();
