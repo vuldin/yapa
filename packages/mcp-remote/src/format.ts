@@ -4,6 +4,7 @@
  * whole team's rows. Sizes are bounded: 4 KiB of content per item and 64 KiB
  * per tool result.
  */
+import { includesUser, ownerWaitsOn } from '@yapa/core/owners';
 import type { DocRow } from './queries.js';
 
 export const MAX_ITEM_CONTENT_BYTES = 4 * 1024;
@@ -157,6 +158,8 @@ export interface WaitingItem {
   title: string;
   /** Who it waits on; empty means anyone. */
   for: string[];
+  /** Someone outside YAPA the person in `for` has to ask. */
+  ask?: string;
   by: string;
   /** Unix seconds since it has been waiting. */
   since: number;
@@ -196,7 +199,8 @@ const who = (i: WaitingItem) => (i.for.length ? i.for.join(', ') : 'anyone');
 export function waitingLine(i: WaitingItem, opts: { collection?: boolean; now?: number } = {}): string {
   const where = opts.collection ? ` (${i.collection})` : '';
   const tag = i.what === 'decision' ? `decision ${i.status}` : i.what === 'question' ? 'question' : i.what === 'action' ? 'needs a person' : 'blocked';
-  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since, opts.now)}] ${i.title}`;
+  const ask = i.ask ? `, ask ${i.ask}` : '';
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}${ask}, ${age(i.since, opts.now)}] ${i.title}`;
   const extra: string[] = [];
   if (i.options?.length) extra.push(`options: ${i.options.join(' | ')}`);
   if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);
@@ -224,13 +228,15 @@ const itemsOf = (v: unknown): string[] =>
 /**
  * What waits on a person, from decision/question memories and open tasks
  * (same sections and rules as core's waitingOn): decisions needed or
- * proposed and open questions (for: owner); open tasks tagged needs-human or
+ * proposed and open questions (for: owner, or whoever recorded it when the
+ * owner is no YAPA user, to ask them); open tasks tagged needs-human or
  * needs:<user> (for: the named users, none = anyone); blocked tasks (for:
  * their owner). `user` keeps items for that user or for anyone (blocked:
  * that user's only); undefined keeps everything. Oldest first.
  */
-export function buildWaiting(memories: DocRow[], tasks: DocRow[], user?: string): WaitingResult {
+export function buildWaiting(memories: DocRow[], tasks: DocRow[], user?: string, me?: string): WaitingResult {
   const out: WaitingResult = { decisions: [], questions: [], actions: [], blocked: [] };
+  const known = new Set([me, ...memories.map(d => d.origin_user), ...tasks.map(t => t.origin_user), user].filter((u): u is string => !!u));
   const open = tasks.filter(t => t.metadata.type === 'task' && t.metadata.status !== 'complete');
   // Per collection, as in core: a task waits on a memory of its own collection.
   const key = (collection: string, id: string) => `${collection}\u0000${id}`;
@@ -253,7 +259,7 @@ export function buildWaiting(memories: DocRow[], tasks: DocRow[], user?: string)
     const options = itemsOf(m.options);
     const waiting = waitingOnIt.get(key(d.collection, id));
     const item: WaitingItem = {
-      id, collection: d.collection, what: m.kind, title: firstLine(d.content), for: m.owner ? [String(m.owner)] : [],
+      id, collection: d.collection, what: m.kind, title: firstLine(d.content), ...ownerWaitsOn(m.owner, d.origin_user, known),
       by: d.origin_user, since: d.updated_at,
       // Core leaves status undefined here ("decision undefined"); use the kind default.
       status: m.status ?? DEFAULT_STATUS[m.kind as MemoryKind],
@@ -283,13 +289,13 @@ export function buildWaiting(memories: DocRow[], tasks: DocRow[], user?: string)
     }
   }
 
-  const forUser = (i: WaitingItem) => !user || i.for.length === 0 || i.for.includes(user);
+  const forUser = (i: WaitingItem) => !user || i.for.length === 0 || includesUser(i.for, user);
   const oldest = (a: WaitingItem, b: WaitingItem) => a.since - b.since;
   return {
     decisions: out.decisions.filter(forUser).sort(oldest),
     questions: out.questions.filter(forUser).sort(oldest),
     actions: out.actions.filter(forUser).sort(oldest),
     // Blocked tasks belong to whoever owns them.
-    blocked: out.blocked.filter(i => !user || i.for.includes(user)).sort(oldest),
+    blocked: out.blocked.filter(i => !user || includesUser(i.for, user)).sort(oldest),
   };
 }

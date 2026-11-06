@@ -516,7 +516,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         typedMemoriesForWaiting(pool, me, coll),
         listTasks(pool, me, { collection: coll, includeComplete: false, limit: WAITING_MAX_ROWS }),
       ]);
-      const w = buildWaiting(memories, tasks, who);
+      const w = buildWaiting(memories, tasks, who, me);
       const now = ctx.nowSecs?.() ?? Date.now() / 1000;
       const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
       return {
