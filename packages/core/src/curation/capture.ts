@@ -68,8 +68,8 @@ export interface CaptureTurnResult {
   settled?: Array<{ id: string; kind: string; status: string; note: string }>;
   /** One-line visibility notice for the next injection, or undefined if nothing happened. */
   notice?: string;
-  /** Documents this turn wrote (stored chunks and settled items), for an immediate push. */
-  ids?: string[];
+  /** Documents this turn wrote (stored chunks, archived ones, settled items), for an immediate push. */
+  written?: Array<{ collection: string; id: string }>;
 }
 
 const defaultDeps: CaptureDeps = {
@@ -123,9 +123,11 @@ async function runCapture(
   // First: does this turn settle something already open? (a person's choice,
   // an answer). Failure never blocks capture.
   let settled: NonNullable<CaptureTurnResult['settled']> = [];
+  let settledWritten: Array<{ collection: string; id: string }> = [];
   try {
     const f = await d.followThrough({ collection, userText: input.userText, assistantText: input.assistantText, taskIds: options.taskIds });
     settled = f.changes.map(c => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
+    settledWritten = f.changes.map(c => ({ collection: c.collection, id: c.id }));
     state.judged = f.judged;
   } catch (e) {
     state.followThroughError = e;
@@ -145,13 +147,13 @@ async function runCapture(
   );
   if (!candidates.length) {
     if (settledNotice) d.log(`${settledNotice} [session ${sessionId}, turn ${turn}]`);
-    return { stored: 0, skipped: 0, superseded: 0, ...(settled.length ? { settled, notice: settledNotice, ids: settled.map(c => c.id) } : {}) };
+    return { stored: 0, skipped: 0, superseded: 0, ...(settled.length ? { settled, notice: settledNotice, written: settledWritten } : {}) };
   }
 
   let stored = 0;
   let skipped = 0;
   let superseded = 0;
-  const written: string[] = settled.map(c => c.id);
+  const written: Array<{ collection: string; id: string }> = [...settledWritten];
   for (const candidate of candidates) {
     const neighbors = await d.queryDocuments(collection, candidate.content, 3, { type: 'memory' })
       .then(results => results.filter(r => r.distance < options.dedupeDistance && r.metadata?.archived !== true))
@@ -223,7 +225,7 @@ async function runCapture(
           }),
         },
       });
-      written.push(...(r?.ids ?? []));
+      for (const id of [...(r?.ids ?? []), ...(supersedes ? [supersedes] : [])]) written.push({ collection, id });
     } catch (e) {
       state.storeError = e;
       d.log(`Storing a captured memory failed in ${collection}: ${e}`);
@@ -242,5 +244,5 @@ async function runCapture(
     d.log(`${notice} [session ${sessionId}, turn ${turn}]`);
   }
   if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
-  return { stored, skipped, superseded, ...(settled.length ? { settled } : {}), notice, ...(written.length ? { ids: written } : {}) };
+  return { stored, skipped, superseded, ...(settled.length ? { settled } : {}), notice, ...(written.length ? { written } : {}) };
 }

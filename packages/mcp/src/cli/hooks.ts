@@ -26,6 +26,7 @@ import {
   getPendingBackfills,
   clearPendingBackfill,
   isSyncConfigured,
+  CollectionLeftError,
   pushDocsNow,
   resolveSyncUsername,
   captureTurn,
@@ -123,16 +124,18 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
 }
 
 const HOOK_PUSH_TIMEOUT_MS = 5000;
+const HEALTH_FRESH_MS = 10 * 60_000;
 
 /**
  * Push what a hook just wrote, so teammates see it now rather than after the
  * MCP server's next cycle. Bounded and fail-open: anything not pushed here
- * stays unsynced for that cycle. Skipped while sync is down.
+ * stays unsynced for that cycle. Skipped while sync was seen down in the
+ * last ten minutes.
  */
 export async function pushWritten(collection: string, ids: string[] | undefined, timeoutMs = HOOK_PUSH_TIMEOUT_MS): Promise<void> {
   if (!ids?.length || !isSyncConfigured(getConfig()) || !isSyncableCollection(collection)) return;
   const health = readSyncHealth();
-  if (health && (health.status === 'signed_out' || health.status === 'unreachable')) return;
+  if (health && Date.now() - health.at < HEALTH_FRESH_MS && (health.status === 'signed_out' || health.status === 'unreachable')) return;
   try {
     const r = await withTimeout(pushDocsNow(collection, ids), timeoutMs);
     if (!r) process.stderr.write(`[yapa-hook] push to ${collection} timed out; the next sync cycle pushes it\n`);
@@ -633,7 +636,9 @@ export async function stop(input: StopInput): Promise<void> {
       },
     );
     if (result.notice) writeFileSync(stateFile(input.session_id, 'notice'), result.notice);
-    await pushWritten(collection, result.ids);
+    const byCollection = new Map<string, string[]>();
+    for (const w of result.written ?? []) byCollection.set(w.collection, [...(byCollection.get(w.collection) ?? []), w.id]);
+    for (const [c, ids] of byCollection) await pushWritten(c, [...new Set(ids)]);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}\n`);
   }
@@ -656,9 +661,10 @@ export async function postCompact(input: PostCompactInput): Promise<void> {
       sector: 'episodic',
       metadata: { source: 'compaction', session_id: input.session_id, trigger: input.trigger },
     });
-    await pushWritten(collection, written.ids);
     recordCapture({ kind: 'compaction' });
+    await pushWritten(collection, written.ids);
   } catch (e) {
+    if (e instanceof CollectionLeftError) return;
     recordCapture({ kind: 'compaction', error: e });
     process.stderr.write(`[yapa-hook] compaction capture failed (non-fatal): ${e}\n`);
   }

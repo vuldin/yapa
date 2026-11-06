@@ -265,13 +265,24 @@ describe('stop (response capture)', () => {
 
   it('pushes what the turn stored right away, in a shared collection', async () => {
     configure({ YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' });
-    captureTurn.mockResolvedValueOnce({ stored: 1, skipped: 0, superseded: 0, ids: ['mem-josh-1-abc'] });
+    captureTurn.mockResolvedValueOnce({
+      stored: 1, skipped: 0, superseded: 0,
+      written: [
+        { collection: 'project-acme', id: 'mem-josh-1-abc' },
+        { collection: 'project-acme', id: 'mem-josh-0-old' },
+        { collection: 'project-other', id: 'mem-josh-q-other' },
+        { collection: 'private-notes', id: 'mem-josh-q-private' },
+      ],
+    });
     const cwd = join(dir, 'proj', 'acme');
     capture();
     await userPromptSubmit({ session_id: 'p1', cwd, prompt: 'why do acme consumers time out?' });
     restore();
     await stop({ session_id: 'p1', cwd, last_assistant_message: longAnswer });
-    expect(pushDocsNow).toHaveBeenCalledWith('project-acme', ['mem-josh-1-abc']);
+    expect(pushDocsNow.mock.calls).toEqual([
+      ['project-acme', ['mem-josh-1-abc', 'mem-josh-0-old']],
+      ['project-other', ['mem-josh-q-other']],
+    ]);
 
     captureTurn.mockResolvedValueOnce({ stored: 0, skipped: 0, superseded: 0 });
     pushDocsNow.mockClear();
@@ -589,7 +600,7 @@ describe('collection_map: a folder with a private collection', () => {
     expect(ctx).toMatch(/rotates on Mondays/);
     expect(pullCollection).not.toHaveBeenCalled();
 
-    captureTurn.mockResolvedValueOnce({ stored: 1, skipped: 0, superseded: 0, ids: ['mem-josh-2-def'] });
+    captureTurn.mockResolvedValueOnce({ stored: 1, skipped: 0, superseded: 0, written: [{ collection: 'private-acme', id: 'mem-josh-2-def' }] });
     await stop({ session_id: 'm1', cwd: cwd(), last_assistant_message: 'It rotates every Monday at 09:00 UTC. '.repeat(10) });
     expect(captureTurn.mock.calls[0][0]).toMatchObject({ collection: 'private-acme' });
     expect(pushDocsNow).not.toHaveBeenCalled();
@@ -670,6 +681,19 @@ describe('after removing a shared collection from this machine only', () => {
   });
 });
 
+describe('postCompact in a collection removed from this machine', () => {
+  it('writes nothing, pushes nothing and records no failure', async () => {
+    const health = join(dir, 'health-left', 'sync-health.json');
+    configure({ YAPA_SYNC_HEALTH_FILE: health });
+    const { addLeftCollection, readCaptureHealth } = await import('@yapa/core');
+    await addLeftCollection('project-gone');
+    await postCompact({ session_id: 'g1', cwd: join(dir, 'proj', 'gone'), compact_summary: 'Decided: gone keeps the old port.', trigger: 'auto' });
+    expect(pushDocsNow).not.toHaveBeenCalled();
+    expect(readCaptureHealth(join(dir, 'health-left', 'capture-health.json'))).toBeUndefined();
+    expect((await listMemories({ collection: 'project-gone', limit: 10 })).length).toBe(0);
+  });
+});
+
 describe('pushWritten', () => {
   it('pushes only shared collections with sync on and up, and never throws', async () => {
     await pushWritten('project-acme', []);
@@ -693,6 +717,10 @@ describe('pushWritten', () => {
     writeFileSync(health, JSON.stringify({ status: 'ok', at: Date.now(), interval_ms: 300000, label: 'yapa' }));
     await pushWritten('project-acme', ['m1']);
     expect(pushDocsNow).toHaveBeenCalledWith('project-acme', ['m1']);
+    pushDocsNow.mockClear();
+    writeFileSync(health, JSON.stringify({ status: 'unreachable', at: Date.now() - 11 * 60_000, interval_ms: 300000, label: 'yapa' }));
+    await pushWritten('project-acme', ['m4']);
+    expect(pushDocsNow).toHaveBeenCalledWith('project-acme', ['m4']);
 
     configure();
     pushDocsNow.mockRejectedValueOnce(new Error('remote down'));

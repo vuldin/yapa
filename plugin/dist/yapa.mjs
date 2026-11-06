@@ -8113,9 +8113,11 @@ async function captureTurn(input2, options, deps = {}) {
 async function runCapture(input2, options, d, state) {
   const { collection, sessionId: sessionId2, turn } = input2;
   let settled = [];
+  let settledWritten = [];
   try {
     const f = await d.followThrough({ collection, userText: input2.userText, assistantText: input2.assistantText, taskIds: options.taskIds });
     settled = f.changes.map((c) => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
+    settledWritten = f.changes.map((c) => ({ collection: c.collection, id: c.id }));
     state.judged = f.judged;
   } catch (e) {
     state.followThroughError = e;
@@ -8132,12 +8134,12 @@ async function runCapture(input2, options, d, state) {
   );
   if (!candidates.length) {
     if (settledNotice) d.log(`${settledNotice} [session ${sessionId2}, turn ${turn}]`);
-    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice, ids: settled.map((c) => c.id) } : {} };
+    return { stored: 0, skipped: 0, superseded: 0, ...settled.length ? { settled, notice: settledNotice, written: settledWritten } : {} };
   }
   let stored = 0;
   let skipped = 0;
   let superseded = 0;
-  const written = settled.map((c) => c.id);
+  const written = [...settledWritten];
   for (const candidate of candidates) {
     const neighbors = await d.queryDocuments(collection, candidate.content, 3, { type: "memory" }).then((results) => results.filter((r) => r.distance < options.dedupeDistance && r.metadata?.archived !== true)).catch(() => []);
     let content = candidate.content;
@@ -8194,7 +8196,7 @@ async function runCapture(input2, options, d, state) {
           }
         }
       });
-      written.push(...r?.ids ?? []);
+      for (const id of [...r?.ids ?? [], ...supersedes ? [supersedes] : []]) written.push({ collection, id });
     } catch (e) {
       state.storeError = e;
       d.log(`Storing a captured memory failed in ${collection}: ${e}`);
@@ -8209,7 +8211,7 @@ async function runCapture(input2, options, d, state) {
     d.log(`${notice} [session ${sessionId2}, turn ${turn}]`);
   }
   if (settledNotice) notice = notice ? `${settledNotice}. ${notice}` : settledNotice;
-  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice, ...written.length ? { ids: written } : {} };
+  return { stored, skipped, superseded, ...settled.length ? { settled } : {}, notice, ...written.length ? { written } : {} };
 }
 var MAX_EXTRACT_CHARS, defaultDeps;
 var init_capture = __esm({
@@ -11702,7 +11704,7 @@ function withTimeout(work, ms) {
 async function pushWritten(collection, ids, timeoutMs = HOOK_PUSH_TIMEOUT_MS) {
   if (!ids?.length || !isSyncConfigured(getConfig()) || !isSyncableCollection(collection)) return;
   const health = readSyncHealth();
-  if (health && (health.status === "signed_out" || health.status === "unreachable")) return;
+  if (health && Date.now() - health.at < HEALTH_FRESH_MS && (health.status === "signed_out" || health.status === "unreachable")) return;
   try {
     const r = await withTimeout(pushDocsNow(collection, ids), timeoutMs);
     if (!r) process.stderr.write(`[yapa-hook] push to ${collection} timed out; the next sync cycle pushes it
@@ -12074,7 +12076,9 @@ async function stop(input2) {
       }
     );
     if (result.notice) writeFileSync11(stateFile2(input2.session_id, "notice"), result.notice);
-    await pushWritten(collection, result.ids);
+    const byCollection = /* @__PURE__ */ new Map();
+    for (const w of result.written ?? []) byCollection.set(w.collection, [...byCollection.get(w.collection) ?? [], w.id]);
+    for (const [c, ids] of byCollection) await pushWritten(c, [...new Set(ids)]);
   } catch (e) {
     process.stderr.write(`[yapa-hook] response capture failed (non-fatal): ${e}
 `);
@@ -12095,9 +12099,10 @@ ${summary}`, {
       sector: "episodic",
       metadata: { source: "compaction", session_id: input2.session_id, trigger: input2.trigger }
     });
-    await pushWritten(collection, written.ids);
     recordCapture({ kind: "compaction" });
+    await pushWritten(collection, written.ids);
   } catch (e) {
+    if (e instanceof CollectionLeftError) return;
     recordCapture({ kind: "compaction", error: e });
     process.stderr.write(`[yapa-hook] compaction capture failed (non-fatal): ${e}
 `);
@@ -12116,7 +12121,7 @@ async function sessionEnd(input2) {
 function reloadConfig() {
   setConfig(createConfig(process.env));
 }
-var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, HOOK_PUSH_TIMEOUT_MS, relTime;
+var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, HOOK_PUSH_TIMEOUT_MS, HEALTH_FRESH_MS, relTime;
 var init_hooks = __esm({
   "packages/mcp/src/cli/hooks.ts"() {
     "use strict";
@@ -12129,6 +12134,7 @@ var init_hooks = __esm({
     LEASE_LIST_BUDGET_MS = 1500;
     HEARTBEAT_BUDGET_MS = 1500;
     HOOK_PUSH_TIMEOUT_MS = 5e3;
+    HEALTH_FRESH_MS = 10 * 6e4;
     relTime = (secs) => secs < 120 ? `${secs}s` : secs < 7200 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`;
   }
 });
