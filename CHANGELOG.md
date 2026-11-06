@@ -11,6 +11,8 @@
   - Recording never fails or slows a turn.
 
 ### Fixes
+- **Questions and decisions for people outside YAPA no longer disappear from `waiting`.** An owner is matched to a YAPA user case-insensitively (`Josh`, `josh@example.com` and `josh` are one person). An owner who is no YAPA user (`Dana`, `the platform team`) is someone to ask: the item waits on whoever recorded it and reads `[question, for josh, ask Dana, 2d]`. Existing items are read the same way, with no migration. The same rule applies in session start, DSH and the reference remote's `waiting`.
+- **Follow-through no longer settles items a turn doesn't settle.** The judge must quote the words of the turn that settle an item, and a change whose quote is not in the turn is dropped, as is one whose note says the turn doesn't address the item. A question for another YAPA user is answered only in that user's turn, and a question for someone outside YAPA only by their reported answer, not by the person's own plan (follow-through prompt v2).
 - Capture in a folder whose collection was removed from this machine (`collection_delete`) now does nothing, without calling the aux model. Before, it ran the model and then failed to store.
 - When one captured memory is refused (an invalid typed memory, say), the turn's other memories are still stored.
 

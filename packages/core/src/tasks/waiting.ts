@@ -6,6 +6,7 @@
  *
  *   decisions  decision memories that are needed or proposed (for: owner)
  *   questions  open question memories (for: owner)
+ *              (an owner who is no YAPA user: whoever recorded it, to ask them)
  *   actions    open tasks tagged needs-human or needs:<user>
  *              (for: the needs:<user> tags; none means anyone may)
  *   blocked    blocked tasks (for: the task's owner), with age and reason
@@ -15,6 +16,9 @@
 import { getDocumentsByFilter, listCollections } from '../store/index.js';
 import { DEFAULT_STATUS, isOpenTyped, type MemoryKind } from '../memory/kinds.js';
 import { isSyncableCollection } from '../sync/syncable.js';
+import { includesUser, ownerWaitsOn } from '../memory/owners.js';
+import { knownUsers, usersIn } from '../memory/known-users.js';
+import { getConfig } from '../config.js';
 
 export interface WaitingItem {
   id: string;
@@ -24,6 +28,8 @@ export interface WaitingItem {
   title: string;
   /** Who it waits on; empty means anyone. */
   for: string[];
+  /** Someone outside YAPA the person in `for` has to ask. */
+  ask?: string;
   /** Who wrote it. */
   by: string;
   /** Unix seconds since it has been waiting. */
@@ -69,13 +75,19 @@ export function taskNeedsPeople(tags: string[]): string[] | undefined {
 export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResult> {
   const names = opts.collection ? [opts.collection] : (await listCollections().catch(() => [])).map(c => c.name);
   const out: WaitingResult = { decisions: [], questions: [], actions: [], blocked: [] };
-
-  await Promise.all(names.map(async collection => {
+  const read = await Promise.all(names.map(async collection => {
     const [decisions, questions, tasks] = await Promise.all([
       getDocumentsByFilter(collection, { type: 'memory', kind: 'decision' }, 2000).catch(() => []),
       getDocumentsByFilter(collection, { type: 'memory', kind: 'question' }, 2000).catch(() => []),
       getDocumentsByFilter(collection, { type: 'task' }, 5000).catch(() => []),
     ]);
+    return { collection, decisions, questions, tasks };
+  }));
+  const known = new Set(opts.collection ? await knownUsers() : [getConfig().USERNAME]);
+  if (opts.user) known.add(opts.user);
+  for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
+
+  for (const { collection, decisions, questions, tasks } of read) {
     const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true);
     const waitingOnIt = new Map<string, string[]>();
     for (const t of open) for (const m of list(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
@@ -87,9 +99,10 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
       const id = m.parent_id ?? d.id;
       if (seen.has(id) || (m.parent_id && (m.chunk_index ?? 0) !== 0)) continue;
       seen.add(id);
+      const by = m.origin_user ?? m.username ?? '';
       const item: WaitingItem = {
-        id, collection, what: m.kind as 'decision' | 'question', title: firstLine(d.content), for: m.owner ? [String(m.owner)] : [],
-        by: m.origin_user ?? m.username ?? '', since: Number(m.updated_at ?? m.created_at ?? 0), status: m.status ?? DEFAULT_STATUS[m.kind as MemoryKind],
+        id, collection, what: m.kind as 'decision' | 'question', title: firstLine(d.content), ...ownerWaitsOn(m.owner, by, known),
+        by, since: Number(m.updated_at ?? m.created_at ?? 0), status: m.status ?? DEFAULT_STATUS[m.kind as MemoryKind],
         ...(list(m.options).length ? { options: list(m.options) } : {}),
         ...(m.recommendation ? { recommendation: String(m.recommendation) } : {}),
         ...(waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}),
@@ -115,16 +128,16 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
         });
       }
     }
-  }));
+  }
 
-  const forUser = (i: WaitingItem) => !opts.user || i.for.length === 0 || i.for.includes(opts.user);
+  const forUser = (i: WaitingItem) => !opts.user || i.for.length === 0 || includesUser(i.for, opts.user);
   const oldest = (a: WaitingItem, b: WaitingItem) => a.since - b.since;
   return {
     decisions: out.decisions.filter(forUser).sort(oldest),
     questions: out.questions.filter(forUser).sort(oldest),
     actions: out.actions.filter(forUser).sort(oldest),
     // Blocked tasks belong to whoever owns them.
-    blocked: out.blocked.filter(i => !opts.user || i.for.includes(opts.user)).sort(oldest),
+    blocked: out.blocked.filter(i => !opts.user || includesUser(i.for, opts.user)).sort(oldest),
   };
 }
 
@@ -166,7 +179,8 @@ const who = (i: WaitingItem) => (i.for.length ? i.for.join(', ') : 'anyone');
 export function waitingLine(i: WaitingItem, opts: { collection?: boolean } = {}): string {
   const where = opts.collection ? ` (${i.collection})` : '';
   const tag = i.what === 'decision' ? `decision ${i.status}` : i.what === 'question' ? 'question' : i.what === 'action' ? 'needs a person' : 'blocked';
-  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}, ${age(i.since)}] ${i.title}`;
+  const ask = i.ask ? `, ask ${i.ask}` : '';
+  const head = `- **${i.id}**${where} [${tag}, for ${who(i)}${ask}, ${age(i.since)}] ${i.title}`;
   const extra: string[] = [];
   if (i.options?.length) extra.push(`options: ${i.options.join(' | ')}`);
   if (i.recommendation) extra.push(`recommended: ${i.recommendation}`);

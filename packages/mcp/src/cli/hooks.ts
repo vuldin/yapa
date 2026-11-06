@@ -41,6 +41,7 @@ import {
   type SyncHealth,
   waitingOn,
   waitingLine,
+  includesUser,
   fenceWaiting,
   heldKeys,
   noteInstalledVersion,
@@ -402,7 +403,7 @@ export async function waitingLines(user: string, budgetMs = 2000, collection = '
     if (!all) return [];
     const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-    const mine = items.filter(i => i.for.includes(user));
+    const mine = items.filter(i => includesUser(i.for, user));
     const anyone = items.filter(i => i.for.length === 0).length;
     if (!mine.length && !anyone && !hidden) return [];
     const out = ['', '## Waiting on you'];
