@@ -3,15 +3,16 @@ import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { pullCollection, captureTurn, heartbeatIfDue } = vi.hoisted(() => ({
+const { pullCollection, captureTurn, heartbeatIfDue, pushDocsNow } = vi.hoisted(() => ({
   pullCollection: vi.fn(),
   captureTurn: vi.fn(),
   heartbeatIfDue: vi.fn(),
+  pushDocsNow: vi.fn(),
 }));
-vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue }));
+vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue, pushDocsNow }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines } from './hooks.js';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -56,6 +57,8 @@ beforeEach(() => {
   pullCollection.mockReset();
   pullCollection.mockResolvedValue({ pulled: 0, updated: 0, moved: 0, linked: 0, skipped: 0, errors: 0 });
   captureTurn.mockReset();
+  pushDocsNow.mockReset();
+  pushDocsNow.mockResolvedValue({ pushed: [], renamed: {}, errors: 0 });
   heartbeatIfDue.mockReset();
   heartbeatIfDue.mockResolvedValue(0);
 });
@@ -260,6 +263,36 @@ describe('stop (response capture)', () => {
     expect(restore().hookSpecificOutput.additionalContext).toContain('_Auto-captured 1 memory from last turn_');
   });
 
+  it('pushes what the turn stored right away, in a shared collection', async () => {
+    configure({ YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' });
+    captureTurn.mockResolvedValueOnce({
+      stored: 1, skipped: 0, superseded: 0,
+      written: [
+        { collection: 'project-acme', id: 'mem-josh-1-abc' },
+        { collection: 'project-acme', id: 'mem-josh-0-old' },
+        { collection: 'project-other', id: 'mem-josh-q-other' },
+        { collection: 'private-notes', id: 'mem-josh-q-private' },
+      ],
+    });
+    const cwd = join(dir, 'proj', 'acme');
+    capture();
+    await userPromptSubmit({ session_id: 'p1', cwd, prompt: 'why do acme consumers time out?' });
+    restore();
+    await stop({ session_id: 'p1', cwd, last_assistant_message: longAnswer });
+    expect(pushDocsNow.mock.calls).toEqual([
+      ['project-acme', ['mem-josh-1-abc', 'mem-josh-0-old']],
+      ['project-other', ['mem-josh-q-other']],
+    ]);
+
+    captureTurn.mockResolvedValueOnce({ stored: 0, skipped: 0, superseded: 0 });
+    pushDocsNow.mockClear();
+    capture();
+    await userPromptSubmit({ session_id: 'p1', cwd, prompt: 'and the fix?' });
+    restore();
+    await stop({ session_id: 'p1', cwd, last_assistant_message: longAnswer });
+    expect(pushDocsNow).not.toHaveBeenCalled();
+  });
+
   it('skips when disabled, re-entrant, or the turn is trivial', async () => {
     configure({ YAPA_RESPONSE_CAPTURE: 'false' });
     await stop({ session_id: 's3', last_assistant_message: longAnswer });
@@ -273,6 +306,9 @@ describe('stop (response capture)', () => {
 describe('postCompact / sessionEnd', () => {
   it('stores the compaction summary as an episodic memory in scope', async () => {
     await postCompact({ session_id: 's4', cwd: join(dir, 'proj', 'acme'), compact_summary: 'Decided: acme moves to mTLS in Q1.', trigger: 'auto' });
+    expect(pushDocsNow).toHaveBeenCalledTimes(1);
+    expect(pushDocsNow.mock.calls[0][0]).toBe('project-acme');
+    expect(pushDocsNow.mock.calls[0][1]).toHaveLength(1);
     const all = await listMemories({ collection: 'project-acme', limit: 50 });
     const summary = all.find(m => m.content.includes('mTLS in Q1'));
     expect(summary?.metadata.sector).toBe('episodic');
@@ -564,11 +600,13 @@ describe('collection_map: a folder with a private collection', () => {
     expect(ctx).toMatch(/rotates on Mondays/);
     expect(pullCollection).not.toHaveBeenCalled();
 
-    captureTurn.mockResolvedValueOnce({ stored: 0, skipped: 0, superseded: 0 });
+    captureTurn.mockResolvedValueOnce({ stored: 1, skipped: 0, superseded: 0, written: [{ collection: 'private-acme', id: 'mem-josh-2-def' }] });
     await stop({ session_id: 'm1', cwd: cwd(), last_assistant_message: 'It rotates every Monday at 09:00 UTC. '.repeat(10) });
     expect(captureTurn.mock.calls[0][0]).toMatchObject({ collection: 'private-acme' });
+    expect(pushDocsNow).not.toHaveBeenCalled();
 
     await postCompact({ session_id: 'm1', cwd: cwd(), compact_summary: 'Decided: acme private notes stay local.', trigger: 'auto' });
+    expect(pushDocsNow).not.toHaveBeenCalled();
     const all = await listMemories({ collection: 'private-acme', limit: 50 });
     expect(all.some(m => m.content.includes('acme private notes stay local'))).toBe(true);
     expect(pullCollection).not.toHaveBeenCalled();
@@ -640,5 +678,56 @@ describe('after removing a shared collection from this machine only', () => {
     expect(await freshenFromRemote('project-acme-gone')).toBe(0);
     expect(pullCollection).not.toHaveBeenCalled();
     expect(await core.getSyncSubscriptions()).not.toContain('project-acme-gone');
+  });
+});
+
+describe('postCompact in a collection removed from this machine', () => {
+  it('writes nothing, pushes nothing and records no failure', async () => {
+    const health = join(dir, 'health-left', 'sync-health.json');
+    configure({ YAPA_SYNC_HEALTH_FILE: health });
+    const { addLeftCollection, readCaptureHealth } = await import('@yapa/core');
+    await addLeftCollection('project-gone');
+    await postCompact({ session_id: 'g1', cwd: join(dir, 'proj', 'gone'), compact_summary: 'Decided: gone keeps the old port.', trigger: 'auto' });
+    expect(pushDocsNow).not.toHaveBeenCalled();
+    expect(readCaptureHealth(join(dir, 'health-left', 'capture-health.json'))).toBeUndefined();
+    expect((await listMemories({ collection: 'project-gone', limit: 10 })).length).toBe(0);
+  });
+});
+
+describe('pushWritten', () => {
+  it('pushes only shared collections with sync on and up, and never throws', async () => {
+    await pushWritten('project-acme', []);
+    await pushWritten('project-acme', undefined);
+    await pushWritten('private-acme', ['m1']);
+    await pushWritten('global', ['m1']);
+    expect(pushDocsNow).not.toHaveBeenCalled();
+
+    configure({ YAPA_SYNC_ENABLED: 'false' });
+    await pushWritten('project-acme', ['m1']);
+    expect(pushDocsNow).not.toHaveBeenCalled();
+
+    const health = join(dir, 'health-push', 'sync-health.json');
+    mkdirSync(join(dir, 'health-push'), { recursive: true });
+    configure({ YAPA_SYNC_HEALTH_FILE: health });
+    for (const status of ['signed_out', 'unreachable']) {
+      writeFileSync(health, JSON.stringify({ status, at: Date.now(), interval_ms: 300000, label: 'yapa' }));
+      await pushWritten('project-acme', ['m1']);
+    }
+    expect(pushDocsNow).not.toHaveBeenCalled();
+    writeFileSync(health, JSON.stringify({ status: 'ok', at: Date.now(), interval_ms: 300000, label: 'yapa' }));
+    await pushWritten('project-acme', ['m1']);
+    expect(pushDocsNow).toHaveBeenCalledWith('project-acme', ['m1']);
+    pushDocsNow.mockClear();
+    writeFileSync(health, JSON.stringify({ status: 'unreachable', at: Date.now() - 11 * 60_000, interval_ms: 300000, label: 'yapa' }));
+    await pushWritten('project-acme', ['m4']);
+    expect(pushDocsNow).toHaveBeenCalledWith('project-acme', ['m4']);
+
+    configure();
+    pushDocsNow.mockRejectedValueOnce(new Error('remote down'));
+    await expect(pushWritten('project-acme', ['m2'])).resolves.toBeUndefined();
+    pushDocsNow.mockReturnValueOnce(new Promise(() => {}));
+    const t = Date.now();
+    await expect(pushWritten('project-acme', ['m3'], 50)).resolves.toBeUndefined();
+    expect(Date.now() - t).toBeLessThan(2000);
   });
 });

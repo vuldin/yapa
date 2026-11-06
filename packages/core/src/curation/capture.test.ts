@@ -24,6 +24,7 @@ describe('captureTurn', () => {
     const result = await captureTurn(input, options, d);
     expect(result).toMatchObject({ stored: 1, skipped: 0 });
     expect(result.notice).toContain('project-acme');
+    expect(result.written).toEqual([{ collection: 'project-acme', id: 'm1' }]);
     const [content, opts] = vi.mocked(d.storeMemory).mock.calls[0] as any;
     expect(content).toBe('acme API listens on port 9000');
     expect(opts.salience).toBe(2); // clamped from 4
@@ -84,6 +85,16 @@ describe('captureTurn', () => {
     const [content, opts] = vi.mocked(d.storeMemory).mock.calls[0] as any;
     expect(content).toBe('acme API moved 8000 -> 9000');
     expect(opts.supersedes).toBe('old');
+    expect(result.written).toEqual([{ collection: 'project-acme', id: 'm1' }, { collection: 'project-acme', id: 'old' }]);
+  });
+
+  it('reports settled items with the collection they live in', async () => {
+    const d = deps({
+      followThrough: vi.fn(async () => ({ judged: 1, changes: [{ id: 'q-other', status: 'answered', note: 'yes', kind: 'question', collection: 'project-other' }] })) as any,
+      extractMemories: vi.fn(async () => []) as any,
+    });
+    const result = await captureTurn(input, options, d);
+    expect(result.written).toEqual([{ collection: 'project-other', id: 'q-other' }]);
   });
 
   it('falls back to a strict distance gate when the resolver is down', async () => {
