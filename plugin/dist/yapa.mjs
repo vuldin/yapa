@@ -7749,29 +7749,41 @@ function toItem(collection, d) {
 async function findOpenItems(collection, text, taskIds = []) {
   const out = /* @__PURE__ */ new Map();
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
+  const linked = [];
+  const waits = [];
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds2(collection, [tid]).catch(() => []);
-    for (const mid of [...list7(t?.metadata.waits_on), ...list7(t?.metadata.memory_ids)]) {
-      for (const name of [collection, ...names.filter((n) => n !== collection)]) {
-        const direct = await getDocumentsByIds2(name, [mid]).catch(() => []);
-        const [doc] = direct.length ? direct : await getDocumentsByIds2(name, [`${mid}-0`]).catch(() => []);
-        if (doc) {
-          if (isOpenTyped(doc.metadata) && doc.metadata.archived !== true) out.set(mid, toItem(name, doc));
-          break;
-        }
+    waits.push(...list7(t?.metadata.waits_on));
+    linked.push(...list7(t?.metadata.memory_ids));
+  }
+  const addById = async (mid) => {
+    for (const name of [collection, ...names.filter((n) => n !== collection)]) {
+      const direct = await getDocumentsByIds2(name, [mid]).catch(() => []);
+      const [doc] = direct.length ? direct : await getDocumentsByIds2(name, [`${mid}-0`]).catch(() => []);
+      if (doc) {
+        if (isOpenTyped(doc.metadata) && doc.metadata.archived !== true) out.set(mid, toItem(name, doc));
+        return;
       }
     }
+  };
+  for (const mid of waits) {
+    if (out.size >= WAITS_MAX) break;
+    await addById(mid);
   }
+  const isLinked = new Set(linked);
   if (text.trim()) {
-    const near = await queryDocuments2(collection, text.slice(0, 4e3), 20, { type: "memory" }).catch(() => []);
-    for (const n of near) {
+    const near = (await queryDocuments2(collection, text.slice(0, 4e3), NEAR_FETCH, { type: "memory" }).catch(() => [])).filter((n) => n.distance < FOLLOW_THROUGH_MAX_DISTANCE && n.metadata.archived !== true && isOpenTyped(n.metadata)).map((n) => ({ n, rank: n.distance - (isLinked.has(n.metadata.parent_id ?? n.id) ? LINKED_BONUS : 0) })).sort((a, b) => a.rank - b.rank);
+    for (const { n } of near) {
       if (out.size >= MAX_ITEMS) break;
-      if (n.distance >= FOLLOW_THROUGH_MAX_DISTANCE || n.metadata.archived === true || !isOpenTyped(n.metadata)) continue;
       const item = toItem(collection, n);
       if (!out.has(item.id)) out.set(item.id, item);
     }
   }
-  return [...out.values()].slice(0, MAX_ITEMS);
+  for (const mid of [...new Set(linked)].reverse()) {
+    if (out.size >= MAX_ITEMS) break;
+    if (!out.has(mid)) await addById(mid);
+  }
+  return [...out.values()];
 }
 function buildFollowThroughPrompt(items, turn) {
   const lines = ["[OPEN ITEMS]"];
@@ -7865,7 +7877,7 @@ ${turn.assistantText}`, userText: turn.userText, knownUsers: known })) {
   }
   return { judged: items.length, changes };
 }
-var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, FOLLOW_THROUGH_SYSTEM_PROMPT, list7, flat, excerpt, DISCLAIMS;
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, WAITS_MAX, NEAR_FETCH, LINKED_BONUS, FOLLOW_THROUGH_SYSTEM_PROMPT, list7, flat, excerpt, DISCLAIMS;
 var init_follow_through = __esm({
   "packages/core/src/curation/follow-through.ts"() {
     "use strict";
@@ -7879,6 +7891,9 @@ var init_follow_through = __esm({
     FOLLOW_THROUGH_PROMPT_VERSION = "v2";
     FOLLOW_THROUGH_MAX_DISTANCE = 0.75;
     MAX_ITEMS = 8;
+    WAITS_MAX = 4;
+    NEAR_FETCH = 40;
+    LINKED_BONUS = 0.1;
     FOLLOW_THROUGH_SYSTEM_PROMPT = `You keep a team's open items current. You get a list of OPEN items (decisions waiting on a choice, open questions, open findings, open limitations, proposed ideas) and ONE conversation turn between a person and their assistant. Report only the items this turn settles. Most turns settle nothing: [] is the common, correct answer.
 
 Settle an item only on clear evidence in the turn:
@@ -7938,6 +7953,7 @@ function applyCaptureEvent(h, e, now) {
     day.stored += e.stored;
     day.skipped += e.skipped;
     day.settled += e.settled;
+    day.judged += e.judged ?? 0;
     if (e.followThroughError !== void 0) {
       day.follow_through_failed++;
       fail2("follow-through", e.followThroughError);
@@ -7980,6 +7996,7 @@ function summarizeCapture(h, now = Date.now(), days = 7) {
     stored: 0,
     skipped: 0,
     settled: 0,
+    judged: 0,
     failed: 0,
     follow_through_failed: 0,
     store_failed: 0,
@@ -7992,7 +8009,7 @@ function summarizeCapture(h, now = Date.now(), days = 7) {
   const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(new Date(t.getFullYear(), t.getMonth(), t.getDate() - i, 12).getTime())));
   for (const [k, d] of Object.entries(h.days)) {
     if (!keys.has(k)) continue;
-    for (const f of ["turns", "stored", "skipped", "settled", "failed", "follow_through_failed", "store_failed", "compactions", "compactions_failed"]) out[f] += Number(d[f] ?? 0);
+    for (const f of ["turns", "stored", "skipped", "settled", "judged", "failed", "follow_through_failed", "store_failed", "compactions", "compactions_failed"]) out[f] += Number(d[f] ?? 0);
   }
   out.last_ok_at = h.last_ok_at;
   out.last_error = h.last_error;
@@ -8034,6 +8051,7 @@ var init_health2 = __esm({
       stored: 0,
       skipped: 0,
       settled: 0,
+      judged: 0,
       failed: 0,
       follow_through_failed: 0,
       store_failed: 0,
@@ -8068,6 +8086,7 @@ async function captureTurn(input2, options, deps = {}) {
       stored: r.stored,
       skipped: r.skipped,
       settled: r.settled?.length ?? 0,
+      judged: state.judged ?? 0,
       ...state.followThroughError !== void 0 ? { followThroughError: state.followThroughError } : {},
       ...state.storeError !== void 0 ? { storeError: state.storeError } : {}
     });
@@ -8083,6 +8102,7 @@ async function runCapture(input2, options, d, state) {
   try {
     const f = await d.followThrough({ collection, userText: input2.userText, assistantText: input2.assistantText, taskIds: options.taskIds });
     settled = f.changes.map((c) => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
+    state.judged = f.judged;
   } catch (e) {
     state.followThroughError = e;
     d.log(`Follow-through failed in ${collection}: ${e}`);
@@ -12778,7 +12798,7 @@ function runCapture2(sub, args, now = Date.now()) {
   const file = captureHealthFile();
   const s = summarizeCapture(readCaptureHealth(file), now, days);
   const lines = [
-    `Capture over the last ${days} day(s): ${s.turns} turn(s) judged, ${s.stored} stored, ${s.skipped} skipped as known, ${s.settled} settled`,
+    `Capture over the last ${days} day(s): ${s.turns} turn(s) judged, ${s.stored} stored, ${s.skipped} skipped as known, ${s.settled} settled of ${s.judged} open item(s) judged`,
     `Failures: ${s.failed} extraction, ${s.store_failed} store, ${s.follow_through_failed} follow-through, ${s.compactions_failed} of ${s.compactions} compaction capture(s)`,
     `Last success: ${when(s.last_ok_at, now)}`,
     ...s.last_error ? [`Last error (${s.last_error.stage}, ${when(s.last_error.at, now)}): ${s.last_error.message}`] : [],

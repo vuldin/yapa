@@ -40,6 +40,9 @@ export const FOLLOW_THROUGH_PROMPT_VERSION = 'v2';
 /** How close (cosine) an open item must be to the turn to be judged. */
 export const FOLLOW_THROUGH_MAX_DISTANCE = 0.75;
 const MAX_ITEMS = 8;
+const WAITS_MAX = 4;
+const NEAR_FETCH = 40;
+const LINKED_BONUS = 0.1;
 
 export const FOLLOW_THROUGH_SYSTEM_PROMPT = `You keep a team's open items current. You get a list of OPEN items (decisions waiting on a choice, open questions, open findings, open limitations, proposed ideas) and ONE conversation turn between a person and their assistant. Report only the items this turn settles. Most turns settle nothing: [] is the common, correct answer.
 
@@ -91,36 +94,54 @@ function toItem(collection: string, d: { id: string; content: string; metadata: 
 }
 
 /**
- * The open items a turn may settle: those the tasks this session holds wait
- * on or recorded (`waits_on`, `memory_ids`), then open typed memories near
- * the turn's text.
+ * The open items a turn may settle, at most MAX_ITEMS: first what the tasks
+ * this session holds wait on (`waits_on`: a short reply often settles those),
+ * then the open typed memories nearest the turn, those the held tasks
+ * recorded (`memory_ids`) ranked a little ahead, then, if there is room, the
+ * tasks' other open records, newest first. A long-running task collects
+ * many, so listing them first would crowd out the items this turn is about.
  */
 export async function findOpenItems(collection: string, text: string, taskIds: string[] = []): Promise<OpenItem[]> {
   const out = new Map<string, OpenItem>();
   const names = (await listCollections().catch(() => [])).map(c => c.name);
+  const linked: string[] = [];
+  const waits: string[] = [];
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds(collection, [tid]).catch(() => []);
-    for (const mid of [...list(t?.metadata.waits_on), ...list(t?.metadata.memory_ids)]) {
-      for (const name of [collection, ...names.filter(n => n !== collection)]) {
-        const direct = await getDocumentsByIds(name, [mid]).catch((): DocumentResult[] => []);
-        const [doc] = direct.length ? direct : await getDocumentsByIds(name, [`${mid}-0`]).catch((): DocumentResult[] => []);
-        if (doc) {
-          if (isOpenTyped(doc.metadata) && doc.metadata.archived !== true) out.set(mid, toItem(name, doc));
-          break;
-        }
+    waits.push(...list(t?.metadata.waits_on));
+    linked.push(...list(t?.metadata.memory_ids));
+  }
+  const addById = async (mid: string) => {
+    for (const name of [collection, ...names.filter(n => n !== collection)]) {
+      const direct = await getDocumentsByIds(name, [mid]).catch((): DocumentResult[] => []);
+      const [doc] = direct.length ? direct : await getDocumentsByIds(name, [`${mid}-0`]).catch((): DocumentResult[] => []);
+      if (doc) {
+        if (isOpenTyped(doc.metadata) && doc.metadata.archived !== true) out.set(mid, toItem(name, doc));
+        return;
       }
     }
+  };
+  for (const mid of waits) {
+    if (out.size >= WAITS_MAX) break;
+    await addById(mid);
   }
+  const isLinked = new Set(linked);
   if (text.trim()) {
-    const near = await queryDocuments(collection, text.slice(0, 4000), 20, { type: 'memory' }).catch(() => []);
-    for (const n of near) {
+    const near = (await queryDocuments(collection, text.slice(0, 4000), NEAR_FETCH, { type: 'memory' }).catch(() => []))
+      .filter(n => n.distance < FOLLOW_THROUGH_MAX_DISTANCE && n.metadata.archived !== true && isOpenTyped(n.metadata))
+      .map(n => ({ n, rank: n.distance - (isLinked.has(n.metadata.parent_id ?? n.id) ? LINKED_BONUS : 0) }))
+      .sort((a, b) => a.rank - b.rank);
+    for (const { n } of near) {
       if (out.size >= MAX_ITEMS) break;
-      if (n.distance >= FOLLOW_THROUGH_MAX_DISTANCE || n.metadata.archived === true || !isOpenTyped(n.metadata)) continue;
       const item = toItem(collection, n);
       if (!out.has(item.id)) out.set(item.id, item);
     }
   }
-  return [...out.values()].slice(0, MAX_ITEMS);
+  for (const mid of [...new Set(linked)].reverse()) {
+    if (out.size >= MAX_ITEMS) break;
+    if (!out.has(mid)) await addById(mid);
+  }
+  return [...out.values()];
 }
 
 export function buildFollowThroughPrompt(items: OpenItem[], turn: { user: string; userText: string; assistantText: string }): string {

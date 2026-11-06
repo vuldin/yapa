@@ -22,6 +22,8 @@ export interface CaptureDay {
   stored: number;
   skipped: number;
   settled: number;
+  /** Open items follow-through judged, summed over turns. */
+  judged: number;
   /** Turns whose extraction failed (no memories stored). */
   failed: number;
   /** Judged turns whose follow-through failed. */
@@ -44,7 +46,7 @@ export interface CaptureHealth {
 }
 
 export type CaptureEvent =
-  | { kind: 'turn'; stored: number; skipped: number; settled: number; followThroughError?: unknown; storeError?: unknown }
+  | { kind: 'turn'; stored: number; skipped: number; settled: number; judged?: number; followThroughError?: unknown; storeError?: unknown }
   | { kind: 'turn_failed'; error: unknown }
   | { kind: 'compaction'; error?: unknown };
 
@@ -62,7 +64,7 @@ export function dayKey(ms: number): string {
 }
 
 const emptyDay = (): CaptureDay => ({
-  turns: 0, clean: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, store_failed: 0, compactions: 0, compactions_failed: 0,
+  turns: 0, clean: 0, stored: 0, skipped: 0, settled: 0, judged: 0, failed: 0, follow_through_failed: 0, store_failed: 0, compactions: 0, compactions_failed: 0,
 });
 
 /** The error, without the model's reply an extractor parse error quotes (it can repeat the turn), and with tokens redacted. */
@@ -92,6 +94,7 @@ export function applyCaptureEvent(h: CaptureHealth | undefined, e: CaptureEvent,
     day.stored += e.stored;
     day.skipped += e.skipped;
     day.settled += e.settled;
+    day.judged += e.judged ?? 0;
     if (e.followThroughError !== undefined) {
       day.follow_through_failed++;
       fail('follow-through', e.followThroughError);
@@ -136,6 +139,7 @@ export interface CaptureSummary {
   stored: number;
   skipped: number;
   settled: number;
+  judged: number;
   failed: number;
   follow_through_failed: number;
   store_failed: number;
@@ -149,14 +153,14 @@ export interface CaptureSummary {
 
 export function summarizeCapture(h: CaptureHealth | undefined, now = Date.now(), days = 7): CaptureSummary {
   const out: CaptureSummary = {
-    days, turns: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, store_failed: 0, compactions: 0, compactions_failed: 0, failing: false,
+    days, turns: 0, stored: 0, skipped: 0, settled: 0, judged: 0, failed: 0, follow_through_failed: 0, store_failed: 0, compactions: 0, compactions_failed: 0, failing: false,
   };
   if (!h) return out;
   const t = new Date(now);
   const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(new Date(t.getFullYear(), t.getMonth(), t.getDate() - i, 12).getTime())));
   for (const [k, d] of Object.entries(h.days)) {
     if (!keys.has(k)) continue;
-    for (const f of ['turns', 'stored', 'skipped', 'settled', 'failed', 'follow_through_failed', 'store_failed', 'compactions', 'compactions_failed'] as const) out[f] += Number(d[f] ?? 0);
+    for (const f of ['turns', 'stored', 'skipped', 'settled', 'judged', 'failed', 'follow_through_failed', 'store_failed', 'compactions', 'compactions_failed'] as const) out[f] += Number(d[f] ?? 0);
   }
   out.last_ok_at = h.last_ok_at;
   out.last_error = h.last_error;
