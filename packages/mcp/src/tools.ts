@@ -80,6 +80,8 @@ import {
   listTrash,
   purgeDocuments,
   stillQueuedForPurge,
+  remoteDataRules,
+  describeDataRules,
   restoreDeleted,
   removeReport,
   resolveWriteCollection,
@@ -1521,6 +1523,7 @@ export function registerTools(server: McpServer): void {
           if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);
           else {
             lines.push(t.remote.length ? `**Your deleted documents on the sync service** (${t.remote.length}, restorable):` : 'You have no deleted documents on the sync service.');
+            if (t.rules) lines.push(`The sync service's rules: ${describeDataRules(t.rules)}.`);
             for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}] ${d.reason === 'retract' ? 'moved into a private collection' : 'deleted'} ${when(d.deleted_at)}: ${d.content.slice(0, 100).replace(/\s+/g, ' ')}`);
           }
           return text(lines.join('\n').trim());
@@ -1548,8 +1551,10 @@ export function registerTools(server: McpServer): void {
         if (r.queued.length) await syncCycle().catch(() => undefined);
         const waiting = r.queued.length ? await stillQueuedForPurge(r.queued) : [];
         const sent = r.queued.filter(x => !waiting.includes(x));
+        const keepsContent = sent.length ? (await remoteDataRules())?.erasure === 'none' : false;
         const parts = [
-          sent.length ? `Purged here and on the sync service: ${sent.join(', ')}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : '',
+          sent.length && keepsContent ? `Removed here and deleted on the sync service: ${sent.join(', ')}. That service can't erase, so the content stays on it, hidden from everyone; ask its administrators to remove it for good.` : '',
+          sent.length && !keepsContent ? `Purged here and on the sync service: ${sent.join(', ')}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : '',
           waiting.length ? `Purged here; the sync service couldn't purge yet: ${waiting.join(', ')}. It stays queued and is retried on every sync.` : '',
           r.local.length ? `Removed for good (it never left this machine): ${r.local.join(', ')}.` : '',
           r.refused.length ? `Not yours, not purged: ${r.refused.map(x => `${x.id} (${x.owner})`).join(', ')}. Ask the owner to purge it.` : '',

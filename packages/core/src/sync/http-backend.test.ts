@@ -337,6 +337,15 @@ describe('soft delete (service schema v4)', () => {
     ]);
   });
 
+  it('reads the data rules a remote declares in /v1/me limits, and shows them in sync status', async () => {
+    handler = () => ({ json: { username: 'tester', email: 'tester@example.com', limits: { deleted_retention_days: null, erasure: 'redact' } } });
+    const b = backend();
+    expect(b.cachedDataRules()).toBeUndefined();
+    expect(await b.dataRules()).toEqual({ deletedRetentionDays: null, erasure: 'redact' });
+    expect(b.cachedDataRules()).toEqual({ deletedRetentionDays: null, erasure: 'redact' });
+    expect((await b.describe()).join('\n')).toMatch(/Data rules: deleted documents restorable until purged; retracted or purged content redacted/);
+  });
+
   it('listDeleted: GET /v1/me/deleted with optional collection and limit', async () => {
     handler = () => ({ json: { documents: [{ id: 'x', collection: 'project-x', content: 'abc', metadata: { type: 'memory' }, deleted_at: 9, reason: 'retract' }] } });
     const b = backend();

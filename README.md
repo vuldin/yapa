@@ -431,6 +431,7 @@ Nothing is lost by accident:
 - `trash list` shows both, `trash restore` brings yours back for everyone, and `trash keep` makes a teammate's deleted copy your own.
 - Moving a document into a private collection (`collection_merge` from a shared one) retracts it: the sync service keeps none of its content, and teammates drop theirs unless they have unpushed edits to it.
 - `trash purge` is for mistakes that must not survive, such as a leaked secret. The service keeps no restorable copy, teammates drop theirs even with local edits, and the id is refused if anyone writes it again. Only the owner can purge. A long memory stored in chunks goes whole, and a purge the service can't take yet stays queued and is retried on every sync.
+- A sync remote with stricter rules of its own (one that never deletes rows, say) declares them, and YAPA follows them: `sync status` shows them, and where a remote can't erase, YAPA says the content stays there, hidden.
 
 ### Local-only collections on this machine
 

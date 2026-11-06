@@ -13,7 +13,7 @@ import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
 import { deleteDocument, getDocumentsByFilter, getDocumentsByIds, listCollections } from '../store/index.js';
 import { isDeletedUpstream, isSyncableCollection } from '../sync/syncable.js';
-import { getSyncBackend, isSyncConfigured, UnsupportedByRemoteError, type DeletedDocument, type RestoreResult } from '../sync/backend.js';
+import { getSyncBackend, isSyncConfigured, remoteDataRules, UnsupportedByRemoteError, type DataRules, type DeletedDocument, type RestoreResult } from '../sync/backend.js';
 import { getPendingPurges, queueSyncPurges } from '../sync/deletes.js';
 import { findDocGroup } from './chunks.js';
 import { storeMemory } from './store.js';
@@ -110,6 +110,8 @@ export interface TrashListing {
   remote: DeletedDocument[];
   /** Why `remote` is empty when it is not known: sync off, offline, or an older service. */
   remoteUnavailable?: string;
+  /** How the remote keeps deleted data, when it could be asked. */
+  rules?: DataRules;
 }
 
 export async function listTrash(collection?: string): Promise<TrashListing> {
@@ -122,6 +124,7 @@ export async function listTrash(collection?: string): Promise<TrashListing> {
     const backend = await getSyncBackend();
     if (!backend?.listDeleted) out.remoteUnavailable = 'this sync target has no soft delete';
     else out.remote = await backend.listDeleted(collection);
+    out.rules = await remoteDataRules();
   } catch (e) {
     out.remoteUnavailable = e instanceof UnsupportedByRemoteError ? e.message : `the sync service could not be asked: ${(e as Error).message}`;
   }

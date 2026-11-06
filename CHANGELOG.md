@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+### Features
+- **Remotes with stricter data rules work too.** A sync remote declares in `GET /v1/me` how long it keeps deleted documents (`deleted_retention_days`, `null` for until purged) and how it erases a retracted or purged document (`erasure`: `delete`, `redact`, or `none`). The client adapts and says what matters: `sync status` shows the rules, `trash list` says how long deleted documents stay restorable, and a purge or a move into a private collection on a remote that cannot erase says the content stays there, hidden. A remote that declares nothing is treated as the reference service.
+
 ### Sync API
-- **"Keeps no copy" is now "keeps no content".** A retract or purge must erase the content, metadata and embedding of the row, its deleted copies and every earlier version a remote keeps. A remote may keep a stub (id, collection, owner, timestamps, reason, who erased it) for its own audit, never served. A remote that keeps history may keep deleted rows restorable until purged and report `limits.deleted_retention_days: null`. The reference service is unchanged: it already deletes. See `docs/sync-api.md` section 5, "Erasure".
+- **Erasure keeps no content; a stub may stay.** A retract or purge removes the content, metadata and embedding of the row, its deleted copies and every earlier version a remote keeps. A remote may keep an audit stub (id, collection, owner, timestamps, reason, who erased it), never served. A remote that can't erase declares `erasure: "none"`, keeps the content hidden, and offers no purge route. The reference service keeps full control (30-day restore, rows deleted) and now declares `erasure: "delete"`. See `docs/sync-api.md` section 5, "Remotes with stricter data rules".
+
+### Fixes
+- **Service: a write that waited on a purge is refused.** An upsert racing a purge of the same id could write it again; the two are now serialized per id.
 
 ## 1.12.0 (2026-11-06)
 

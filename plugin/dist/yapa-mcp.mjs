@@ -9333,12 +9333,19 @@ var init_http_backend = __esm({
       async me(refresh = false) {
         if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
           const r = await this.request("GET", "/v1/me");
-          this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
+          this.meCache = { username: r.username, email: r.email, limits: r.limits, generation: this.tokens.generation };
         }
         return { username: this.meCache.username, email: this.meCache.email };
       }
       identity() {
         return this.me();
+      }
+      async dataRules() {
+        await this.me();
+        return parseDataRules(this.meCache?.limits);
+      }
+      cachedDataRules() {
+        return this.meCache ? parseDataRules(this.meCache.limits) : void 0;
       }
       async pull(collection, req) {
         const q = new URLSearchParams();
@@ -9530,6 +9537,7 @@ var init_http_backend = __esm({
           lines.push(`Signed in as: ${me.username} (${me.email})`);
           const note = syncUsernameNote();
           if (note) lines.push(note);
+          lines.push(`Data rules: ${describeDataRules(parseDataRules(this.meCache?.limits))}`);
           lines.push("Connection: healthy");
         } catch (e) {
           lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
@@ -10027,11 +10035,35 @@ async function resolveSyncUsername() {
   }
   return getConfig().USERNAME;
 }
+function parseDataRules(limits) {
+  const l = limits && typeof limits === "object" ? limits : {};
+  const days = l.deleted_retention_days;
+  const erasure = l.erasure;
+  return {
+    deletedRetentionDays: days === null ? null : typeof days === "number" && Number.isInteger(days) && days >= 1 ? days : REFERENCE_DATA_RULES.deletedRetentionDays,
+    erasure: erasure === "delete" || erasure === "redact" || erasure === "none" ? erasure : REFERENCE_DATA_RULES.erasure
+  };
+}
+async function remoteDataRules(opts = {}) {
+  if (!isSyncConfigured()) return void 0;
+  try {
+    const b = await getSyncBackend();
+    if (opts.cachedOnly) return b?.cachedDataRules?.();
+    return b?.dataRules ? await b.dataRules() : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function describeDataRules(r) {
+  const kept = r.deletedRetentionDays === null ? "until purged" : `${r.deletedRetentionDays} days`;
+  const erased = { delete: "removed", redact: "redacted (an audit stub stays)", none: "kept on the remote, hidden (it cannot erase)" }[r.erasure];
+  return `deleted documents restorable ${kept}; retracted or purged content ${erased}`;
+}
 function syncUsernameNote() {
   if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return void 0;
   return `Username: using '${serverUsername}' from your Google account (the username option '${configuredUsername}' is informational with the sync service)`;
 }
-var UnsupportedByRemoteError, override, active3, lastError, serverUsername, configuredUsername;
+var UnsupportedByRemoteError, override, active3, lastError, serverUsername, configuredUsername, REFERENCE_DATA_RULES;
 var init_backend = __esm({
   "packages/core/src/sync/backend.ts"() {
     "use strict";
@@ -10046,6 +10078,7 @@ var init_backend = __esm({
       feature;
       code = "unsupported_by_remote";
     };
+    REFERENCE_DATA_RULES = { deletedRetentionDays: 30, erasure: "delete" };
   }
 });
 
@@ -41379,6 +41412,7 @@ async function listTrash(collection) {
     const backend = await getSyncBackend();
     if (!backend?.listDeleted) out.remoteUnavailable = "this sync target has no soft delete";
     else out.remote = await backend.listDeleted(collection);
+    out.rules = await remoteDataRules();
   } catch (e) {
     out.remoteUnavailable = e instanceof UnsupportedByRemoteError ? e.message : `the sync service could not be asked: ${e.message}`;
   }
@@ -42390,6 +42424,7 @@ init_doc_lock();
 init_push();
 init_store();
 init_syncable();
+init_backend();
 async function listCollectionsWithCounts() {
   const collections = await listCollections2();
   const results = await Promise.all(
@@ -42524,6 +42559,7 @@ async function mergeCollections(from, into, opts = {}) {
     teammateRowsKept,
     ownRowsRetracted
   };
+  if (ownRowsRetracted > 0 && (await remoteDataRules({ cachedOnly: true }))?.erasure === "none") result.remoteKeepsContent = true;
   if (opts.dryRun) return result;
   if (docs.length > 0) {
     const before = await getCollectionCount2(into);
@@ -42567,6 +42603,7 @@ function mergeReportLines(r) {
     const lines2 = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
     if (sharedToPrivate && r.ownRowsRetracted > 0) {
       lines2.push(`Up to ${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
+      if (r.remoteKeepsContent) lines2.push("This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.");
     }
     if (sharedToPrivate && r.teammateRowsKept > 0) {
       lines2.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
@@ -42577,6 +42614,7 @@ function mergeReportLines(r) {
   if (sharedToPrivate) {
     if (r.ownRowsRetracted > 0) {
       lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
+      if (r.remoteKeepsContent) lines.push("This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good.");
     }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
@@ -46822,6 +46860,7 @@ ${rec}`;
           if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);
           else {
             lines.push(t.remote.length ? `**Your deleted documents on the sync service** (${t.remote.length}, restorable):` : "You have no deleted documents on the sync service.");
+            if (t.rules) lines.push(`The sync service's rules: ${describeDataRules(t.rules)}.`);
             for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}] ${d.reason === "retract" ? "moved into a private collection" : "deleted"} ${when(d.deleted_at)}: ${d.content.slice(0, 100).replace(/\s+/g, " ")}`);
           }
           return text(lines.join("\n").trim());
@@ -46848,8 +46887,10 @@ ${rec}`;
         if (r.queued.length) await syncCycle().catch(() => void 0);
         const waiting = r.queued.length ? await stillQueuedForPurge(r.queued) : [];
         const sent = r.queued.filter((x) => !waiting.includes(x));
+        const keepsContent = sent.length ? (await remoteDataRules())?.erasure === "none" : false;
         const parts = [
-          sent.length ? `Purged here and on the sync service: ${sent.join(", ")}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : "",
+          sent.length && keepsContent ? `Removed here and deleted on the sync service: ${sent.join(", ")}. That service can't erase, so the content stays on it, hidden from everyone; ask its administrators to remove it for good.` : "",
+          sent.length && !keepsContent ? `Purged here and on the sync service: ${sent.join(", ")}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : "",
           waiting.length ? `Purged here; the sync service couldn't purge yet: ${waiting.join(", ")}. It stays queued and is retried on every sync.` : "",
           r.local.length ? `Removed for good (it never left this machine): ${r.local.join(", ")}.` : "",
           r.refused.length ? `Not yours, not purged: ${r.refused.map((x) => `${x.id} (${x.owner})`).join(", ")}. Ask the owner to purge it.` : ""

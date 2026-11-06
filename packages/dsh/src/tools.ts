@@ -40,6 +40,7 @@ import {
   keepDeletedUpstream,
   listTrash,
   purgeDocuments,
+  describeDataRules,
   restoreDeleted,
   removeDependency,
   runDecaySweep,
@@ -495,6 +496,7 @@ export function registerTools(ctx: Context): void {
         const lines = [`Deleted by their owners, kept here: ${t.upstream.filter(c => !c.by_you).length}`];
         for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] deleted by ${c.by_you ? 'you on another machine' : c.deleted_by}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`);
         lines.push(t.remoteUnavailable ? `Your deleted documents on the sync service: unknown (${t.remoteUnavailable})` : `Your deleted documents on the sync service: ${t.remote.length}`);
+        if (t.rules) lines.push(`The sync service's rules: ${describeDataRules(t.rules)}`);
         for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}]: ${d.content.slice(0, 100).replace(/\s+/g, ' ')}`);
         return { report: lines.join('\n') };
       }

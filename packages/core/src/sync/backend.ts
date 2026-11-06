@@ -255,6 +255,10 @@ export interface SyncBackend {
    * server-side identity (Postgres) omit it and use YAPA_USERNAME.
    */
   identity?(): Promise<{ username: string; email: string }>;
+  /** How the remote keeps deleted data (service: GET /v1/me `limits`). Absent: the reference's rules. */
+  dataRules?(): Promise<DataRules>;
+  /** The rules from the last GET /v1/me, without asking the remote. */
+  cachedDataRules?(): DataRules | undefined;
   /** Lines for `sync status`: backend, target, identity, TLS, last error. */
   describe(): Promise<string[]>;
   close(): Promise<void>;
@@ -410,6 +414,47 @@ export async function resolveSyncUsername(): Promise<string> {
     }
   }
   return getConfig().USERNAME;
+}
+
+/** docs/sync-api.md section 5, "Remotes with stricter data rules". */
+export interface DataRules {
+  /** Days a deleted row stays restorable; null: until it is purged. */
+  deletedRetentionDays: number | null;
+  /** How a retract or purge removes a doc's content: rows deleted, content redacted, or kept hidden. */
+  erasure: 'delete' | 'redact' | 'none';
+}
+
+export const REFERENCE_DATA_RULES: DataRules = { deletedRetentionDays: 30, erasure: 'delete' };
+
+export function parseDataRules(limits: unknown): DataRules {
+  const l = (limits && typeof limits === 'object' ? limits : {}) as Record<string, unknown>;
+  const days = l.deleted_retention_days;
+  const erasure = l.erasure;
+  return {
+    deletedRetentionDays: days === null ? null
+      : typeof days === 'number' && Number.isInteger(days) && days >= 1 ? days
+      : REFERENCE_DATA_RULES.deletedRetentionDays,
+    erasure: erasure === 'delete' || erasure === 'redact' || erasure === 'none' ? erasure : REFERENCE_DATA_RULES.erasure,
+  };
+}
+
+/** The remote's data rules, or undefined when sync is off or the remote can't be asked. `cachedOnly` never waits on the network. */
+export async function remoteDataRules(opts: { cachedOnly?: boolean } = {}): Promise<DataRules | undefined> {
+  if (!isSyncConfigured()) return undefined;
+  try {
+    const b = await getSyncBackend();
+    if (opts.cachedOnly) return b?.cachedDataRules?.();
+    return b?.dataRules ? await b.dataRules() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One line for `sync status` and the trash listing. */
+export function describeDataRules(r: DataRules): string {
+  const kept = r.deletedRetentionDays === null ? 'until purged' : `${r.deletedRetentionDays} days`;
+  const erased = { delete: 'removed', redact: 'redacted (an audit stub stays)', none: 'kept on the remote, hidden (it cannot erase)' }[r.erasure];
+  return `deleted documents restorable ${kept}; retracted or purged content ${erased}`;
 }
 
 /** Explanation for `sync status` when the configured username was replaced. */
