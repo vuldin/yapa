@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.14.1 (2026-11-06)
+
+Follow-through settles what a turn answers again in sessions that have worked one task for a while.
+
+**Upgrading:** update the plugin and restart Claude Code. There's nothing else to do.
 
 ### Fixes
 - **Follow-through judges what a turn is about.**
