@@ -468,3 +468,13 @@ Now execute these steps in order, without asking anything else:
    ```
 
 8. Tell the user: "YAPA is installed. Restart your editor to activate it. To uninstall later, say 'uninstall yapa' in any session." If sync was enabled, also tell the user: "After restarting, say 'sync yapa' to push your local data to the remote database and pull any shared data."
+
+## Changing YAPA itself (contributors only, not part of the install)
+
+Feature and fix PRs leave `CHANGELOG.md` and `plugin/dist/` alone:
+- Put the release-note entry in the PR description instead, written as it should appear under the next version.
+- Don't commit rebuilt bundles. Run `npm run build:all` to test, then restore `plugin/dist/`.
+- Only the release PR adds the dated CHANGELOG section, from the merged PRs' entries, and commits the rebuilt bundles.
+
+That way open PRs don't conflict with each other and can merge in any order.
+
