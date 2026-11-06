@@ -16,6 +16,7 @@ const USAGE =
   '       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n' +
   '       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n' +
   '       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n' +
+  '       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n' +
   '       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n';
 
 const COORD_USAGE =
@@ -130,6 +131,7 @@ async function runStatusLineCommand(action: string | undefined, args: string[]):
       const update = health ? sl.readUpdate(join(dirname(health), 'update-check.json')) : undefined;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR, version: YAPA_VERSION, remote: getConfig().REMOTE_NAME || undefined, update,
+        captureFailing: health ? sl.captureFailingAt(join(dirname(health), 'capture-health.json'), Date.now()) : false,
       }) + '\n');
       return;
     }
@@ -236,6 +238,13 @@ async function main(): Promise<void> {
     const args = command === 'waiting' ? [sub, ...rest].filter((a): a is string => a !== undefined) : rest;
     const r = command === 'waiting' ? await m.runWaiting(args) : await m.runMemory(sub, rest);
     process.stdout.write((args.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
+    await exitAfterFlush(r.exit);
+  }
+  if (command === 'capture') {
+    adoptCliEnv(process.cwd());
+    const { runCapture } = await import('./capture.js');
+    const r = runCapture(sub, rest);
+    process.stdout.write((rest.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
     await exitAfterFlush(r.exit);
   }
   if (command === 'scope') {

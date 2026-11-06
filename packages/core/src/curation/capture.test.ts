@@ -12,6 +12,7 @@ function deps(overrides: Partial<CaptureDeps> = {}): CaptureDeps {
     resolveConflict: vi.fn() as any,
     storeMemory: vi.fn(async () => ({ ids: ['m1'], potential_conflicts: [] })) as any,
     log: vi.fn(),
+    record: vi.fn(),
     ...overrides,
   };
 }
@@ -27,6 +28,22 @@ describe('captureTurn', () => {
     expect(opts.salience).toBe(2); // clamped from 4
     expect(opts.tags).toEqual(['ports', 'auto-capture']);
     expect(opts.metadata).toMatchObject({ source: 'auto-capture', session_id: 's1', turn: 4 });
+  });
+
+  it('records each turn\'s outcome for capture health, failures included', async () => {
+    let d = deps();
+    await captureTurn(input, options, d);
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0 });
+
+    const ftError = new Error('judge timed out');
+    d = deps({ followThrough: vi.fn(async () => { throw ftError; }) as any, extractMemories: vi.fn(async () => []) as any });
+    await captureTurn(input, options, d);
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 0, skipped: 0, settled: 0, followThroughError: ftError });
+
+    const exError = new Error('claude -p exited 1');
+    d = deps({ extractMemories: vi.fn(async () => { throw exError; }) as any });
+    await expect(captureTurn(input, options, d)).rejects.toThrow('claude -p exited 1');
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn_failed', error: exError });
   });
 
   it('supersedes a stale neighbor when the resolver says the fact changed', async () => {

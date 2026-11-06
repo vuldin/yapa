@@ -20,6 +20,7 @@ import { queryDocuments } from '../store/index.js';
 import { storeMemory } from '../memory/store.js';
 import { isMemoryKind } from '../memory/kinds.js';
 import { followThrough } from './follow-through.js';
+import { recordCapture, type CaptureEvent } from './health.js';
 import { extractMemories, EXTRACTOR_PROMPT_VERSION } from './extractor.js';
 import { resolveConflict, RESOLVER_PROMPT_VERSION } from './resolver.js';
 
@@ -52,6 +53,8 @@ export interface CaptureDeps {
   resolveConflict: typeof resolveConflict;
   storeMemory: typeof storeMemory;
   log: (msg: string) => void;
+  /** Capture health (curation/health.ts). */
+  record: (e: CaptureEvent) => void;
 }
 
 export interface CaptureTurnResult {
@@ -71,6 +74,7 @@ const defaultDeps: CaptureDeps = {
   resolveConflict,
   storeMemory,
   log: msg => process.stderr.write(`[yapa] ${msg}\n`),
+  record: e => recordCapture(e),
 };
 
 export async function captureTurn(
@@ -79,6 +83,24 @@ export async function captureTurn(
   deps: Partial<CaptureDeps> = {},
 ): Promise<CaptureTurnResult> {
   const d = { ...defaultDeps, ...deps };
+  const state: { followThroughError?: unknown } = {};
+  const ft = () => (state.followThroughError !== undefined ? { followThroughError: state.followThroughError } : {});
+  try {
+    const r = await runCapture(input, options, d, state);
+    d.record({ kind: 'turn', stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0, ...ft() });
+    return r;
+  } catch (e) {
+    d.record({ kind: 'turn_failed', error: e, ...ft() });
+    throw e;
+  }
+}
+
+async function runCapture(
+  input: CaptureTurnInput,
+  options: CaptureTurnOptions,
+  d: CaptureDeps,
+  state: { followThroughError?: unknown },
+): Promise<CaptureTurnResult> {
   const { collection, sessionId, turn } = input;
 
   // First: does this turn settle something already open? (a person's choice,
@@ -88,6 +110,7 @@ export async function captureTurn(
     const f = await d.followThrough({ collection, userText: input.userText, assistantText: input.assistantText, taskIds: options.taskIds });
     settled = f.changes.map(c => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
   } catch (e) {
+    state.followThroughError = e;
     d.log(`Follow-through failed in ${collection}: ${e}`);
   }
   const settledNotice = settled.length

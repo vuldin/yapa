@@ -262,6 +262,23 @@ describe('postCompact / sessionEnd', () => {
     expect(String(summary?.metadata.tags)).toContain('compaction');
   });
 
+  it('records compaction captures in capture health, and session start says when capture is failing', async () => {
+    const health = join(dir, 'health-cap', 'sync-health.json');
+    configure({ YAPA_SYNC_HEALTH_FILE: health });
+    const { readCaptureHealth, recordCapture } = await import('@yapa/core');
+    await postCompact({ session_id: 's5', cwd: join(dir, 'proj', 'acme'), compact_summary: 'Decided: acme keeps the old port.', trigger: 'auto' });
+    const capFile = join(dir, 'health-cap', 'capture-health.json');
+    expect(Object.values(readCaptureHealth(capFile)!.days)[0]).toMatchObject({ compactions: 1, compactions_failed: 0 });
+
+    capture();
+    await sessionStart({ session_id: 's6', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+    expect(restore().hookSpecificOutput.additionalContext).not.toContain('YAPA capture is failing');
+    recordCapture({ kind: 'turn_failed', error: new Error('claude -p: command not found') }, Date.now(), capFile);
+    capture();
+    await sessionStart({ session_id: 's7', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+    expect(restore().hookSpecificOutput.additionalContext).toContain('**YAPA capture is failing** (extractor, 1 failure(s) today): claude -p: command not found.');
+  });
+
   it('removes the session\'s hook state on session end', async () => {
     const sessions = join(dir, 'plugin-data', 'sessions');
     expect(readdirSync(sessions).some(f => f.startsWith('s2.'))).toBe(true);

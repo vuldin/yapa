@@ -43640,6 +43640,10 @@ ${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
   return { id: baseId, collection: found.collection, metadata };
 }
 
+// packages/core/src/curation/health.ts
+init_config();
+init_fs_lock();
+
 // packages/core/src/buckets/index.ts
 init_config();
 init_store();

@@ -132,6 +132,8 @@ export interface RenderOptions {
    * run a while and no live server reported (an older YAPA, or none).
    */
   session?: { version?: string; missing?: boolean };
+  /** The per-turn capture is failing (capture-health.json). */
+  captureFailing?: boolean;
 }
 
 /** The segment for `health` (undefined: no record yet). */
@@ -155,7 +157,8 @@ export function renderSegment(health: HealthRecord | undefined, now: number, opt
   const name = cleanCollection(opts.collection);
   // Where this session writes, and whether that ever leaves the machine.
   const tail = name ? `${name}${isLocalOnly(name) ? ' (local only)' : ''}` : undefined;
-  const state = (tone: Tone, text: string) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ''}`;
+  const capture = opts.captureFailing ? ` ${paint('red', '· capture ✗')}` : '';
+  const state = (tone: Tone, text: string) => `${head} ${paint(tone, text)}${capture}${tail ? ` | ${tail}` : ''}`;
 
   if (!health) return state('dim', '○ sync status unknown');
   switch (health.status) {
@@ -325,6 +328,30 @@ export function readUpdate(path: string): UpdateRecord | undefined {
   } catch {
     return undefined;
   }
+}
+
+const localDay = (ms: number) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+/** Core's captureFailing (curation/health.ts), kept here because this file stays self-contained. */
+export function captureFailingAt(path: string, now: number): boolean {
+  let h: any;
+  try {
+    h = JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    return false;
+  }
+  if (!h || typeof h.at !== 'number' || !h.days) return false;
+  const err = h.last_error;
+  if (err && typeof err.at === 'number' && err.at >= (h.last_ok_at ?? 0) && now - err.at < 3_600_000) return true;
+  const d = h.days[localDay(now)];
+  if (!d) return false;
+  const n = (k: string) => Number(d[k] ?? 0);
+  const bad = n('failed') + n('follow_through_failed') + n('compactions_failed');
+  const good = n('turns') - n('follow_through_failed') + n('compactions') - n('compactions_failed');
+  return bad >= 2 && bad > good;
 }
 
 export function readHealth(path: string): HealthRecord | undefined {
@@ -520,6 +547,7 @@ export async function main(args: string[], self: string): Promise<void> {
   const color = !process.env.NO_COLOR;
   process.stdout.write(renderSegment(readHealth(healthPath), Date.now(), {
     color, remote: argValue(args, '--remote') ?? argValue(args, '--label'), update, collection, session,
+    captureFailing: captureFailingAt(join(dirname(healthPath), 'capture-health.json'), Date.now()),
   }) + '\n');
 }
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **You can tell when capture is failing.** The per-turn capture and the compaction capture run in hook processes whose errors used to go only to a stderr nobody sees, so a broken aux model, a missing `claude` CLI or a bad `CURATION_MODEL` failed silently.
+  - Each run is now counted in `capture-health.json`, beside `sync-health.json`. That covers turns judged, memories stored, those skipped as known, items settled, and extraction, follow-through and compaction failures per day, plus the last error. The Claude Code hooks and DSH both record.
+  - `yapa capture status [--days N]` prints the counts and the last error.
+  - The status line adds `· capture ✗` when the latest run failed within the hour, or more runs failed than succeeded today.
+  - Session start says when capture failed in the last day and hasn't succeeded since.
+  - Recording never fails or slows a turn.
+
 ## 1.13.0 (2026-11-06)
 
 YAPA can sync with a remote that serves the Sync API as an MCP tool behind a gateway, and with remotes that have stricter rules about deleting data.

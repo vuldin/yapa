@@ -46,10 +46,10 @@ function list(value) {
 function splitCollectionMap(value) {
   return value.split(/[;\n]/).map((v) => v.trim()).filter(Boolean);
 }
-function warnOnce(message) {
-  if (warned.has(message)) return;
-  warned.add(message);
-  process.stderr.write(`[yapa] ${message}
+function warnOnce(message2) {
+  if (warned.has(message2)) return;
+  warned.add(message2);
+  process.stderr.write(`[yapa] ${message2}
 `);
 }
 function normalizeCollectionMap(entries, pathImpl = path) {
@@ -1853,8 +1853,8 @@ var init_kinds = __esm({
     };
     TypedMemoryError = class extends Error {
       code = "typed_memory_invalid";
-      constructor(message) {
-        super(message);
+      constructor(message2) {
+        super(message2);
         this.name = "TypedMemoryError";
       }
     };
@@ -2957,7 +2957,7 @@ function runTokenCommand(cmd) {
     { file: "gcloud", args: ["auth", "print-identity-token"] }
   );
 }
-function explain(status, code, message, transport) {
+function explain(status, code, message2, transport) {
   switch (code) {
     case "unauthenticated":
       return `the ${transport.label} rejected the sign-in (401). ${transport.signInHint}`;
@@ -2968,7 +2968,7 @@ function explain(status, code, message, transport) {
     case "user_inactive":
       return "your YAPA user is disabled; ask a YAPA admin.";
     case "rate_limited":
-      return `rate limited by the sync service (${message}); sync retries next cycle.`;
+      return `rate limited by the sync service (${message2}); sync retries next cycle.`;
     case "unavailable":
       return "the sync service is temporarily unavailable; local changes stay unsynced and retry next cycle.";
     case "cloud_run_forbidden":
@@ -2977,10 +2977,10 @@ function explain(status, code, message, transport) {
       return "Cloud Run rejected the ID token (401). Run `gcloud auth login`.";
     default:
       if (code.startsWith("http_")) {
-        const body = message.replace(/^HTTP \d+:?\s*/, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+        const body = message2.replace(/^HTTP \d+:?\s*/, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
         return `the ${transport.label} answered HTTP ${status}${body ? `: ${body}` : ""}`;
       }
-      return `sync service error ${status} ${code}: ${message}`;
+      return `sync service error ${status} ${code}: ${message2}`;
   }
 }
 function toOutcome(id, r) {
@@ -3140,8 +3140,8 @@ ${this.validUntil}` : token, { mode: 384 });
       }
     };
     ServiceError = class extends Error {
-      constructor(message, status, code, requestId, details = {}) {
-        super(message);
+      constructor(message2, status, code, requestId, details = {}) {
+        super(message2);
         this.status = status;
         this.code = code;
         this.requestId = requestId;
@@ -3246,11 +3246,11 @@ ${this.validUntil}` : token, { mode: 384 });
             this.tokens.invalidate();
             continue;
           }
-          const message = redactTokens(String(apiErr?.message ?? res.statusText ?? "")).slice(0, 300);
+          const message2 = redactTokens(String(apiErr?.message ?? res.statusText ?? "")).slice(0, 300);
           const details = { ...apiErr?.details ?? {} };
           const retryAfter = res.header("retry-after");
           if (retryAfter) details.retry_after = Number(retryAfter);
-          return this.fail(new ServiceError(explain(res.status, code, message, this.transport), res.status, code, apiErr?.request_id, details), opts.quiet);
+          return this.fail(new ServiceError(explain(res.status, code, message2, this.transport), res.status, code, apiErr?.request_id, details), opts.quiet);
         }
       }
       /** GET /v1/me, cached per process until the token is re-minted. */
@@ -3569,12 +3569,12 @@ function toResponse(result) {
     const headers = new Map(Object.entries(parsed.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
     return { status: parsed.status, statusText: "", json: parsed.body ?? void 0, header: (name) => headers.get(name.toLowerCase()) ?? null };
   }
-  const message = redactTokens(text).slice(0, 300) || "the tool returned no result";
-  if (result?.isError && /unauthori[sz]ed|unauthenticated|\b401\b|(expired|invalid) token/i.test(message)) return refusal(401, "unauthenticated", message);
-  return refusal(502, result?.isError ? "mcp_tool_error" : "bad_response", message);
+  const message2 = redactTokens(text).slice(0, 300) || "the tool returned no result";
+  if (result?.isError && /unauthori[sz]ed|unauthenticated|\b401\b|(expired|invalid) token/i.test(message2)) return refusal(401, "unauthenticated", message2);
+  return refusal(502, result?.isError ? "mcp_tool_error" : "bad_response", message2);
 }
-function refusal(status, code, message, retryAfter = null) {
-  return { status, statusText: "", json: { error: { code, message } }, header: (name) => name.toLowerCase() === "retry-after" ? retryAfter : null };
+function refusal(status, code, message2, retryAfter = null) {
+  return { status, statusText: "", json: { error: { code, message: message2 } }, header: (name) => name.toLowerCase() === "retry-after" ? retryAfter : null };
 }
 function describeFailure(e, timeoutMs) {
   const err = e;
@@ -3594,8 +3594,8 @@ var init_mcp_transport = __esm({
     PREFIX_SEPARATORS = ["__", ".", "/", "-"];
     LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
     HttpStatusError = class extends Error {
-      constructor(status, message, retryAfter) {
-        super(message);
+      constructor(status, message2, retryAfter) {
+        super(message2);
         this.status = status;
         this.retryAfter = retryAfter;
       }
@@ -3710,9 +3710,9 @@ var init_mcp_transport = __esm({
         return headers;
       }
       /** POST one JSON-RPC message; with `id`, resolve with the response to it (JSON body or SSE stream). */
-      async post(session, message, deadline, id) {
+      async post(session, message2, deadline, id) {
         const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
-        const res = await fetch(this.url, { method: "POST", headers: this.headers(session), body: JSON.stringify(message), signal });
+        const res = await fetch(this.url, { method: "POST", headers: this.headers(session), body: JSON.stringify(message2), signal });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           throw new HttpStatusError(res.status, redactTokens(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`), res.headers.get("retry-after"));
@@ -3809,10 +3809,10 @@ function chunk(items, size) {
   return out;
 }
 function noteSyncError(e) {
-  const message = e instanceof Error ? e.message : String(e);
-  lastError = { message, at: Date.now() };
+  const message2 = e instanceof Error ? e.message : String(e);
+  lastError = { message: message2, at: Date.now() };
   const code = e?.code;
-  recordSyncHealth({ status: healthStatusFor(code), code: typeof code === "string" ? code : void 0, message });
+  recordSyncHealth({ status: healthStatusFor(code), code: typeof code === "string" ? code : void 0, message: message2 });
 }
 function noteSyncOk(unpushed) {
   lastError = void 0;
@@ -3905,8 +3905,8 @@ var init_backend = __esm({
     init_config();
     init_health();
     UnsupportedByRemoteError = class extends Error {
-      constructor(feature, message = `the sync service does not support ${feature} yet (it needs a newer service release)`) {
-        super(message);
+      constructor(feature, message2 = `the sync service does not support ${feature} yet (it needs a newer service release)`) {
+        super(message2);
         this.feature = feature;
         this.name = "UnsupportedByRemoteError";
       }
@@ -4143,15 +4143,15 @@ var init_local_coordination = __esm({
     COLLECTION_RE = /^[A-Za-z0-9._-]{1,200}$/;
     RESERVED_RE = /^@[a-z]+$/;
     LocalCoordinationError = class extends Error {
-      constructor(code, message) {
-        super(message);
+      constructor(code, message2) {
+        super(message2);
         this.code = code;
         this.name = "LocalCoordinationError";
       }
       code;
       status = 400;
     };
-    bad = (message) => new LocalCoordinationError("invalid_request", message);
+    bad = (message2) => new LocalCoordinationError("invalid_request", message2);
     isMine = (l, user, session) => l.user === user && l.session === session;
   }
 });
@@ -4411,8 +4411,8 @@ var init_coordination = __esm({
     HEARTBEAT_MAX_INTERVAL_S = 300;
     heldKey = (collection, key) => `${collection}\0${key}`;
     CoordinationUnavailableError = class extends Error {
-      constructor(reason, message) {
-        super(message);
+      constructor(reason, message2) {
+        super(message2);
         this.reason = reason;
         this.name = "CoordinationUnavailableError";
       }
@@ -5364,15 +5364,15 @@ async function applyPushed(backend, collection, doc, similar, stats) {
   });
   stats.linked++;
 }
-async function markRejected(collection, doc, code, message) {
+async function markRejected(collection, doc, code, message2) {
   await writeIfUnchanged(collection, doc, (cur) => ({
     ...cur,
     is_synced: false,
     sync_rejected: code,
-    sync_rejected_message: message.slice(0, 300),
+    sync_rejected_message: message2.slice(0, 300),
     sync_rejected_fp: syncFingerprint(doc)
   }));
-  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message}. It stays local and is retried after it changes.
+  process.stderr.write(`[yapa-sync] Not syncing ${doc.id} (${collection}): ${code}: ${message2}. It stays local and is retried after it changes.
 `);
 }
 async function countUnpushed() {
@@ -6544,8 +6544,8 @@ var init_manage = __esm({
     init_backend();
     isSyncable2 = isSyncableCollection;
     CollectionDeleteRefusedError = class extends Error {
-      constructor(message, documentCount) {
-        super(message);
+      constructor(message2, documentCount) {
+        super(message2);
         this.documentCount = documentCount;
         this.name = "CollectionDeleteRefusedError";
       }
@@ -7531,15 +7531,145 @@ Omit the disposition fields except for a finding. If nothing is settled, return 
   }
 });
 
+// packages/core/src/curation/health.ts
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync9 } from "node:fs";
+import { dirname as dirname6, join as join8 } from "node:path";
+function captureHealthFile() {
+  const health = getConfig().SYNC_HEALTH_FILE;
+  return health ? join8(dirname6(health), "capture-health.json") : "";
+}
+function dayKey(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function readCaptureHealth(path3 = captureHealthFile()) {
+  if (!path3) return void 0;
+  try {
+    const h = JSON.parse(readFileSync9(path3, "utf-8"));
+    return h && typeof h.at === "number" && h.days && typeof h.days === "object" ? h : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function applyCaptureEvent(h, e, now) {
+  const days = {};
+  const key = dayKey(now);
+  for (const [k, v] of Object.entries(h?.days ?? {})) days[k] = { ...emptyDay(), ...v };
+  const day = days[key] ?? (days[key] = emptyDay());
+  const next = { ...h, days, at: now };
+  const fail2 = (stage, err) => {
+    next.last_error = { at: now, stage, message: message(err) };
+  };
+  if (e.kind === "turn") {
+    day.turns++;
+    day.stored += e.stored;
+    day.skipped += e.skipped;
+    day.settled += e.settled;
+    if (e.followThroughError !== void 0) {
+      day.follow_through_failed++;
+      fail2("follow-through", e.followThroughError);
+    } else {
+      next.last_ok_at = now;
+    }
+  } else if (e.kind === "turn_failed") {
+    day.failed++;
+    if (e.followThroughError !== void 0) day.follow_through_failed++;
+    fail2("extractor", e.error);
+  } else {
+    day.compactions++;
+    if (e.error !== void 0) {
+      day.compactions_failed++;
+      fail2("compaction", e.error);
+    } else {
+      next.last_ok_at = now;
+    }
+  }
+  for (const k of Object.keys(days).sort().slice(0, -KEEP_DAYS)) delete days[k];
+  return next;
+}
+function recordCapture(e, now = Date.now(), path3 = captureHealthFile()) {
+  if (!path3) return;
+  try {
+    mkdirSync5(dirname6(path3), { recursive: true });
+    withFileLockSync(lockFileFor(path3), () => writeJsonAtomic(path3, applyCaptureEvent(readCaptureHealth(path3), e, now)), { waitMs: 2e3 });
+  } catch {
+  }
+}
+function summarizeCapture(h, now = Date.now(), days = 7) {
+  const out = {
+    days,
+    turns: 0,
+    stored: 0,
+    skipped: 0,
+    settled: 0,
+    failed: 0,
+    follow_through_failed: 0,
+    compactions: 0,
+    compactions_failed: 0,
+    failing: false
+  };
+  if (!h) return out;
+  const keys = new Set(Array.from({ length: days }, (_, i) => dayKey(now - i * 864e5)));
+  for (const [k, d] of Object.entries(h.days)) {
+    if (!keys.has(k)) continue;
+    for (const f of ["turns", "stored", "skipped", "settled", "failed", "follow_through_failed", "compactions", "compactions_failed"]) out[f] += Number(d[f] ?? 0);
+  }
+  out.last_ok_at = h.last_ok_at;
+  out.last_error = h.last_error;
+  out.failing = captureFailing(h, now);
+  return out;
+}
+function captureFailing(h, now = Date.now()) {
+  if (!h) return false;
+  const err = h.last_error;
+  if (err && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
+  const d = h.days[dayKey(now)];
+  if (!d) return false;
+  const bad2 = d.failed + d.follow_through_failed + d.compactions_failed;
+  const good = d.turns - d.follow_through_failed + d.compactions - d.compactions_failed;
+  return bad2 >= 2 && bad2 > good;
+}
+function captureDownLine(h = readCaptureHealth(), now = Date.now()) {
+  const err = h?.last_error;
+  if (!h || !err || now - err.at > 864e5 || (h.last_ok_at ?? 0) > err.at) return void 0;
+  const d = h.days[dayKey(now)] ?? emptyDay();
+  const failed = d.failed + d.follow_through_failed + d.compactions_failed;
+  return `**YAPA capture is failing** (${err.stage}${failed ? `, ${failed} failure(s) today` : ""}): ${err.message.slice(0, 160)}. Memories from recent turns may be missing; \`yapa capture status\` for details.`;
+}
+var KEEP_DAYS, emptyDay, message;
+var init_health2 = __esm({
+  "packages/core/src/curation/health.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    KEEP_DAYS = 14;
+    emptyDay = () => ({ turns: 0, stored: 0, skipped: 0, settled: 0, failed: 0, follow_through_failed: 0, compactions: 0, compactions_failed: 0 });
+    message = (e) => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 300);
+  }
+});
+
 // packages/core/src/curation/capture.ts
 async function captureTurn(input2, options, deps = {}) {
   const d = { ...defaultDeps, ...deps };
+  const state = {};
+  const ft = () => state.followThroughError !== void 0 ? { followThroughError: state.followThroughError } : {};
+  try {
+    const r = await runCapture(input2, options, d, state);
+    d.record({ kind: "turn", stored: r.stored, skipped: r.skipped, settled: r.settled?.length ?? 0, ...ft() });
+    return r;
+  } catch (e) {
+    d.record({ kind: "turn_failed", error: e, ...ft() });
+    throw e;
+  }
+}
+async function runCapture(input2, options, d, state) {
   const { collection, sessionId: sessionId2, turn } = input2;
   let settled = [];
   try {
     const f = await d.followThrough({ collection, userText: input2.userText, assistantText: input2.assistantText, taskIds: options.taskIds });
     settled = f.changes.map((c) => ({ id: c.id, kind: c.kind, status: c.status, note: c.note }));
   } catch (e) {
+    state.followThroughError = e;
     d.log(`Follow-through failed in ${collection}: ${e}`);
   }
   const settledNotice = settled.length ? `Recorded from last turn: ${settled.map((c) => `${c.kind} ${c.id} ${c.status}${c.note ? ` (${c.note})` : ""}`).join("; ")}` : void 0;
@@ -7632,6 +7762,7 @@ var init_capture = __esm({
     init_store2();
     init_kinds();
     init_follow_through();
+    init_health2();
     init_extractor();
     init_resolver();
     MAX_EXTRACT_CHARS = 12e3;
@@ -7642,20 +7773,21 @@ var init_capture = __esm({
       resolveConflict,
       storeMemory,
       log: (msg) => process.stderr.write(`[yapa] ${msg}
-`)
+`),
+      record: (e) => recordCapture(e)
     };
   }
 });
 
 // packages/core/src/buckets/artifacts.ts
-import { existsSync, mkdirSync as mkdirSync5, readdirSync as readdirSync4, readFileSync as readFileSync9, writeFileSync as writeFileSync4 } from "fs";
-import { join as join8 } from "path";
+import { existsSync, mkdirSync as mkdirSync6, readdirSync as readdirSync4, readFileSync as readFileSync10, writeFileSync as writeFileSync4 } from "fs";
+import { join as join9 } from "path";
 function artifactDir(kind) {
-  return join8(getConfig().ARTIFACTS_DIR, kind);
+  return join9(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync(dir)) mkdirSync5(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSync6(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -7683,17 +7815,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path3 = join8(dir, filename);
+  const path3 = join9(dir, filename);
   writeFileSync4(path3, content);
   return path3;
 }
 function readArtifact(kind, filename) {
-  const path3 = join8(artifactDir(kind), filename);
+  const path3 = join9(artifactDir(kind), filename);
   if (!existsSync(path3)) return null;
-  return readFileSync9(path3, "utf-8");
+  return readFileSync10(path3, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join8(artifactDir(kind), filename);
+  return join9(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -8373,8 +8505,8 @@ var init_pull = __esm({
 
 // packages/core/src/sync/shared-cycle.ts
 import { createHash as createHash3 } from "node:crypto";
-import { closeSync as closeSync2, mkdirSync as mkdirSync6, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
-import { dirname as dirname6, join as join9 } from "node:path";
+import { closeSync as closeSync2, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
+import { dirname as dirname7, join as join10 } from "node:path";
 function syncTargetKey(config = getConfig()) {
   let remote = "";
   if (config.SYNC_MCP_URL) remote = `mcp:${config.SYNC_MCP_URL}`;
@@ -8392,7 +8524,7 @@ function syncTargetKey(config = getConfig()) {
 }
 function sharedDir(config = getConfig()) {
   if (!config.SYNC_COORDINATE || !config.SYNC_HEALTH_FILE) return void 0;
-  return dirname6(config.SYNC_HEALTH_FILE);
+  return dirname7(config.SYNC_HEALTH_FILE);
 }
 function paths(config = getConfig()) {
   const dir = sharedDir(config);
@@ -8400,21 +8532,21 @@ function paths(config = getConfig()) {
   const key = syncTargetKey(config);
   return {
     dir,
-    record: join9(dir, `sync-cycle-${key}.json`),
-    lock: join9(dir, `sync-cycle-${key}.lock`),
-    pulls: join9(dir, `sync-pulls-${key}.json`)
+    record: join10(dir, `sync-cycle-${key}.json`),
+    lock: join10(dir, `sync-cycle-${key}.lock`),
+    pulls: join10(dir, `sync-pulls-${key}.json`)
   };
 }
 function readJson(path3) {
   try {
-    return JSON.parse(readFileSync10(path3, "utf-8"));
+    return JSON.parse(readFileSync11(path3, "utf-8"));
   } catch {
     return void 0;
   }
 }
 function writeJson(path3, value) {
   try {
-    mkdirSync6(dirname6(path3), { recursive: true, mode: 448 });
+    mkdirSync7(dirname7(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     writeFileSync5(tmp, JSON.stringify(value) + "\n", { mode: 384 });
     renameSync4(tmp, path3);
@@ -8442,7 +8574,7 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
   const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
   for (let attempt2 = 0; attempt2 < 2; attempt2++) {
     try {
-      mkdirSync6(p.dir, { recursive: true, mode: 448 });
+      mkdirSync7(p.dir, { recursive: true, mode: 448 });
       const fd = openSync2(p.lock, "wx", 384);
       try {
         writeSync2(fd, JSON.stringify(body));
@@ -8514,8 +8646,8 @@ var init_shared_cycle = __esm({
 });
 
 // packages/core/src/update-check.ts
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname7, join as join10 } from "node:path";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync12, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname8, join as join11 } from "node:path";
 function compareVersions(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
   const pb = SEMVER.exec(String(b ?? "").trim());
@@ -8530,12 +8662,12 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join10(dirname7(health), "update-check.json") : void 0;
+  return health ? join11(dirname8(health), "update-check.json") : void 0;
 }
 function readUpdateState(path3 = updateStatePath()) {
   if (!path3) return void 0;
   try {
-    const s = JSON.parse(readFileSync11(path3, "utf-8"));
+    const s = JSON.parse(readFileSync12(path3, "utf-8"));
     return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
   } catch {
     return void 0;
@@ -8544,7 +8676,7 @@ function readUpdateState(path3 = updateStatePath()) {
 function writeUpdateState(s, path3 = updateStatePath()) {
   if (!path3) return;
   try {
-    mkdirSync7(dirname7(path3), { recursive: true, mode: 448 });
+    mkdirSync8(dirname8(path3), { recursive: true, mode: 448 });
     const tmp = `${path3}.${process.pid}.tmp`;
     writeFileSync6(tmp, JSON.stringify(s) + "\n", { mode: 384 });
     renameSync5(tmp, path3);
@@ -9010,21 +9142,21 @@ ${jobResult.stdout}`);
 });
 
 // packages/core/src/training/registry.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync12, writeFileSync as writeFileSync7 } from "fs";
-import { join as join11 } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync9, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "fs";
+import { join as join12 } from "path";
 function registryPath() {
-  return join11(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join12(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join11(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync2(dir)) mkdirSync8(dir, { recursive: true });
+  const dir = join12(getConfig().ARTIFACTS_DIR, "adapters");
+  if (!existsSync2(dir)) mkdirSync9(dir, { recursive: true });
 }
 function load() {
   ensureDir();
   const path3 = registryPath();
   if (!existsSync2(path3)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync12(path3, "utf-8"));
+    const parsed = JSON.parse(readFileSync13(path3, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -9074,7 +9206,7 @@ var init_registry = __esm({
 });
 
 // packages/core/src/training/synthesis.ts
-import { readFileSync as readFileSync13 } from "fs";
+import { readFileSync as readFileSync14 } from "fs";
 async function synthesizeMemory(memory, options = {}) {
   const caller = options.call ?? callCurationLLM;
   const userPrompt = `[MEMORY]
@@ -9149,7 +9281,7 @@ function extractJsonArray3(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path3) {
-  const content = readFileSync13(path3, "utf-8");
+  const content = readFileSync14(path3, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -9205,8 +9337,8 @@ RULES
 
 // packages/core/src/training/index.ts
 import { createHash as createHash4 } from "crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync14, writeFileSync as writeFileSync8 } from "fs";
-import { join as join12 } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync8 } from "fs";
+import { join as join13 } from "path";
 function getBackend() {
   switch (getConfig().TRAINING_BACKEND) {
     case "fireworks":
@@ -9216,8 +9348,8 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join12(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
+  const dir = join13(getConfig().ARTIFACTS_DIR, "training-runs");
+  if (!existsSync3(dir)) mkdirSync10(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
@@ -9250,7 +9382,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join12(dir, filename);
+  const previewPath = join13(dir, filename);
   writeFileSync8(previewPath, jsonl);
   return {
     manifestVersion,
@@ -9267,7 +9399,7 @@ async function trainingTrigger(args) {
   if (!existsSync3(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync14(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync15(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -9569,7 +9701,7 @@ Partial coverage is a fail. Being correct on general principles but missing the 
 });
 
 // packages/core/src/training/holdout.ts
-import { readFileSync as readFileSync15 } from "fs";
+import { readFileSync as readFileSync16 } from "fs";
 function seededShuffle(items, seed) {
   const arr = items.slice();
   let h = 2166136261 >>> 0;
@@ -9609,7 +9741,7 @@ function loadManifestSplit(manifestPath, manifestVersion) {
   return splitManifest(memories, manifestVersion);
 }
 function readHoldoutFile(path3) {
-  const content = readFileSync15(path3, "utf-8");
+  const content = readFileSync16(path3, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -9935,14 +10067,14 @@ var init_external = __esm({
 });
 
 // packages/core/src/last-write.ts
-import { mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname8, join as join13 } from "node:path";
+import { mkdirSync as mkdirSync11, readdirSync as readdirSync5, readFileSync as readFileSync17, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
+import { dirname as dirname9, join as join14 } from "node:path";
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join13(dirname8(health), "last-write") : "";
+  return health ? join14(dirname9(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -9950,7 +10082,7 @@ function recordLastWrite(collection, opts = {}) {
   if (!collection || !session || !dir) return;
   const now = opts.now ?? Date.now();
   try {
-    mkdirSync10(dir, { recursive: true, mode: 448 });
+    mkdirSync11(dir, { recursive: true, mode: 448 });
     const file = lastWriteFile(session, dir);
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync9(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
@@ -9965,7 +10097,7 @@ function recordLastWrite(collection, opts = {}) {
 function readLastWrite(session, dir = lastWriteDir()) {
   if (!dir) return void 0;
   try {
-    const r = JSON.parse(readFileSync16(lastWriteFile(session, dir), "utf-8"));
+    const r = JSON.parse(readFileSync17(lastWriteFile(session, dir), "utf-8"));
     return r && typeof r.collection === "string" && typeof r.at === "number" ? r : void 0;
   } catch {
     return void 0;
@@ -9975,7 +10107,7 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync5(dir)) {
-      const p = join13(dir, name);
+      const p = join14(dir, name);
       try {
         if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
@@ -9996,14 +10128,14 @@ var init_last_write = __esm({
 });
 
 // packages/core/src/session-record.ts
-import { readdirSync as readdirSync6, readFileSync as readFileSync17, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
-import { dirname as dirname9, join as join14 } from "node:path";
+import { readdirSync as readdirSync6, readFileSync as readFileSync18, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
+import { dirname as dirname10, join as join15 } from "node:path";
 function sessionRecordDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join14(dirname9(health), "sessions") : "";
+  return health ? join15(dirname10(health), "sessions") : "";
 }
 function sessionRecordFile(session, dir = sessionRecordDir()) {
-  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join15(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function sessionId(explicit) {
   const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
@@ -10037,7 +10169,7 @@ function recordSessionScope(session, collection, opts = {}) {
   if (!id || !dir || !collection) return;
   const file = sessionRecordFile(id, dir).replace(/\.json$/, ".scope");
   try {
-    if (JSON.parse(readFileSync17(file, "utf-8"))?.collection === collection) return;
+    if (JSON.parse(readFileSync18(file, "utf-8"))?.collection === collection) return;
   } catch {
   }
   try {
@@ -10051,7 +10183,7 @@ function removeSessionRecord(opts = {}) {
   if (!session || !dir) return;
   const file = sessionRecordFile(session, dir);
   try {
-    const r = JSON.parse(readFileSync17(file, "utf-8"));
+    const r = JSON.parse(readFileSync18(file, "utf-8"));
     if (r.pid === process.pid) rmSync6(file, { force: true });
   } catch {
   }
@@ -10060,7 +10192,7 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      const p = join14(dir, name);
+      const p = join15(dir, name);
       if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
           if (now - statSync3(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
@@ -10070,7 +10202,7 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
       }
       if (!name.endsWith(".json")) continue;
       try {
-        const r = JSON.parse(readFileSync17(p, "utf-8"));
+        const r = JSON.parse(readFileSync18(p, "utf-8"));
         if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
       } catch {
         rmSync6(p, { force: true });
@@ -10152,6 +10284,7 @@ __export(src_exports, {
   addLocalTombstone: () => addLocalTombstone,
   addLocalTombstones: () => addLocalTombstones,
   addPendingBackfill: () => addPendingBackfill,
+  applyCaptureEvent: () => applyCaptureEvent,
   applyCompaction: () => applyCompaction,
   applyDecay: () => applyDecay,
   applyServerUsername: () => applyServerUsername,
@@ -10167,6 +10300,9 @@ __export(src_exports, {
   buildFollowThroughPrompt: () => buildFollowThroughPrompt,
   buildResolverUserPrompt: () => buildResolverUserPrompt,
   callCurationLLM: () => callCurationLLM,
+  captureDownLine: () => captureDownLine,
+  captureFailing: () => captureFailing,
+  captureHealthFile: () => captureHealthFile,
   captureNudge: () => captureNudge,
   captureTurn: () => captureTurn,
   carryTyped: () => carryTyped,
@@ -10205,6 +10341,7 @@ __export(src_exports, {
   createTask: () => createTask,
   curationCycle: () => curationCycle,
   currentSession: () => currentSession,
+  dayKey: () => dayKey,
   decayFactor: () => decayFactor,
   defaultInferenceCaller: () => defaultInferenceCaller,
   deleteCollection: () => deleteCollection2,
@@ -10357,6 +10494,7 @@ __export(src_exports, {
   queueSyncPurges: () => queueSyncPurges,
   rankScore: () => rankScore,
   readArtifact: () => readArtifact,
+  readCaptureHealth: () => readCaptureHealth,
   readCycleRecord: () => readCycleRecord,
   readHoldoutFile: () => readHoldoutFile,
   readLastWrite: () => readLastWrite,
@@ -10364,6 +10502,7 @@ __export(src_exports, {
   readSyncHealth: () => readSyncHealth,
   readUpdateState: () => readUpdateState,
   recallMemory: () => recallMemory,
+  recordCapture: () => recordCapture,
   recordCycle: () => recordCycle,
   recordForTask: () => recordForTask,
   recordLastWrite: () => recordLastWrite,
@@ -10424,6 +10563,7 @@ __export(src_exports, {
   stopUpdateChecks: () => stopUpdateChecks,
   storeMemory: () => storeMemory,
   suggestCompaction: () => suggestCompaction,
+  summarizeCapture: () => summarizeCapture,
   sweepDeletedUpstream: () => sweepDeletedUpstream,
   sweepLockDebris: () => sweepLockDebris,
   syncBackendKind: () => syncBackendKind,
@@ -10546,6 +10686,7 @@ var init_src = __esm({
     init_waiting();
     init_close();
     init_follow_through();
+    init_health2();
     init_update_check();
     init_last_write();
     init_doc_lock();
@@ -10609,6 +10750,7 @@ __export(statusline_exports, {
   REMOVED_MARKER: () => REMOVED_MARKER,
   SCRIPT_VERSION: () => SCRIPT_VERSION,
   SESSION_REPORT_GRACE_MS: () => SESSION_REPORT_GRACE_MS,
+  captureFailingAt: () => captureFailingAt,
   copyScript: () => copyScript,
   decodeWrapped: () => decodeWrapped,
   defaultSettingsPath: () => defaultSettingsPath,
@@ -10637,9 +10779,9 @@ __export(statusline_exports, {
   uninstallStatusLine: () => uninstallStatusLine
 });
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync11, readFileSync as readFileSync18, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync12, readFileSync as readFileSync19, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname10, join as join15, resolve } from "node:path";
+import { dirname as dirname11, join as join16, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -10690,7 +10832,8 @@ function renderSegment(health, now, opts = {}) {
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
   const name = cleanCollection(opts.collection);
   const tail = name ? `${name}${isLocalOnly(name) ? " (local only)" : ""}` : void 0;
-  const state = (tone, text) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ""}`;
+  const capture = opts.captureFailing ? ` ${paint("red", "\xB7 capture \u2717")}` : "";
+  const state = (tone, text) => `${head} ${paint(tone, text)}${capture}${tail ? ` | ${tail}` : ""}`;
   if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
     case "disabled":
@@ -10727,7 +10870,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -10769,7 +10912,7 @@ function readSessionRecord(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.version === "string" && typeof r.pid === "number" && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
     } catch {
     }
@@ -10781,7 +10924,7 @@ function readSessionScope(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
+      const r = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
       if (typeof r?.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -10793,7 +10936,7 @@ function readSessionStarting(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const at = JSON.parse(readFileSync18(join15(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
+      const at = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
       if (typeof at === "number" && (best === void 0 || at > best)) best = at;
     } catch {
     }
@@ -10808,15 +10951,32 @@ function sessionInfo(record, ageMs, startedAt, now = Date.now()) {
 }
 function readUpdate(path3) {
   try {
-    const u = JSON.parse(readFileSync18(path3, "utf-8"));
+    const u = JSON.parse(readFileSync19(path3, "utf-8"));
     return u && typeof u === "object" ? { current: typeof u.current === "string" ? u.current : void 0, latest: typeof u.latest === "string" ? u.latest : void 0 } : void 0;
   } catch {
     return void 0;
   }
 }
+function captureFailingAt(path3, now) {
+  let h;
+  try {
+    h = JSON.parse(readFileSync19(path3, "utf-8"));
+  } catch {
+    return false;
+  }
+  if (!h || typeof h.at !== "number" || !h.days) return false;
+  const err = h.last_error;
+  if (err && typeof err.at === "number" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
+  const d = h.days[localDay(now)];
+  if (!d) return false;
+  const n = (k) => Number(d[k] ?? 0);
+  const bad2 = n("failed") + n("follow_through_failed") + n("compactions_failed");
+  const good = n("turns") - n("follow_through_failed") + n("compactions") - n("compactions_failed");
+  return bad2 >= 2 && bad2 > good;
+}
 function readHealth(path3) {
   try {
-    const h = JSON.parse(readFileSync18(path3, "utf-8"));
+    const h = JSON.parse(readFileSync19(path3, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -10864,18 +11024,18 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join15(process.env.CLAUDE_CONFIG_DIR ?? join15(homedir3(), ".claude"), "settings.json");
+  return join16(process.env.CLAUDE_CONFIG_DIR ?? join16(homedir3(), ".claude"), "settings.json");
 }
 function readSettings(path3) {
   try {
-    return JSON.parse(readFileSync18(path3, "utf-8"));
+    return JSON.parse(readFileSync19(path3, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
   }
 }
 function writeSettings(path3, settings) {
-  mkdirSync11(dirname10(path3), { recursive: true });
+  mkdirSync12(dirname11(path3), { recursive: true });
   const tmp = `${path3}.${process.pid}.tmp`;
   writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
   renameSync7(tmp, path3);
@@ -10890,7 +11050,7 @@ function uninstallStatusLine(path3 = defaultSettingsPath(), script) {
 }
 function hasStatusLine(path3 = defaultSettingsPath(), script) {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync18(path3, "utf-8")).statusLine, script);
+    return isYapaStatusLine(JSON.parse(readFileSync19(path3, "utf-8")).statusLine, script);
   } catch {
     return false;
   }
@@ -10898,25 +11058,25 @@ function hasStatusLine(path3 = defaultSettingsPath(), script) {
 function copyScript(from, to) {
   let src;
   try {
-    src = readFileSync18(from);
+    src = readFileSync19(from);
   } catch {
     return false;
   }
   try {
-    if (readFileSync18(to).equals(src)) return false;
+    if (readFileSync19(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync11(dirname10(to), { recursive: true, mode: 448 });
+  mkdirSync12(dirname11(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
   renameSync7(tmp, to);
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join15(dir, REMOVED_MARKER);
+  const p = join16(dir, REMOVED_MARKER);
   try {
     if (removed) {
-      mkdirSync11(dir, { recursive: true, mode: 448 });
+      mkdirSync12(dir, { recursive: true, mode: 448 });
       writeFileSync10(p, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
     } else {
@@ -10940,13 +11100,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
-    setRemovedMarker(dirname10(self2), false);
+    setRemovedMarker(dirname11(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
     process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
-    setRemovedMarker(dirname10(self2), true);
+    setRemovedMarker(dirname11(self2), true);
     return;
   }
   const input2 = await readStdin();
@@ -10957,12 +11117,12 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join15(dirname10(self2), "sync-health.json");
-  const update = readUpdate(join15(dirname10(healthPath), "update-check.json"));
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join16(dirname11(self2), "sync-health.json");
+  const update = readUpdate(join16(dirname11(healthPath), "update-check.json"));
   const info = stdinInfo(input2);
   const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
-  const last = readLastWrite2(join15(dirname10(healthPath), "last-write"), ids);
-  const sessionsDir = join15(dirname10(healthPath), "sessions");
+  const last = readLastWrite2(join16(dirname11(healthPath), "last-write"), ids);
+  const sessionsDir = join16(dirname11(healthPath), "sessions");
   const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
   const collection = last?.collection ?? readSessionScope(sessionsDir, ids);
   const color = !process.env.NO_COLOR;
@@ -10971,7 +11131,8 @@ async function main(args, self2) {
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
     update,
     collection,
-    session
+    session,
+    captureFailing: captureFailingAt(join16(dirname11(healthPath), "capture-health.json"), Date.now())
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -10982,7 +11143,7 @@ function isMain(argv1, self2) {
     return false;
   }
 }
-var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_MS, ANSI, SESSION_REPORT_GRACE_MS, REMOVED_MARKER, self;
+var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_MS, ANSI, SESSION_REPORT_GRACE_MS, localDay, REMOVED_MARKER, self;
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
@@ -10993,6 +11154,10 @@ var init_statusline = __esm({
     WRAP_TIMEOUT_MS = 5e3;
     ANSI = { green: "\x1B[32m", red: "\x1B[31m", yellow: "\x1B[33m", dim: "\x1B[2m", reset: "\x1B[0m" };
     SESSION_REPORT_GRACE_MS = 6e4;
+    localDay = (ms) => {
+      const d = new Date(ms);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
     REMOVED_MARKER = "statusline-removed";
     self = fileURLToPath(import.meta.url);
     if (isMain(process.argv[1], self)) {
@@ -11035,9 +11200,9 @@ __export(hooks_exports, {
   userText: () => userText,
   waitingLines: () => waitingLines
 });
-import { existsSync as existsSync4, mkdirSync as mkdirSync12, readFileSync as readFileSync19, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync13, readFileSync as readFileSync20, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname11, join as join16 } from "node:path";
+import { dirname as dirname12, join as join17 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -11104,11 +11269,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join16(dirname11(health), "statusline.mjs") : void 0;
+  return health ? join17(dirname12(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
-  const here = dirname11(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join16(here, f)).find((p) => existsSync4(p));
+  const here = dirname12(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join17(here, f)).find((p) => existsSync4(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -11122,8 +11287,8 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join16(dirname11(to), "statusline-added");
-    if (existsSync4(join16(dirname11(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    const added = join17(dirname12(to), "statusline-added");
+    if (existsSync4(join17(dirname12(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
@@ -11139,7 +11304,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join16(dirname11(to), "statusline-hint");
+  const marker = join17(dirname12(to), "statusline-hint");
   if (existsSync4(marker)) return void 0;
   try {
     writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
@@ -11158,17 +11323,17 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join16(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join16(base, "sessions");
-  mkdirSync12(dir, { recursive: true });
+  const base = process.env.CLAUDE_PLUGIN_DATA || join17(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join17(base, "sessions");
+  mkdirSync13(dir, { recursive: true });
   return dir;
 }
 function stateFile2(sessionId2, kind) {
-  return join16(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join17(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId2) {
   try {
-    return JSON.parse(readFileSync19(stateFile2(sessionId2, "turn"), "utf-8"));
+    return JSON.parse(readFileSync20(stateFile2(sessionId2, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -11187,7 +11352,7 @@ function takeNotice(sessionId2) {
   if (!sessionId2) return void 0;
   const file = stateFile2(sessionId2, "notice");
   try {
-    const notice = readFileSync19(file, "utf-8").trim();
+    const notice = readFileSync20(file, "utf-8").trim();
     rmSync8(file, { force: true });
     return notice || void 0;
   } catch {
@@ -11276,6 +11441,8 @@ async function sessionStart(input2) {
   if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const down = syncDownLine();
   if (down) lines.push(down);
+  const captureDown = captureDownLine();
+  if (captureDown) lines.push(captureDown);
   const hint = prepareStatusLine();
   if (hint) lines.push(hint);
   const update = updateLine();
@@ -11427,7 +11594,9 @@ ${summary}`, {
       sector: "episodic",
       metadata: { source: "compaction", session_id: input2.session_id, trigger: input2.trigger }
     });
+    recordCapture({ kind: "compaction" });
   } catch (e) {
+    recordCapture({ kind: "compaction", error: e });
     process.stderr.write(`[yapa-hook] compaction capture failed (non-fatal): ${e}
 `);
   }
@@ -11472,9 +11641,9 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync13, readFileSync as readFileSync20, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync14, readFileSync as readFileSync21, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname12, join as join17 } from "node:path";
+import { dirname as dirname13, join as join18 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -11501,14 +11670,14 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join17(process.env.CLAUDE_CONFIG_DIR ?? join17(homedir4(), ".claude"), "settings.json");
+  return join18(process.env.CLAUDE_CONFIG_DIR ?? join18(homedir4(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
 function readSettings2(path3) {
   try {
-    return JSON.parse(readFileSync20(path3, "utf-8"));
+    return JSON.parse(readFileSync21(path3, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
     throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
@@ -11516,7 +11685,7 @@ function readSettings2(path3) {
 }
 function installHooks(path3 = defaultSettingsPath2(), command = selfCommand()) {
   const merged = mergeHooks(readSettings2(path3), command);
-  mkdirSync13(dirname12(path3), { recursive: true });
+  mkdirSync14(dirname13(path3), { recursive: true });
   writeFileSync12(path3, JSON.stringify(merged, null, 2) + "\n");
   return path3;
 }
@@ -11664,7 +11833,7 @@ __export(task_exports, {
   TASK_USAGE: () => TASK_USAGE,
   runTask: () => runTask
 });
-import { readFileSync as readFileSync21 } from "node:fs";
+import { readFileSync as readFileSync22 } from "node:fs";
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -11730,8 +11899,8 @@ async function runTask(sub, args) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
     }
     const usage2 = e instanceof UsageError || e instanceof TypedMemoryError;
-    const message = e instanceof Error ? e.message : String(e);
-    return { exit: usage2 ? EXIT.usage : EXIT.error, json: { ok: false, error: message }, text: `yapa task ${sub ?? ""}: ${message}` };
+    const message2 = e instanceof Error ? e.message : String(e);
+    return { exit: usage2 ? EXIT.usage : EXIT.error, json: { ok: false, error: message2 }, text: `yapa task ${sub ?? ""}: ${message2}` };
   }
 }
 async function dispatch(sub, args) {
@@ -11879,7 +12048,7 @@ function jsonFile(path3, shape) {
   if (path3 === void 0) return void 0;
   let v;
   try {
-    v = JSON.parse(readFileSync21(path3 === "-" ? 0 : path3, "utf8"));
+    v = JSON.parse(readFileSync22(path3 === "-" ? 0 : path3, "utf8"));
   } catch (e) {
     throw new UsageError(`${path3}: ${e instanceof Error ? e.message : e}`);
   }
@@ -12054,9 +12223,9 @@ async function runWaiting(args) {
 }
 function fail(what, e) {
   const usage2 = e instanceof UsageError2 || e instanceof TypedMemoryError;
-  const message = e instanceof Error ? e.message : String(e);
+  const message2 = e instanceof Error ? e.message : String(e);
   const code = e instanceof MemoryNotFoundError ? "not_found" : void 0;
-  return { exit: usage2 ? 2 : 1, json: { ok: false, error: message, ...code ? { code } : {} }, text: `${what}: ${message}` };
+  return { exit: usage2 ? 2 : 1, json: { ok: false, error: message2, ...code ? { code } : {} }, text: `${what}: ${message2}` };
 }
 var MEMORY_USAGE, UsageError2, csv, VALUE_FLAGS;
 var init_memory = __esm({
@@ -12087,6 +12256,43 @@ var init_memory = __esm({
       "--tags",
       "--for"
     ]);
+  }
+});
+
+// packages/mcp/src/cli/capture.ts
+var capture_exports = {};
+__export(capture_exports, {
+  CAPTURE_USAGE: () => CAPTURE_USAGE,
+  runCapture: () => runCapture2
+});
+function when(ms, now) {
+  if (!ms) return "never";
+  const min = Math.round((now - ms) / 6e4);
+  return min < 1 ? "just now" : min < 120 ? `${min} min ago` : `${Math.round(min / 60)} h ago`;
+}
+function runCapture2(sub, args, now = Date.now()) {
+  if (sub !== "status") return { exit: 2, json: { ok: false, error: CAPTURE_USAGE.trim() }, text: CAPTURE_USAGE.trim() };
+  const i = args.indexOf("--days");
+  const days = i >= 0 ? Number(args[i + 1]) : 7;
+  if (!Number.isInteger(days) || days < 1 || days > 14) return { exit: 2, json: { ok: false, error: "--days must be 1-14" }, text: "--days must be 1-14" };
+  const file = captureHealthFile();
+  const s = summarizeCapture(readCaptureHealth(file), now, days);
+  const lines = [
+    `Capture over the last ${days} day(s): ${s.turns} turn(s) judged, ${s.stored} stored, ${s.skipped} skipped as known, ${s.settled} settled`,
+    `Failures: ${s.failed} extraction, ${s.follow_through_failed} follow-through, ${s.compactions_failed} of ${s.compactions} compaction capture(s)`,
+    `Last success: ${when(s.last_ok_at, now)}`,
+    ...s.last_error ? [`Last error (${s.last_error.stage}, ${when(s.last_error.at, now)}): ${s.last_error.message}`] : [],
+    ...s.failing ? ["Status: FAILING"] : [],
+    ...file ? [] : ["(no health file: SYNC_HEALTH_FILE is off)"]
+  ];
+  return { exit: 0, json: { ok: true, file: file || null, ...s }, text: lines.join("\n") };
+}
+var CAPTURE_USAGE;
+var init_capture2 = __esm({
+  "packages/mcp/src/cli/capture.ts"() {
+    "use strict";
+    init_src();
+    CAPTURE_USAGE = "Usage: yapa capture status [--days N] [--text]\n";
   }
 });
 
@@ -12127,7 +12333,7 @@ var init_scope2 = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname13, join as join18 } from "node:path";
+import { dirname as dirname14, join as join19 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 import { readFileSync } from "node:fs";
@@ -12195,7 +12401,7 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n";
 var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nShared collections are coordinated by the sync service; private-*, local-* and global (and every collection with sync off) by this machine.\nExit: 0 done, 3 refused (held or overlapping), 4 unavailable (the service for a shared collection; nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
@@ -12272,23 +12478,24 @@ async function runStatusLineCommand(action, args) {
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path3)} (runs ${script})
 `);
-      sl.setRemovedMarker(dirname13(script), false);
+      sl.setRemovedMarker(dirname14(script), false);
       return;
     }
     case "uninstall":
       process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path3, script)}
 `);
-      if (script) sl.setRemovedMarker(dirname13(script), true);
+      if (script) sl.setRemovedMarker(dirname14(script), true);
       return;
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join18(dirname13(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join19(dirname14(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,
         remote: getConfig2().REMOTE_NAME || void 0,
-        update
+        update,
+        captureFailing: health ? sl.captureFailingAt(join19(dirname14(health), "capture-health.json"), Date.now()) : false
       }) + "\n");
       return;
     }
@@ -12394,6 +12601,13 @@ async function main2() {
     const args = command === "waiting" ? [sub, ...rest].filter((a) => a !== void 0) : rest;
     const r = command === "waiting" ? await m.runWaiting(args) : await m.runMemory(sub, rest);
     process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
+    await exitAfterFlush(r.exit);
+  }
+  if (command === "capture") {
+    adoptCliEnv(process.cwd());
+    const { runCapture: runCapture3 } = await Promise.resolve().then(() => (init_capture2(), capture_exports));
+    const r = runCapture3(sub, rest);
+    process.stdout.write((rest.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
     await exitAfterFlush(r.exit);
   }
   if (command === "scope") {
