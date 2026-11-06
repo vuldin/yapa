@@ -433,8 +433,9 @@ Nothing is lost by accident:
 - `collection_delete` removes a collection from this machine only, unless you pass `scope: "everyone"` (with `confirm`). A shared collection stays with teammates, and your unpushed documents in it are pushed first.
 - Deleting one of your documents in a shared collection (`memory_forget`, `task_delete`, `collection_delete` with `scope: "everyone"`) removes it for teammates too. The sync service keeps it restorable for 30 days, and each teammate's machine keeps an archived copy for 30 days (`YAPA_DELETED_RETENTION_DAYS`): hidden, never pushed back, back to live if you restore it.
 - `trash list` shows both, `trash restore` brings yours back for everyone, and `trash keep` makes a teammate's deleted copy your own.
-- Moving a document into a private collection (`collection_merge` from a shared one) retracts it: the service keeps no copy, and teammates drop theirs unless they have unpushed edits to it.
+- Moving a document into a private collection (`collection_merge` from a shared one) retracts it: the sync service keeps none of its content, and teammates drop theirs unless they have unpushed edits to it.
 - `trash purge` is for mistakes that must not survive, such as a leaked secret. The service keeps no restorable copy, teammates drop theirs even with local edits, and the id is refused if anyone writes it again. Only the owner can purge. A long memory stored in chunks goes whole, and a purge the service can't take yet stays queued and is retried on every sync.
+- A sync remote with stricter rules of its own (one that never deletes rows, say) declares them, and YAPA follows them: `sync status` shows them, and where a remote can't erase, YAPA says the content stays there, hidden.
 
 ### Local-only collections on this machine
 

@@ -163,6 +163,10 @@ apply to every Claude Code session, so while `sync_service_url` points at the
 remote under evaluation, start Claude Code only from that shell; afterwards,
 clear or restore `sync_service_url` before starting it normally.
 
+## Remotes with stricter data rules
+
+A remote may keep deleted documents longer than 30 days, redact instead of deleting, or never erase at all. It declares this in `GET /v1/me` (`docs/sync-api.md` section 5, "Remotes with stricter data rules"), and `sync status` shows it as `Data rules: ...`. Check that line before trusting a remote with anything that may have to be removed for good: on a remote that can't erase, a purge only deletes, and the content stays there, hidden.
+
 ## Switching from another remote
 
 The local store remembers its last pull point and which docs are already

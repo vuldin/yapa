@@ -3257,12 +3257,19 @@ ${this.validUntil}` : token, { mode: 384 });
       async me(refresh = false) {
         if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
           const r = await this.request("GET", "/v1/me");
-          this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
+          this.meCache = { username: r.username, email: r.email, limits: r.limits, generation: this.tokens.generation };
         }
         return { username: this.meCache.username, email: this.meCache.email };
       }
       identity() {
         return this.me();
+      }
+      async dataRules() {
+        await this.me();
+        return parseDataRules(this.meCache?.limits);
+      }
+      cachedDataRules() {
+        return this.meCache ? parseDataRules(this.meCache.limits) : void 0;
       }
       async pull(collection, req) {
         const q = new URLSearchParams();
@@ -3454,6 +3461,7 @@ ${this.validUntil}` : token, { mode: 384 });
           lines.push(`Signed in as: ${me.username} (${me.email})`);
           const note = syncUsernameNote(this.identitySource);
           if (note) lines.push(note);
+          lines.push(`Data rules: ${describeDataRules(parseDataRules(this.meCache?.limits))}`);
           lines.push("Connection: healthy");
         } catch (e) {
           lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);
@@ -3850,11 +3858,47 @@ async function resolveSyncUsername() {
   }
   return getConfig().USERNAME;
 }
+function parseDataRules(limits) {
+  const l = limits && typeof limits === "object" ? limits : {};
+  const unrecognized = [];
+  const days = l.deleted_retention_days;
+  let deletedRetentionDays = REFERENCE_DATA_RULES.deletedRetentionDays;
+  if (days === null || typeof days === "number" && Number.isInteger(days) && days >= 1) deletedRetentionDays = days;
+  else if (days !== void 0) {
+    deletedRetentionDays = void 0;
+    unrecognized.push(`deleted_retention_days=${JSON.stringify(days)}`);
+  }
+  let erasure = REFERENCE_DATA_RULES.erasure;
+  if (l.erasure === "delete" || l.erasure === "redact" || l.erasure === "none") erasure = l.erasure;
+  else if (l.erasure !== void 0) {
+    erasure = "none";
+    unrecognized.push(`erasure=${JSON.stringify(l.erasure)}`);
+  }
+  return { deletedRetentionDays, erasure, ...unrecognized.length ? { unrecognized } : {} };
+}
+async function remoteDataRules(opts = {}) {
+  if (!isSyncConfigured()) return void 0;
+  try {
+    const b = await getSyncBackend();
+    if (opts.cachedOnly) return b?.cachedDataRules?.();
+    return b?.dataRules ? await b.dataRules() : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function describeDataRules(r) {
+  const kept = r.deletedRetentionDays === null ? "until purged" : r.deletedRetentionDays === void 0 ? "for an unknown time" : `${r.deletedRetentionDays} days`;
+  if (r.unrecognized) {
+    return `deleted documents restorable ${kept}; the remote declares rules this client does not know (${r.unrecognized.join(", ")}), so retracted or purged content may stay on it`;
+  }
+  const erased = { delete: "removed", redact: "redacted (an audit stub stays)", none: "kept on the remote, hidden (it cannot erase)" }[r.erasure];
+  return `deleted documents restorable ${kept}; retracted or purged content ${erased}`;
+}
 function syncUsernameNote(source = (override ?? active3?.backend)?.identitySource) {
   if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return void 0;
   return `Username: using '${serverUsername}' from ${source ?? "your Google account"} (the username option '${configuredUsername}' is informational with the sync service)`;
 }
-var UnsupportedByRemoteError, override, active3, lastError, serverUsername, configuredUsername;
+var UnsupportedByRemoteError, override, active3, lastError, serverUsername, configuredUsername, REFERENCE_DATA_RULES;
 var init_backend = __esm({
   "packages/core/src/sync/backend.ts"() {
     "use strict";
@@ -3869,6 +3913,7 @@ var init_backend = __esm({
       feature;
       code = "unsupported_by_remote";
     };
+    REFERENCE_DATA_RULES = { deletedRetentionDays: 30, erasure: "delete" };
   }
 });
 
@@ -4574,6 +4619,7 @@ async function listTrash(collection) {
     const backend = await getSyncBackend();
     if (!backend?.listDeleted) out.remoteUnavailable = "this sync target has no soft delete";
     else out.remote = await backend.listDeleted(collection);
+    out.rules = await remoteDataRules();
   } catch (e) {
     out.remoteUnavailable = e instanceof UnsupportedByRemoteError ? e.message : `the sync service could not be asked: ${e.message}`;
   }
@@ -6406,6 +6452,11 @@ async function mergeCollections(from, into, opts = {}) {
     teammateRowsKept,
     ownRowsRetracted
   };
+  if (ownRowsRetracted > 0 && isSyncConfigured()) {
+    const rules = await remoteDataRules({ cachedOnly: true });
+    if (!rules) result.remoteRulesUnknown = true;
+    else if (rules.erasure === "none") result.remoteKeepsContent = true;
+  }
   if (opts.dryRun) return result;
   if (docs.length > 0) {
     const before = await getCollectionCount2(into);
@@ -6441,6 +6492,11 @@ async function mergeCollections(from, into, opts = {}) {
   await addCollectionRedirect(from, into);
   return result;
 }
+function erasureLines(r) {
+  if (r.remoteKeepsContent) return ["This sync service cannot erase: it keeps their content, hidden from everyone. Ask its administrators to remove it for good."];
+  if (r.remoteRulesUnknown) return ["This sync service's data rules aren't known yet (see `sync status`): if it cannot erase, it keeps their content."];
+  return [];
+}
 function mergeReportLines(r) {
   const types = Object.entries(r.byType).sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => `${n} ${t}`).join(", ") || "none";
   const sharedToPrivate = isSyncable2(r.from) && !isSyncable2(r.into);
@@ -6449,6 +6505,7 @@ function mergeReportLines(r) {
     const lines2 = [`Dry run: would move ${r.moved} document(s) from "${r.from}" into "${r.into}" (${types}), then remove "${r.from}". Nothing changed.`];
     if (sharedToPrivate && r.ownRowsRetracted > 0) {
       lines2.push(`Up to ${docs(r.ownRowsRetracted)} of yours would be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
+      lines2.push(...erasureLines(r));
     }
     if (sharedToPrivate && r.teammateRowsKept > 0) {
       lines2.push(`${docs(r.teammateRowsKept)} by teammates would stay shared in "${r.from}" (you would keep a private copy).`);
@@ -6459,6 +6516,7 @@ function mergeReportLines(r) {
   if (sharedToPrivate) {
     if (r.ownRowsRetracted > 0) {
       lines.push(`Up to ${docs(r.ownRowsRetracted)} of yours will be removed from the shared copy (retracted) at the next push (those that reached the sync service).`);
+      lines.push(...erasureLines(r));
     }
     if (r.teammateRowsKept > 0) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
@@ -6483,6 +6541,7 @@ var init_manage = __esm({
     init_push();
     init_store();
     init_syncable();
+    init_backend();
     isSyncable2 = isSyncableCollection;
     CollectionDeleteRefusedError = class extends Error {
       constructor(message, documentCount) {
@@ -10063,6 +10122,7 @@ __export(src_exports, {
   MemoryNotFoundError: () => MemoryNotFoundError,
   OPEN_STATUSES: () => OPEN_STATUSES,
   PostgresBackend: () => PostgresBackend,
+  REFERENCE_DATA_RULES: () => REFERENCE_DATA_RULES,
   RESOLVER_PROMPT_VERSION: () => RESOLVER_PROMPT_VERSION,
   RESOLVER_SYSTEM_PROMPT: () => RESOLVER_SYSTEM_PROMPT,
   SALIENCE_BOOST_ON_ACCESS: () => SALIENCE_BOOST_ON_ACCESS,
@@ -10152,6 +10212,7 @@ __export(src_exports, {
   deleteDocumentEverywhere: () => deleteDocumentEverywhere,
   deleteTask: () => deleteTask,
   describeClaim: () => describeClaim,
+  describeDataRules: () => describeDataRules,
   describeHolder: () => describeHolder,
   describeRefusal: () => describeRefusal,
   describeWaits: () => describeWaits,
@@ -10267,6 +10328,7 @@ __export(src_exports, {
   openWaits: () => openWaits,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
+  parseDataRules: () => parseDataRules,
   parseDuration: () => parseDuration,
   parseExtractorResponse: () => parseExtractorResponse,
   parseFollowThrough: () => parseFollowThrough,
@@ -10315,6 +10377,7 @@ __export(src_exports, {
   rejoinCollection: () => rejoinCollection,
   rekeyTask: () => rekeyTask,
   releaseTaskClaim: () => releaseTaskClaim,
+  remoteDataRules: () => remoteDataRules,
   removeCollection: () => removeCollection,
   removeDependency: () => removeDependency,
   removeReport: () => removeReport,

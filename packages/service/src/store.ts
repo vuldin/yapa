@@ -247,6 +247,15 @@ async function similarIn(c: pg.PoolClient, collection: string, vec: string, thre
     .filter(s => s.similarity > threshold);
 }
 
+/** Byte order, as `COLLATE "C"` sorts, so every request locks ids in the same order. */
+function lockOrder(ids: string[]): string[] {
+  return [...new Set(ids)].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+}
+
+function lockDocId(c: pg.PoolClient, id: string): Promise<unknown> {
+  return c.query("SELECT pg_advisory_xact_lock(hashtextextended('yapa-doc:' || $1, 0))", [id]);
+}
+
 /**
  * Upsert one validated document in its own transaction. Item-level problems
  * come back as `status: "error"`; only infrastructure errors throw.
@@ -261,6 +270,8 @@ export async function upsertOne(pool: pg.Pool, ctx: RequestCtx, doc: UpsertInput
   const vec = toPgVector(doc.embedding);
 
   return withUserTx(pool, me, async c => {
+    // Serialized with purgeMany per id, which may hold no row lock (a deleted-only id).
+    await lockDocId(c, doc.id);
     if ((await c.query('SELECT 1 FROM purged_ids WHERE id = $1', [doc.id])).rowCount! > 0) {
       return { id: doc.id, status: 'error' as const, error: itemError('purged', 'this id was purged by its owner and cannot be written again; use a new id') };
     }
@@ -363,7 +374,7 @@ export async function deleteMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], 
   const me = ctx.caller.username;
   return withUserTx(pool, me, async c => {
     const rows = await c.query(
-      `SELECT id, collection, origin_user, last_editor FROM documents WHERE id = ANY($1::text[]) AND ${LOCAL_ONLY_SQL} FOR UPDATE`,
+      `SELECT id, collection, origin_user, last_editor FROM documents WHERE id = ANY($1::text[]) AND ${LOCAL_ONLY_SQL} ORDER BY id COLLATE "C" FOR UPDATE`,
       [ids],
     );
     const byId = new Map(rows.rows.map(r => [r.id as string, r]));
@@ -470,6 +481,7 @@ export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[],
     const done = new Map<string, RestoreResult>();
     let restored = 0;
     const one = async (id: string): Promise<RestoreResult> => {
+      await lockDocId(c, id);
       const found = await c.query(
         `SELECT ${MICROS('deleted_at', 'deleted_us')}, collection, last_editor, origin_user, content
            FROM deleted_documents
@@ -513,7 +525,7 @@ export async function restoreMany(pool: pg.Pool, ctx: RequestCtx, ids: string[],
       restored++;
       return { id, status: 'restored', synced_at: Number(ins.rows[0].synced_at) };
     };
-    for (const id of ids) if (!done.has(id)) done.set(id, await one(id));
+    for (const id of lockOrder(ids)) done.set(id, await one(id));
     return { results: ids.map(id => done.get(id)!), restored };
   });
 }
@@ -540,6 +552,7 @@ export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): 
     const done = new Map<string, PurgeResult>();
     let purged = 0;
     const one = async (id: string): Promise<PurgeResult> => {
+      await lockDocId(c, id);
       const live = (await c.query('SELECT collection, origin_user, last_editor FROM documents WHERE id = $1 FOR UPDATE', [id])).rows[0];
       // RLS shows only the caller's deleted rows; the filter says so explicitly.
       const gone = await c.query(
@@ -582,7 +595,7 @@ export async function purgeMany(pool: pg.Pool, ctx: RequestCtx, ids: string[]): 
       purged++;
       return { id, status: 'purged' };
     };
-    for (const id of ids) if (!done.has(id)) done.set(id, await one(id));
+    for (const id of lockOrder(ids)) done.set(id, await one(id));
     return { results: ids.map(id => done.get(id)!), purged };
   });
 }

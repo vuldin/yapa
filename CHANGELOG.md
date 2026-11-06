@@ -5,6 +5,13 @@
 ### Features
 - **Sync over MCP.** A remote can serve YAPA Sync API v1 as one MCP tool, `yapa_sync`, usually behind an MCP gateway that signs each person in, instead of over HTTPS. Set `sync_mcp_url` (`YAPA_SYNC_MCP_URL`) to its MCP URL and `sync_mcp_token_cmd` (`YAPA_SYNC_MCP_TOKEN_CMD`) to a command that prints your bearer token for the gateway; the MCP URL wins over `sync_service_url`, which wins over `sync_database_url`. Every request is one tool call carrying the HTTP request (method, path, body, device, idempotency key), and its `{status, body, headers}` result is handled exactly as the HTTP response, so errors, paging, soft delete and coordination behave the same. The token is cached until shortly before it expires and refreshed once on a 401 from the gateway or the tool. A single gateway-prefixed tool name (`remote__yapa_sync`) is found too; when there are several, `sync_mcp_tool` (`YAPA_SYNC_MCP_TOOL`) names the one to use. `sync status` reads `Backend: YAPA sync over MCP (<host>)`, and the status line says `sign in to the MCP gateway` when signed out. DSH: `syncMcpUrl`, `syncMcpTokenCmd`. See `docs/sync-api.md` section 3, "Over MCP", and `docs/connecting-to-a-remote.md`.
 - `npm run conformance -- --mcp <MCP URL>` runs the conformance suite against a remote served over MCP.
+- **Remotes with stricter data rules work too.** A sync remote declares in `GET /v1/me` how long it keeps deleted documents (`deleted_retention_days`, `null` for until purged) and how it erases a retracted or purged document (`erasure`: `delete`, `redact`, or `none`). The client adapts and says what matters: `sync status` shows the rules, `trash list` says how long deleted documents stay restorable, and a purge or a move into a private collection on a remote that cannot erase says the content stays there, hidden. A remote that declares nothing is treated as the reference service.
+
+### Sync API
+- **Erasure keeps no content; a stub may stay.** A retract or purge removes the content, metadata and embedding of the row, its deleted copies and every earlier version a remote keeps. A remote may keep an audit stub (id, collection, owner, timestamps, reason, who erased it), never served. A remote that can't erase declares `erasure: "none"`, keeps the content hidden, and offers no purge route. The reference service keeps full control (30-day restore, rows deleted) and now declares `erasure: "delete"`. See `docs/sync-api.md` section 5, "Remotes with stricter data rules".
+
+### Fixes
+- **Service: a write that waited on a purge is refused.** An upsert racing a purge of the same id could write it again; the two are now serialized per id.
 
 ## 1.12.0 (2026-11-06)
 

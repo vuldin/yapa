@@ -26,7 +26,7 @@ import { getDeviceId } from './device.js';
 import {
   applyServerUsername, chunk, isSignedOutError, noteSyncError, syncUsernameNote, UnsupportedByRemoteError, type PullPage, type PullRequest, type RemoteDocument, type RemoteOwner, type SimilarMatch, type SyncBackend,
   type UpsertDoc, type UpsertOutcome, type Coordination, type Lease, type LeaseAcquireResult, type LeaseReleaseResult,
-  type DeletedDocument, type PurgeResult, type RemoteDeletion, type RestoreResult,
+  type DeletedDocument, type PurgeResult, type RemoteDeletion, type RestoreResult, type DataRules, describeDataRules, parseDataRules,
 } from './backend.js';
 
 /** Refresh this long before the token's `exp`. */
@@ -354,7 +354,7 @@ export class HttpBackend implements SyncBackend {
   private readonly tokens: IdTokenProvider;
   private readonly timeoutMs: number;
   private readonly device: () => string;
-  private meCache: { username: string; email: string; generation: number } | undefined;
+  private meCache: { username: string; email: string; limits: unknown; generation: number } | undefined;
 
   constructor(opts: HttpBackendOptions = {}) {
     const config = getConfig();
@@ -419,14 +419,23 @@ export class HttpBackend implements SyncBackend {
   /** GET /v1/me, cached per process until the token is re-minted. */
   async me(refresh = false): Promise<{ username: string; email: string }> {
     if (!this.meCache || refresh || this.meCache.generation !== this.tokens.generation) {
-      const r = await this.request<{ username: string; email: string }>('GET', '/v1/me');
-      this.meCache = { username: r.username, email: r.email, generation: this.tokens.generation };
+      const r = await this.request<{ username: string; email: string; limits?: unknown }>('GET', '/v1/me');
+      this.meCache = { username: r.username, email: r.email, limits: r.limits, generation: this.tokens.generation };
     }
     return { username: this.meCache.username, email: this.meCache.email };
   }
 
   identity(): Promise<{ username: string; email: string }> {
     return this.me();
+  }
+
+  async dataRules(): Promise<DataRules> {
+    await this.me();
+    return parseDataRules(this.meCache?.limits);
+  }
+
+  cachedDataRules(): DataRules | undefined {
+    return this.meCache ? parseDataRules(this.meCache.limits) : undefined;
   }
 
   async pull(collection: string, req: PullRequest): Promise<PullPage> {
@@ -643,6 +652,7 @@ export class HttpBackend implements SyncBackend {
       lines.push(`Signed in as: ${me.username} (${me.email})`);
       const note = syncUsernameNote(this.identitySource);
       if (note) lines.push(note);
+      lines.push(`Data rules: ${describeDataRules(parseDataRules(this.meCache?.limits))}`);
       lines.push('Connection: healthy');
     } catch (e) {
       lines.push(`Connection: error - ${e instanceof Error ? e.message : e}`);

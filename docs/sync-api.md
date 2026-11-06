@@ -261,9 +261,10 @@ reads" lists the response fields the client uses; others are optional.
 ### GET /v1/me
 
 Response: `{ "username": "jane-doe", "email": "jane.doe@example.com" }`.
-Client reads `username`, `email`. The reference also returns `device` and a
-`limits` object (not read; `limits.deleted_retention_days` is how long a
-deleted row stays restorable, section 5 "Soft delete").
+Client reads `username`, `email`, and from `limits` the remote's data rules,
+`deleted_retention_days` and `erasure` (section 5, "Remotes with stricter data
+rules"). The reference also returns `device` and the rest of `limits`, which
+the client does not read.
 
 Called at startup, before every push/pull cycle (cached per token), and for
 `sync status` ("Signed in as: <username> (<email>)").
@@ -363,10 +364,10 @@ The reference soft-deletes a `delete`: the row moves out of the live documents
 (pulls stop returning it, teammates get the deletion entry) into a store of
 deleted rows that only its owner can see, list and restore, for
 `YAPA_DELETED_RETENTION_DAYS` (default 30) days. See "Soft delete" below. A
-`retract` MUST NOT keep a copy: the doc moved into a local-only collection on
-the owner's machine (which keeps it), and the point of the move is that no
-shared copy of its content stays on the remote. Its deletion entry is written
-as for a delete, with `reason: "retract"`.
+`retract` erases the doc (see "Erasure" below): the doc moved into a
+local-only collection on the owner's machine (which keeps it), and the point of
+the move is that no shared copy of its content stays on the remote. Its
+deletion entry is written as for a delete, with `reason: "retract"`.
 
 ### Soft delete: GET /v1/me/deleted, POST /v1/documents:restore, POST /v1/documents:purge
 
@@ -378,9 +379,21 @@ sees, restores or purges rows it owns.
 A deleted row stays restorable for the remote's retention window (reference:
 `YAPA_DELETED_RETENTION_DAYS`, default 30, reported as
 `limits.deleted_retention_days` by `GET /v1/me`). After that it is removed
-for good. The reference removes expired rows lazily, at most every 5 minutes
-per instance, from requests that touch deleted rows; rows past the window are
-never listed or restored even before the sweep runs.
+or erased. A remote that keeps history may keep deleted rows restorable until
+they are purged, and reports `"deleted_retention_days": null`. The reference
+removes expired rows lazily, at most every 5 minutes per instance, from
+requests that touch deleted rows; rows past the window are never listed or
+restored even before the sweep runs.
+
+**Erasure.** A retract and a purge erase, unless the remote declares
+`erasure: "none"` (below): the remote MUST remove the content,
+metadata and embedding of the row, of every deleted copy, and of every earlier
+version it keeps (a remote that keeps revisions redacts them all). It MAY keep
+a stub holding only the id, collection, owner, timestamps, `reason` and who
+erased it when, for its own audit; a stub is never returned by a pull, a
+listing or a restore. The reference deletes the rows outright. How a remote
+stores a restored row is its own matter, as long as the id, `origin_user`,
+`created_at`, content and metadata come back as they were.
 
 `GET /v1/me/deleted?collection=<c>&limit=<n>`: the caller's own deleted rows
 within retention, newest first. `collection` is optional (a local-only name is
@@ -431,11 +444,11 @@ re-created, deleted again) appears once per deleted copy.
 ], "purged": 2 }
 ```
 
-Purge removes the id for good: the caller's live row (if any) and every
+Purge erases the id for good: the caller's live row (if any) and every
 deleted copy the caller owns. With no live row, the caller must have a deleted
 copy (else `not_found`). When the id is now someone else's live document
 (reused after the caller deleted theirs), the caller's deleted copies are
-still removed and the answer is `purged_copies`: the other user's row stays,
+still erased and the answer is `purged_copies`: the other user's row stays,
 the id is not recorded as purged, and no feed entry is written. With no copy
 of the caller's either, the answer is `not_owner` and nothing changes.
 Otherwise each affected collection's deletions feed gets an entry with
@@ -444,6 +457,47 @@ older than this release treat it as a plain delete: keep teammates updated
 for a purge to reach every copy), and the id
 is recorded as purged: every later upsert of it, by anyone, is refused with
 the permanent item error `purged` (`410` on `PUT /v1/documents/{id}`).
+
+### Remotes with stricter data rules
+
+The reference service gives YAPA full control over the data it writes: a
+deleted row is restorable for 30 days and then removed, a retract or purge
+deletes rows outright, and nothing of a purged id survives. Prefer it unless
+an organization's own rules say otherwise.
+
+A remote MAY apply stricter rules of its own, such as never deleting a row or
+keeping every version, provided it declares them in `GET /v1/me` `limits`. An
+absent key means the reference's value.
+
+| Key | Reference | Allowed | Meaning |
+|---|---|---|---|
+| `deleted_retention_days` | `30` | an integer >= 1, or `null` | how long a deleted row stays restorable; `null`: until it is purged |
+| `erasure` | `"delete"` | `"delete"`, `"redact"`, `"none"` | how a retract or purge removes a doc: its rows are deleted; its content is removed from every version and a stub is kept ("Erasure" above); or it is kept, hidden |
+
+Every remote, whatever it declares:
+
+- records each owner-only deletion in the deletions feed with its `reason`;
+- never returns a deleted, retracted, erased or purged row's content in a pull,
+  a lookup or `:similar`, and returns a deleted row only to its owner, through
+  `GET /v1/me/deleted`;
+- answers a route it does not offer with `404 not_found`, so the client falls
+  back.
+
+With `erasure: "none"` the remote keeps a retracted or purged doc's content,
+hidden as above; nobody, its owner included, can list or restore it through
+this API. It MUST NOT offer `documents:purge` (the client then sends an
+ordinary delete), and SHOULD name, in its own documentation, who can remove
+content for good. `deleted_retention_days` applies only to a remote that
+offers `GET /v1/me/deleted` and restore.
+
+A key present with a value the client does not know is not read as the
+reference's: the client treats an unknown `erasure` as `"none"` and an unknown
+retention as unknown, and says so.
+
+The client never fails because of these rules; it tells the user where they
+matter: `trash list` shows how long the remote keeps deleted documents, a purge
+or a move into a private collection on an `erasure: "none"` remote says the
+content stays on the remote, and `sync status` shows the rules.
 
 ### GET /v1/collections
 
@@ -675,7 +729,8 @@ Per upsert item, in this order (the first failure is the item's error):
 
 Deletes are owner-only and recorded in the deletions feed (with `reason`);
 the reference keeps deleted rows restorable by their owner for its retention
-window, and purges are owner-only too. Task numbers come
+window, retracts and purges erase (section 5, "Erasure"), and purges are
+owner-only too. Task numbers come
 from one per-user sequence (`task-ids:next`), floored by the highest existing
 `<caller>-<n>`.
 
