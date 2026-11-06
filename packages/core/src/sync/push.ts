@@ -6,7 +6,7 @@ import { generateEmbedding } from '../embeddings.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
 import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects } from './sentinel.js';
+import { getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
 import { isSyncableCollection as isSyncable, isReadOnlyDoc } from './syncable.js';
@@ -57,6 +57,22 @@ async function writeIfUnchanged(collection: string, doc: DocumentResult, metadat
   });
 }
 
+/** Refused by the remote before and unchanged since: stays local until it is edited. */
+export function isRejectedUnchanged(doc: DocumentResult): boolean {
+  return !!doc.metadata.sync_rejected && doc.metadata.sync_rejected_fp === syncFingerprint(doc);
+}
+
+/**
+ * Would a push send this doc? Unsynced, and not skipped for good: sentinels,
+ * journal drafts (per-session scratch), docs the remote owns (read_only), and
+ * docs it refused that are unchanged since. One rule for every push path and
+ * for anything that asks "is this only on this machine?".
+ */
+export function isPushable(doc: DocumentResult): boolean {
+  return doc.metadata.is_synced === false && !doc.id.startsWith('__') && doc.metadata.type !== 'journal_draft'
+    && !isReadOnlyDoc(doc.metadata) && !isRejectedUnchanged(doc);
+}
+
 function stripLocalOnly(metadata: Record<string, any>): Record<string, any> {
   const out = { ...metadata };
   for (const k of LOCAL_ONLY_KEYS) delete out[k];
@@ -94,9 +110,7 @@ export function pushDocsNow(collection: string, ids: string[]): Promise<{ pushed
     const backend = await getSyncBackend();
     if (!backend) return out;
     await resolveSyncUsername();
-    const docs = (await getDocumentsByIds(collection, ids)).filter(d =>
-      d.metadata.is_synced === false && !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata)
-      && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const docs = (await getDocumentsByIds(collection, ids)).filter(isPushable);
     const stats = emptyPushStats();
     const batch: Array<{ doc: DocumentResult; upsert: UpsertDoc }> = [];
     for (const unsynced of docs) {
@@ -180,15 +194,8 @@ async function pushAll(): Promise<PushStats> {
       const batch: Array<{ doc: DocumentResult; upsert: UpsertDoc }> = [];
 
       for (const unsynced of unsyncedDocs) {
-        // Skip sentinel/internal documents
-        if (unsynced.id.startsWith('__')) continue;
-        // Journal drafts are per-session scratch; only the consolidated
-        // journal memory is worth sharing.
-        if (unsynced.metadata.type === 'journal_draft') continue;
-        // Owned by the remote (metadata.read_only): local changes never go back.
-        if (isReadOnlyDoc(unsynced.metadata)) continue;
-        // Refused before and unchanged since: stays local until edited.
-        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        // Sentinels, journal drafts, read-only docs, refused-and-unchanged docs (isPushable).
+        if (!isPushable(unsynced)) continue;
         // Stamp the last writer's device: pull on this device skips its own
         // echoes, while the same user's other devices still receive the row.
         const doc: DocumentResult = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
@@ -216,9 +223,9 @@ async function pushAll(): Promise<PushStats> {
     try {
       const existing = await getSyncSubscriptions();
       const existingSet = new Set(existing);
-      // A name merged away on this machine is never re-followed implicitly.
-      const redirects = await getCollectionRedirects();
-      const newSubs = pushedCollections.filter(c => !existingSet.has(c) && !Object.hasOwn(redirects, c));
+      // A name merged away or left on this machine is never re-followed implicitly.
+      const unfollowed = await getUnfollowedCollections();
+      const newSubs = pushedCollections.filter(c => !existingSet.has(c) && !unfollowed.has(c));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }
@@ -344,11 +351,7 @@ export async function countUnpushed(): Promise<number> {
   for (const col of await listCollections()) {
     if (!isSyncable(col.name)) continue;
     const docs = await getDocumentsByFilter(col.name, { is_synced: false }, 100_000).catch(() => []);
-    for (const d of docs) {
-      if (d.id.startsWith('__') || d.metadata.type === 'journal_draft' || isReadOnlyDoc(d.metadata)) continue;
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
-      n++;
-    }
+    for (const d of docs) if (isPushable(d)) n++;
   }
   return n;
 }
@@ -360,7 +363,7 @@ export async function listRejectedDocs(): Promise<Array<{ collection: string; id
     if (!isSyncable(col.name)) continue;
     const docs = await getDocumentsByFilter(col.name, { is_synced: false }, 100_000).catch(() => []);
     for (const d of docs) {
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+      if (isRejectedUnchanged(d)) {
         out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
       }
     }

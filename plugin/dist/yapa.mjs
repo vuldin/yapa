@@ -1513,6 +1513,33 @@ async function clearCollectionRedirect(name) {
   delete redirects[name];
   await writeCollectionRedirects(redirects);
 }
+async function getLeftCollections() {
+  try {
+    const r = await getDocumentsByFilter2("global", { type: { $eq: "collections_left" } }, 1);
+    const raw = r[0]?.metadata.collections;
+    return Array.isArray(raw) ? raw.map(String) : String(raw ?? "").split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function writeLeftCollections(names) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", COLLECTIONS_LEFT_ID, "collections removed from this machine", {
+    type: "collections_left",
+    collections: [...new Set(names)].sort().join(",")
+  });
+}
+async function addLeftCollection(name) {
+  const left = await getLeftCollections();
+  if (!left.includes(name)) await writeLeftCollections([...left, name]);
+}
+async function clearLeftCollection(name) {
+  const left = await getLeftCollections();
+  if (left.includes(name)) await writeLeftCollections(left.filter((n) => n !== name));
+}
+async function getUnfollowedCollections() {
+  return /* @__PURE__ */ new Set([...Object.keys(await getCollectionRedirects()), ...await getLeftCollections()]);
+}
 function resolveCollectionRedirect(name, redirects) {
   let current = name;
   const seen = /* @__PURE__ */ new Set([name]);
@@ -1526,12 +1553,45 @@ function resolveCollectionRedirect(name, redirects) {
 }
 async function resolveWriteCollection(name) {
   if (name === "global") return { collection: name };
-  return resolveCollectionRedirect(name, await getCollectionRedirects());
+  const w = resolveCollectionRedirect(name, await getCollectionRedirects());
+  if ((await getLeftCollections()).includes(w.collection)) throw new CollectionLeftError(w.collection);
+  return w;
+}
+async function getPendingBackfills() {
+  try {
+    const r = await getDocumentsByFilter2("global", { type: { $eq: "collections_backfill" } }, 1);
+    return String(r[0]?.metadata.collections ?? "").split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function writePendingBackfills(names) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", COLLECTIONS_BACKFILL_ID, "collections to backfill", {
+    type: "collections_backfill",
+    collections: [...new Set(names)].sort().join(",")
+  });
+}
+async function addPendingBackfill(name) {
+  const p = await getPendingBackfills();
+  if (!p.includes(name)) await writePendingBackfills([...p, name]);
+}
+async function clearPendingBackfill(name) {
+  const p = await getPendingBackfills();
+  if (p.includes(name)) await writePendingBackfills(p.filter((n) => n !== name));
+}
+async function rejoinCollection(name) {
+  if (!(await getLeftCollections()).includes(name)) return false;
+  await clearLeftCollection(name);
+  const subs = await getSyncSubscriptions();
+  if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  await addPendingBackfill(name);
+  return true;
 }
 function redirectNote(w) {
   return w.redirectedFrom ? `"${w.redirectedFrom}" was merged into "${w.collection}" on this machine, so this was written to "${w.collection}".` : "";
 }
-var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID;
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID, COLLECTIONS_LEFT_ID, CollectionLeftError, COLLECTIONS_BACKFILL_ID;
 var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
@@ -1539,6 +1599,17 @@ var init_sentinel = __esm({
     SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
     COLLECTION_REDIRECTS_ID = "__collection_redirects__";
+    COLLECTIONS_LEFT_ID = "__collections_left__";
+    CollectionLeftError = class extends Error {
+      constructor(collection) {
+        super(`"${collection}" was removed from this machine (collection_delete), so writes to it are refused: written here it would be pushed but never pulled, and teammates' documents in it would be missing. To follow it again with its full history, run sync subscribe ${collection} (or collection_create ${collection}), then write again.`);
+        this.collection = collection;
+        this.name = "CollectionLeftError";
+      }
+      collection;
+      code = "collection_left";
+    };
+    COLLECTIONS_BACKFILL_ID = "__collections_backfill__";
   }
 });
 
@@ -1566,6 +1637,11 @@ function matchCollectionMap(cwd, entries, opts = {}) {
   return best?.collection;
 }
 async function detectCollection(cwd, roots = getConfig().PROJECT_ROOTS, customers = getConfig().CUSTOMERS, map = getConfig().COLLECTION_MAP) {
+  const d = await detect(cwd, roots, customers, map);
+  if (d.collection !== "global" && (await getLeftCollections()).includes(d.collection)) d.left = true;
+  return d;
+}
+async function detect(cwd, roots, customers, map) {
   if (!cwd) return { collection: "global" };
   const mapped = matchCollectionMap(cwd, map);
   if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
@@ -1600,6 +1676,7 @@ function scopeNotes(d) {
     notes.push("(shared: this name syncs; local-only names start with lowercase `private-` or `local-`)");
   }
   if (d.redirectedFrom) notes.push(`(merged from \`${d.redirectedFrom}\`)`);
+  if (d.left) notes.push(`(removed from this machine: writes to it are refused; \`sync subscribe ${d.collection}\` follows it again)`);
   return notes.length ? ` ${notes.join(" ")}` : "";
 }
 function follow(d, redirects) {
@@ -4376,6 +4453,12 @@ async function writeIfUnchanged(collection, doc, metadata) {
     return true;
   });
 }
+function isRejectedUnchanged(doc) {
+  return !!doc.metadata.sync_rejected && doc.metadata.sync_rejected_fp === syncFingerprint(doc);
+}
+function isPushable(doc) {
+  return doc.metadata.is_synced === false && !doc.id.startsWith("__") && doc.metadata.type !== "journal_draft" && !isReadOnlyDoc(doc.metadata) && !isRejectedUnchanged(doc);
+}
 function stripLocalOnly(metadata) {
   const out = { ...metadata };
   for (const k of LOCAL_ONLY_KEYS) delete out[k];
@@ -4396,7 +4479,7 @@ function pushDocsNow(collection, ids) {
     const backend = await getSyncBackend();
     if (!backend) return out;
     await resolveSyncUsername();
-    const docs = (await getDocumentsByIds2(collection, ids)).filter((d) => d.metadata.is_synced === false && !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const docs = (await getDocumentsByIds2(collection, ids)).filter(isPushable);
     const stats = emptyPushStats();
     const batch = [];
     for (const unsynced of docs) {
@@ -4466,10 +4549,7 @@ async function pushAll() {
       const before = stats.pushed + stats.linked;
       const batch = [];
       for (const unsynced of unsyncedDocs) {
-        if (unsynced.id.startsWith("__")) continue;
-        if (unsynced.metadata.type === "journal_draft") continue;
-        if (isReadOnlyDoc(unsynced.metadata)) continue;
-        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        if (!isPushable(unsynced)) continue;
         const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
         try {
           batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
@@ -4493,8 +4573,8 @@ async function pushAll() {
     try {
       const existing = await getSyncSubscriptions();
       const existingSet = new Set(existing);
-      const redirects = await getCollectionRedirects();
-      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !Object.hasOwn(redirects, c));
+      const unfollowed = await getUnfollowedCollections();
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !unfollowed.has(c));
       if (newSubs.length > 0) {
         await updateSyncSubscriptions([...existing, ...newSubs]);
       }
@@ -4592,11 +4672,7 @@ async function countUnpushed() {
   for (const col of await listCollections2()) {
     if (!isSyncableCollection(col.name)) continue;
     const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
-    for (const d of docs) {
-      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata)) continue;
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
-      n++;
-    }
+    for (const d of docs) if (isPushable(d)) n++;
   }
   return n;
 }
@@ -4606,7 +4682,7 @@ async function listRejectedDocs() {
     if (!isSyncableCollection(col.name)) continue;
     const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
     for (const d of docs) {
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+      if (isRejectedUnchanged(d)) {
         out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
       }
     }
@@ -4806,7 +4882,7 @@ function describeClaim(r) {
         const whose = prev.user === getConfig().USERNAME ? `your other session ${String(prev.session ?? "")}` : `${prev.user}'s expired claim`;
         return `Claimed ${r.id} (took over from ${whose}).`;
       }
-      return r.renewed ? `Claim on ${r.id} renewed.` : `Claimed ${r.id}: teammates see it as yours.`;
+      return r.renewed ? `Claim on ${r.id} renewed.` : coordinatedLocally(r.collection) ? `Claimed ${r.id} (this machine: your other sessions see it as yours).` : `Claimed ${r.id}: teammates see it as yours.`;
     }
     case "refused":
       return describeRefusal(r);
@@ -5562,31 +5638,69 @@ async function listCollectionsWithCounts() {
 async function createNewCollection(name) {
   await createCollection2(name);
   await clearCollectionRedirect(name);
+  if (isSyncable2(name)) await rejoinCollection(name);
+  else await clearLeftCollection(name);
 }
 async function removeCollection(name, opts = {}) {
-  if (isSyncable2(name) && !opts.force && opts.confirm !== name) {
-    const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
-    const count = docs.filter((d) => !d.id.startsWith("__")).length;
-    if (count > 0) {
-      const reach = getConfig().SYNC_ENABLED ? "Deleting it permanently deletes the collection for EVERY teammate on the sync service." : "Deleting it is permanent.";
-      throw new CollectionDeleteRefusedError(
-        `Refused: "${name}" is a shared collection with ${count} document${count === 1 ? "" : "s"}. ${reach} This is not a merge: to combine it with another collection, use collection_merge (it keeps every document). To delete it anyway, confirm with the user, then pass confirm: "${name}".`,
-        count
-      );
+  const scope = opts.scope ?? "local";
+  const shared = isSyncable2(name);
+  const syncOn = getConfig().SYNC_ENABLED;
+  const docs = (await getDocumentsByFilter2(name, {}, 1e5).catch(() => [])).filter((d) => !d.id.startsWith("__"));
+  const result = { name, scope, removed: docs.length, pushed: 0, deletedRemotely: 0, shared };
+  const confirmed = !!opts.force || opts.confirm === name;
+  const refuse = (why) => {
+    throw new CollectionDeleteRefusedError(
+      `Refused: ${why} This is not a merge: to combine it with another collection, use collection_merge (it keeps every document). To delete it anyway, confirm with the user, then pass confirm: "${name}".`,
+      docs.length
+    );
+  };
+  const n = `${docs.length} document${docs.length === 1 ? "" : "s"}`;
+  if (docs.length > 0 && !confirmed) {
+    if (!shared) refuse(`"${name}" is local only, with ${n} and no copy anywhere else: deleting it is permanent.`);
+    if (!syncOn) refuse(`"${name}" has ${n} and sync is off, so this machine holds the only copy: deleting it is permanent.`);
+    if (scope === "everyone") {
+      refuse(`deleting "${name}" for everyone removes your documents in it from the sync service and from every teammate's machine (${n} here).`);
     }
   }
-  if (getConfig().SYNC_ENABLED && isSyncable2(name)) {
-    const docs = await getDocumentsByFilter2(name, {}, 1e5).catch(() => []);
-    const me = getConfig().USERNAME;
-    const real = docs.filter((d) => !d.id.startsWith("__") && d.metadata.type !== "journal_draft");
-    await queueSyncDeletes(real.filter((d) => !d.metadata.origin_user || d.metadata.origin_user === me).map((d) => d.id), name);
-    await addLocalTombstones(real.filter((d) => d.metadata.origin_user && d.metadata.origin_user !== me).map((d) => d.id));
+  const me = getConfig().USERNAME;
+  const mine = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
+  if (shared && syncOn && scope === "local") {
+    const stuck = docs.filter((d) => d.metadata.is_synced === false && isRejectedUnchanged(d));
+    if (stuck.length && !confirmed) {
+      refuse(`${stuck.length} document${stuck.length === 1 ? "" : "s"} in "${name}" (${stuck.slice(0, 3).map((d) => d.id).join(", ")}${stuck.length > 3 ? ", ..." : ""}) ${stuck.length === 1 ? "was refused by the sync service and exists" : "were refused by the sync service and exist"} only on this machine: deleting it here loses ${stuck.length === 1 ? "it" : "them"}.`);
+    }
+    const unpushed = docs.filter(isPushable).map((d) => d.id);
+    if (unpushed.length) {
+      const r = await pushDocsNow(name, unpushed).catch(() => ({ pushed: [], errors: unpushed.length }));
+      result.pushed = r.pushed.length;
+      const missing = unpushed.length - r.pushed.length;
+      if (missing > 0 && !confirmed) {
+        refuse(`${missing} of your documents in "${name}" could not be pushed to the sync service, so deleting it here would lose them.`);
+      }
+    }
   }
-  if (isSyncable2(name)) {
+  if (shared && syncOn && scope === "everyone") {
+    const real = docs.filter((d) => d.metadata.type !== "journal_draft");
+    const own = real.filter(mine).map((d) => d.id);
+    await queueSyncDeletes(own, name);
+    await addLocalTombstones(real.filter((d) => !mine(d)).map((d) => d.id));
+    result.deletedRemotely = own.length;
+  }
+  if (shared) {
     const subs = await getSyncSubscriptions();
     if (subs.includes(name)) await updateSyncSubscriptions(subs.filter((s) => s !== name));
+    if (scope === "local" && (opts.markLeft ?? true)) await addLeftCollection(name);
   }
   await deleteCollection2(name);
+  return result;
+}
+function removeReport(r) {
+  const docs = `${r.removed} document${r.removed === 1 ? "" : "s"}`;
+  if (!r.shared) return `Deleted "${r.name}" (${docs}) from this machine. It was local only, so it is gone.`;
+  if (r.scope === "everyone") {
+    return `Deleted "${r.name}" (${docs}) here and, for everyone, your ${r.deletedRemotely} document${r.deletedRemotely === 1 ? "" : "s"} in it on the sync service. Teammates' own documents in it stay shared.`;
+  }
+  return `Removed "${r.name}" (${docs}) from this machine only${r.pushed ? ` after pushing ${r.pushed} unpushed document${r.pushed === 1 ? "" : "s"} of yours` : ""}. Teammates and the sync service keep it; this machine no longer follows it (sync subscribe ${r.name} to follow it again).`;
 }
 async function mergeCollections(from, into, opts = {}) {
   if (from === into) throw new Error("Source and target are the same collection");
@@ -5660,7 +5774,7 @@ async function mergeCollections(from, into, opts = {}) {
     const left = await getCollectionCount2(from);
     if (left !== 0) throw new Error(`"${from}" still holds ${left} document(s) after the move; it was not deleted`);
   }
-  await removeCollection(from);
+  await removeCollection(from, { force: true, markLeft: false });
   result.sourceRemoved = true;
   await addCollectionRedirect(from, into);
   return result;
@@ -5704,6 +5818,7 @@ var init_manage = __esm({
     init_deletes();
     init_sentinel();
     init_doc_lock();
+    init_push();
     init_store();
     init_syncable();
     isSyncable2 = isSyncableCollection;
@@ -5714,6 +5829,7 @@ var init_manage = __esm({
         this.name = "CollectionDeleteRefusedError";
       }
       documentCount;
+      code = "collection_delete_refused";
     };
     MERGE_BATCH = 100;
   }
@@ -7283,8 +7399,8 @@ async function pullFromRemote() {
   const recovering = lastPull === 0;
   if (recovering) {
     try {
-      const redirects2 = await getCollectionRedirects();
-      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !Object.hasOwn(redirects2, c));
+      const unfollowed2 = await getUnfollowedCollections();
+      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
       const subs = await getSyncSubscriptions();
       const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -7300,23 +7416,25 @@ async function pullFromRemote() {
   }
   const collections = await listCollections2();
   const localCollectionNames = new Set(collections.map((c) => c.name));
-  const redirects = await getCollectionRedirects();
+  const unfollowed = await getUnfollowedCollections();
   const pullCollectionNames = [];
   for (const col of collections) {
-    if (isSyncableCollection(col.name) && !Object.hasOwn(redirects, col.name)) pullCollectionNames.push(col.name);
+    if (isSyncableCollection(col.name) && !unfollowed.has(col.name)) pullCollectionNames.push(col.name);
   }
-  const backfill = /* @__PURE__ */ new Set();
+  const pendingBackfills = (await getPendingBackfills()).filter((n) => !unfollowed.has(n));
+  const backfill = new Set(pendingBackfills);
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncableCollection(sub) && !Object.hasOwn(redirects, sub)) {
+    if ((!localCollectionNames.has(sub) || backfill.has(sub)) && isSyncableCollection(sub) && !unfollowed.has(sub)) {
       await getOrCreateCollection2(sub);
-      pullCollectionNames.push(sub);
+      if (!pullCollectionNames.includes(sub)) pullCollectionNames.push(sub);
       backfill.add(sub);
     }
   }
   const followed = new Set(pullCollectionNames);
   let fatal = false;
   for (const collectionName of pullCollectionNames) {
+    const errorsBefore = stats.errors;
     await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
       includeOwnDevice: recovering,
       followedCollections: followed,
@@ -7325,6 +7443,7 @@ async function pullFromRemote() {
       }
     });
     if (fatal) break;
+    if (pendingBackfills.includes(collectionName) && stats.errors === errorsBefore) await clearPendingBackfill(collectionName);
   }
   if (!fatal) await updateSyncPullTimestamp(cycleStartedAt);
   return stats;
@@ -9230,6 +9349,7 @@ __export(src_exports, {
   CLASSIFIER_SYSTEM_PROMPT: () => CLASSIFIER_SYSTEM_PROMPT,
   ClaimBusyError: () => ClaimBusyError,
   CollectionDeleteRefusedError: () => CollectionDeleteRefusedError,
+  CollectionLeftError: () => CollectionLeftError,
   CoordinationUnavailableError: () => CoordinationUnavailableError,
   DECAY_INTERVAL_MS: () => DECAY_INTERVAL_MS,
   DEFAULT_STATUS: () => DEFAULT_STATUS,
@@ -9276,8 +9396,10 @@ __export(src_exports, {
   addDependency: () => addDependency,
   addDocument: () => addDocument2,
   addDocumentsBatch: () => addDocumentsBatch2,
+  addLeftCollection: () => addLeftCollection,
   addLocalTombstone: () => addLocalTombstone,
   addLocalTombstones: () => addLocalTombstones,
+  addPendingBackfill: () => addPendingBackfill,
   applyCompaction: () => applyCompaction,
   applyDecay: () => applyDecay,
   applyServerUsername: () => applyServerUsername,
@@ -9309,6 +9431,8 @@ __export(src_exports, {
   classifyMemories: () => classifyMemories,
   clearCollectionRedirect: () => clearCollectionRedirect,
   clearEmbeddingMemo: () => clearEmbeddingMemo,
+  clearLeftCollection: () => clearLeftCollection,
+  clearPendingBackfill: () => clearPendingBackfill,
   clearPendingDeletes: () => clearPendingDeletes,
   clearSelectedForManifest: () => clearSelectedForManifest,
   closeSyncBackend: () => closeSyncBackend,
@@ -9375,9 +9499,11 @@ __export(src_exports, {
   getDocumentsByIds: () => getDocumentsByIds2,
   getDueTasks: () => getDueTasks,
   getEmbeddingModel: () => getEmbeddingModel,
+  getLeftCollections: () => getLeftCollections,
   getLocalTombstones: () => getLocalTombstones,
   getNextTaskId: () => getNextTaskId,
   getOrCreateCollection: () => getOrCreateCollection2,
+  getPendingBackfills: () => getPendingBackfills,
   getPendingDeletes: () => getPendingDeletes,
   getRegistryPath: () => getRegistryPath,
   getStore: () => getStore,
@@ -9387,6 +9513,7 @@ __export(src_exports, {
   getSyncSubscriptions: () => getSyncSubscriptions,
   getSynthesisModel: () => getSynthesisModel,
   getTask: () => getTask,
+  getUnfollowedCollections: () => getUnfollowedCollections,
   hasPendingSync: () => hasPendingSync,
   healthStatusFor: () => healthStatusFor,
   heartbeatIfDue: () => heartbeatIfDue,
@@ -9396,7 +9523,9 @@ __export(src_exports, {
   isDetectionStale: () => isDetectionStale,
   isMemoryKind: () => isMemoryKind,
   isOpenTyped: () => isOpenTyped,
+  isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
+  isRejectedUnchanged: () => isRejectedUnchanged,
   isSignedOutError: () => isSignedOutError,
   isSyncConfigured: () => isSyncConfigured,
   isSyncableCollection: () => isSyncableCollection,
@@ -9484,10 +9613,12 @@ __export(src_exports, {
   recordUnpushed: () => recordUnpushed,
   redirectNote: () => redirectNote,
   refreshSyncHealthNames: () => refreshSyncHealthNames,
+  rejoinCollection: () => rejoinCollection,
   rekeyTask: () => rekeyTask,
   releaseTaskClaim: () => releaseTaskClaim,
   removeCollection: () => removeCollection,
   removeDependency: () => removeDependency,
+  removeReport: () => removeReport,
   removeSessionRecord: () => removeSessionRecord,
   requestDecision: () => requestDecision,
   requireCoordination: () => requireCoordination,
@@ -9666,7 +9797,7 @@ var init_rules = __esm({
 You have YAPA's persistent memory and durable task tools (the yapa MCP server: \`memory_*\`, \`task_*\`, \`journal_*\`, \`collection_*\`, \`compaction_*\`, \`sync\`). Hooks already do the routine work: this block plus open tasks and top memories are injected at session start, and a semantic recall for each prompt is injected as \`# YAPA Recall\` (after pulling teammates' latest writes for the active collection). Do not repeat that recall unless you need a different or more specific query.
 
 ### Scope
-The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). \`private-*\`, \`local-*\` and \`global\` collections never sync (\`global\` is personal; team-wide knowledge goes in a shared collection). To combine or rename collections use \`collection_merge\` (it keeps every document); never \`collection_delete\`, which deletes a shared collection for every teammate.
+The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). \`private-*\`, \`local-*\` and \`global\` collections never sync (\`global\` is personal; team-wide knowledge goes in a shared collection). To combine or rename collections use \`collection_merge\` (it keeps every document), not \`collection_delete\`. \`collection_delete\` removes a collection from this machine only; pass \`scope: "everyone"\` (with \`confirm\`) only when the user explicitly asks to delete it for the whole team.
 
 ### Capture as you go (do not batch to the end)
 Call \`memory_store\` (salience >= 2.0) when: a bug's root cause is identified; a config value, env var, endpoint, or credential location is learned; the user states a preference, decision, or correction; a non-obvious technical fact is discovered; a solution took real effort; a decision or commitment surfaces.
@@ -10163,8 +10294,9 @@ async function freshenFromRemote(collection, opts = {}) {
   if (!isSyncConfigured(config)) return 0;
   if (!isSyncableCollection(collection)) return 0;
   try {
-    if (Object.hasOwn(await getCollectionRedirects(), collection)) return 0;
-    const followed = (await getSyncSubscriptions()).includes(collection);
+    if ((await getUnfollowedCollections()).has(collection)) return 0;
+    const pendingBackfill = (await getPendingBackfills()).includes(collection);
+    const followed = (await getSyncSubscriptions()).includes(collection) && !pendingBackfill;
     if (opts.gate && followed && !shouldPull(collection)) return 0;
     const since = followed ? Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS) : 0;
     const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
@@ -10176,6 +10308,7 @@ async function freshenFromRemote(collection, opts = {}) {
     if (stats.errors === 0) {
       noteSyncOk();
       recordPull(collection);
+      if (pendingBackfill) await clearPendingBackfill(collection);
     }
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();

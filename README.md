@@ -183,7 +183,7 @@ walkthrough and its tools.
 | `collection_list` | List all collections with doc counts |
 | `collection_create` | Create new collection |
 | `collection_merge` | Move every document of one collection into another (ids and metadata kept, synced as a move), then remove the empty source |
-| `collection_delete` | Delete a collection (a non-empty shared one needs `confirm: "<name>"`; not a merge) |
+| `collection_delete` | Remove a collection from this machine (`scope: "local"`, the default: a shared one stays with teammates, everything only this machine has is pushed first, and writes to it are refused until `sync subscribe` follows it again), or delete your documents in it for everyone (`scope: "everyone"`, needs `confirm: "<name>"`). A non-empty collection with no other copy (local-only, or sync off) needs `confirm` too. Not a merge |
 | `decay_sweep` | Manually trigger salience decay |
 | `sync` | Sync control via `action`: `status` (health, last pull, pending), `now` (push+pull cycle), `collections` (remote list + subscriptions), `subscribe` / `unsubscribe` (local data preserved) |
 | `uninstall` | Remove YAPA from your system |

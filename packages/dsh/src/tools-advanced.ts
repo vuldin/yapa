@@ -37,6 +37,7 @@ import {
   getSyncState,
   getSyncSubscriptions,
   clearCollectionRedirect,
+  clearLeftCollection,
   janitorSweep,
   listCollections,
   systemPromptActivate,
@@ -857,8 +858,11 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
             }
             const existing = await getSyncSubscriptions();
             await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
-            // Asked for by name: a collection merged away here is followed again.
-            for (const name of valid) await clearCollectionRedirect(name);
+            // Asked for by name: a collection merged away or left here is followed again.
+            for (const name of valid) {
+              await clearCollectionRedirect(name);
+              await clearLeftCollection(name);
+            }
             for (const name of valid) await getOrCreateCollection(name);
             await syncCycle();
             const lines = [`Subscribed to: ${valid.join(', ')}`];
