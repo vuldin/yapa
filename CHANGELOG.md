@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Upgrading:** `collection_delete` now removes a shared collection from this machine only, unless you pass `scope: "everyone"`.
+
+### Features
+- **Deleting a collection no longer deletes it for the team by default.** `collection_delete` (and DSH `yapa_collection_delete`) takes `scope`:
+  - `local` (the default): a shared collection is removed from this machine only. Your unpushed documents in it are pushed first, and the delete is refused if any can't be. Teammates and the sync service keep everything, and this machine stops following it (no backfill, pull, recovery or push auto-subscribe) until `sync subscribe` or `collection_create`.
+  - `everyone`: needs `confirm: "<name>"`, and deletes your documents in it from the sync service and from every teammate's machine (as `collection_delete` did before). Teammates' own documents stay shared.
+  - The reply says exactly what was removed where.
+
+### Fixes
+- **Deleting a collection that has no other copy needs `confirm`.** A non-empty local-only collection (`private-*`, `local-*`, `global`), or any collection while sync is off, was deleted without confirmation, and that is permanent.
+- A claim in a local-only collection says "this machine: your other sessions see it as yours" instead of "teammates see it as yours".
+
 ## 1.10.3 (2026-11-03)
 
 The status line always says which collection a session writes to and whether it stays on this machine, and `yapa scope` tells a project's scripts which collection their folder uses.

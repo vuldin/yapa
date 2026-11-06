@@ -19,7 +19,7 @@ import { PostgresBackend } from './postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds } from '../store/index.js';
 import { pullFromRemote, pullCollection } from './pull.js';
 import { isSyncableCollection } from './syncable.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions, addCollectionRedirect } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, updateSyncSubscriptions, getSyncSubscriptions, addCollectionRedirect, clearLeftCollection } from './sentinel.js';
 import { removeCollection, mergeCollections } from '../collections/manage.js';
 import { getPendingDeletes, getLocalTombstones } from './deletes.js';
 import { addLocalTombstone } from './deletes.js';
@@ -264,7 +264,7 @@ describe('removeCollection under sync', () => {
     await store.addDocument('customer-gone', 'theirs-1', 'their note', { type: 'memory', origin_user: 'teammate' });
     await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'customer-gone']);
 
-    await removeCollection('customer-gone', { confirm: 'customer-gone' });
+    await removeCollection('customer-gone', { scope: 'everyone', confirm: 'customer-gone' });
 
     expect(await getPendingDeletes()).toContain('customer-gone:mine-1');
     expect((await getLocalTombstones()).has('theirs-1')).toBe(true);
@@ -275,6 +275,25 @@ describe('removeCollection under sync', () => {
     await pullFromRemote();
     expect(mockedRemote.mock.calls.some(c => c[0] === 'customer-gone')).toBe(false);
     expect((await store.listCollections()).some(c => c.name === 'customer-gone')).toBe(false);
+  });
+});
+
+describe('a shared collection removed from this machine only', () => {
+  it('is never pulled, backfilled or re-subscribed by recovery, until subscribe clears it', async () => {
+    const store = getStore();
+    await store.createCollection('customer-left');
+    await store.addDocument('customer-left', 'l-1', 'a teammate note', { type: 'memory', origin_user: 'teammate', is_synced: true });
+    await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'customer-left']);
+    await removeCollection('customer-left');
+    expect(await getPendingDeletes()).not.toContain('customer-left:l-1');
+    // A subscription left behind by an older version must not bring it back either.
+    await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'customer-left']);
+    mockedRemote.mockImplementation(async (col: string) => (col === 'customer-left' ? [remote('l-1', 'customer-left', 'a teammate note')] : []));
+    await pullFromRemote();
+    expect(mockedRemote.mock.calls.some(c => c[0] === 'customer-left')).toBe(false);
+    expect((await store.listCollections()).some(c => c.name === 'customer-left')).toBe(false);
+    await clearLeftCollection('customer-left');
+    mockedRemote.mockReset();
   });
 });
 

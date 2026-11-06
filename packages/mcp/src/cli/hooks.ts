@@ -18,7 +18,7 @@ import {
   getSyncPullTimestamp,
   getSyncSubscriptions,
   updateSyncSubscriptions,
-  getCollectionRedirects,
+  getUnfollowedCollections,
   isSyncConfigured,
   resolveSyncUsername,
   captureTurn,
@@ -126,8 +126,8 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
   // global/private-*/local-* never sync: skip the sign-in and the request.
   if (!isSyncableCollection(collection)) return 0;
   try {
-    // Merged away on this machine: teammates' rows must not bring it back.
-    if (Object.hasOwn(await getCollectionRedirects(), collection)) return 0;
+    // Merged away or left on this machine: teammates' rows must not bring it back.
+    if ((await getUnfollowedCollections()).has(collection)) return 0;
     // First visit to a shared collection (a teammate's project folder, or one
     // named in the prompt): pull its whole history, then follow it so the
     // background sync keeps it current. Subscribe only after the backfill

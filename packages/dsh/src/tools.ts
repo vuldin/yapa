@@ -36,6 +36,7 @@ import {
   parseRelativeDate,
   recallMemory,
   removeCollection,
+  removeReport,
   removeDependency,
   runDecaySweep,
   searchTasks,
@@ -1177,24 +1178,27 @@ export function registerTools(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'yapa_collection_delete',
     description:
-      'Permanently delete a collection and ALL its contents. Not a merge; to combine collections use '
-      + 'yapa_collection_merge. A non-empty shared collection is deleted for every teammate on the sync service, '
-      + 'so it requires `confirm` set to the exact collection name, after the user explicitly asked for the deletion.',
+      'Delete a collection. Not a merge; to combine or rename collections use yapa_collection_merge. '
+      + 'scope `local` (default) removes it from THIS machine only: a shared collection stays on the sync service for teammates '
+      + '(your unpushed documents are pushed first) and this machine stops following it. scope `everyone` also deletes your '
+      + 'documents in it for every teammate: only when the user explicitly asks, with `confirm` set to the exact name. '
+      + 'A collection with no other copy (private-*, local-*, global, or any while sync is off) needs `confirm` when non-empty.',
     parameters: {
       name: { type: 'string', required: true },
-      confirm: { type: 'string', description: 'Exact collection name; required to delete a non-empty shared collection' },
+      scope: { type: 'string', enum: ['local', 'everyone'], description: 'local (default): this machine only; everyone: also for every teammate' },
+      confirm: { type: 'string', description: 'Exact collection name; required when the delete loses data' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { name: { type: 'string', required: true } },
+        properties: { name: { type: 'string', required: true }, report: { type: 'string', required: true } },
       },
-      render: (_args, v) => text(`Deleted collection "${v.name}"`),
+      render: (_args, v) => text(v.report),
     },
     async execute(args) {
-      await removeCollection(args.name, { confirm: args.confirm });
-      return { name: args.name };
+      const r = await removeCollection(args.name, { scope: args.scope as 'local' | 'everyone' | undefined, confirm: args.confirm });
+      return { name: args.name, report: removeReport(r) };
     },
     presentCall: args => ({ card: 'generic', title: `Delete collection ${args.name} (all contents)`, kind: 'delete' }),
   }));

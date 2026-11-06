@@ -133,12 +133,15 @@ describe('registered tools over the local store', () => {
     }
   });
 
-  it('collection_delete refuses a non-empty shared collection until confirmed', async () => {
-    await expect(call('collection_delete', { name: 'project-acme' })).rejects.toThrow(/EVERY teammate.*collection_merge/s);
+  it('collection_delete: for everyone needs confirm; here only refuses while your unpushed documents cannot be pushed', async () => {
+    await expect(call('collection_delete', { name: 'project-acme', scope: 'everyone' })).rejects.toThrow(/for everyone removes your documents.*collection_merge/s);
+    // No sync service here: the unpushed tasks can't reach the team copy, so a local delete would lose them.
+    await expect(call('collection_delete', { name: 'project-acme' })).rejects.toThrow(/could not be pushed/);
     await createNewCollection('customer-into');
     const merged = await call('collection_merge', { from: 'project-acme', into: 'customer-into', dry_run: true });
     expect(merged.content[0].text).toMatch(/^Dry run: would move 3 document/);
-    await call('collection_delete', { name: 'project-acme', confirm: 'project-acme' });
+    const r = await call('collection_delete', { name: 'project-acme', scope: 'everyone', confirm: 'project-acme' });
+    expect(r.content[0].text).toMatch(/^Deleted "project-acme" \(3 documents\) here and, for everyone, your 3 documents/);
     expect((await listCollections()).map(c => c.name)).not.toContain('project-acme');
   });
 });

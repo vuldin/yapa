@@ -75,6 +75,8 @@ import {
   mergeCollections,
   mergeReportLines,
   clearCollectionRedirect,
+  clearLeftCollection,
+  removeReport,
   resolveWriteCollection,
   redirectNote,
   removeCollection,
@@ -1465,15 +1467,19 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'collection_delete',
-    'Permanently delete a collection and all its contents. Not a merge; to combine collections use collection_merge. A non-empty shared collection is deleted for every teammate on the sync service, so it requires `confirm` set to the exact collection name, after the user explicitly asked for the deletion.',
+    'Delete a collection. Not a merge; to combine or rename collections use collection_merge. '
+      + 'scope `local` (default) removes it from THIS machine only: a shared collection stays on the sync service for teammates (your unpushed documents are pushed first) and this machine stops following it; `sync subscribe` brings it back. '
+      + 'scope `everyone` also deletes your documents in it from the sync service and every teammate\'s machine: use it only when the user explicitly asks to remove it for the team, with `confirm` set to the exact name. '
+      + 'A collection with no other copy (private-*, local-*, global, or any collection while sync is off) is gone for good, so a non-empty one needs `confirm` too.',
     {
       name: z.string().describe('Collection name to delete'),
-      confirm: z.string().optional().describe('Exact collection name; required to delete a non-empty shared collection'),
+      scope: z.enum(['local', 'everyone']).optional().describe('local (default): this machine only; everyone: also delete your documents in it for every teammate'),
+      confirm: z.string().optional().describe('Exact collection name; required when the delete loses data (scope everyone, or no other copy exists)'),
     },
-    async ({ name, confirm }) => {
-      // Refusals (shared, non-empty, unconfirmed) throw with the reason for the model.
-      await removeCollection(name, { confirm });
-      return { content: [{ type: 'text' as const, text: `Deleted collection "${name}"` }] };
+    async ({ name, scope, confirm }) => {
+      // Refusals (it would lose data, unconfirmed) throw with the reason for the model.
+      const r = await removeCollection(name, { scope, confirm });
+      return { content: [{ type: 'text' as const, text: removeReport(r) }] };
     },
   );
 
@@ -1598,8 +1604,11 @@ export function registerTools(server: McpServer): void {
             }
             const existing = await getSyncSubscriptions();
             await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
-            // Asked for by name: a collection merged away here is followed again.
-            for (const name of valid) await clearCollectionRedirect(name);
+            // Asked for by name: a collection merged away or left here is followed again.
+            for (const name of valid) {
+              await clearCollectionRedirect(name);
+              await clearLeftCollection(name);
+            }
             for (const name of valid) await getOrCreateCollection(name);
             // Backfill full history: a regular cycle only pulls docs newer than
             // the shared last-pull timestamp, so a new subscription would start empty.

@@ -118,6 +118,54 @@ export async function clearCollectionRedirect(name: string): Promise<void> {
   await writeCollectionRedirects(redirects);
 }
 
+const COLLECTIONS_LEFT_ID = '__collections_left__';
+
+/**
+ * Shared collections removed from this machine only (`collection_delete`
+ * with scope `local`): teammates keep them on the sync service, and this
+ * machine stops following them. Kept in `global` beside the subscriptions,
+ * so it never syncs. Like a redirect, a left name is never re-followed
+ * implicitly (no backfill, recovery or push auto-subscribe, no pull); an
+ * explicit `sync subscribe` or `collection_create` clears it.
+ */
+export async function getLeftCollections(): Promise<string[]> {
+  try {
+    const r = await getDocumentsByFilter('global', { type: { $eq: 'collections_left' } }, 1);
+    const raw = r[0]?.metadata.collections;
+    return Array.isArray(raw) ? raw.map(String) : String(raw ?? '').split(',').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function writeLeftCollections(names: string[]): Promise<void> {
+  await getOrCreateCollection('global');
+  await addDocument('global', COLLECTIONS_LEFT_ID, 'collections removed from this machine', {
+    type: 'collections_left',
+    collections: [...new Set(names)].sort().join(','),
+  });
+}
+
+/** Record that this machine left the shared collection `name`. */
+export async function addLeftCollection(name: string): Promise<void> {
+  const left = await getLeftCollections();
+  if (!left.includes(name)) await writeLeftCollections([...left, name]);
+}
+
+/** Follow `name` again (the user subscribed to it or created it). No-op when not left. */
+export async function clearLeftCollection(name: string): Promise<void> {
+  const left = await getLeftCollections();
+  if (left.includes(name)) await writeLeftCollections(left.filter(n => n !== name));
+}
+
+/**
+ * Names this machine never follows implicitly: merged away (redirects) or
+ * left. Backfill, pulls, recovery and push auto-subscribe all skip them.
+ */
+export async function getUnfollowedCollections(): Promise<Set<string>> {
+  return new Set([...Object.keys(await getCollectionRedirects()), ...(await getLeftCollections())]);
+}
+
 /**
  * Where `name` lives now: follows redirect chains (a -> b -> c), stopping at
  * a cycle. `redirectedFrom` is set when `name` itself was merged away.

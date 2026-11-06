@@ -20,9 +20,9 @@ import { setSyncBackend } from '../sync/backend.js';
 import { PostgresBackend } from '../sync/postgres-backend.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds, getDocumentsByFilter } from '../store/index.js';
 import { getPendingDeletes, getLocalTombstones } from '../sync/deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects, addCollectionRedirect, clearCollectionRedirect, resolveWriteCollection, redirectNote } from '../sync/sentinel.js';
+import { getLeftCollections, getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects, addCollectionRedirect, clearCollectionRedirect, resolveWriteCollection, redirectNote } from '../sync/sentinel.js';
 import { pushToRemote } from '../sync/push.js';
-import { mergeCollections, mergeReportLines, removeCollection, createNewCollection, CollectionDeleteRefusedError } from './manage.js';
+import { mergeCollections, mergeReportLines, removeCollection, removeReport, createNewCollection, CollectionDeleteRefusedError } from './manage.js';
 import { storeMemory } from '../memory/store.js';
 import { createTask } from '../tasks/create.js';
 import { journalAppend } from '../memory/journal.js';
@@ -235,34 +235,81 @@ describe('mergeCollections: shared -> private', () => {
   });
 });
 
-describe('removeCollection guard', () => {
-  it('refuses a non-empty shared collection without confirm, with the count and the merge pointer', async () => {
+describe('removeCollection', () => {
+  it('scope local (the default) removes a shared collection from this machine only: nothing is queued remotely, and it is left', async () => {
     await getStore().createCollection('project-keep');
-    await getStore().addDocument('project-keep', 'k-1', 'one', { type: 'memory', origin_user: 'tester' });
-    await getStore().addDocument('project-keep', 'k-2', 'two', { type: 'memory', origin_user: 'tester' });
+    await getStore().addDocument('project-keep', 'k-1', 'one', { type: 'memory', origin_user: 'tester', is_synced: true });
+    await getStore().addDocument('project-keep', 'k-2', 'two', { type: 'memory', origin_user: 'teammate', is_synced: true });
+    await updateSyncSubscriptions([...(await getSyncSubscriptions()), 'project-keep']);
 
-    const err = await removeCollection('project-keep').catch(e => e);
-    expect(err).toBeInstanceOf(CollectionDeleteRefusedError);
-    expect(err.message).toMatch(/2 documents/);
-    expect(err.message).toMatch(/EVERY teammate/);
-    expect(err.message).toMatch(/collection_merge/);
-    await expect(removeCollection('project-keep', { confirm: 'project-kee' })).rejects.toThrow(/Refused/);
-    expect(await names()).toContain('project-keep');
-    expect(await getPendingDeletes()).not.toContain('project-keep:k-1');
-  });
-
-  it('deletes it with confirm set to the exact name', async () => {
-    await removeCollection('project-keep', { confirm: 'project-keep' });
+    const r = await removeCollection('project-keep');
+    expect(r).toMatchObject({ scope: 'local', removed: 2, pushed: 0, deletedRemotely: 0, shared: true });
+    expect(removeReport(r)).toMatch(/^Removed "project-keep" \(2 documents\) from this machine only\. Teammates and the sync service keep it/);
     expect(await names()).not.toContain('project-keep');
-    expect(await getPendingDeletes()).toEqual(expect.arrayContaining(['project-keep:k-1', 'project-keep:k-2']));
+    expect(await getPendingDeletes()).not.toEqual(expect.arrayContaining(['project-keep:k-1']));
+    expect((await getLocalTombstones()).has('k-2')).toBe(false);
+    expect(await getSyncSubscriptions()).not.toContain('project-keep');
+    expect(await getLeftCollections()).toContain('project-keep');
+    // Creating it again (or subscribing) follows it again.
+    await createNewCollection('project-keep');
+    expect(await getLeftCollections()).not.toContain('project-keep');
+    await removeCollection('project-keep');
   });
 
-  it('keeps the old behavior for local-only and empty collections', async () => {
+  it('pushes your unpushed documents before removing a shared collection here, and refuses if that push fails', async () => {
+    await getStore().createCollection('project-dirty');
+    await getStore().addDocument('project-dirty', 'd-1', 'not pushed yet', { type: 'memory', origin_user: 'tester', is_synced: false, created_at: 1_800_000_000 });
+    vi.mocked(upsertRemoteDocument).mockClear();
+    const r = await removeCollection('project-dirty');
+    expect(r.pushed).toBe(1);
+    expect(vi.mocked(upsertRemoteDocument).mock.calls.some(c => (c[0] as any).id === 'd-1')).toBe(true);
+
+    await getStore().createCollection('project-dirty2');
+    await getStore().addDocument('project-dirty2', 'd-2', 'cannot push', { type: 'memory', origin_user: 'tester', is_synced: false, created_at: 1_800_000_000 });
+    vi.mocked(upsertRemoteDocument).mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'unreachable' }));
+    const err = await removeCollection('project-dirty2').catch(e => e);
+    expect(err).toBeInstanceOf(CollectionDeleteRefusedError);
+    expect(err.message).toMatch(/could not be pushed .* would lose them/);
+    expect(await names()).toContain('project-dirty2');
+    await removeCollection('project-dirty2', { confirm: 'project-dirty2' });
+  });
+
+  it('scope everyone needs the exact name, then deletes your documents for everyone and tombstones teammates\'', async () => {
+    await getStore().createCollection('project-team');
+    await getStore().addDocument('project-team', 't-1', 'one', { type: 'memory', origin_user: 'tester' });
+    await getStore().addDocument('project-team', 't-2', 'two', { type: 'memory', origin_user: 'teammate' });
+    const err = await removeCollection('project-team', { scope: 'everyone' }).catch(e => e);
+    expect(err).toBeInstanceOf(CollectionDeleteRefusedError);
+    expect(err.message).toMatch(/for everyone removes your documents in it from the sync service and from every teammate's machine \(2 documents here\)/);
+    expect(err.message).toMatch(/collection_merge/);
+    await expect(removeCollection('project-team', { scope: 'everyone', confirm: 'project-tea' })).rejects.toThrow(/Refused/);
+    const r = await removeCollection('project-team', { scope: 'everyone', confirm: 'project-team' });
+    expect(r.deletedRemotely).toBe(1);
+    expect(removeReport(r)).toMatch(/for everyone, your 1 document in it on the sync service/);
+    expect(await getPendingDeletes()).toContain('project-team:t-1');
+    expect((await getLocalTombstones()).has('t-2')).toBe(true);
+    expect(await getLeftCollections()).not.toContain('project-team');
+  });
+
+  it('a collection with no other copy (local-only, or sync off) needs confirm when non-empty; an empty one does not', async () => {
     await getStore().createCollection('private-tmp');
-    await getStore().addDocument('private-tmp', 't-1', 'scratch', { type: 'memory' });
-    await removeCollection('private-tmp');
+    await getStore().addDocument('private-tmp', 'p-1', 'scratch', { type: 'memory' });
+    const err = await removeCollection('private-tmp').catch(e => e);
+    expect(err.message).toMatch(/local only, with 1 document and no copy anywhere else: deleting it is permanent/);
+    const r = await removeCollection('private-tmp', { confirm: 'private-tmp' });
+    expect(removeReport(r)).toMatch(/It was local only, so it is gone/);
     await getStore().createCollection('project-empty');
     await removeCollection('project-empty');
+    const prev = createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true' });
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A' }));
+    try {
+      await getStore().createCollection('project-offline');
+      await getStore().addDocument('project-offline', 'o-1', 'only here', { type: 'memory' });
+      await expect(removeCollection('project-offline')).rejects.toThrow(/sync is off, so this machine holds the only copy/);
+      await removeCollection('project-offline', { confirm: 'project-offline' });
+    } finally {
+      setConfig(prev);
+    }
     const left = await names();
     expect(left).not.toContain('private-tmp');
     expect(left).not.toContain('project-empty');
