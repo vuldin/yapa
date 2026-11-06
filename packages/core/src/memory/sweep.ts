@@ -156,6 +156,20 @@ export function parseSweep(raw: string, batch: Candidate[]): Map<string, { verdi
   return out;
 }
 
+/** Notes a closed finding was superseded by: closing one of them would lose that finding's knowledge. */
+async function supersedingIds(collection: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const docs = await getDocumentsByFilter(collection, { type: 'memory', kind: 'finding' }, 5000).catch(() => []);
+  for (const { metadata: m } of docs) {
+    if (m.status !== 'resolved') continue;
+    const reason = String(m.disposition_reason ?? '');
+    const named = /^superseded by (\S+?)[:\s]/.exec(`${reason} `)?.[1];
+    if (named) out.add(named);
+    if (named || m.disposition !== 'no-action') for (const id of list(m.disposition_ids)) out.add(id);
+  }
+  return out;
+}
+
 /** A finding superseded by a note that is itself being closed keeps its knowledge open. */
 function keepSupersededChains(items: SweepItem[]): void {
   for (let changed = true; changed;) {
@@ -213,6 +227,14 @@ export async function sweepFindings(
       });
     }
   }
+  const held = await supersedingIds(opts.collection);
+  for (const i of items) {
+    if (i.verdict !== 'keep' && held.has(i.id)) {
+      i.verdict = 'keep';
+      i.reason = 'a finding closed earlier was superseded by it';
+      delete i.superseded_by;
+    }
+  }
   keepSupersededChains(items);
   if (opts.apply) await applySweep(opts.collection, items, { allOwners: opts.allOwners }, d);
   return { collection: opts.collection, considered: candidates.length, items, applied: !!opts.apply };
@@ -237,8 +259,10 @@ export async function applySweep(
   const update = deps.updateMemory ?? updateMemory;
   const me = getConfig().USERNAME;
   const closing = new Set(items.filter(i => i.verdict !== 'keep').map(i => i.id));
+  const held = await supersedingIds(collection);
   for (const it of items) {
     if (it.verdict === 'keep') continue;
+    if (held.has(it.id)) { it.skipped = 'a finding closed earlier was superseded by it'; continue; }
     const doc = await findDoc(collection, it.id);
     const m = doc?.metadata;
     if (!m || m.type !== 'memory' || m.kind !== 'finding' || !isStale(m)) { it.skipped = 'no longer an open finding'; continue; }
@@ -252,8 +276,12 @@ export async function applySweep(
       ? `progress note, not a finding${it.reason ? `: ${it.reason}` : ''}`
       : `superseded by ${it.superseded_by}${it.reason ? `: ${it.reason}` : ''}`;
     try {
-      await update(it.id, { status: 'resolved', disposition: 'no-action', disposition_reason: why, note: `Swept: ${why}` }, collection);
+      await update(it.id, {
+        status: 'resolved', disposition: 'no-action', disposition_reason: why, note: `Swept: ${why}`,
+        ...(it.verdict === 'superseded' ? { disposition_ids: [it.superseded_by!] } : {}),
+      }, collection);
       it.applied = true;
+      if (it.verdict === 'superseded') held.add(it.superseded_by!);
     } catch (e) {
       it.error = String(e);
     }

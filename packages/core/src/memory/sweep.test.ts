@@ -113,6 +113,29 @@ describe('sweep safety', () => {
     expect((await getDocumentsByIds(C, [a]))[0].metadata.status).toBe('open');
   });
 
+  it('never closes a note an earlier sweep closed a finding in favor of', async () => {
+    const C = 'project-sweep-later';
+    const a = await finding(C, 'Root cause of the consumer lag: the fetch quota was set to 1 MB for the whole group.');
+    const b = await finding(C, 'Review round 2: confirmed the consumer lag root cause is the 1 MB fetch quota for the group; pushed the fix.', { old: false });
+    const j = judge(p => idsIn(p).map(id => ({ id, verdict: id === a ? 'superseded' : 'progress' })));
+    const first = await sweepFindings({ collection: C, apply: true }, { call: j.call as any });
+    expect(first.items.map(i => [i.id, i.verdict, i.applied])).toEqual([[a, 'superseded', true]]);
+    expect((await getDocumentsByIds(C, [a]))[0].metadata.disposition_ids).toEqual([b]);
+
+    await patchDocument(C, b, { created_at: OLD });
+    const second = await sweepFindings({ collection: C, apply: true }, { call: j.call as any });
+    expect(second.items.map(i => [i.id, i.verdict, i.reason])).toEqual([[b, 'keep', 'a finding closed earlier was superseded by it']]);
+    expect((await getDocumentsByIds(C, [b]))[0].metadata.status).toBe('open');
+    const forced = await applySweep(C, [{ id: b, verdict: 'progress', reason: '', content: '' }]);
+    expect(forced[0].skipped).toBe('a finding closed earlier was superseded by it');
+
+    const { updateMemory } = await import('./update.js');
+    const legacy = await finding(C, 'Old finding closed by an earlier client.');
+    const target = await finding(C, 'Tagged release 4.0 and published the notes.');
+    await updateMemory(legacy, { status: 'resolved', disposition: 'no-action', disposition_reason: `superseded by ${target}: same thing` }, C);
+    expect((await applySweep(C, [{ id: target, verdict: 'progress', reason: '', content: '' }]))[0].skipped).toBe('a finding closed earlier was superseded by it');
+  });
+
   it('sweeps only your own findings unless asked for everyone\'s', async () => {
     const C = 'project-sweep-team';
     const mineId = await finding(C, 'Pushed the TLS fix and reran the suite.');

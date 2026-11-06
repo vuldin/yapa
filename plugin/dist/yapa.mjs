@@ -6112,6 +6112,18 @@ function parseSweep(raw, batch) {
   }
   return out;
 }
+async function supersedingIds(collection) {
+  const out = /* @__PURE__ */ new Set();
+  const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
+  for (const { metadata: m } of docs) {
+    if (m.status !== "resolved") continue;
+    const reason = String(m.disposition_reason ?? "");
+    const named = /^superseded by (\S+?)[:\s]/.exec(`${reason} `)?.[1];
+    if (named) out.add(named);
+    if (named || m.disposition !== "no-action") for (const id of list5(m.disposition_ids)) out.add(id);
+  }
+  return out;
+}
 function keepSupersededChains(items) {
   for (let changed = true; changed; ) {
     changed = false;
@@ -6168,6 +6180,14 @@ async function sweepFindings(opts, deps = {}) {
       });
     }
   }
+  const held2 = await supersedingIds(opts.collection);
+  for (const i of items) {
+    if (i.verdict !== "keep" && held2.has(i.id)) {
+      i.verdict = "keep";
+      i.reason = "a finding closed earlier was superseded by it";
+      delete i.superseded_by;
+    }
+  }
   keepSupersededChains(items);
   if (opts.apply) await applySweep(opts.collection, items, { allOwners: opts.allOwners }, d);
   return { collection: opts.collection, considered: candidates.length, items, applied: !!opts.apply };
@@ -6182,8 +6202,13 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   const update = deps.updateMemory ?? updateMemory;
   const me = getConfig().USERNAME;
   const closing = new Set(items.filter((i) => i.verdict !== "keep").map((i) => i.id));
+  const held2 = await supersedingIds(collection);
   for (const it of items) {
     if (it.verdict === "keep") continue;
+    if (held2.has(it.id)) {
+      it.skipped = "a finding closed earlier was superseded by it";
+      continue;
+    }
     const doc = await findDoc2(collection, it.id);
     const m = doc?.metadata;
     if (!m || m.type !== "memory" || m.kind !== "finding" || !isStale(m)) {
@@ -6207,8 +6232,15 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
     }
     const why = it.verdict === "progress" ? `progress note, not a finding${it.reason ? `: ${it.reason}` : ""}` : `superseded by ${it.superseded_by}${it.reason ? `: ${it.reason}` : ""}`;
     try {
-      await update(it.id, { status: "resolved", disposition: "no-action", disposition_reason: why, note: `Swept: ${why}` }, collection);
+      await update(it.id, {
+        status: "resolved",
+        disposition: "no-action",
+        disposition_reason: why,
+        note: `Swept: ${why}`,
+        ...it.verdict === "superseded" ? { disposition_ids: [it.superseded_by] } : {}
+      }, collection);
       it.applied = true;
+      if (it.verdict === "superseded") held2.add(it.superseded_by);
     } catch (e) {
       it.error = String(e);
     }
