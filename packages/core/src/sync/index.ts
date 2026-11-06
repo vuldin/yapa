@@ -64,7 +64,7 @@ export async function syncCycle(): Promise<SyncStats | null> {
     }
 
     const hasPushActivity = pushStats.pushed > 0 || pushStats.linked > 0 || pushStats.deleted > 0 || pushStats.retracted > 0;
-    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.keptDirty > 0;
+    const hasPullActivity = pullStats.pulled > 0 || pullStats.updated > 0 || pullStats.moved > 0 || pullStats.linked > 0 || pullStats.deleted > 0 || pullStats.archived > 0 || pullStats.keptDirty > 0;
     const hasErrors = pushStats.errors > 0 || pullStats.errors > 0;
 
     if (hasPushActivity || hasPullActivity || pushStats.rejected > 0) {
@@ -270,7 +270,7 @@ export function formatSyncStats({ push, pull }: SyncStats): string {
   let line = `Push: ${push.pushed} new, ${push.linked} linked, ${push.deleted} deleted, ${push.retracted} retracted`;
   if (push.renamed) line += `, ${push.renamed} renamed`;
   if (push.rejected) line += `, ${push.rejected} refused (kept local)`;
-  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.skipped} skipped`;
+  line += `, ${push.errors} errors | Pull: ${pull.pulled} new, ${pull.updated} updated, ${pull.moved} moved, ${pull.linked} linked, ${pull.deleted} deleted, ${pull.archived ?? 0} archived, ${pull.skipped} skipped`;
   if (pull.keptDirty) line += `, ${pull.keptDirty} remote deletions not applied (local edits kept)`;
   return `${line}, ${pull.errors} errors`;
 }

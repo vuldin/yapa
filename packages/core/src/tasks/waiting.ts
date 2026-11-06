@@ -76,7 +76,7 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
       getDocumentsByFilter(collection, { type: 'memory', kind: 'question' }, 2000).catch(() => []),
       getDocumentsByFilter(collection, { type: 'task' }, 5000).catch(() => []),
     ]);
-    const open = tasks.filter(t => t.metadata.status !== 'complete');
+    const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true);
     const waitingOnIt = new Map<string, string[]>();
     for (const t of open) for (const m of list(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
 

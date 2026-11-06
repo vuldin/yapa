@@ -9,7 +9,7 @@ import { getPendingDeletes, clearPendingDeletes } from './deletes.js';
 import { getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
-import { isSyncableCollection as isSyncable, isReadOnlyDoc } from './syncable.js';
+import { isSyncableCollection as isSyncable, isDeletedUpstream, isReadOnlyDoc } from './syncable.js';
 
 export interface PushStats {
   pushed: number;
@@ -95,7 +95,7 @@ export function pushDocsNow(collection: string, ids: string[]): Promise<{ pushed
     if (!backend) return out;
     await resolveSyncUsername();
     const docs = (await getDocumentsByIds(collection, ids)).filter(d =>
-      d.metadata.is_synced === false && !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata)
+      d.metadata.is_synced === false && !d.id.startsWith('__') && d.metadata.type !== 'journal_draft' && !isReadOnlyDoc(d.metadata) && !isDeletedUpstream(d.metadata)
       && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
     const stats = emptyPushStats();
     const batch: Array<{ doc: DocumentResult; upsert: UpsertDoc }> = [];
@@ -187,6 +187,8 @@ async function pushAll(): Promise<PushStats> {
         if (unsynced.metadata.type === 'journal_draft') continue;
         // Owned by the remote (metadata.read_only): local changes never go back.
         if (isReadOnlyDoc(unsynced.metadata)) continue;
+        // Deleted on the remote by its owner, kept here archived: never sent back.
+        if (isDeletedUpstream(unsynced.metadata)) continue;
         // Refused before and unchanged since: stays local until edited.
         if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
         // Stamp the last writer's device: pull on this device skips its own
@@ -345,7 +347,7 @@ export async function countUnpushed(): Promise<number> {
     if (!isSyncable(col.name)) continue;
     const docs = await getDocumentsByFilter(col.name, { is_synced: false }, 100_000).catch(() => []);
     for (const d of docs) {
-      if (d.id.startsWith('__') || d.metadata.type === 'journal_draft' || isReadOnlyDoc(d.metadata)) continue;
+      if (d.id.startsWith('__') || d.metadata.type === 'journal_draft' || isReadOnlyDoc(d.metadata) || isDeletedUpstream(d.metadata)) continue;
       if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
       n++;
     }

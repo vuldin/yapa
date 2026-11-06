@@ -34,6 +34,10 @@ export interface RemoteDeletion {
   deleted_by: string;
   /** Unix seconds. */
   deleted_at: number;
+  /** Why (services with soft delete): a user's delete, or a retract (moved into a private collection). */
+  reason?: 'delete' | 'retract';
+  /** The owner purged it (a mistake such as a leaked secret): copies are dropped, not archived. */
+  purged?: boolean;
 }
 
 export interface PullRequest {

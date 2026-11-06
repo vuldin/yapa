@@ -102,3 +102,4 @@ export * from './update-check.js';
 export * from './last-write.js';
 export { withDocLock } from './doc-lock.js';
 export * from './session-record.js';
+export * from './memory/trash.js';
