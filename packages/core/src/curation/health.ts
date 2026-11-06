@@ -12,7 +12,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfig } from '../config.js';
 import { lockFileFor, withFileLockSync, writeJsonAtomic } from '../fs-lock.js';
-import { redactTokens } from '../sync/http-backend.js';
+import { redactTokens } from '../redact.js';
 
 export interface CaptureDay {
   /** Turns judged (extractor ran to the end). */

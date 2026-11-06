@@ -54,6 +54,10 @@ describe('captureTurn', () => {
     expect(d.followThrough).not.toHaveBeenCalled();
     expect(d.extractMemories).not.toHaveBeenCalled();
     expect(d.record).not.toHaveBeenCalled();
+    const broken = new Error('store unreadable');
+    const e = deps({ writable: vi.fn(async () => { throw broken; }) });
+    await expect(captureTurn(input, options, e)).rejects.toThrow('store unreadable');
+    expect(e.record).toHaveBeenCalledWith({ kind: 'turn_failed', error: broken });
   });
 
   it('stores the other candidates when one is refused, and records the refusal as a store failure', async () => {

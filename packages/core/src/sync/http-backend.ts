@@ -17,6 +17,7 @@
  * 'off' disables): it is short-lived (1 h) and far less powerful than the
  * refresh token gcloud itself keeps on disk.
  */
+import { redactTokens } from '../redact.js';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { exec, execFile } from 'node:child_process';
@@ -54,10 +55,7 @@ const PERMANENT_ITEM_ERRORS = new Set([
   'purged',
 ]);
 
-/** Redact anything that looks like a JWT from text that may be shown or logged. */
-export function redactTokens(text: string): string {
-  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, '<token>');
-}
+export { redactTokens } from '../redact.js';
 
 /** The JWT payload, decoded without verification (only to read `exp`/`email`). */
 export function decodeJwtPayload(token: string): Record<string, unknown> | undefined {

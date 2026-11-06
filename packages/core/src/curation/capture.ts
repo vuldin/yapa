@@ -92,6 +92,7 @@ export async function captureTurn(
   } catch (e) {
     // A collection removed from this machine takes no writes: nothing to capture, nothing failed.
     if (e instanceof CollectionLeftError) return { stored: 0, skipped: 0, superseded: 0 };
+    d.record({ kind: 'turn_failed', error: e });
     throw e;
   }
   const state: { followThroughError?: unknown; storeError?: unknown } = {};
