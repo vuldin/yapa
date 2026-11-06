@@ -9434,7 +9434,7 @@ var init_http_backend = __esm({
             if (x?.status === "purged" || x?.status === "purged_copies" || x?.status === "not_found") out.push({ id, status: x.status });
             else {
               const code = String(x?.error?.code ?? "internal");
-              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300) });
+              out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300), permanent: PERMANENT_ITEM_ERRORS.has(code) });
             }
           }
         }
@@ -10680,11 +10680,19 @@ async function pushAll() {
   try {
     const purges = await getPendingPurges();
     if (purges.length > 0) {
+      let done = purges;
       if (backend.purge) {
         try {
           const results = await backend.purge(purges);
+          const retry = new Set(results.filter((r) => r.status === "error" && !r.permanent).map((r) => r.id));
+          done = purges.filter((id) => !retry.has(id));
+          if (retry.size) {
+            stats.errors += retry.size;
+            process.stderr.write(`[yapa-sync] Purge of ${[...retry].join(", ")} failed for now; kept queued for the next push
+`);
+          }
           for (const r of results) {
-            if (r.status === "error") process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}
+            if (r.status === "error" && r.permanent) process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}
 `);
             if (r.status === "purged_copies") process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays
 `);
@@ -10699,7 +10707,7 @@ async function pushAll() {
       } else {
         stats.deleted += await backend.delete(purges, "delete");
       }
-      await clearPendingPurges(purges);
+      await clearPendingPurges(done);
     }
   } catch (e) {
     process.stderr.write(`[yapa-sync] Purge error: ${e}
@@ -41211,33 +41219,46 @@ function track(p) {
 // packages/core/src/memory/forget.ts
 init_config();
 init_store();
+
+// packages/core/src/memory/chunks.ts
+init_store();
+var byChunk = (a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0);
+async function docGroupIn(collection, id) {
+  const [doc] = await getDocumentsByIds2(collection, [id]).catch(() => []);
+  const baseId = doc ? doc.metadata.parent_id ?? doc.id : id;
+  const chunks = await getDocumentsByFilter2(collection, { parent_id: baseId }, 1e4).catch(() => []);
+  if (!doc && !chunks.length) return void 0;
+  const docs = doc && !chunks.some((c) => c.id === doc.id) ? [doc, ...chunks] : chunks;
+  return { collection, baseId, docs: docs.sort(byChunk) };
+}
+async function findDocGroup(id, collections) {
+  for (const c of collections ?? (await listCollections2().catch(() => [])).map((x) => x.name)) {
+    const g = await docGroupIn(c, id);
+    if (g) return g;
+  }
+  return void 0;
+}
+
+// packages/core/src/memory/forget.ts
 init_deletes();
 init_syncable();
 function isSyncable(collection) {
   return !collection.startsWith("private-") && !collection.startsWith("local-");
 }
 async function deleteDocumentEverywhere(id) {
-  for (const collection of await listCollections2()) {
-    let found;
-    try {
-      [found] = await getDocumentsByIds2(collection.name, [id]);
-    } catch {
-      continue;
+  const group = await findDocGroup(id);
+  if (!group) throw new Error(`Document '${id}' not found in any collection`);
+  for (const d of group.docs) assertWritable(d.id, d.metadata);
+  const { collection, docs } = group;
+  for (const d of docs) await deleteDocument2(collection, d.id);
+  if (getConfig().SYNC_ENABLED && isSyncable(collection)) {
+    for (const d of docs) {
+      const owner = d.metadata.origin_user;
+      if (!owner || owner === getConfig().USERNAME) await queueSyncDelete(d.id, collection);
+      else await addLocalTombstone(d.id);
     }
-    if (!found) continue;
-    assertWritable(id, found.metadata);
-    await deleteDocument2(collection.name, id);
-    if (getConfig().SYNC_ENABLED && isSyncable(collection.name)) {
-      const owner = found.metadata.origin_user;
-      if (!owner || owner === getConfig().USERNAME) {
-        await queueSyncDelete(id, collection.name);
-      } else {
-        await addLocalTombstone(id);
-      }
-    }
-    return collection.name;
   }
-  throw new Error(`Document '${id}' not found in any collection`);
+  return collection;
 }
 async function forgetMemory(id) {
   return deleteDocumentEverywhere(id);
@@ -41302,14 +41323,15 @@ function toCopy(collection, d) {
     deleted_by: String(d.metadata.deleted_upstream_by ?? ""),
     deleted_at: at,
     reason: String(d.metadata.deleted_upstream_reason ?? "delete"),
-    expires_at: at + getConfig().DELETED_RETENTION_DAYS * DAY
+    expires_at: at + getConfig().DELETED_RETENTION_DAYS * DAY,
+    by_you: String(d.metadata.deleted_upstream_by ?? "") === getConfig().USERNAME
   };
 }
 async function listDeletedUpstream(collection) {
   const names = collection ? [collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
   const out = [];
   for (const c of names) {
-    for (const d of await getDocumentsByFilter2(c, { archived: true }, 1e5).catch(() => [])) {
+    for (const d of await getDocumentsByFilter2(c, { deleted_upstream: true }, 1e5).catch(() => [])) {
       if (isDeletedUpstream(d.metadata) && !(d.metadata.parent_id && (d.metadata.chunk_index ?? 0) !== 0)) out.push(toCopy(c, d));
     }
   }
@@ -41319,7 +41341,7 @@ async function sweepDeletedUpstream(now = Math.floor(Date.now() / 1e3)) {
   const cutoff = now - getConfig().DELETED_RETENTION_DAYS * DAY;
   let n = 0;
   for (const c of (await listCollections2().catch(() => [])).map((x) => x.name)) {
-    for (const d of await getDocumentsByFilter2(c, { archived: true }, 1e5).catch(() => [])) {
+    for (const d of await getDocumentsByFilter2(c, { deleted_upstream: true }, 1e5).catch(() => [])) {
       if (!isDeletedUpstream(d.metadata) || Number(d.metadata.deleted_upstream_at) > cutoff) continue;
       await deleteDocument2(c, d.id).catch(() => void 0);
       n++;
@@ -41368,34 +41390,53 @@ async function restoreDeleted(ids) {
   if (!backend?.restore) throw new UnsupportedByRemoteError("restore");
   return backend.restore([...new Set(ids)]);
 }
+async function remoteGroup(id, deleted) {
+  if (!deleted) return [];
+  const row = deleted.find((d) => d.id === id);
+  const base = row?.metadata?.parent_id ?? id;
+  return deleted.filter((d) => d.id === base || d.metadata?.parent_id === base || d.id === id).map((d) => d.id);
+}
 async function purgeDocuments(ids) {
   const me = getConfig().USERNAME;
   const out = { queued: [], local: [], refused: [] };
   const collections = (await listCollections2().catch(() => [])).map((c) => c.name);
+  let deleted = null;
+  const queue = (xs) => {
+    for (const x of xs) if (!out.queued.includes(x)) out.queued.push(x);
+  };
   for (const id of [...new Set(ids)]) {
-    let found;
-    for (const c of collections) {
-      const [d] = await getDocumentsByIds2(c, [id]).catch(() => []);
-      if (d) {
-        found = { collection: c, metadata: d.metadata };
-        break;
+    const group = await findDocGroup(id, collections);
+    if (!group) {
+      if (deleted === null) {
+        deleted = void 0;
+        try {
+          const backend = isSyncConfigured() ? await getSyncBackend() : void 0;
+          if (backend?.listDeleted) deleted = await backend.listDeleted();
+        } catch {
+        }
       }
-    }
-    if (found && found.metadata.origin_user && found.metadata.origin_user !== me) {
-      out.refused.push({ id, collection: found.collection, owner: String(found.metadata.origin_user) });
+      const rows = await remoteGroup(id, deleted);
+      queue(rows.length ? rows : [id]);
       continue;
     }
-    if (found) {
-      await withDocLock(found.collection, id, async () => {
-        for (const c of await getDocumentsByFilter2(found.collection, { parent_id: id }, 1e3).catch(() => [])) await deleteDocument2(found.collection, c.id);
-        await deleteDocument2(found.collection, id);
-      });
+    const theirs = group.docs.find((d) => d.metadata.origin_user && d.metadata.origin_user !== me);
+    if (theirs) {
+      out.refused.push({ id, collection: group.collection, owner: String(theirs.metadata.origin_user) });
+      continue;
     }
-    if (found && (!isSyncableCollection(found.collection) || !isSyncConfigured())) out.local.push(id);
-    else out.queued.push(id);
+    await withDocLock(group.collection, group.baseId, async () => {
+      for (const d of group.docs) await deleteDocument2(group.collection, d.id);
+    });
+    const docIds = group.docs.map((d) => d.id);
+    if (!isSyncableCollection(group.collection) || !isSyncConfigured()) out.local.push(...docIds);
+    else queue(docIds);
   }
   await queueSyncPurges(out.queued);
   return out;
+}
+async function stillQueuedForPurge(ids) {
+  const pending = new Set(await getPendingPurges());
+  return ids.filter((id) => pending.has(id));
 }
 
 // packages/core/src/memory/decay.ts
@@ -43755,9 +43796,16 @@ async function applyRemoteDeletion(collectionName, del, stats) {
 `);
       return;
     }
+    if (del.reason === "retract" && del.deleted_by !== getConfig().USERNAME) {
+      await deleteDocument2(collectionName, del.id);
+      stats.deleted++;
+      return;
+    }
     if (isDeletedUpstream(existing.metadata)) return;
     await patchDocument(collectionName, del.id, {
       archived: true,
+      // Equality-filterable marker, so the trash and its sweep needn't scan every archived doc.
+      deleted_upstream: true,
       deleted_upstream_by: del.deleted_by,
       deleted_upstream_at: Number(del.deleted_at) || Math.floor(Date.now() / 1e3),
       deleted_upstream_reason: del.reason ?? "delete"
@@ -46761,8 +46809,15 @@ ${rec}`;
         if (action === "list") {
           const t = await listTrash(collection);
           const lines = [];
-          lines.push(t.upstream.length ? `**Deleted by their owners, kept here** (${t.upstream.length}):` : "No copies of documents deleted by their owners are kept here.");
-          for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] ${c.type}, deleted by ${c.deleted_by} ${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, " ")}`);
+          const copyLine = (c) => `- ${c.id} [${c.collection}] ${c.type}, deleted ${c.by_you ? "" : `by ${c.deleted_by} `}${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, " ")}`;
+          const theirs = t.upstream.filter((c) => !c.by_you);
+          const mine = t.upstream.filter((c) => c.by_you);
+          lines.push(theirs.length ? `**Deleted by their owners, kept here** (${theirs.length}):` : "No copies of documents deleted by their owners are kept here.");
+          for (const c of theirs.slice(0, 50)) lines.push(copyLine(c));
+          if (mine.length) {
+            lines.push("", `**Deleted by you on another machine, kept here** (${mine.length}):`);
+            for (const c of mine.slice(0, 50)) lines.push(copyLine(c));
+          }
           lines.push("");
           if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);
           else {
@@ -46790,8 +46845,12 @@ ${rec}`;
           return text(parts2.join("\n"));
         }
         const r = await purgeDocuments(ids);
+        if (r.queued.length) await syncCycle().catch(() => void 0);
+        const waiting = r.queued.length ? await stillQueuedForPurge(r.queued) : [];
+        const sent = r.queued.filter((x) => !waiting.includes(x));
         const parts = [
-          r.queued.length ? `Purged here and queued for a purge on the sync service: ${r.queued.join(", ")}. Teammates' copies are dropped on their next pull, and these ids can't be written again.` : "",
+          sent.length ? `Purged here and on the sync service: ${sent.join(", ")}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : "",
+          waiting.length ? `Purged here; the sync service couldn't purge yet: ${waiting.join(", ")}. It stays queued and is retried on every sync.` : "",
           r.local.length ? `Removed for good (it never left this machine): ${r.local.join(", ")}.` : "",
           r.refused.length ? `Not yours, not purged: ${r.refused.map((x) => `${x.id} (${x.owner})`).join(", ")}. Ask the owner to purge it.` : ""
         ].filter(Boolean);

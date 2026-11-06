@@ -3,12 +3,14 @@
 ## Unreleased
 
 ### Features
-- **Nothing a teammate deletes is lost on your machine.** When a document's owner deletes it on the sync service, your copy is archived instead of dropped: it is hidden from recall, task lists, the ready queue and `waiting`, never pushed back (even if you edit it), and removed after 30 days (`YAPA_DELETED_RETENTION_DAYS`). If the owner restores it, the live document comes back on the next pull.
+- **Nothing a teammate deletes is lost on your machine.** When a document's owner deletes it on the sync service, your copy is archived instead of dropped: it is hidden from recall, task lists, the ready queue and `waiting`, never pushed back (even if you edit it), and removed after 30 days (`YAPA_DELETED_RETENTION_DAYS`). If the owner restores it, the live document comes back on the next pull. A teammate's retract (they moved the document into a private collection) still drops a clean copy, so no shared copy stays; your own retract is archived on your other machines, where it may be your only copy.
 - **`trash` tool (DSH `yapa_trash`):**
   - `list`: copies kept after their owner deleted them, and your own deleted documents on the sync service.
   - `restore`: bring yours back for everyone.
   - `keep`: turn a copy someone else deleted into a document of your own.
-  - `purge`: remove documents of yours for good, for mistakes such as a leaked secret. No restorable copy remains, teammates' copies are dropped even with local edits, and the id can never be written again. An older service without purge gets an ordinary delete instead. DSH asks for approval before a purge.
+  - `purge`: remove documents of yours for good, for mistakes such as a leaked secret. No restorable copy remains, teammates' copies are dropped even with local edits, and the id can never be written again. A memory stored in chunks is purged whole, by its id or any chunk's. The purge is sent to the service at once; a temporary failure stays queued and is retried on every sync. An older service without purge gets an ordinary delete instead. DSH asks for approval before a purge.
+  - `list` shows your own documents deleted on another machine separately from teammates' deletions.
+- **`memory_forget` deletes a chunked memory whole**, by its id or any chunk's. It removed only the one chunk named, so the other chunks stayed here and on the sync service.
 - `memory_forget` and `task_delete` say that one of your documents in a shared collection is deleted for teammates too, and how to restore it.
 
 ### Service

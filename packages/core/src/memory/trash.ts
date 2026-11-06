@@ -14,7 +14,8 @@ import { withDocLock } from '../doc-lock.js';
 import { deleteDocument, getDocumentsByFilter, getDocumentsByIds, listCollections } from '../store/index.js';
 import { isDeletedUpstream, isSyncableCollection } from '../sync/syncable.js';
 import { getSyncBackend, isSyncConfigured, UnsupportedByRemoteError, type DeletedDocument, type RestoreResult } from '../sync/backend.js';
-import { queueSyncPurges } from '../sync/deletes.js';
+import { getPendingPurges, queueSyncPurges } from '../sync/deletes.js';
+import { findDocGroup } from './chunks.js';
 import { storeMemory } from './store.js';
 import { createTask } from '../tasks/create.js';
 
@@ -29,6 +30,8 @@ export interface TrashedCopy {
   reason: string;
   /** Unix seconds when the retention sweep removes it. */
   expires_at: number;
+  /** You deleted it, on another machine: your own copy, kept here. */
+  by_you: boolean;
 }
 
 const DAY = 86400;
@@ -40,6 +43,7 @@ function toCopy(collection: string, d: { id: string; content: string; metadata: 
     deleted_by: String(d.metadata.deleted_upstream_by ?? ''), deleted_at: at,
     reason: String(d.metadata.deleted_upstream_reason ?? 'delete'),
     expires_at: at + getConfig().DELETED_RETENTION_DAYS * DAY,
+    by_you: String(d.metadata.deleted_upstream_by ?? '') === getConfig().USERNAME,
   };
 }
 
@@ -48,7 +52,7 @@ export async function listDeletedUpstream(collection?: string): Promise<TrashedC
   const names = collection ? [collection] : (await listCollections().catch(() => [])).map(c => c.name);
   const out: TrashedCopy[] = [];
   for (const c of names) {
-    for (const d of await getDocumentsByFilter(c, { archived: true }, 100_000).catch(() => [])) {
+    for (const d of await getDocumentsByFilter(c, { deleted_upstream: true }, 100_000).catch(() => [])) {
       if (isDeletedUpstream(d.metadata) && !(d.metadata.parent_id && (d.metadata.chunk_index ?? 0) !== 0)) out.push(toCopy(c, d));
     }
   }
@@ -60,7 +64,7 @@ export async function sweepDeletedUpstream(now: number = Math.floor(Date.now() /
   const cutoff = now - getConfig().DELETED_RETENTION_DAYS * DAY;
   let n = 0;
   for (const c of (await listCollections().catch(() => [])).map(x => x.name)) {
-    for (const d of await getDocumentsByFilter(c, { archived: true }, 100_000).catch(() => [])) {
+    for (const d of await getDocumentsByFilter(c, { deleted_upstream: true }, 100_000).catch(() => [])) {
       if (!isDeletedUpstream(d.metadata) || Number(d.metadata.deleted_upstream_at) > cutoff) continue;
       await deleteDocument(c, d.id).catch(() => undefined);
       n++;
@@ -137,7 +141,7 @@ export async function restoreDeleted(ids: string[]): Promise<RestoreResult[]> {
 }
 
 export interface PurgeQueued {
-  /** Removed here and queued for a purge on the next push. */
+  /** Removed here and queued for a purge on the next push (every chunk of a chunked memory). */
   queued: string[];
   /** Removed here only: in a local-only collection (no remote copy), or sync is off. */
   local: string[];
@@ -146,34 +150,62 @@ export interface PurgeQueued {
 }
 
 /**
+ * Your deleted rows on the service that make up `id` (itself, or every chunk
+ * when it is a chunk or a base id), for an id this machine no longer has.
+ * Empty when the service can't say.
+ */
+async function remoteGroup(id: string, deleted: DeletedDocument[] | undefined): Promise<string[]> {
+  if (!deleted) return [];
+  const row = deleted.find(d => d.id === id);
+  const base = (row?.metadata as Record<string, any> | undefined)?.parent_id ?? id;
+  return deleted.filter(d => d.id === base || (d.metadata as Record<string, any> | undefined)?.parent_id === base || d.id === id).map(d => d.id);
+}
+
+/**
  * Purge documents of yours for good: a mistake such as a leaked secret. Each
- * is removed here at once (with its chunks) and, in a shared collection,
- * queued for a purge on the next push. Ids not found here are queued too:
- * the service may still hold them as deleted rows.
+ * is removed here at once (a chunked memory with all its chunks, by its base
+ * id or any chunk's id) and, in a shared collection, queued for a purge on
+ * the next push. Ids not found here are queued too, expanded to their chunks
+ * when the service lists them as your deleted rows.
  */
 export async function purgeDocuments(ids: string[]): Promise<PurgeQueued> {
   const me = getConfig().USERNAME;
   const out: PurgeQueued = { queued: [], local: [], refused: [] };
   const collections = (await listCollections().catch(() => [])).map(c => c.name);
+  let deleted: DeletedDocument[] | undefined | null = null;
+  const queue = (xs: string[]) => { for (const x of xs) if (!out.queued.includes(x)) out.queued.push(x); };
   for (const id of [...new Set(ids)]) {
-    let found: { collection: string; metadata: Record<string, any> } | undefined;
-    for (const c of collections) {
-      const [d] = await getDocumentsByIds(c, [id]).catch(() => []);
-      if (d) { found = { collection: c, metadata: d.metadata }; break; }
-    }
-    if (found && found.metadata.origin_user && found.metadata.origin_user !== me) {
-      out.refused.push({ id, collection: found.collection, owner: String(found.metadata.origin_user) });
+    const group = await findDocGroup(id, collections);
+    if (!group) {
+      if (deleted === null) {
+        deleted = undefined;
+        try {
+          const backend = isSyncConfigured() ? await getSyncBackend() : undefined;
+          if (backend?.listDeleted) deleted = await backend.listDeleted();
+        } catch { /* the service can't say: queue the id as given */ }
+      }
+      const rows = await remoteGroup(id, deleted);
+      queue(rows.length ? rows : [id]);
       continue;
     }
-    if (found) {
-      await withDocLock(found.collection, id, async () => {
-        for (const c of await getDocumentsByFilter(found!.collection, { parent_id: id }, 1000).catch(() => [])) await deleteDocument(found!.collection, c.id);
-        await deleteDocument(found!.collection, id);
-      });
+    const theirs = group.docs.find(d => d.metadata.origin_user && d.metadata.origin_user !== me);
+    if (theirs) {
+      out.refused.push({ id, collection: group.collection, owner: String(theirs.metadata.origin_user) });
+      continue;
     }
-    if (found && (!isSyncableCollection(found.collection) || !isSyncConfigured())) out.local.push(id);
-    else out.queued.push(id);
+    await withDocLock(group.collection, group.baseId, async () => {
+      for (const d of group.docs) await deleteDocument(group.collection, d.id);
+    });
+    const docIds = group.docs.map(d => d.id);
+    if (!isSyncableCollection(group.collection) || !isSyncConfigured()) out.local.push(...docIds);
+    else queue(docIds);
   }
   await queueSyncPurges(out.queued);
   return out;
+}
+
+/** Which of `ids` are still waiting in the purge queue (the last push couldn't purge them). */
+export async function stillQueuedForPurge(ids: string[]): Promise<string[]> {
+  const pending = new Set(await getPendingPurges());
+  return ids.filter(id => pending.has(id));
 }

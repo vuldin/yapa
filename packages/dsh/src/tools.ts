@@ -492,8 +492,8 @@ export function registerTools(ctx: Context): void {
       const action = String(args.action);
       if (action === 'list') {
         const t = await listTrash(args.collection);
-        const lines = [`Deleted by their owners, kept here: ${t.upstream.length}`];
-        for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] deleted by ${c.deleted_by}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`);
+        const lines = [`Deleted by their owners, kept here: ${t.upstream.filter(c => !c.by_you).length}`];
+        for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] deleted by ${c.by_you ? 'you on another machine' : c.deleted_by}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`);
         lines.push(t.remoteUnavailable ? `Your deleted documents on the sync service: unknown (${t.remoteUnavailable})` : `Your deleted documents on the sync service: ${t.remote.length}`);
         for (const d of t.remote.slice(0, 50)) lines.push(`- ${d.id} [${d.collection}]: ${d.content.slice(0, 100).replace(/\s+/g, ' ')}`);
         return { report: lines.join('\n') };
@@ -510,7 +510,7 @@ export function registerTools(ctx: Context): void {
         return { report: results.map(r => `${r.id}: ${r.status}`).join('\n') };
       }
       const r = await purgeDocuments(ids);
-      return { report: [`queued for purge: ${r.queued.join(', ') || 'none'}`, `removed (local only): ${r.local.join(', ') || 'none'}`, `not yours: ${r.refused.map(x => x.id).join(', ') || 'none'}`].join('\n') };
+      return { report: [`queued for purge on the next sync (retried until the service purges them): ${r.queued.join(', ') || 'none'}`, `removed (local only): ${r.local.join(', ') || 'none'}`, `not yours: ${r.refused.map(x => x.id).join(', ') || 'none'}`].join('\n') };
     },
     presentCall: args => ({ card: 'generic', title: `Trash ${args.action}${args.ids ? ` ${args.ids.join(', ')}` : ''}`, kind: args.action === 'purge' ? 'delete' : 'read' }),
   }));

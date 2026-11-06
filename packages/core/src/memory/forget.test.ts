@@ -55,6 +55,19 @@ describe('sync-aware deletes', () => {
     expect((await getLocalTombstones()).has('mem-private')).toBe(false);
   });
 
+  it('deletes a chunked memory whole, by a chunk\'s id or its base id, queueing every chunk', async () => {
+    const store = getStore();
+    for (const base of ['mem-chunked', 'mem-chunked2']) {
+      for (let i = 0; i < 3; i++) await store.addDocument('project-acme', `${base}-${i}`, `part ${i}`, { type: 'memory', origin_user: 'tester', parent_id: base, chunk_index: i });
+    }
+    await forgetMemory('mem-chunked-1');
+    await forgetMemory('mem-chunked2');
+    const left = await store.getDocumentsByFilter('project-acme', { type: 'memory' }, 100);
+    expect(left.filter(d => d.id.startsWith('mem-chunked'))).toEqual([]);
+    const pending = await getPendingDeletes();
+    for (const base of ['mem-chunked', 'mem-chunked2']) for (let i = 0; i < 3; i++) expect(pending).toContain(`project-acme:${base}-${i}`);
+  });
+
   it('throws for unknown ids', async () => {
     await expect(forgetMemory('nope')).rejects.toThrow(/not found/);
   });

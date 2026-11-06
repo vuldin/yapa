@@ -423,7 +423,7 @@ export class HttpBackend implements SyncBackend {
         if (x?.status === 'purged' || x?.status === 'purged_copies' || x?.status === 'not_found') out.push({ id, status: x.status });
         else {
           const code = String(x?.error?.code ?? 'internal');
-          out.push({ id, status: 'error', code, message: redactTokens(String(x?.error?.message ?? (x ? code : 'no result for this id'))).slice(0, 300) });
+          out.push({ id, status: 'error', code, message: redactTokens(String(x?.error?.message ?? (x ? code : 'no result for this id'))).slice(0, 300), permanent: PERMANENT_ITEM_ERRORS.has(code) });
         }
       }
     }

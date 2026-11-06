@@ -155,11 +155,19 @@ async function pushAll(): Promise<PushStats> {
   try {
     const purges = await getPendingPurges();
     if (purges.length > 0) {
+      // A temporary failure stays queued and is retried on the next push.
+      let done = purges;
       if (backend.purge) {
         try {
           const results = await backend.purge(purges);
+          const retry = new Set(results.filter(r => r.status === 'error' && !r.permanent).map(r => r.id));
+          done = purges.filter(id => !retry.has(id));
+          if (retry.size) {
+            stats.errors += retry.size;
+            process.stderr.write(`[yapa-sync] Purge of ${[...retry].join(', ')} failed for now; kept queued for the next push\n`);
+          }
           for (const r of results) {
-            if (r.status === 'error') process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}\n`);
+            if (r.status === 'error' && r.permanent) process.stderr.write(`[yapa-sync] Purge of ${r.id} refused: ${r.code}: ${r.message}\n`);
             // The id is now someone else's live document: only our deleted copies went.
             if (r.status === 'purged_copies') process.stderr.write(`[yapa-sync] Purged your deleted copies of ${r.id}; the id now belongs to another user's document, which stays\n`);
           }
@@ -173,7 +181,7 @@ async function pushAll(): Promise<PushStats> {
       } else {
         stats.deleted += await backend.delete(purges, 'delete');
       }
-      await clearPendingPurges(purges);
+      await clearPendingPurges(done);
     }
   } catch (e) {
     process.stderr.write(`[yapa-sync] Purge error: ${e}\n`);

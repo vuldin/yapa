@@ -10,7 +10,7 @@ import { nextTasks } from '../tasks/next.js';
 
 let dir: string;
 const NOW = 1_900_000_000;
-const gone = (at: number) => ({ archived: true, deleted_upstream_by: 'mate', deleted_upstream_at: at, deleted_upstream_reason: 'delete', is_synced: true, origin_user: 'mate' });
+const gone = (at: number) => ({ archived: true, deleted_upstream: true, deleted_upstream_by: 'mate', deleted_upstream_at: at, deleted_upstream_reason: 'delete', is_synced: true, origin_user: 'mate' });
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'yapa-trash-'));
@@ -33,7 +33,12 @@ describe('copies deleted upstream', () => {
   it('are listed with who deleted them and when they expire', async () => {
     const l = await listDeletedUpstream('project-acme');
     expect(l.map(x => x.id)).toEqual(['mate-3', 'mate-1', 'mate-2']);
-    expect(l[1]).toMatchObject({ deleted_by: 'mate', reason: 'delete', expires_at: NOW - 86400 + 30 * 86400 });
+    expect(l[1]).toMatchObject({ deleted_by: 'mate', reason: 'delete', expires_at: NOW - 86400 + 30 * 86400, by_you: false });
+  });
+
+  it('say when you deleted one yourself, on another machine', async () => {
+    await getStore().addDocument('project-mine', 'own-1', 'my note deleted elsewhere', { type: 'memory', ...gone(NOW), deleted_upstream_by: 'tester', origin_user: 'tester' });
+    expect(await listDeletedUpstream('project-mine')).toMatchObject([{ id: 'own-1', by_you: true }]);
   });
 
   it('are hidden from task lists and the ready queue', async () => {

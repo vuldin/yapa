@@ -79,6 +79,7 @@ import {
   keepDeletedUpstream,
   listTrash,
   purgeDocuments,
+  stillQueuedForPurge,
   restoreDeleted,
   removeReport,
   resolveWriteCollection,
@@ -1507,8 +1508,15 @@ export function registerTools(server: McpServer): void {
         if (action === 'list') {
           const t = await listTrash(collection);
           const lines: string[] = [];
-          lines.push(t.upstream.length ? `**Deleted by their owners, kept here** (${t.upstream.length}):` : 'No copies of documents deleted by their owners are kept here.');
-          for (const c of t.upstream.slice(0, 50)) lines.push(`- ${c.id} [${c.collection}] ${c.type}, deleted by ${c.deleted_by} ${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`);
+          const copyLine = (c: (typeof t.upstream)[number]) => `- ${c.id} [${c.collection}] ${c.type}, deleted ${c.by_you ? '' : `by ${c.deleted_by} `}${when(c.deleted_at)}, removed here after ${when(c.expires_at)}: ${c.content.slice(0, 100).replace(/\s+/g, ' ')}`;
+          const theirs = t.upstream.filter(c => !c.by_you);
+          const mine = t.upstream.filter(c => c.by_you);
+          lines.push(theirs.length ? `**Deleted by their owners, kept here** (${theirs.length}):` : 'No copies of documents deleted by their owners are kept here.');
+          for (const c of theirs.slice(0, 50)) lines.push(copyLine(c));
+          if (mine.length) {
+            lines.push('', `**Deleted by you on another machine, kept here** (${mine.length}):`);
+            for (const c of mine.slice(0, 50)) lines.push(copyLine(c));
+          }
           lines.push('');
           if (t.remoteUnavailable) lines.push(`Your deleted documents on the sync service: unknown (${t.remoteUnavailable}).`);
           else {
@@ -1536,8 +1544,13 @@ export function registerTools(server: McpServer): void {
           return text(parts.join('\n'));
         }
         const r = await purgeDocuments(ids);
+        // Purge on the service now rather than at the next timed sync.
+        if (r.queued.length) await syncCycle().catch(() => undefined);
+        const waiting = r.queued.length ? await stillQueuedForPurge(r.queued) : [];
+        const sent = r.queued.filter(x => !waiting.includes(x));
         const parts = [
-          r.queued.length ? `Purged here and queued for a purge on the sync service: ${r.queued.join(', ')}. Teammates' copies are dropped on their next pull, and these ids can't be written again.` : '',
+          sent.length ? `Purged here and on the sync service: ${sent.join(', ')}. Teammates' copies are dropped on their next pull, and these ids can't be written again. (A sync service without purge deletes them instead, restorable there for its retention period.)` : '',
+          waiting.length ? `Purged here; the sync service couldn't purge yet: ${waiting.join(', ')}. It stays queued and is retried on every sync.` : '',
           r.local.length ? `Removed for good (it never left this machine): ${r.local.join(', ')}.` : '',
           r.refused.length ? `Not yours, not purged: ${r.refused.map(x => `${x.id} (${x.owner})`).join(', ')}. Ask the owner to purge it.` : '',
         ].filter(Boolean);

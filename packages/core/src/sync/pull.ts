@@ -210,8 +210,13 @@ export async function pullCollection(
  *   the shared row), as before;
  * - a clean copy is archived as deleted upstream (isDeletedUpstream): hidden,
  *   never pushed, restorable, removed after DELETED_RETENTION_DAYS.
- * A purge (the owner removing a mistake such as a leaked secret) is the one
- * exception: the copy is dropped, edited or not.
+ * Two exceptions drop the copy instead:
+ * - a purge (the owner removing a mistake such as a leaked secret), edited
+ *   or not;
+ * - a teammate's retract (they moved the doc to a private collection, so no
+ *   shared copy should stay), when this copy is clean. Your own retract is
+ *   archived: a private collection doesn't sync between your machines, so
+ *   this may be your only copy here.
  */
 async function applyRemoteDeletion(collectionName: string, del: RemoteDeletion, stats: PullStats): Promise<void> {
   await withDocLock(collectionName, del.id, async () => {
@@ -228,9 +233,16 @@ async function applyRemoteDeletion(collectionName: string, del: RemoteDeletion, 
       process.stderr.write(`[yapa-sync] ${del.id} was deleted remotely by ${del.deleted_by}, but this copy has unpushed edits: kept (it will be pushed again)\n`);
       return;
     }
+    if (del.reason === 'retract' && del.deleted_by !== getConfig().USERNAME) {
+      await deleteDocument(collectionName, del.id);
+      stats.deleted++;
+      return;
+    }
     if (isDeletedUpstream(existing.metadata)) return;
     await patchDocument(collectionName, del.id, {
       archived: true,
+      // Equality-filterable marker, so the trash and its sweep needn't scan every archived doc.
+      deleted_upstream: true,
       deleted_upstream_by: del.deleted_by,
       deleted_upstream_at: Number(del.deleted_at) || Math.floor(Date.now() / 1000),
       deleted_upstream_reason: del.reason ?? 'delete',
