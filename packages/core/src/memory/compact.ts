@@ -1,4 +1,5 @@
 import { isSessionSummary } from './filters.js';
+import { isReadOnlyDoc } from '../sync/syncable.js';
 import { getConfig } from '../config.js';
 import { archivedMetadata } from './archive.js';
 import { getDocumentsByFilter, getDocumentsByIds, metadataDelta, patchDocument, queryDocuments } from '../store/index.js';
@@ -49,7 +50,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
   // Typed memories (findings, decisions, ...) keep their own identity and
   // status: a decision folded into a summary could no longer be waited on.
   const all = (await getDocumentsByFilter(collection, { type: 'memory' }, 10000))
-    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
+    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
 
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
 
@@ -68,6 +69,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
       n.metadata.archived !== true &&
       !isMemoryKind(n.metadata.kind) &&
       !isSessionSummary(n.metadata) &&
+      !isReadOnlyDoc(n.metadata) &&
       n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE,
     );
 
@@ -113,6 +115,10 @@ export interface ApplyCompactionResult {
 export async function applyCompaction(input: ApplyCompactionInput): Promise<ApplyCompactionResult> {
   // A collection merged away here is followed: its members moved with it.
   input = { ...input, collection: (await resolveWriteCollection(input.collection)).collection };
+  const members = await getDocumentsByIds(input.collection, input.member_ids).catch(() => []);
+  if (input.member_ids.length && members.length && members.every(m => isReadOnlyDoc(m.metadata))) {
+    throw new Error('every member is owned by the remote (read_only): nothing to compact');
+  }
   const stored = await storeMemory(input.summary, {
     collection: input.collection,
     salience: 2.0,
@@ -125,7 +131,7 @@ export async function applyCompaction(input: ApplyCompactionInput): Promise<Appl
   for (const id of input.member_ids) {
     try {
       const existing = await getDocumentsByIds(input.collection, [id]);
-      if (!existing.length) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
       await patchDocument(input.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {

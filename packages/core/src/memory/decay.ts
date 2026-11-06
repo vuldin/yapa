@@ -1,4 +1,5 @@
 import { getDocumentsByFilter, patchDocuments, listCollections } from '../store/index.js';
+import { isReadOnlyDoc } from '../sync/syncable.js';
 import { sweepDeletedUpstream } from './trash.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
@@ -40,6 +41,7 @@ export async function runDecaySweep(now: number = Math.floor(Date.now() / 1000))
       // ChromaDB, single file flush on the local store) instead of N rewrites.
       const updates: Array<{ id: string; patch: Record<string, any> }> = [];
       for (const doc of docs) {
+        if (isReadOnlyDoc(doc.metadata)) continue;
         const anchor = typeof doc.metadata.decayed_at === 'number' ? doc.metadata.decayed_at : fallbackAnchor;
         const days = (now - anchor) / DAY;
         if (days <= 0) continue;

@@ -8625,38 +8625,6 @@ var init_store = __esm({
   }
 });
 
-// packages/core/src/doc-lock.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
-import { join as join4 } from "node:path";
-function docLockPath(collection, id) {
-  const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
-  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
-}
-async function withDocLock(collection, id, fn) {
-  const path2 = docLockPath(collection, id);
-  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine2.some((h) => h.paths.has(path2))) return fn();
-  return withFileLock(path2, async () => {
-    const me = { paths: /* @__PURE__ */ new Set([path2]), active: true };
-    try {
-      return await held.run([...mine2, me], fn);
-    } finally {
-      me.active = false;
-    }
-  }, { waitMs: WAIT_MS });
-}
-var held, WAIT_MS;
-var init_doc_lock = __esm({
-  "packages/core/src/doc-lock.ts"() {
-    "use strict";
-    init_config();
-    init_fs_lock();
-    held = new AsyncLocalStorage();
-    WAIT_MS = 2e4;
-  }
-});
-
 // packages/core/src/sync/sentinel.ts
 async function getSyncPullTimestamp() {
   try {
@@ -8697,23 +8665,6 @@ async function updateSyncSubscriptions(collections) {
     collections: deduped.join(",")
   });
 }
-async function addSyncSubscriptions(names) {
-  return withDocLock("global", SYNC_SUBSCRIPTIONS_ID, async () => {
-    const before = await getSyncSubscriptions();
-    const added = [...new Set(names)].filter((n) => !before.includes(n));
-    if (added.length) await updateSyncSubscriptions([...before, ...added]);
-    return { before, added };
-  });
-}
-async function removeSyncSubscriptions(names) {
-  return withDocLock("global", SYNC_SUBSCRIPTIONS_ID, async () => {
-    const before = await getSyncSubscriptions();
-    const drop = new Set(names);
-    const removed = before.filter((n) => drop.has(n));
-    if (removed.length) await updateSyncSubscriptions(before.filter((n) => !drop.has(n)));
-    return { before, removed };
-  });
-}
 async function getCollectionRedirects() {
   try {
     const results = await getDocumentsByFilter2("global", {
@@ -8738,20 +8689,16 @@ async function writeCollectionRedirects(redirects) {
 }
 async function addCollectionRedirect(from, into) {
   if (from === into || from === "global") return;
-  await withDocLock("global", COLLECTION_REDIRECTS_ID, async () => {
-    const redirects = await getCollectionRedirects();
-    redirects[from] = into;
-    delete redirects[into];
-    await writeCollectionRedirects(redirects);
-  });
+  const redirects = await getCollectionRedirects();
+  redirects[from] = into;
+  delete redirects[into];
+  await writeCollectionRedirects(redirects);
 }
 async function clearCollectionRedirect(name) {
-  await withDocLock("global", COLLECTION_REDIRECTS_ID, async () => {
-    const redirects = await getCollectionRedirects();
-    if (!Object.hasOwn(redirects, name)) return;
-    delete redirects[name];
-    await writeCollectionRedirects(redirects);
-  });
+  const redirects = await getCollectionRedirects();
+  if (!Object.hasOwn(redirects, name)) return;
+  delete redirects[name];
+  await writeCollectionRedirects(redirects);
 }
 async function getLeftCollections() {
   try {
@@ -8770,16 +8717,12 @@ async function writeLeftCollections(names) {
   });
 }
 async function addLeftCollection(name) {
-  await withDocLock("global", COLLECTIONS_LEFT_ID, async () => {
-    const left = await getLeftCollections();
-    if (!left.includes(name)) await writeLeftCollections([...left, name]);
-  });
+  const left = await getLeftCollections();
+  if (!left.includes(name)) await writeLeftCollections([...left, name]);
 }
 async function clearLeftCollection(name) {
-  await withDocLock("global", COLLECTIONS_LEFT_ID, async () => {
-    const left = await getLeftCollections();
-    if (left.includes(name)) await writeLeftCollections(left.filter((n) => n !== name));
-  });
+  const left = await getLeftCollections();
+  if (left.includes(name)) await writeLeftCollections(left.filter((n) => n !== name));
 }
 async function getUnfollowedCollections() {
   return /* @__PURE__ */ new Set([...Object.keys(await getCollectionRedirects()), ...await getLeftCollections()]);
@@ -8817,21 +8760,18 @@ async function writePendingBackfills(names) {
   });
 }
 async function addPendingBackfill(name) {
-  await withDocLock("global", COLLECTIONS_BACKFILL_ID, async () => {
-    const p = await getPendingBackfills();
-    if (!p.includes(name)) await writePendingBackfills([...p, name]);
-  });
+  const p = await getPendingBackfills();
+  if (!p.includes(name)) await writePendingBackfills([...p, name]);
 }
 async function clearPendingBackfill(name) {
-  await withDocLock("global", COLLECTIONS_BACKFILL_ID, async () => {
-    const p = await getPendingBackfills();
-    if (p.includes(name)) await writePendingBackfills(p.filter((n) => n !== name));
-  });
+  const p = await getPendingBackfills();
+  if (p.includes(name)) await writePendingBackfills(p.filter((n) => n !== name));
 }
 async function rejoinCollection(name) {
   if (!(await getLeftCollections()).includes(name)) return false;
   await clearLeftCollection(name);
-  await addSyncSubscriptions([name]);
+  const subs = await getSyncSubscriptions();
+  if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
   await addPendingBackfill(name);
   return true;
 }
@@ -8843,7 +8783,6 @@ var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
     init_store();
-    init_doc_lock();
     SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
     COLLECTION_REDIRECTS_ID = "__collection_redirects__";
@@ -8858,6 +8797,38 @@ var init_sentinel = __esm({
       code = "collection_left";
     };
     COLLECTIONS_BACKFILL_ID = "__collections_backfill__";
+  }
+});
+
+// packages/core/src/doc-lock.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { join as join4 } from "node:path";
+function docLockPath(collection, id) {
+  const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
+  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
+}
+async function withDocLock(collection, id, fn) {
+  const path2 = docLockPath(collection, id);
+  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine2.some((h) => h.paths.has(path2))) return fn();
+  return withFileLock(path2, async () => {
+    const me = { paths: /* @__PURE__ */ new Set([path2]), active: true };
+    try {
+      return await held.run([...mine2, me], fn);
+    } finally {
+      me.active = false;
+    }
+  }, { waitMs: WAIT_MS });
+}
+var held, WAIT_MS;
+var init_doc_lock = __esm({
+  "packages/core/src/doc-lock.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    held = new AsyncLocalStorage();
+    WAIT_MS = 2e4;
   }
 });
 
@@ -10881,44 +10852,6 @@ function wrap(c) {
     nextTaskId: guard(c.nextTaskId)
   };
 }
-async function moveOwnLeases(from, into, keys, now = Math.floor(Date.now() / 1e3)) {
-  const out = { moved: 0, kept: [] };
-  let coord;
-  let leases;
-  const wanted = new Set(keys);
-  if (!wanted.size) return out;
-  try {
-    coord = await requireCoordination();
-    leases = (await coord.leaseList(from)).leases;
-  } catch {
-    return { ...out, unchecked: true };
-  }
-  const me = getConfig().USERNAME.toLowerCase();
-  for (const l of leases) {
-    if (l.expired || l.holder.user.toLowerCase() !== me || !wanted.has(l.key)) continue;
-    try {
-      const r = await coord.leaseAcquire({
-        collection: into,
-        key: l.key,
-        session: l.holder.session,
-        scope: l.scope,
-        ttlSeconds: Math.max(LEASE_TTL_MIN, l.expires_at - now),
-        ...l.title ? { title: l.title } : {}
-      });
-      if (!r.granted) {
-        out.kept.push(l.key);
-        continue;
-      }
-      await coord.leaseRelease(from, l.key, l.holder.session).catch(() => void 0);
-      noteLeaseReleased(l.holder.session, from, l.key);
-      noteLeaseHeld(l.holder.session, r.lease.ttl_seconds, now, { collection: into, key: l.key });
-      out.moved++;
-    } catch {
-      out.kept.push(l.key);
-    }
-  }
-  return out;
-}
 var SESSION_RE2, heldKey, CoordinationUnavailableError, local;
 var init_coordination = __esm({
   "packages/core/src/sync/coordination.ts"() {
@@ -11247,8 +11180,13 @@ async function pushAll() {
   }
   if (pushedCollections.length > 0) {
     try {
+      const existing = await getSyncSubscriptions();
+      const existingSet = new Set(existing);
       const unfollowed = await getUnfollowedCollections();
-      await addSyncSubscriptions(pushedCollections.filter((c) => !unfollowed.has(c)));
+      const newSubs = pushedCollections.filter((c) => !existingSet.has(c) && !unfollowed.has(c));
+      if (newSubs.length > 0) {
+        await updateSyncSubscriptions([...existing, ...newSubs]);
+      }
     } catch (e) {
       process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}
 `);
@@ -41587,6 +41525,7 @@ async function storeMemory(content, options = {}) {
 
 // packages/core/src/memory/recall.ts
 init_store();
+init_syncable();
 init_config();
 init_syncable();
 
@@ -41677,7 +41616,7 @@ async function recallMemory(query, options = {}) {
   const boostMaxDistance = getConfig().SALIENCE_BOOST_MAX_DISTANCE;
   const boosts = /* @__PURE__ */ new Map();
   for (const r of results) {
-    if (options.boost === false || r.distance >= boostMaxDistance) continue;
+    if (options.boost === false || r.distance >= boostMaxDistance || isReadOnlyDoc(r.metadata)) continue;
     if (r.collection) {
       const lifecycleMeta = {
         salience: r.metadata.salience ?? 1,
@@ -41787,6 +41726,7 @@ async function listMemories(options = {}) {
 
 // packages/core/src/memory/decay.ts
 init_store();
+init_syncable();
 
 // packages/core/src/memory/trash.ts
 init_config();
@@ -41945,6 +41885,7 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
       const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
       const updates = [];
       for (const doc of docs) {
+        if (isReadOnlyDoc(doc.metadata)) continue;
         const anchor2 = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
         const days = (now - anchor2) / DAY2;
         if (days <= 0) continue;
@@ -41982,6 +41923,7 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
 }
 
 // packages/core/src/memory/compact.ts
+init_syncable();
 init_config();
 init_store();
 init_sentinel();
@@ -42003,7 +41945,7 @@ function intersect(a, b) {
   return b.filter((t) => set2.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -42012,7 +41954,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && !isReadOnlyDoc(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -42033,6 +41975,10 @@ async function suggestCompaction(collection) {
 }
 async function applyCompaction(input2) {
   input2 = { ...input2, collection: (await resolveWriteCollection(input2.collection)).collection };
+  const members2 = await getDocumentsByIds2(input2.collection, input2.member_ids).catch(() => []);
+  if (input2.member_ids.length && members2.length && members2.every((m) => isReadOnlyDoc(m.metadata))) {
+    throw new Error("every member is owned by the remote (read_only): nothing to compact");
+  }
   const stored = await storeMemory(input2.summary, {
     collection: input2.collection,
     salience: 2,
@@ -42044,7 +41990,7 @@ async function applyCompaction(input2) {
   for (const id of input2.member_ids) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
       await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
@@ -43163,7 +43109,6 @@ function formatDuration(minutes) {
 // packages/core/src/collections/manage.ts
 init_config();
 init_deletes();
-init_coordination();
 init_sentinel();
 init_doc_lock();
 init_push();
@@ -43246,7 +43191,8 @@ async function removeCollection(name, opts = {}) {
     result.deletedRemotely = own2.length;
   }
   if (shared) {
-    await removeSyncSubscriptions([name]);
+    const subs = await getSyncSubscriptions();
+    if (subs.includes(name)) await updateSyncSubscriptions(subs.filter((s) => s !== name));
     if (scope === "local" && (opts.markLeft ?? true)) await addLeftCollection(name);
   }
   await deleteCollection2(name);
@@ -43340,13 +43286,7 @@ async function mergeCollections(from, into, opts = {}) {
   }
   await removeCollection(from, { force: true, markLeft: false });
   result.sourceRemoved = true;
-  try {
-    await addCollectionRedirect(from, into);
-  } catch (e) {
-    result.redirectError = e instanceof Error ? e.message : String(e);
-  }
-  const leases = await moveOwnLeases(from, into, docs.filter((d) => d.metadata.type === "task").map((d) => d.id));
-  if (leases.moved || leases.kept.length || leases.unchecked) result.leases = leases;
+  await addCollectionRedirect(from, into);
   return result;
 }
 function erasureLines(r) {
@@ -43379,10 +43319,6 @@ function mergeReportLines(r) {
       lines.push(`${r.teammateRowsKept} teammates' docs stay shared in "${r.from}" (you now have a private copy; only their owners can remove the shared rows).`);
     }
   }
-  if (r.redirectError) lines.push(`Could not record that "${r.from}" moved here (${r.redirectError}): a prompt in its folder may recreate it; run collection_merge again to record it.`);
-  if (r.leases?.moved) lines.push(`${r.leases.moved} of your claims moved with their tasks to "${r.into}".`);
-  if (r.leases?.kept.length) lines.push(`Claims still on "${r.from}" (the target refused them): ${r.leases.kept.join(", ")}.`);
-  if (r.leases?.unchecked) lines.push(`Your claims in "${r.from}" could not be checked (the sync service did not answer): claim the moved tasks you were working on again in "${r.into}".`);
   if (isSyncable2(r.from)) {
     lines.push(`"${r.from}" won't come back here (sync subscribe ${r.from} to follow it again).`);
     lines.push(
@@ -43394,6 +43330,7 @@ function mergeReportLines(r) {
 
 // packages/core/src/curation/index.ts
 init_config();
+init_syncable();
 init_store();
 
 // packages/core/src/curation/prompts.ts
@@ -43525,7 +43462,7 @@ function getCurationState() {
 var MAX_PER_COLLECTION = 500;
 async function collectUnclassified(collection) {
   const docs = await getDocumentsByFilter2(collection, { type: "memory" }, MAX_PER_COLLECTION);
-  return docs.filter((d) => d.metadata.classified_at == null);
+  return docs.filter((d) => d.metadata.classified_at == null && !isReadOnlyDoc(d.metadata));
 }
 async function curationCycle() {
   if (running) {
@@ -43714,17 +43651,18 @@ function extractJsonObject(raw) {
 }
 
 // packages/core/src/curation/janitor.ts
+init_syncable();
 init_config();
 init_store();
 async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
       if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind)) continue;
+      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
       const key = [doc.id, n.id].sort().join("|");
       if (seen.has(key)) continue;
       seen.add(key);
@@ -43833,6 +43771,7 @@ init_sentinel();
 
 // packages/core/src/buckets/index.ts
 init_config();
+init_syncable();
 init_store();
 
 // packages/core/src/buckets/artifacts.ts
@@ -44039,6 +43978,7 @@ async function collectClassifiedMemories() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at != null) {
           out.push({
             id: d.id,
@@ -44188,6 +44128,7 @@ async function systemPromptActivate(version2) {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.selected_for === target && d.metadata.promoted_to == null) {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -44232,6 +44173,7 @@ async function bucketStatus() {
     try {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION2);
       for (const d of docs) {
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.classified_at == null) pendingClassification++;
         const sel = d.metadata.selected_for;
         const prom = d.metadata.promoted_to;
@@ -44273,7 +44215,9 @@ async function pullFromRemote() {
     try {
       const unfollowed2 = await getUnfollowedCollections();
       const mine2 = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
-      await addSyncSubscriptions(mine2);
+      const subs = await getSyncSubscriptions();
+      const add = mine2.filter((c) => !subs.includes(c));
+      if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
 `);
@@ -45729,6 +45673,7 @@ async function evalCompare(adapterRefA, adapterRefB, manifestVersion, options = 
 
 // packages/core/src/training/promotion.ts
 init_store();
+init_syncable();
 var MAX_PER_COLLECTION4 = 2e3;
 async function adapterPromote(args) {
   if (args.confirm !== true) {
@@ -45749,6 +45694,7 @@ async function adapterPromote(args) {
       const docs = await getDocumentsByFilter2(c.name, { type: "memory" }, MAX_PER_COLLECTION4);
       for (const d of docs) {
         if (d.metadata.selected_for !== target) continue;
+        if (isReadOnlyDoc(d.metadata)) continue;
         if (d.metadata.verification_last_result === "passed") {
           await patchDocument(c.name, d.id, { promoted_to: target, promoted_at: now });
           promoted++;
@@ -47584,7 +47530,8 @@ Last error: ${last.message}` : ""}`);
             if (valid.length === 0) {
               return text(`None of the requested collections exist on remote. Available: ${[...remoteNames].join(", ")}`);
             }
-            await addSyncSubscriptions(valid);
+            const existing = await getSyncSubscriptions();
+            await updateSyncSubscriptions([.../* @__PURE__ */ new Set([...existing, ...valid])]);
             for (const name of valid) {
               await clearCollectionRedirect(name);
               await clearLeftCollection(name);
@@ -47603,7 +47550,9 @@ Last error: ${last.message}` : ""}`);
         case "unsubscribe": {
           if (!collections?.length) return text("Refused \u2014 `collections` is required for unsubscribe.");
           try {
-            const { before: existing } = await removeSyncSubscriptions(collections);
+            const existing = await getSyncSubscriptions();
+            const removeSet = new Set(collections);
+            await updateSyncSubscriptions(existing.filter((c) => !removeSet.has(c)));
             const removed = collections.filter((c) => existing.includes(c));
             const notFound = collections.filter((c) => !existing.includes(c));
             const lines = [];
