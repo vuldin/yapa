@@ -2874,7 +2874,7 @@ var init_http_backend = __esm({
           const byId = new Map((r.results ?? []).map((x) => [x?.id, x]));
           for (const id of part) {
             const x = byId.get(id);
-            if (x?.status === "purged" || x?.status === "not_found") out.push({ id, status: x.status });
+            if (x?.status === "purged" || x?.status === "purged_copies" || x?.status === "not_found") out.push({ id, status: x.status });
             else {
               const code = String(x?.error?.code ?? "internal");
               out.push({ id, status: "error", code, message: redactTokens(String(x?.error?.message ?? (x ? code : "no result for this id"))).slice(0, 300) });
