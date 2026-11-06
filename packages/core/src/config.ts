@@ -138,6 +138,8 @@ export interface YapaConfig {
   SYNC_MCP_URL: string;
   /** Command that prints the bearer token for SYNC_MCP_URL. Required with it. */
   SYNC_MCP_TOKEN_CMD: string;
+  /** The sync tool's exact name on SYNC_MCP_URL; empty = `yapa_sync` or one prefixed `..__yapa_sync`. */
+  SYNC_MCP_TOOL: string;
   /**
    * Command that prints a Google ID token for the service. Empty =
    * `gcloud auth print-identity-token` (user accounts, after `gcloud auth login`).
@@ -364,6 +366,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_ID_TOKEN_CMD: get(env, 'SYNC_ID_TOKEN_CMD', ''),
     SYNC_MCP_URL: get(env, 'SYNC_MCP_URL', '').trim(),
     SYNC_MCP_TOKEN_CMD: get(env, 'SYNC_MCP_TOKEN_CMD', ''),
+    SYNC_MCP_TOOL: get(env, 'SYNC_MCP_TOOL', '').trim(),
     SYNC_ID_TOKEN_CACHE: ((v: string) => (v === 'off' ? '' : v))(get(env, 'SYNC_ID_TOKEN_CACHE', pathJoin(homedir(), '.local', 'share', 'yapa', 'id-token'))),
     // Not recorded under vitest unless a test names a file: suites that fail
     // sync on purpose must not paint the developer's own status line red.

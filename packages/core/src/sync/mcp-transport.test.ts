@@ -17,7 +17,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest, typ
 
 import { setConfig, createConfig, getConfig } from '../config.js';
 import { HttpBackend, IdTokenProvider } from './http-backend.js';
-import { McpTransport, mcpTokenProvider, pickSyncTool } from './mcp-transport.js';
+import { McpTransport, mcpTokenProvider, pickSyncTool, readSse } from './mcp-transport.js';
 import { setSyncBackend, getSyncBackend, isSyncConfigured, syncBackendKind, syncTransportKind, UnsupportedByRemoteError } from './backend.js';
 import { syncTargetKey } from './shared-cycle.js';
 import { readSyncHealth } from './health.js';
@@ -42,6 +42,14 @@ class Gateway {
   json = false;
   /** Send a notification on the call's stream before its result. */
   notifyFirst = false;
+  /** More tools to list. */
+  extraTools: string[] = [];
+  /** Delay every POST this long. */
+  delayMs = 0;
+  /** Answer tools/call POSTs with this HTTP status instead of running them. */
+  callStatus: { status: number; headers?: Record<string, string> } | undefined;
+  /** Session ids ended with DELETE. */
+  ended: string[] = [];
   sessions = new Map<string, StreamableHTTPServerTransport>();
   url = '';
   private http: HttpServer | undefined;
@@ -78,6 +86,10 @@ class Gateway {
     this.answered.length = 0;
     this.json = false;
     this.notifyFirst = false;
+    this.extraTools = [];
+    this.delayMs = 0;
+    this.callStatus = undefined;
+    this.ended.length = 0;
   }
 
   private async handle(req: IncomingMessage, res: import('node:http').ServerResponse): Promise<void> {
@@ -88,6 +100,14 @@ class Gateway {
       res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"invalid_token"}');
       return;
     }
+    const sessionId = header('mcp-session-id');
+    if (req.method === 'DELETE' && sessionId) {
+      this.ended.push(sessionId);
+      this.sessions.get(sessionId)?.close().catch(() => undefined);
+      this.sessions.delete(sessionId);
+      res.writeHead(200).end();
+      return;
+    }
     if (req.method !== 'POST') {
       res.writeHead(405).end();
       return;
@@ -95,6 +115,11 @@ class Gateway {
     let raw = '';
     for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw);
+    if (this.delayMs) await new Promise(r => setTimeout(r, this.delayMs));
+    if (this.callStatus && body.method === 'tools/call') {
+      res.writeHead(this.callStatus.status, { 'content-type': 'text/plain', ...(this.callStatus.headers ?? {}) }).end('gateway says no');
+      return;
+    }
     const sid = req.headers['mcp-session-id'];
     let transport = typeof sid === 'string' ? this.sessions.get(sid) : undefined;
     if (!transport) {
@@ -126,6 +151,7 @@ class Gateway {
       tools: [
         { name: 'recall', inputSchema: { type: 'object' as const } },
         { name: this.toolName, inputSchema: { type: 'object' as const } },
+        ...this.extraTools.map(name => ({ name, inputSchema: { type: 'object' as const } })),
       ],
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
@@ -163,8 +189,8 @@ class Gateway {
 const gateway = new Gateway(() => base);
 const opened: HttpBackend[] = [];
 
-function mcpBackend(opts: { tokens: IdTokenProvider; timeoutMs?: number; device?: () => string; url?: string }): HttpBackend {
-  const b = new HttpBackend({ transport: new McpTransport(opts.url ?? gateway.url), tokens: opts.tokens, timeoutMs: opts.timeoutMs ?? 2000, device: opts.device ?? (() => 'dev-A') });
+function mcpBackend(opts: { tokens: IdTokenProvider; timeoutMs?: number; device?: () => string; url?: string; tool?: string }): HttpBackend {
+  const b = new HttpBackend({ transport: new McpTransport(opts.url ?? gateway.url, { tool: opts.tool }), tokens: opts.tokens, timeoutMs: opts.timeoutMs ?? 2000, device: opts.device ?? (() => 'dev-A') });
   opened.push(b);
   return b;
 }
@@ -232,7 +258,6 @@ describe('sync over MCP', () => {
     expect(gateway.sessions.size).toBe(sessions + 1);
     now += 3600_000;
     await b.maxTaskNumber();
-    expect(gateway.sessions.size).toBe(sessions + 2);
     expect(tk.calls()).toBe(2);
     expect(gateway.calls.map(c => c.token)).toEqual([...Array(2).fill(gateway.calls[0].token), gateway.calls[2].token]);
     expect(gateway.calls[2].token).not.toBe(gateway.calls[0].token);
@@ -284,15 +309,33 @@ describe('sync over MCP', () => {
     expect(tk.calls()).toBe(1);
   });
 
-  it('finds a gateway-prefixed tool name, and says so when there is no sync tool', async () => {
-    expect(pickSyncTool(['recall', 'yapa_sync', 'x__yapa_sync'])).toBe('yapa_sync');
-    expect(pickSyncTool(['recall', 'remote-mcp__yapa_sync'])).toBe('remote-mcp__yapa_sync');
-    expect(pickSyncTool(['notyapa_sync', 'yapa_sync_v2'])).toBeUndefined();
-    gateway.toolName = 'remote-mcp_yapa_sync';
+  it('finds yapa_sync or exactly one prefixed name; several are ambiguous; YAPA_SYNC_MCP_TOOL picks one', async () => {
+    const pick = (names: string[], explicit?: string) => { try { return pickSyncTool(names, 'gw', explicit); } catch (e: any) { return e.code; } };
+    expect(pick(['recall', 'yapa_sync', 'x__yapa_sync'])).toBe('yapa_sync');
+    for (const name of ['remote__yapa_sync', 'remote.yapa_sync', 'remote/yapa_sync', 'remote-yapa_sync']) expect(pick(['recall', name])).toBe(name);
+    expect(pick(['legacy_yapa_sync', 'notyapa_sync', 'yapa_sync_v2', '__yapa_sync'])).toBe('no_sync_tool');
+    expect(pick(['staging__yapa_sync', 'prod__yapa_sync'])).toBe('ambiguous_sync_tool');
+    expect(pick(['staging__yapa_sync', 'prod__yapa_sync'], 'prod__yapa_sync')).toBe('prod__yapa_sync');
+    expect(pick(['yapa_sync'], 'prod__yapa_sync')).toBe('no_sync_tool');
+    expect(createConfig({ YAPA_SYNC_MCP_TOOL: ' prod__yapa_sync ' }).SYNC_MCP_TOOL).toBe('prod__yapa_sync');
+
+    gateway.toolName = 'staging__yapa_sync';
+    gateway.extraTools = ['prod__yapa_sync'];
+    const none = await mcpBackend({ tokens: tokens().provider }).maxTaskNumber().catch(e => e);
+    expect(none.code).toBe('ambiguous_sync_tool');
+    expect(none.message).toMatch(/several sync tools \(staging__yapa_sync, prod__yapa_sync\)\. Set YAPA_SYNC_MCP_TOOL/);
+    const { isCycleFatal } = await import('./backend.js');
+    expect(isCycleFatal(none)).toBe(true);
+    setHandler(() => ({ json: { max: 6 } }));
+    expect(await mcpBackend({ tokens: tokens().provider, tool: 'staging__yapa_sync' }).maxTaskNumber()).toBe(6);
+    expect(gateway.calls.at(-1)?.args.path).toBe('/v1/me/max-task-number');
+    gateway.extraTools = [];
+
+    gateway.toolName = 'remote-mcp__yapa_sync';
     setHandler(() => ({ json: { max: 2 } }));
     const b = mcpBackend({ tokens: tokens().provider });
     expect(await b.maxTaskNumber()).toBe(2);
-    expect((await b.describe())).toContain('Tool: remote-mcp_yapa_sync');
+    expect((await b.describe())).toContain('Tool: remote-mcp__yapa_sync');
     gateway.toolName = 'something_else';
     const err = await mcpBackend({ tokens: tokens().provider }).maxTaskNumber().catch(e => e);
     expect(err.code).toBe('no_sync_tool');
@@ -319,6 +362,99 @@ describe('sync over MCP', () => {
     expect(err.message).toMatch(/^MCP gateway unreachable \(127\.0\.0\.1:\d+\)/);
   });
 
+  it('a token printed as "Bearer <token>" is used without the prefix', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'yapa-mcp-bearer-'));
+    try {
+      const provider = mcpTokenProvider(createConfig({ YAPA_SYNC_MCP_TOKEN_CMD: 'echo "Bearer opaque-abc"', YAPA_SYNC_ID_TOKEN_CACHE: join(dir, 'id-token') }));
+      expect(await provider.get()).toBe('opaque-abc');
+      setHandler(() => ({ json: { max: 8 } }));
+      expect(await mcpBackend({ tokens: provider }).maxTaskNumber()).toBe(8);
+      expect(gateway.requests.at(-1)?.authorization).toBe('Bearer opaque-abc');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an opaque token is reused for 50 minutes and read back from the file cache with its expiry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'yapa-mcp-opaque-'));
+    const { readFileSync, writeFileSync } = await import('node:fs');
+    try {
+      const cache = join(dir, 'mcp-token');
+      let now = 1_800_000_000_000;
+      let minted = 0;
+      const mint = async () => `opaque-${++minted}`;
+      const a = new IdTokenProvider(mint, () => now, cache, 50 * 60_000);
+      expect(await a.get()).toBe('opaque-1');
+      expect(readFileSync(cache, 'utf-8')).toBe(`opaque-1\n${now + 50 * 60_000}`);
+      now += 49 * 60_000;
+      expect(await a.get()).toBe('opaque-1');
+      expect(await new IdTokenProvider(mint, () => now, cache, 50 * 60_000).get()).toBe('opaque-1');
+      expect(minted).toBe(1);
+      now += 2 * 60_000;
+      expect(await new IdTokenProvider(mint, () => now, cache, 50 * 60_000).get()).toBe('opaque-2');
+      writeFileSync(cache, 'bare-opaque');
+      expect(await new IdTokenProvider(mint, () => now, cache, 50 * 60_000).get()).toBe('opaque-3');
+      writeFileSync(cache, `opaque-x\n${now + 60_000}`);
+      expect(await new IdTokenProvider(mint, () => now, cache).get()).toBe('opaque-4'); // the ID-token cache never adopts opaque tokens
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a new token ends the old session', async () => {
+    setHandler(() => ({ json: { max: 1 } }));
+    let now = 1_000_000_000_000;
+    const tk = tokens([jwt(now / 1000 + 3600, 'a@example.com', 1), jwt(now / 1000 + 7200, 'a@example.com', 2)], () => now);
+    const b = mcpBackend({ tokens: tk.provider });
+    await b.maxTaskNumber();
+    const first = gateway.requests.at(-1)?.session;
+    now += 3600_000;
+    await b.maxTaskNumber();
+    await new Promise(r => setTimeout(r, 50));
+    expect(gateway.ended).toEqual([first]);
+  });
+
+  it('gateway statuses: 429 is rate_limited with retry-after, other errors http_<status>, JSON-RPC errors mcp_error', async () => {
+    const b = mcpBackend({ tokens: tokens().provider });
+    gateway.callStatus = { status: 429, headers: { 'retry-after': '9' } };
+    expect(await b.collections().catch(e => e)).toMatchObject({ code: 'rate_limited', status: 429, details: { retry_after: 9 } });
+    gateway.callStatus = { status: 503 };
+    expect(await b.collections().catch(e => e)).toMatchObject({ code: 'http_503', status: 503 });
+    gateway.callStatus = { status: 400 };
+    expect(await b.collections().catch(e => e)).toMatchObject({ code: 'http_400', status: 400 });
+    gateway.callStatus = undefined;
+    gateway.intercept = () => { throw new Error('tool crashed'); };
+    const err = await b.collections().catch(e => e);
+    expect(err).toMatchObject({ code: 'mcp_error', status: 502 });
+    expect(err.message).toMatch(/tool crashed/);
+  });
+
+  it('one deadline covers initialize, notify, tools/list and the call', async () => {
+    setHandler(() => ({ json: { max: 1 } }));
+    gateway.delayMs = 80;
+    const err = await mcpBackend({ tokens: tokens().provider, timeoutMs: 250 }).maxTaskNumber().catch(e => e);
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toMatch(/timed out after 250 ms/);
+    expect(await mcpBackend({ tokens: tokens().provider, timeoutMs: 2000 }).maxTaskNumber()).toBe(1);
+  });
+
+  it('only https, or http to this machine', () => {
+    expect(() => new McpTransport('http://gw.example/mcp')).toThrow(/must use https:\/\/ \(http:\/\/ only for localhost/);
+    for (const url of ['https://gw.example/mcp', 'http://localhost:9/mcp', 'http://127.0.0.1:9/mcp', 'http://[::1]:9/mcp']) expect(() => new McpTransport(url)).not.toThrow();
+  });
+
+  it('SSE: a last event without a trailing blank line, and CR-only line endings', async () => {
+    const reply = (id: number) => JSON.stringify({ jsonrpc: '2.0', id, result: { ok: id } });
+    const sse = (text: string) => new Response(text, { headers: { 'content-type': 'text/event-stream' } });
+    expect(await readSse(sse(`event: message\ndata: ${reply(1)}`), 1)).toMatchObject({ result: { ok: 1 } });
+    expect(await readSse(sse(`data: {"jsonrpc":"2.0","method":"notifications/message"}\r\rdata: ${reply(2)}\r\r`), 2)).toMatchObject({ result: { ok: 2 } });
+    expect(await readSse(sse(`data: ${reply(9)}\r\n\r\ndata: ${reply(3)}\r\n\r\n`), 3)).toMatchObject({ result: { ok: 3 } });
+    const parts = [`data: ${reply(4)}\r`, '\n', '\r\n'];
+    const stream = new ReadableStream({ start(c) { for (const p of parts) c.enqueue(new TextEncoder().encode(p)); c.close(); } });
+    expect(await readSse(new Response(stream), 4)).toMatchObject({ result: { ok: 4 } });
+    await expect(readSse(sse(`data: ${reply(5)}\n\n`), 6)).rejects.toThrow(/without a response/);
+  });
+
   it('the token command: required, cached, and a failure is a clear sign-in error', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'yapa-mcp-token-'));
     try {
@@ -327,11 +463,18 @@ describe('sync over MCP', () => {
       const failing = mcpBackend({ tokens: mcpTokenProvider(cfg('echo "session expired, log in again" >&2; exit 3')) });
       const err = await failing.collections().catch(e => e);
       expect(err.code).toBe('token_command');
-      expect(err.message).toMatch(/could not get a token for the MCP gateway from `.*`: session expired, log in again\. Sign in to the gateway again/);
+      expect(err.message).toMatch(/could not get a token for the MCP gateway from `echo`: session expired, log in again\. Sign in to the MCP gateway again/);
       await expect(mcpTokenProvider(cfg('true')).get()).rejects.toThrow(/printed no token/);
       const t = jwt(Math.floor(Date.now() / 1000) + 3600);
       expect(await mcpTokenProvider(cfg(`echo ${t}`)).get()).toBe(t);
       expect(await mcpTokenProvider(cfg('exit 1')).get()).toBe(t); // the next process reuses the cached token
+      await rm(join(dir, 'mcp-token'), { force: true });
+      const leak = await mcpTokenProvider(cfg('false sk-not-for-the-status-line')).get().catch(e => e);
+      expect(leak.message).toMatch(/from `false`: exit code 1\. Sign in to the MCP gateway again/);
+      expect(leak.message).not.toMatch(/sk-not-for|gcloud/);
+      const odd = await mcpTokenProvider(cfg('echo "two words"; true')).get().catch(e => e);
+      expect(odd.message).toMatch(/the MCP token command \(`echo`\) printed no token\. Sign in to the MCP gateway again/);
+      expect(odd.message).not.toMatch(/gcloud/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

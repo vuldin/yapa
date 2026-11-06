@@ -78,7 +78,9 @@ export function runCommand(cmd: string, explain: (detail: string) => string, fal
   return new Promise((resolve, reject) => {
     const done = (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
       if (err) {
-        const detail = redactTokens(String(stderr || err.message).trim().split('\n').filter(Boolean).slice(-2).join(' ')).slice(0, 300);
+        // err.message repeats the whole command line, which may hold a secret.
+        const why = String(stderr).trim() || ((err as { killed?: boolean }).killed ? 'timed out' : exitText((err as { code?: unknown }).code));
+        const detail = redactTokens(why.split('\n').filter(Boolean).slice(-2).join(' ')).slice(0, 300);
         reject(new Error(explain(detail)));
         return;
       }
@@ -90,10 +92,19 @@ export function runCommand(cmd: string, explain: (detail: string) => string, fal
   });
 }
 
+/** A command's program name, safe to show (its arguments may hold a secret). */
+export function programOf(cmd: string): string {
+  return cmd.trim().split(/\s+/)[0]?.split('/').pop() || 'the token command';
+}
+
+function exitText(code: unknown): string {
+  return typeof code === 'number' ? `exit code ${code}` : String(code ?? 'failed');
+}
+
 function runTokenCommand(cmd: string): Promise<string> {
   return runCommand(
     cmd,
-    detail => `could not get a Google ID token from \`${cmd || 'gcloud auth print-identity-token'}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`,
+    detail => `could not get a Google ID token from \`${cmd ? programOf(cmd) : 'gcloud auth print-identity-token'}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`,
     { file: 'gcloud', args: ['auth', 'print-identity-token'] },
   );
 }
@@ -114,6 +125,8 @@ export class IdTokenProvider {
     cmd: string | TokenCommandRunner = '',
     private readonly now: () => number = Date.now,
     private readonly cachePath: string = '',
+    /** Reuse a token without a readable `exp` this long, and keep it in the file cache with its expiry. */
+    private readonly opaqueTtlMs?: number,
   ) {
     this.run = typeof cmd === 'function' ? cmd : () => runTokenCommand(cmd);
   }
@@ -133,18 +146,21 @@ export class IdTokenProvider {
 
   private validity(token: string, now: number): number {
     const exp = Number(decodeJwtPayload(token)?.exp);
-    if (!Number.isFinite(exp) || exp <= 0) return now + OPAQUE_TOKEN_TTL_MS;
+    if (!Number.isFinite(exp) || exp <= 0) return now + (this.opaqueTtlMs ?? OPAQUE_TOKEN_TTL_MS);
     const life = exp * 1000 - now;
     return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
   }
 
-  /** Adopt a still-valid token cached by an earlier process (JWTs with `exp` only). */
+  /** Adopt a still-valid token cached by an earlier process (JWTs with `exp`, or opaque ones stored with their expiry). */
   private loadCached(): boolean {
     if (!this.cachePath) return false;
     try {
-      const token = readFileSync(this.cachePath, 'utf-8').trim();
-      if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
-      const until = this.validity(token, this.now());
+      const [first = '', stored] = readFileSync(this.cachePath, 'utf-8').split('\n');
+      const token = first.trim();
+      if (!token) return false;
+      const jwt = Number.isFinite(Number(decodeJwtPayload(token)?.exp));
+      if (!jwt && (this.opaqueTtlMs === undefined || !Number.isFinite(Number(stored)))) return false;
+      const until = jwt ? this.validity(token, this.now()) : Number(stored);
       if (this.now() >= until) return false;
       this.token = token;
       this.validUntil = until;
@@ -160,7 +176,8 @@ export class IdTokenProvider {
     try {
       mkdirSync(dirname(this.cachePath), { recursive: true, mode: 0o700 });
       const tmp = `${this.cachePath}.${process.pid}.tmp`;
-      writeFileSync(tmp, token, { mode: 0o600 });
+      const opaque = this.opaqueTtlMs !== undefined && !Number.isFinite(Number(decodeJwtPayload(token)?.exp));
+      writeFileSync(tmp, opaque ? `${token}\n${this.validUntil}` : token, { mode: 0o600 });
       renameSync(tmp, this.cachePath);
     } catch {
       // Cache is an optimization only.

@@ -289,7 +289,7 @@ let override: SyncBackend | undefined;
 let active: { key: string; backend: SyncBackend } | undefined;
 
 function keyOf(config: YapaConfig): string {
-  return JSON.stringify([config.SYNC_MCP_URL, config.SYNC_MCP_TOKEN_CMD, config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
+  return JSON.stringify([config.SYNC_MCP_URL, config.SYNC_MCP_TOKEN_CMD, config.SYNC_MCP_TOOL, config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
 }
 
 /**
@@ -325,7 +325,7 @@ async function selectBackend(): Promise<SyncBackend | undefined> {
 
 async function mcpBackend(config: YapaConfig): Promise<SyncBackend> {
   const [{ HttpBackend }, { McpTransport, mcpTokenProvider }] = await Promise.all([import('./http-backend.js'), import('./mcp-transport.js')]);
-  return new HttpBackend({ transport: new McpTransport(config.SYNC_MCP_URL), tokens: mcpTokenProvider(config) });
+  return new HttpBackend({ transport: new McpTransport(config.SYNC_MCP_URL, { tool: config.SYNC_MCP_TOOL }), tokens: mcpTokenProvider(config) });
 }
 
 /** Like getSyncBackend, but throws a clear error when sync has no target. */
@@ -390,7 +390,7 @@ export function isCycleFatal(e: unknown): boolean {
   const code = (e as { code?: unknown })?.code;
   return typeof code === 'string' && [
     'unreachable', 'unauthenticated', 'cloud_run_unauthenticated', 'cloud_run_forbidden', 'not_member', 'user_inactive',
-    'rate_limited', 'unavailable', 'token_command', 'gateway_forbidden', 'no_sync_tool',
+    'rate_limited', 'unavailable', 'token_command', 'gateway_forbidden', 'no_sync_tool', 'ambiguous_sync_tool',
   ].includes(code);
 }
 

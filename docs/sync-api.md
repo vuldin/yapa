@@ -164,13 +164,16 @@ over `sync_service_url`, which wins over a database URL.
 
 - Connection: MCP Streamable HTTP to that URL with `Authorization: Bearer
   <token>`. The token is what the command in `YAPA_SYNC_MCP_TOKEN_CMD`
-  (plugin option `sync_mcp_token_cmd`, no default) prints; it is reused and
-  cached like the ID token (section 2), in `mcp-token` beside the ID token
-  cache. No `X-Yapa-Id-Token` is sent: the remote learns the caller from the
+  (plugin option `sync_mcp_token_cmd`, no default) prints, without a leading
+  `Bearer `; it is reused and cached like the ID token (section 2), in
+  `mcp-token` beside the ID token cache. A token without a readable `exp` is
+  reused for 50 minutes (a 401 refreshes it sooner). No `X-Yapa-Id-Token` is sent: the remote learns the caller from the
   MCP connection.
-- Tool: `yapa_sync`, found with `tools/list`. A gateway-prefixed name, i.e.
-  one ending in `yapa_sync` after a separator (`remote__yapa_sync`), also
-  matches.
+- Tool: `yapa_sync`, found with `tools/list`. Otherwise exactly one
+  gateway-prefixed name ending in `__yapa_sync`, `.yapa_sync`, `/yapa_sync` or
+  `-yapa_sync` (`remote__yapa_sync`); several are `ambiguous_sync_tool`, and
+  `YAPA_SYNC_MCP_TOOL` (`sync_mcp_tool`) names the tool exactly. The URL must
+  be `https://` (`http://` only for localhost).
 - Arguments: `method` (`GET`, `POST` or `PUT`); `path`, below the API root
   with its query (`/v1/...`, at most 4096 characters; the client
   percent-encodes `!'()*`); `body`, a JSON object, omitted on GET; `device`
@@ -183,11 +186,14 @@ over `sync_service_url`, which wins over a database URL.
   either way, exactly as it reads an HTTP response (section 4).
 - Failures: an HTTP 401 from the gateway, a `401` result, or an error result
   that is not JSON and says unauthorized refreshes the token once and retries
-  (same idempotency key). A gateway 403 is `gateway_forbidden`, and a server
-  without the tool is `no_sync_tool`. Connection failures, MCP errors and
-  timeouts are `unreachable`, as network errors are over HTTP. An expired MCP
-  session (HTTP 404) is reopened and the call sent once more. Any other
-  result that is not a Sync API answer is `502 mcp_tool_error`.
+  (same idempotency key). A gateway 403 is `gateway_forbidden`, a 429
+  `rate_limited` (with its `Retry-After`), any other HTTP error status
+  `http_<status>`, and a server without the tool `no_sync_tool`. A JSON-RPC
+  error reply is `mcp_error`. Connection failures and timeouts are
+  `unreachable`, as network errors are over HTTP; the timeout covers the whole
+  exchange (initialize, `tools/list`, the call). An expired MCP session (HTTP
+  404) is reopened and the call sent once more. Any other result that is not a
+  Sync API answer is `502 mcp_tool_error`.
 - Gateways may cap the size of a tool result: such a remote SHOULD lower its
   pull page byte budget (section 6) to fit.
 

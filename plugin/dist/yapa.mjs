@@ -148,6 +148,7 @@ function createConfig(env = process.env) {
     SYNC_ID_TOKEN_CMD: get(env, "SYNC_ID_TOKEN_CMD", ""),
     SYNC_MCP_URL: get(env, "SYNC_MCP_URL", "").trim(),
     SYNC_MCP_TOKEN_CMD: get(env, "SYNC_MCP_TOKEN_CMD", ""),
+    SYNC_MCP_TOOL: get(env, "SYNC_MCP_TOOL", "").trim(),
     SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
     // Not recorded under vitest unless a test names a file: suites that fail
     // sync on purpose must not paint the developer's own status line red.
@@ -2905,6 +2906,7 @@ __export(http_backend_exports, {
   ServiceError: () => ServiceError,
   TransportError: () => TransportError,
   decodeJwtPayload: () => decodeJwtPayload,
+  programOf: () => programOf,
   redactTokens: () => redactTokens,
   runCommand: () => runCommand
 });
@@ -2929,7 +2931,8 @@ function runCommand(cmd, explain2, fallback) {
   return new Promise((resolve3, reject) => {
     const done = (err, stdout, stderr) => {
       if (err) {
-        const detail = redactTokens(String(stderr || err.message).trim().split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
+        const why = String(stderr).trim() || (err.killed ? "timed out" : exitText(err.code));
+        const detail = redactTokens(why.split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 300);
         reject(new Error(explain2(detail)));
         return;
       }
@@ -2940,10 +2943,16 @@ function runCommand(cmd, explain2, fallback) {
     else execFile(fallback.file, fallback.args, { ...opts, shell: process.platform === "win32" }, done);
   });
 }
+function programOf(cmd) {
+  return cmd.trim().split(/\s+/)[0]?.split("/").pop() || "the token command";
+}
+function exitText(code) {
+  return typeof code === "number" ? `exit code ${code}` : String(code ?? "failed");
+}
 function runTokenCommand(cmd) {
   return runCommand(
     cmd,
-    (detail) => `could not get a Google ID token from \`${cmd || "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`,
+    (detail) => `could not get a Google ID token from \`${cmd ? programOf(cmd) : "gcloud auth print-identity-token"}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`,
     { file: "gcloud", args: ["auth", "print-identity-token"] }
   );
 }
@@ -3044,13 +3053,15 @@ var init_http_backend = __esm({
       "purged"
     ]);
     IdTokenProvider = class {
-      constructor(cmd = "", now = Date.now, cachePath = "") {
+      constructor(cmd = "", now = Date.now, cachePath = "", opaqueTtlMs) {
         this.now = now;
         this.cachePath = cachePath;
+        this.opaqueTtlMs = opaqueTtlMs;
         this.run = typeof cmd === "function" ? cmd : () => runTokenCommand(cmd);
       }
       now;
       cachePath;
+      opaqueTtlMs;
       token;
       validUntil = 0;
       inFlight;
@@ -3072,17 +3083,20 @@ var init_http_backend = __esm({
       }
       validity(token, now) {
         const exp = Number(decodeJwtPayload(token)?.exp);
-        if (!Number.isFinite(exp) || exp <= 0) return now + OPAQUE_TOKEN_TTL_MS;
+        if (!Number.isFinite(exp) || exp <= 0) return now + (this.opaqueTtlMs ?? OPAQUE_TOKEN_TTL_MS);
         const life = exp * 1e3 - now;
         return now + (life > 2 * REFRESH_MARGIN_MS ? life - REFRESH_MARGIN_MS : Math.max(0, life / 2));
       }
-      /** Adopt a still-valid token cached by an earlier process (JWTs with `exp` only). */
+      /** Adopt a still-valid token cached by an earlier process (JWTs with `exp`, or opaque ones stored with their expiry). */
       loadCached() {
         if (!this.cachePath) return false;
         try {
-          const token = readFileSync6(this.cachePath, "utf-8").trim();
-          if (!token || !Number.isFinite(Number(decodeJwtPayload(token)?.exp))) return false;
-          const until = this.validity(token, this.now());
+          const [first = "", stored] = readFileSync6(this.cachePath, "utf-8").split("\n");
+          const token = first.trim();
+          if (!token) return false;
+          const jwt = Number.isFinite(Number(decodeJwtPayload(token)?.exp));
+          if (!jwt && (this.opaqueTtlMs === void 0 || !Number.isFinite(Number(stored)))) return false;
+          const until = jwt ? this.validity(token, this.now()) : Number(stored);
           if (this.now() >= until) return false;
           this.token = token;
           this.validUntil = until;
@@ -3097,7 +3111,9 @@ var init_http_backend = __esm({
         try {
           mkdirSync4(dirname4(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
-          writeFileSync3(tmp, token, { mode: 384 });
+          const opaque = this.opaqueTtlMs !== void 0 && !Number.isFinite(Number(decodeJwtPayload(token)?.exp));
+          writeFileSync3(tmp, opaque ? `${token}
+${this.validUntil}` : token, { mode: 384 });
           renameSync3(tmp, this.cachePath);
         } catch {
         }
@@ -3454,48 +3470,71 @@ __export(mcp_transport_exports, {
   McpTransport: () => McpTransport,
   SYNC_TOOL: () => SYNC_TOOL,
   mcpTokenProvider: () => mcpTokenProvider,
-  pickSyncTool: () => pickSyncTool
+  pickSyncTool: () => pickSyncTool,
+  readSse: () => readSse
 });
 import { join as join5, dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 function mcpTokenProvider(config) {
   const cmd = config.SYNC_MCP_TOKEN_CMD.trim();
   const cache = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
   return new IdTokenProvider(async () => {
     if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
-    const out = await runCommand(cmd, (detail) => `could not get a token for the MCP gateway from \`${cmd}\`: ${detail}. Sign in to the gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).`);
-    if (!out.trim()) throw new Error(`\`${cmd}\` printed no token. Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).`);
-    return out;
-  }, Date.now, cache);
+    const out = await runCommand(cmd, (detail) => `could not get a token for the MCP gateway from \`${programOf(cmd)}\`: ${detail}. ${fix}`);
+    const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
+    if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
+    return token;
+  }, Date.now, cache, OPAQUE_TOKEN_TTL_MS2);
 }
-function pickSyncTool(names) {
+function pickSyncTool(names, host, explicit = "") {
+  if (explicit) {
+    if (names.includes(explicit)) return explicit;
+    throw new ServiceError(`the MCP server at ${host} has no tool named ${explicit} (YAPA_SYNC_MCP_TOOL).`, 0, "no_sync_tool");
+  }
   if (names.includes(SYNC_TOOL)) return SYNC_TOOL;
-  return names.find((n) => n.length > SYNC_TOOL.length && n.endsWith(SYNC_TOOL) && /[^A-Za-z0-9]$/.test(n.slice(0, -SYNC_TOOL.length)));
+  const prefixed = [...new Set(names.filter((n) => PREFIX_SEPARATORS.some((sep) => n.endsWith(`${sep}${SYNC_TOOL}`) && n.length > sep.length + SYNC_TOOL.length)))];
+  if (prefixed.length === 1) return prefixed[0];
+  if (prefixed.length > 1) {
+    throw new ServiceError(`the MCP server at ${host} has several sync tools (${prefixed.join(", ")}). Set YAPA_SYNC_MCP_TOOL (plugin option sync_mcp_tool) to the one to use.`, 0, "ambiguous_sync_tool");
+  }
+  throw new ServiceError(`the MCP server at ${host} has no ${SYNC_TOOL} tool. Check YAPA_SYNC_MCP_URL, and that your account may use it.`, 0, "no_sync_tool");
 }
 async function readSse(res, id) {
   if (!res.body) throw new Error("the MCP server sent an empty event stream");
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
+  let data = [];
+  const line = (l) => {
+    if (l !== "") {
+      if (l.startsWith("data:")) data.push(l.slice(5).replace(/^ /, ""));
+      return void 0;
+    }
+    const payload = data.join("\n");
+    data = [];
+    if (!payload) return void 0;
+    try {
+      const msg = JSON.parse(payload);
+      return msg?.id === id && ("result" in msg || "error" in msg) ? msg : void 0;
+    } catch {
+      return void 0;
+    }
+  };
   try {
     for (; ; ) {
       const { value, done } = await reader.read();
       if (done) break;
       buf += value;
-      let end;
-      while ((end = buf.search(/\r?\n\r?\n/)) >= 0) {
-        const event = buf.slice(0, end);
-        buf = buf.slice(end).replace(/^\r?\n\r?\n/, "");
-        const data = event.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
-        if (!data) continue;
-        let msg;
-        try {
-          msg = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        if (msg?.id === id && ("result" in msg || "error" in msg)) return msg;
+      for (let m = /\r\n|\r|\n/.exec(buf); m; m = /\r\n|\r|\n/.exec(buf)) {
+        if (m[0] === "\r" && m.index === buf.length - 1) break;
+        const found2 = line(buf.slice(0, m.index));
+        buf = buf.slice(m.index + m[0].length);
+        if (found2) return found2;
       }
     }
+    const found = (buf ? line(buf) : void 0) ?? line("");
+    if (found) return found;
   } finally {
     reader.cancel().catch(() => void 0);
   }
@@ -3517,15 +3556,15 @@ function toResponse(result) {
   if (result?.isError && /unauthori[sz]ed|unauthenticated|\b401\b|(expired|invalid) token/i.test(message)) return refusal(401, "unauthenticated", message);
   return refusal(502, result?.isError ? "mcp_tool_error" : "bad_response", message);
 }
-function refusal(status, code, message) {
-  return { status, statusText: "", json: { error: { code, message } }, header: () => null };
+function refusal(status, code, message, retryAfter = null) {
+  return { status, statusText: "", json: { error: { code, message } }, header: (name) => name.toLowerCase() === "retry-after" ? retryAfter : null };
 }
 function describeFailure(e, timeoutMs) {
   const err = e;
   if (err?.name === "TimeoutError" || err?.name === "AbortError") return `timed out after ${timeoutMs} ms`;
   return redactTokens(String(err?.cause?.message ?? err?.message ?? e)).slice(0, 300);
 }
-var SYNC_TOOL, PROTOCOL_VERSION, MAX_TOOL_PAGES, HttpStatusError, McpTransport;
+var SYNC_TOOL, PROTOCOL_VERSION, MAX_TOOL_PAGES, OPAQUE_TOKEN_TTL_MS2, END_SESSION_TIMEOUT_MS, PREFIX_SEPARATORS, LOOPBACK, HttpStatusError, RpcError, McpTransport;
 var init_mcp_transport = __esm({
   "packages/core/src/sync/mcp-transport.ts"() {
     "use strict";
@@ -3533,14 +3572,32 @@ var init_mcp_transport = __esm({
     SYNC_TOOL = "yapa_sync";
     PROTOCOL_VERSION = "2025-06-18";
     MAX_TOOL_PAGES = 50;
+    OPAQUE_TOKEN_TTL_MS2 = 50 * 6e4;
+    END_SESSION_TIMEOUT_MS = 2e3;
+    PREFIX_SEPARATORS = ["__", ".", "/", "-"];
+    LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
     HttpStatusError = class extends Error {
-      constructor(status, message) {
+      constructor(status, message, retryAfter) {
         super(message);
         this.status = status;
+        this.retryAfter = retryAfter;
       }
       status;
+      retryAfter;
+    };
+    RpcError = class extends Error {
     };
     McpTransport = class {
+      constructor(url, opts = {}) {
+        this.opts = opts;
+        this.target = url.trim();
+        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync MCP URL must start with https:// (got "${this.target}")`);
+        this.url = new URL(this.target);
+        if (this.url.protocol === "http:" && !LOOPBACK.has(this.url.hostname)) {
+          throw new Error(`sync MCP URL must use https:// (http:// only for localhost; got "${this.target}")`);
+        }
+      }
+      opts;
       kind = "mcp";
       label = "MCP gateway";
       signInHint = "Sign in to the MCP gateway again (or check YAPA_SYNC_MCP_TOKEN_CMD).";
@@ -3549,12 +3606,8 @@ var init_mcp_transport = __esm({
       session;
       opening;
       nextId = 1;
-      constructor(url) {
-        this.target = url.trim();
-        if (!/^https?:\/\//.test(this.target)) throw new Error(`sync MCP URL must start with https:// (got "${this.target}")`);
-        this.url = new URL(this.target);
-      }
       async send(req, timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
         const args = {
           method: req.method,
           // The tool's path pattern has no room for the characters encodeURIComponent and URLSearchParams leave alone.
@@ -3568,67 +3621,68 @@ var init_mcp_transport = __esm({
           const reused = this.session?.token === req.token;
           let session;
           try {
-            session = await this.connect(req.token, timeoutMs);
-            const result = await this.rpc(session, "tools/call", { name: session.tool, arguments: args }, timeoutMs);
+            session = await this.connect(req.token, deadline);
+            const result = await this.rpc(session, "tools/call", { name: session.tool, arguments: args }, deadline);
             return toResponse(result);
           } catch (e) {
-            this.forget(session);
+            if (session && this.session === session) this.session = void 0;
             if (e instanceof ServiceError) throw e;
-            const status = e instanceof HttpStatusError ? e.status : void 0;
+            if (e instanceof RpcError) return refusal(502, "mcp_error", redactTokens(e.message).slice(0, 300));
+            if (!(e instanceof HttpStatusError)) throw new TransportError(describeFailure(e, timeoutMs));
+            const { status } = e;
             if (status === 401) return refusal(401, "unauthenticated", "the MCP gateway rejected the token");
             if (status === 403) return refusal(403, "gateway_forbidden", "the MCP gateway refused the request");
             if (status === 404 && reused && session?.id && attempt2 === 0) continue;
-            throw new TransportError(describeFailure(e, timeoutMs));
+            if (status === 429) return refusal(429, "rate_limited", "the MCP gateway is rate limiting requests", e.retryAfter);
+            return { status, statusText: e.message, json: void 0, header: () => null };
           }
         }
       }
-      async connect(token, timeoutMs) {
+      async connect(token, deadline) {
         if (this.session?.token === token) return this.session;
+        if (this.session) this.end(this.session);
         this.session = void 0;
         if (this.opening?.token !== token) {
-          const promise = this.open(token, timeoutMs).finally(() => {
+          const promise = this.open(token, deadline).finally(() => {
             if (this.opening?.promise === promise) this.opening = void 0;
           });
           this.opening = { token, promise };
         }
         return this.opening.promise;
       }
-      async open(token, timeoutMs) {
+      async open(token, deadline) {
         const session = { token, tool: "" };
-        const init = await this.rpc(session, "initialize", {
-          protocolVersion: PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: { name: "yapa", version: "1" }
-        }, timeoutMs);
-        session.protocol = typeof init?.protocolVersion === "string" ? init.protocolVersion : PROTOCOL_VERSION;
-        await this.post(session, { jsonrpc: "2.0", method: "notifications/initialized" }, timeoutMs);
-        session.tool = await this.findSyncTool(session, timeoutMs);
-        this.session = session;
-        return session;
-      }
-      async findSyncTool(session, timeoutMs) {
-        const names = [];
-        let cursor;
-        for (let page = 0; page < MAX_TOOL_PAGES; page++) {
-          const r = await this.rpc(session, "tools/list", cursor ? { cursor } : {}, timeoutMs);
-          names.push(...(r?.tools ?? []).map((t) => String(t?.name ?? "")));
-          cursor = r?.nextCursor;
-          if (!cursor) break;
+        try {
+          const init = await this.rpc(session, "initialize", {
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: { name: "yapa", version: "1" }
+          }, deadline);
+          session.protocol = typeof init?.protocolVersion === "string" ? init.protocolVersion : PROTOCOL_VERSION;
+          await this.post(session, { jsonrpc: "2.0", method: "notifications/initialized" }, deadline);
+          const names = [];
+          let cursor;
+          for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+            const r = await this.rpc(session, "tools/list", cursor ? { cursor } : {}, deadline);
+            names.push(...(r?.tools ?? []).map((t) => String(t?.name ?? "")));
+            cursor = r?.nextCursor;
+            if (!cursor) break;
+          }
+          session.tool = pickSyncTool(names, this.url.host, this.opts.tool);
+          this.session = session;
+          return session;
+        } catch (e) {
+          this.end(session);
+          throw e;
         }
-        const tool = pickSyncTool(names);
-        if (!tool) {
-          throw new ServiceError(`the MCP server at ${this.url.host} has no ${SYNC_TOOL} tool. Check YAPA_SYNC_MCP_URL, and that your account may use it.`, 0, "no_sync_tool");
-        }
-        return tool;
       }
-      async rpc(session, method, params, timeoutMs) {
+      async rpc(session, method, params, deadline) {
         const id = this.nextId++;
-        const msg = await this.post(session, { jsonrpc: "2.0", id, method, params }, timeoutMs, id);
-        if (msg?.error) throw new Error(`MCP error ${msg.error.code}: ${msg.error.message}`);
+        const msg = await this.post(session, { jsonrpc: "2.0", id, method, params }, deadline, id);
+        if (msg?.error) throw new RpcError(`MCP error ${msg.error.code}: ${msg.error.message}`);
         return msg?.result;
       }
-      /** POST one JSON-RPC message; with `id`, resolve with the response to it (JSON body or SSE stream). */
-      async post(session, message, timeoutMs, id) {
+      headers(session) {
         const headers = {
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
@@ -3636,10 +3690,15 @@ var init_mcp_transport = __esm({
         };
         if (session.id) headers["mcp-session-id"] = session.id;
         if (session.protocol) headers["mcp-protocol-version"] = session.protocol;
-        const res = await fetch(this.url, { method: "POST", headers, body: JSON.stringify(message), signal: AbortSignal.timeout(timeoutMs) });
+        return headers;
+      }
+      /** POST one JSON-RPC message; with `id`, resolve with the response to it (JSON body or SSE stream). */
+      async post(session, message, deadline, id) {
+        const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+        const res = await fetch(this.url, { method: "POST", headers: this.headers(session), body: JSON.stringify(message), signal });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          throw new HttpStatusError(res.status, `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+          throw new HttpStatusError(res.status, redactTokens(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`), res.headers.get("retry-after"));
         }
         session.id ??= res.headers.get("mcp-session-id") ?? void 0;
         if (id === void 0) {
@@ -3653,8 +3712,10 @@ var init_mcp_transport = __esm({
         if (!found) throw new Error("the MCP server answered without a response to the request");
         return found;
       }
-      forget(session) {
-        if (session && this.session === session) this.session = void 0;
+      /** Best effort: tell the server a session is over (DELETE), without waiting for it. */
+      end(session) {
+        if (!session.id) return;
+        fetch(this.url, { method: "DELETE", headers: this.headers(session), signal: AbortSignal.timeout(END_SESSION_TIMEOUT_MS) }).then((r) => r.body?.cancel()).catch(() => void 0);
       }
       describe() {
         const lines = [`Backend: YAPA sync over MCP (${this.url.host})`, `MCP server: ${this.target}`];
@@ -3663,6 +3724,7 @@ var init_mcp_transport = __esm({
       }
       async close() {
         this.opening = void 0;
+        if (this.session) this.end(this.session);
         this.session = void 0;
       }
     };
@@ -3684,7 +3746,7 @@ function isSyncConfigured(config = getConfig()) {
   return config.SYNC_ENABLED && syncBackendKind(config) !== void 0;
 }
 function keyOf(config) {
-  return JSON.stringify([config.SYNC_MCP_URL, config.SYNC_MCP_TOKEN_CMD, config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
+  return JSON.stringify([config.SYNC_MCP_URL, config.SYNC_MCP_TOKEN_CMD, config.SYNC_MCP_TOOL, config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
 }
 async function getSyncBackend() {
   const b = await selectBackend();
@@ -3706,7 +3768,7 @@ async function selectBackend() {
 }
 async function mcpBackend(config) {
   const [{ HttpBackend: HttpBackend2 }, { McpTransport: McpTransport2, mcpTokenProvider: mcpTokenProvider2 }] = await Promise.all([Promise.resolve().then(() => (init_http_backend(), http_backend_exports)), Promise.resolve().then(() => (init_mcp_transport(), mcp_transport_exports))]);
-  return new HttpBackend2({ transport: new McpTransport2(config.SYNC_MCP_URL), tokens: mcpTokenProvider2(config) });
+  return new HttpBackend2({ transport: new McpTransport2(config.SYNC_MCP_URL, { tool: config.SYNC_MCP_TOOL }), tokens: mcpTokenProvider2(config) });
 }
 async function requireSyncBackend() {
   const b = await getSyncBackend();
@@ -3758,7 +3820,8 @@ function isCycleFatal(e) {
     "unavailable",
     "token_command",
     "gateway_forbidden",
-    "no_sync_tool"
+    "no_sync_tool",
+    "ambiguous_sync_tool"
   ].includes(code);
 }
 function applyServerUsername(username) {

@@ -35,6 +35,7 @@ export interface Config {
   /** Sync API served as an MCP tool (wins over syncDatabaseUrl), and the command printing its bearer token. */
   syncMcpUrl?: string;
   syncMcpTokenCmd?: string;
+  syncMcpTool?: string;
   syncIntervalMs?: number;
   /** Absolute workspace roots used for collection detection from session cwd. */
   projectRoots?: string[];
@@ -109,6 +110,7 @@ export const Config: z<Config> = z.object({
   syncDatabaseUrl: z.string(),
   syncMcpUrl: z.string(),
   syncMcpTokenCmd: z.string(),
+  syncMcpTool: z.string(),
   syncIntervalMs: z.number(),
   projectRoots: z.array(z.string()),
   customers: z.array(z.string()),
@@ -219,6 +221,7 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     ...(merged.syncDatabaseUrl !== undefined && { SYNC_DATABASE_URL: merged.syncDatabaseUrl }),
     ...(merged.syncMcpUrl !== undefined && { SYNC_MCP_URL: merged.syncMcpUrl.trim() }),
     ...(merged.syncMcpTokenCmd !== undefined && { SYNC_MCP_TOKEN_CMD: merged.syncMcpTokenCmd }),
+    ...(merged.syncMcpTool !== undefined && { SYNC_MCP_TOOL: merged.syncMcpTool.trim() }),
     ...(merged.syncIntervalMs !== undefined && { SYNC_INTERVAL_MS: merged.syncIntervalMs }),
     ...(merged.trainingPipeline !== undefined && { TRAINING_PIPELINE: merged.trainingPipeline }),
     ...(merged.collectionMap !== undefined && { COLLECTION_MAP: normalizeCollectionMap(merged.collectionMap) }),

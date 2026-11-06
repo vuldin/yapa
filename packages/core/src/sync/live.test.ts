@@ -70,7 +70,7 @@ describe.skipIf(!URL_ && !MCP_URL)('live sync remote (opt-in conformance)', () =
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'yapa-live-'));
     setConfig(createConfig({ ...process.env, YAPA_SYNC_ENABLED: 'true', ...REMOTE }));
-    backend = MCP_URL ? new HttpBackend({ transport: new McpTransport(MCP_URL), tokens: mcpTokenProvider(getConfig()) }) : new HttpBackend();
+    backend = MCP_URL ? new HttpBackend({ transport: new McpTransport(MCP_URL, { tool: getConfig().SYNC_MCP_TOOL }), tokens: mcpTokenProvider(getConfig()) }) : new HttpBackend();
     setSyncBackend(backend);
     await backend.prepare(); // signs in; the remote's username becomes USERNAME
   }, 60_000);

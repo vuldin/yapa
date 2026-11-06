@@ -47,10 +47,13 @@ MCP gateway that signs you in, instead of over HTTPS. For those, set:
 | `sync_enabled` | `YAPA_SYNC_ENABLED` | `true` |
 | `sync_mcp_url` | `YAPA_SYNC_MCP_URL` | the MCP server's URL on the gateway |
 | `sync_mcp_token_cmd` | `YAPA_SYNC_MCP_TOKEN_CMD` | a command that prints your bearer token for the gateway |
+| `sync_mcp_tool` | `YAPA_SYNC_MCP_TOOL` | optional: the sync tool's exact name, when the gateway lists several |
 
 The MCP URL wins over `sync_service_url` and `sync_database_url`. YAPA runs
 the token command when it needs a token, reuses the token until shortly
-before it expires, and runs the command again when the gateway rejects it.
+before it expires (50 minutes for a token without an expiry), and runs the
+command again when the gateway rejects it. Use `https://` (`http://` only for
+localhost).
 Sign in to the gateway with its own tool first; there is no `gcloud` step.
 `sync status` then reads `Backend: YAPA sync over MCP (<host>)`, and the
 status line says `sign in to the MCP gateway` when your sign-in lapses.
