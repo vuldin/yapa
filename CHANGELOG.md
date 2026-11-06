@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.14.0 (2026-11-06)
+
+Automatic capture holds up over time:
+- questions and decisions for people outside YAPA reach whoever has to ask them;
+- follow-through closes only what a turn settles;
+- progress notes no longer pile up as open findings;
+- compaction summaries stay out of recall;
+- you can see when capture is failing.
+
+**Upgrading:** update the plugin and restart Claude Code. There's no schema change and no migration.
+- Items for someone outside YAPA now show in `waiting` for whoever recorded them (`ask <owner>`).
+- A collection with 20 or more of your stale findings shows a backlog line at session start, and `yapa memory sweep-findings` clears it. That's a dry run unless you apply a saved list.
+- Redeploying a self-hosted `yapa-mcp-remote` is optional. It brings the same owner rule and keeps compaction summaries out of its recall.
 
 ### Features
 - **You can tell when capture is failing.** The per-turn capture and the compaction capture run in hook processes whose errors used to go only to a stderr nobody sees, so a broken aux model, a missing `claude` CLI or a bad `CURATION_MODEL` failed silently.
