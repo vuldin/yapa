@@ -573,6 +573,10 @@ describe('after removing a shared collection from this machine only', () => {
     capture();
     await userPromptSubmit({ session_id: 'g1', cwd: join(dir, 'proj', 'acme-gone'), prompt: 'what did we decide for acme-gone?' });
     restore();
+    capture();
+    await sessionStart({ session_id: 'g1', cwd: join(dir, 'proj', 'acme-gone'), source: 'startup' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('(removed from this machine: writes to it are refused; `sync subscribe project-acme-gone` follows it again)');
     expect(await freshenFromRemote('project-acme-gone')).toBe(0);
     expect(pullCollection).not.toHaveBeenCalled();
     expect(await core.getSyncSubscriptions()).not.toContain('project-acme-gone');

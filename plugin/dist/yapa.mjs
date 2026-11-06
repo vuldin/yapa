@@ -1557,12 +1557,45 @@ function resolveCollectionRedirect(name, redirects) {
 }
 async function resolveWriteCollection(name) {
   if (name === "global") return { collection: name };
-  return resolveCollectionRedirect(name, await getCollectionRedirects());
+  const w = resolveCollectionRedirect(name, await getCollectionRedirects());
+  if ((await getLeftCollections()).includes(w.collection)) throw new CollectionLeftError(w.collection);
+  return w;
+}
+async function getPendingBackfills() {
+  try {
+    const r = await getDocumentsByFilter2("global", { type: { $eq: "collections_backfill" } }, 1);
+    return String(r[0]?.metadata.collections ?? "").split(",").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function writePendingBackfills(names) {
+  await getOrCreateCollection2("global");
+  await addDocument2("global", COLLECTIONS_BACKFILL_ID, "collections to backfill", {
+    type: "collections_backfill",
+    collections: [...new Set(names)].sort().join(",")
+  });
+}
+async function addPendingBackfill(name) {
+  const p = await getPendingBackfills();
+  if (!p.includes(name)) await writePendingBackfills([...p, name]);
+}
+async function clearPendingBackfill(name) {
+  const p = await getPendingBackfills();
+  if (p.includes(name)) await writePendingBackfills(p.filter((n) => n !== name));
+}
+async function rejoinCollection(name) {
+  if (!(await getLeftCollections()).includes(name)) return false;
+  await clearLeftCollection(name);
+  const subs = await getSyncSubscriptions();
+  if (!subs.includes(name)) await updateSyncSubscriptions([...subs, name]);
+  await addPendingBackfill(name);
+  return true;
 }
 function redirectNote(w) {
   return w.redirectedFrom ? `"${w.redirectedFrom}" was merged into "${w.collection}" on this machine, so this was written to "${w.collection}".` : "";
 }
-var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID, COLLECTIONS_LEFT_ID;
+var SYNC_PULL_SENTINEL_ID, SYNC_SUBSCRIPTIONS_ID, COLLECTION_REDIRECTS_ID, COLLECTIONS_LEFT_ID, CollectionLeftError, COLLECTIONS_BACKFILL_ID;
 var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
@@ -1571,6 +1604,16 @@ var init_sentinel = __esm({
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
     COLLECTION_REDIRECTS_ID = "__collection_redirects__";
     COLLECTIONS_LEFT_ID = "__collections_left__";
+    CollectionLeftError = class extends Error {
+      constructor(collection) {
+        super(`"${collection}" was removed from this machine (collection_delete), so writes to it are refused: written here it would be pushed but never pulled, and teammates' documents in it would be missing. To follow it again with its full history, run sync subscribe ${collection} (or collection_create ${collection}), then write again.`);
+        this.collection = collection;
+        this.name = "CollectionLeftError";
+      }
+      collection;
+      code = "collection_left";
+    };
+    COLLECTIONS_BACKFILL_ID = "__collections_backfill__";
   }
 });
 
@@ -1598,6 +1641,11 @@ function matchCollectionMap(cwd, entries, opts = {}) {
   return best?.collection;
 }
 async function detectCollection(cwd, roots = getConfig().PROJECT_ROOTS, customers = getConfig().CUSTOMERS, map = getConfig().COLLECTION_MAP) {
+  const d = await detect(cwd, roots, customers, map);
+  if (d.collection !== "global" && (await getLeftCollections()).includes(d.collection)) d.left = true;
+  return d;
+}
+async function detect(cwd, roots, customers, map) {
   if (!cwd) return { collection: "global" };
   const mapped = matchCollectionMap(cwd, map);
   if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
@@ -1632,6 +1680,7 @@ function scopeNotes(d) {
     notes.push("(shared: this name syncs; local-only names start with lowercase `private-` or `local-`)");
   }
   if (d.redirectedFrom) notes.push(`(merged from \`${d.redirectedFrom}\`)`);
+  if (d.left) notes.push(`(removed from this machine: writes to it are refused; \`sync subscribe ${d.collection}\` follows it again)`);
   return notes.length ? ` ${notes.join(" ")}` : "";
 }
 function follow(d, redirects) {
@@ -4636,6 +4685,12 @@ async function writeIfUnchanged(collection, doc, metadata) {
     return true;
   });
 }
+function isRejectedUnchanged(doc) {
+  return !!doc.metadata.sync_rejected && doc.metadata.sync_rejected_fp === syncFingerprint(doc);
+}
+function isPushable(doc) {
+  return doc.metadata.is_synced === false && !doc.id.startsWith("__") && doc.metadata.type !== "journal_draft" && !isReadOnlyDoc(doc.metadata) && !isDeletedUpstream(doc.metadata) && !isRejectedUnchanged(doc);
+}
 function stripLocalOnly(metadata) {
   const out = { ...metadata };
   for (const k of LOCAL_ONLY_KEYS) delete out[k];
@@ -4656,7 +4711,7 @@ function pushDocsNow(collection, ids) {
     const backend = await getSyncBackend();
     if (!backend) return out;
     await resolveSyncUsername();
-    const docs = (await getDocumentsByIds2(collection, ids)).filter((d) => d.metadata.is_synced === false && !d.id.startsWith("__") && d.metadata.type !== "journal_draft" && !isReadOnlyDoc(d.metadata) && !isDeletedUpstream(d.metadata) && !(d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)));
+    const docs = (await getDocumentsByIds2(collection, ids)).filter(isPushable);
     const stats = emptyPushStats();
     const batch = [];
     for (const unsynced of docs) {
@@ -4755,11 +4810,7 @@ async function pushAll() {
       const before = stats.pushed + stats.linked;
       const batch = [];
       for (const unsynced of unsyncedDocs) {
-        if (unsynced.id.startsWith("__")) continue;
-        if (unsynced.metadata.type === "journal_draft") continue;
-        if (isReadOnlyDoc(unsynced.metadata)) continue;
-        if (isDeletedUpstream(unsynced.metadata)) continue;
-        if (unsynced.metadata.sync_rejected && unsynced.metadata.sync_rejected_fp === syncFingerprint(unsynced)) continue;
+        if (!isPushable(unsynced)) continue;
         const doc = { ...unsynced, metadata: { ...unsynced.metadata, origin_device: getDeviceId() } };
         try {
           batch.push({ doc, upsert: await toUpsert(collection.name, doc) });
@@ -4882,11 +4933,7 @@ async function countUnpushed() {
   for (const col of await listCollections2()) {
     if (!isSyncableCollection(col.name)) continue;
     const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
-    for (const d of docs) {
-      if (d.id.startsWith("__") || d.metadata.type === "journal_draft" || isReadOnlyDoc(d.metadata) || isDeletedUpstream(d.metadata)) continue;
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) continue;
-      n++;
-    }
+    for (const d of docs) if (isPushable(d)) n++;
   }
   return n;
 }
@@ -4896,7 +4943,7 @@ async function listRejectedDocs() {
     if (!isSyncableCollection(col.name)) continue;
     const docs = await getDocumentsByFilter2(col.name, { is_synced: false }, 1e5).catch(() => []);
     for (const d of docs) {
-      if (d.metadata.sync_rejected && d.metadata.sync_rejected_fp === syncFingerprint(d)) {
+      if (isRejectedUnchanged(d)) {
         out.push({ collection: col.name, id: d.id, code: String(d.metadata.sync_rejected) });
       }
     }
@@ -5852,7 +5899,8 @@ async function listCollectionsWithCounts() {
 async function createNewCollection(name) {
   await createCollection2(name);
   await clearCollectionRedirect(name);
-  await clearLeftCollection(name);
+  if (isSyncable2(name)) await rejoinCollection(name);
+  else await clearLeftCollection(name);
 }
 async function removeCollection(name, opts = {}) {
   const scope = opts.scope ?? "local";
@@ -5878,7 +5926,11 @@ async function removeCollection(name, opts = {}) {
   const me = getConfig().USERNAME;
   const mine = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
   if (shared && syncOn && scope === "local") {
-    const unpushed = docs.filter((d) => mine(d) && d.metadata.is_synced === false && d.metadata.type !== "journal_draft").map((d) => d.id);
+    const stuck = docs.filter((d) => d.metadata.is_synced === false && isRejectedUnchanged(d));
+    if (stuck.length && !confirmed) {
+      refuse(`${stuck.length} document${stuck.length === 1 ? "" : "s"} in "${name}" (${stuck.slice(0, 3).map((d) => d.id).join(", ")}${stuck.length > 3 ? ", ..." : ""}) ${stuck.length === 1 ? "was refused by the sync service and exists" : "were refused by the sync service and exist"} only on this machine: deleting it here loses ${stuck.length === 1 ? "it" : "them"}.`);
+    }
+    const unpushed = docs.filter(isPushable).map((d) => d.id);
     if (unpushed.length) {
       const r = await pushDocsNow(name, unpushed).catch(() => ({ pushed: [], errors: unpushed.length }));
       result.pushed = r.pushed.length;
@@ -7630,18 +7682,20 @@ async function pullFromRemote() {
   for (const col of collections) {
     if (isSyncableCollection(col.name) && !unfollowed.has(col.name)) pullCollectionNames.push(col.name);
   }
-  const backfill = /* @__PURE__ */ new Set();
+  const pendingBackfills = (await getPendingBackfills()).filter((n) => !unfollowed.has(n));
+  const backfill = new Set(pendingBackfills);
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncableCollection(sub) && !unfollowed.has(sub)) {
+    if ((!localCollectionNames.has(sub) || backfill.has(sub)) && isSyncableCollection(sub) && !unfollowed.has(sub)) {
       await getOrCreateCollection2(sub);
-      pullCollectionNames.push(sub);
+      if (!pullCollectionNames.includes(sub)) pullCollectionNames.push(sub);
       backfill.add(sub);
     }
   }
   const followed = new Set(pullCollectionNames);
   let fatal = false;
   for (const collectionName of pullCollectionNames) {
+    const errorsBefore = stats.errors;
     await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
       includeOwnDevice: recovering,
       followedCollections: followed,
@@ -7650,6 +7704,7 @@ async function pullFromRemote() {
       }
     });
     if (fatal) break;
+    if (pendingBackfills.includes(collectionName) && stats.errors === errorsBefore) await clearPendingBackfill(collectionName);
   }
   if (!fatal) await updateSyncPullTimestamp(cycleStartedAt);
   return stats;
@@ -9571,6 +9626,7 @@ __export(src_exports, {
   CLASSIFIER_SYSTEM_PROMPT: () => CLASSIFIER_SYSTEM_PROMPT,
   ClaimBusyError: () => ClaimBusyError,
   CollectionDeleteRefusedError: () => CollectionDeleteRefusedError,
+  CollectionLeftError: () => CollectionLeftError,
   CoordinationUnavailableError: () => CoordinationUnavailableError,
   DECAY_INTERVAL_MS: () => DECAY_INTERVAL_MS,
   DEFAULT_STATUS: () => DEFAULT_STATUS,
@@ -9621,6 +9677,7 @@ __export(src_exports, {
   addLeftCollection: () => addLeftCollection,
   addLocalTombstone: () => addLocalTombstone,
   addLocalTombstones: () => addLocalTombstones,
+  addPendingBackfill: () => addPendingBackfill,
   applyCompaction: () => applyCompaction,
   applyDecay: () => applyDecay,
   applyServerUsername: () => applyServerUsername,
@@ -9653,6 +9710,7 @@ __export(src_exports, {
   clearCollectionRedirect: () => clearCollectionRedirect,
   clearEmbeddingMemo: () => clearEmbeddingMemo,
   clearLeftCollection: () => clearLeftCollection,
+  clearPendingBackfill: () => clearPendingBackfill,
   clearPendingDeletes: () => clearPendingDeletes,
   clearPendingPurges: () => clearPendingPurges,
   clearSelectedForManifest: () => clearSelectedForManifest,
@@ -9724,6 +9782,7 @@ __export(src_exports, {
   getLocalTombstones: () => getLocalTombstones,
   getNextTaskId: () => getNextTaskId,
   getOrCreateCollection: () => getOrCreateCollection2,
+  getPendingBackfills: () => getPendingBackfills,
   getPendingDeletes: () => getPendingDeletes,
   getPendingPurges: () => getPendingPurges,
   getRegistryPath: () => getRegistryPath,
@@ -9744,7 +9803,9 @@ __export(src_exports, {
   isDetectionStale: () => isDetectionStale,
   isMemoryKind: () => isMemoryKind,
   isOpenTyped: () => isOpenTyped,
+  isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
+  isRejectedUnchanged: () => isRejectedUnchanged,
   isSignedOutError: () => isSignedOutError,
   isSyncConfigured: () => isSyncConfigured,
   isSyncableCollection: () => isSyncableCollection,
@@ -9837,6 +9898,7 @@ __export(src_exports, {
   recordUnpushed: () => recordUnpushed,
   redirectNote: () => redirectNote,
   refreshSyncHealthNames: () => refreshSyncHealthNames,
+  rejoinCollection: () => rejoinCollection,
   rekeyTask: () => rekeyTask,
   releaseTaskClaim: () => releaseTaskClaim,
   removeCollection: () => removeCollection,
@@ -10521,7 +10583,8 @@ async function freshenFromRemote(collection, opts = {}) {
   if (!isSyncableCollection(collection)) return 0;
   try {
     if ((await getUnfollowedCollections()).has(collection)) return 0;
-    const followed = (await getSyncSubscriptions()).includes(collection);
+    const pendingBackfill = (await getPendingBackfills()).includes(collection);
+    const followed = (await getSyncSubscriptions()).includes(collection) && !pendingBackfill;
     if (opts.gate && followed && !shouldPull(collection)) return 0;
     const since = followed ? Math.max(0, await getSyncPullTimestamp() - HOOK_PULL_OVERLAP_SECONDS) : 0;
     const stats = await withTimeout(resolveSyncUsername().then(() => pullCollection(collection, since)), config.HOOK_PULL_TIMEOUT_MS);
@@ -10533,6 +10596,7 @@ async function freshenFromRemote(collection, opts = {}) {
     if (stats.errors === 0) {
       noteSyncOk();
       recordPull(collection);
+      if (pendingBackfill) await clearPendingBackfill(collection);
     }
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();

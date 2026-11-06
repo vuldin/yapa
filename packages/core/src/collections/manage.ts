@@ -1,8 +1,8 @@
 import { getConfig } from '../config.js';
 import { queueSyncDeletes, addLocalTombstones } from '../sync/deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions, addCollectionRedirect, addLeftCollection, clearCollectionRedirect, clearLeftCollection } from '../sync/sentinel.js';
+import { getSyncSubscriptions, updateSyncSubscriptions, addCollectionRedirect, addLeftCollection, clearCollectionRedirect, clearLeftCollection, rejoinCollection } from '../sync/sentinel.js';
 import { withDocLock } from '../doc-lock.js';
-import { pushDocsNow } from '../sync/push.js';
+import { isPushable, isRejectedUnchanged, pushDocsNow } from '../sync/push.js';
 import {
   addDocument,
   addDocumentsBatch,
@@ -47,7 +47,9 @@ export async function listCollectionsWithCounts(): Promise<CollectionInfo[]> {
 export async function createNewCollection(name: string): Promise<void> {
   await chromaCreateCollection(name);
   await clearCollectionRedirect(name);
-  await clearLeftCollection(name);
+  // Left earlier: followed again, with its whole history on the next pull.
+  if (isSyncable(name)) await rejoinCollection(name);
+  else await clearLeftCollection(name);
 }
 
 const isSyncable = isSyncableCollection;
@@ -131,8 +133,16 @@ export async function removeCollection(name: string, opts: RemoveCollectionOptio
   const me = getConfig().USERNAME;
   const mine = (d: { metadata: Record<string, any> }) => !d.metadata.origin_user || d.metadata.origin_user === me;
   if (shared && syncOn && scope === 'local') {
-    // Your own unpushed edits reach the team copy before this one goes.
-    const unpushed = docs.filter(d => mine(d) && d.metadata.is_synced === false && d.metadata.type !== 'journal_draft').map(d => d.id);
+    // Refused by the sync service (a secret, a bad embedding) and unchanged
+    // since: no push will take it, so this machine holds the only copy.
+    const stuck = docs.filter(d => d.metadata.is_synced === false && isRejectedUnchanged(d));
+    if (stuck.length && !confirmed) {
+      refuse(`${stuck.length} document${stuck.length === 1 ? '' : 's'} in "${name}" (${stuck.slice(0, 3).map(d => d.id).join(', ')}${stuck.length > 3 ? ', ...' : ''}) ${stuck.length === 1 ? 'was refused by the sync service and exists' : 'were refused by the sync service and exist'} only on this machine: deleting it here loses ${stuck.length === 1 ? 'it' : 'them'}.`);
+    }
+    // Everything else only this machine has reaches the team copy first:
+    // your new docs, and your edits to teammates' docs (the service keeps
+    // the owner and records you as the last editor).
+    const unpushed = docs.filter(isPushable).map(d => d.id);
     if (unpushed.length) {
       const r = await pushDocsNow(name, unpushed).catch(() => ({ pushed: [] as string[], errors: unpushed.length }));
       result.pushed = r.pushed.length;
