@@ -1,14 +1,30 @@
 # Changelog
 
-## Unreleased
+## 1.15.0 (2026-11-06)
+
+Hook-written memories reach teammates right away, merges keep your claims, old compaction summaries are archived, and background curation leaves records the remote owns alone.
+
+**Upgrading:** update the plugin and restart Claude Code. There's no schema change. New option: `SESSION_SUMMARY_RETENTION_DAYS` (default 90; `0` keeps compaction summaries forever). Keep `YAPA_USERNAME` set to the name the sync service gives you, so your own summaries and findings are recognized as yours.
+
+### Features
+- **Old compaction summaries are archived.** Since 1.14.0 they stay out of recall and memory compaction, so nothing pruned them. The daily decay sweep now archives your own summaries older than `SESSION_SUMMARY_RETENTION_DAYS` (default 90; `0` keeps them forever), a chunked one whole. Teammates' summaries and read-only ones are left alone. Archived summaries stay reachable with `memory_list` `include_archived`, or with `memory_recall` `include_archived` plus `include_sessions`. Your summaries count as yours under the configured username too, after the sync service's username replaces it; the findings sweep uses the same rule.
 
 ### Fixes
+- **Captured memories reach teammates right away.**
+  - The Stop hook's auto-captures (and the memories they supersede), the items it settles, and the PostCompact hook's summary were written locally and waited for the MCP server's next sync cycle, up to five minutes, before teammates saw them.
+  - The hook now pushes exactly what it wrote, to each shared collection it wrote to. It skips this while sync was seen signed out or offline in the last ten minutes.
+  - It waits at most five seconds, and anything it doesn't push stays for the next cycle.
+- **A merge keeps your claims.** `collection_merge` used to leave the source collection's leases behind, so another session could claim a moved task in the target.
+  - Now your live claims on the moved tasks move with them: same session, title, scope and remaining time. The merge report says how many moved, or that they couldn't be checked when the sync service didn't answer.
+  - Other leases, such as a project's own `yapa coord` leases, stay in the collection they name. So do teammates' claims.
+- **Sync subscriptions, merge redirects, left collections and pending backfills no longer lose an entry to a concurrent write.** Their read-modify-writes take a per-document lock, and every subscription change goes through locked add and remove helpers, so a prompt's subscribe and the server's auto-subscribe at the same moment keep both.
 - **Background curation leaves documents the remote owns alone.** A remote can serve records it owns with `metadata.read_only: true`. Edits by hand were already refused, but curation still touched them. Now:
   - the janitor never pairs or archives them as duplicates;
   - `compaction_suggest` never groups them, and `compaction_apply` never archives one;
   - the decay sweep and the recall salience boost leave their salience as served;
   - the classifier never sends one to the curation model or scores it, so none is selected or promoted for training;
   - `compaction_apply` refuses a group whose members are all read-only, instead of writing a summary that compacts nothing.
+- A compaction summary in a folder whose collection was removed from this machine is now skipped quietly instead of showing as a capture failure.
 
 ## 1.14.1 (2026-11-06)
 
