@@ -7,7 +7,7 @@ import { copyFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-var SCRIPT_VERSION = true ? "1.10.3" : void 0;
+var SCRIPT_VERSION = true ? "1.11.0" : void 0;
 var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
 function newer(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
