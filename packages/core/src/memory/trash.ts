@@ -181,7 +181,8 @@ export async function purgeDocuments(ids: string[]): Promise<PurgeQueued> {
         deleted = undefined;
         try {
           const backend = isSyncConfigured() ? await getSyncBackend() : undefined;
-          if (backend?.listDeleted) deleted = await backend.listDeleted();
+          // The service's maximum page (docs/sync-api.md): older chunks past it are not found.
+          if (backend?.listDeleted) deleted = await backend.listDeleted(undefined, 500);
         } catch { /* the service can't say: queue the id as given */ }
       }
       const rows = await remoteGroup(id, deleted);

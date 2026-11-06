@@ -10,7 +10,7 @@ import { pushToRemote } from '../sync/push.js';
 import { purgeDocuments, restoreDeleted, listTrash, stillQueuedForPurge } from './trash.js';
 
 let dir: string;
-const calls: { purge: string[][]; delete: string[][]; restore: string[][] } = { purge: [], delete: [], restore: [] };
+const calls: { purge: string[][]; delete: string[][]; restore: string[][]; listLimit?: number } = { purge: [], delete: [], restore: [] };
 let supportsPurge = true;
 let reused = new Set<string>();
 let failing = new Map<string, { code: string; permanent: boolean }>();
@@ -31,10 +31,11 @@ const stub = (): SyncBackend => ({
     });
   },
   restore: async ids => { calls.restore.push(ids); return ids.map(id => ({ id, status: 'restored' as const, synced_at: 1 })); },
-  listDeleted: async () => [
+  listDeleted: async (_c?: string, limit?: number) => { calls.listLimit = limit; return [
+
     { id: 'tester-9', collection: 'project-acme', content: 'old', metadata: {}, deleted_at: 1_800_000_000, reason: 'delete' },
     ...remoteDeleted.map(d => ({ ...d, collection: 'project-acme', content: 'x', deleted_at: 1_800_000_000, reason: 'delete' })),
-  ],
+  ]; },
   collections: async () => [], collectionsForUser: async () => [], collectionsByIds: async () => new Map(), ownersByIds: async () => new Map(),
   createdAt: async () => undefined, maxTaskNumber: async () => 0, similar: async () => [], addRelatedIds: async () => {},
   health: async () => ({ ok: true }), prepare: async () => {},
@@ -102,6 +103,7 @@ describe('purge', () => {
   it('an id no longer here is expanded to its chunks from your deleted rows on the service', async () => {
     remoteDeleted = [0, 1, 2].map(i => ({ id: `mem-gone-${i}`, metadata: { parent_id: 'mem-gone', chunk_index: i } }));
     expect((await purgeDocuments(['mem-gone-1'])).queued).toEqual(['mem-gone-0', 'mem-gone-1', 'mem-gone-2']);
+    expect(calls.listLimit).toBe(500);
     await pushToRemote();
     expect(calls.purge.at(-1)).toEqual(['mem-gone-0', 'mem-gone-1', 'mem-gone-2']);
   });

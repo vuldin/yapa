@@ -41411,7 +41411,7 @@ async function purgeDocuments(ids) {
         deleted = void 0;
         try {
           const backend = isSyncConfigured() ? await getSyncBackend() : void 0;
-          if (backend?.listDeleted) deleted = await backend.listDeleted();
+          if (backend?.listDeleted) deleted = await backend.listDeleted(void 0, 500);
         } catch {
         }
       }
