@@ -27,7 +27,8 @@ const LOCAL_ONLY_SQL = "collection <> 'global' AND collection NOT LIKE 'private-
 // compacted) and promoted memories are hidden. `->>` reads true and "true" alike.
 const ACTIVE_SQL = "COALESCE(metadata->>'archived', '') <> 'true' AND metadata->>'promoted_to' IS NULL";
 // Compaction summaries of past sessions: recalled only on request, as in core.
-const NO_SESSIONS_SQL = "COALESCE(metadata->>'source', '') <> 'compaction'";
+const NO_SESSIONS_SQL = "NOT (COALESCE(metadata->>'source', '') = 'compaction'"
+  + " OR (COALESCE(metadata->>'tags', '') ~ '(^|[\\[\",\\s])compaction([\\]\",\\s]|$)' AND COALESCE(metadata->>'tags', '') ~ '(^|[\\[\",\\s])journal([\\]\",\\s]|$)'))";
 const COLUMNS = `id, collection, content, metadata, origin_user, last_editor,
   floor(extract(epoch from created_at))::bigint AS created_at, floor(extract(epoch from updated_at))::bigint AS updated_at`;
 

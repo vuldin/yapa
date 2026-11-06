@@ -58,5 +58,8 @@ export function rankScore(distance: number, salience: number | undefined): numbe
 
 /** A compaction summary of a past session: long, episodic, and recalled only on request. */
 export function isSessionSummary(metadata: Record<string, any> | undefined | null): boolean {
-  return metadata?.source === 'compaction';
+  if (!metadata) return false;
+  if (metadata.source === 'compaction') return true;
+  const tags = Array.isArray(metadata.tags) ? metadata.tags.map(String) : String(metadata.tags ?? '').split(',').map(t => t.trim());
+  return tags.includes('compaction') && tags.includes('journal');
 }

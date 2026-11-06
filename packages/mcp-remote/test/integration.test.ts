@@ -147,8 +147,13 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
         const w = await call('memory_recall', { query, collection: 'customer-acme', n_results: 10, include_tasks: false, include_sessions: true });
         expect(w.text).toContain('m-sess');
       }
+      await insert('m-sess-tags', 'customer-acme', '# Conversation compaction summary\n\nanother acme session', 1, { type: 'memory', tags: ['compaction', 'journal'] }, 'alice', null, 5);
+      await insert('m-kafka', 'customer-acme', 'acme uses log compaction on the orders topic', 1, { type: 'memory', tags: 'compaction,kafka' }, 'alice', null, 5);
+      const r = await call('memory_recall', { query: 'seed:1 acme', collection: 'customer-acme', n_results: 10, include_tasks: false });
+      expect(r.text).not.toContain('m-sess-tags');
+      expect(r.text).toContain('m-kafka');
     } finally {
-      await db.adminPool.query("DELETE FROM documents WHERE id = 'm-sess'");
+      await db.adminPool.query("DELETE FROM documents WHERE id IN ('m-sess', 'm-sess-tags', 'm-kafka')");
     }
   });
 

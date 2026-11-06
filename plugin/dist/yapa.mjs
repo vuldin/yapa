@@ -2085,7 +2085,10 @@ function rankScore(distance, salience) {
   return distance - getConfig().SALIENCE_RANKING_WEIGHT * normalizedSalience(salience);
 }
 function isSessionSummary(metadata) {
-  return metadata?.source === "compaction";
+  if (!metadata) return false;
+  if (metadata.source === "compaction") return true;
+  const tags = Array.isArray(metadata.tags) ? metadata.tags.map(String) : String(metadata.tags ?? "").split(",").map((t) => t.trim());
+  return tags.includes("compaction") && tags.includes("journal");
 }
 var init_filters = __esm({
   "packages/core/src/memory/filters.ts"() {
@@ -2104,21 +2107,28 @@ async function recallMemory(query, options = {}) {
   const filter = { type: "memory" };
   if (options.kind) filter.kind = options.kind;
   if (options.status) filter.status = options.status;
-  const sessions = options.include_sessions ?? options.tags?.includes("compaction") ?? false;
-  const fetch2 = sessions ? nResults : nResults * 3;
+  const sessions = options.include_sessions === true;
   const kept = (docs) => sessions ? docs : docs.filter((d) => !isSessionSummary(d.metadata));
+  const enough = async (want, get2) => {
+    if (sessions) return get2(want);
+    for (let n = want * 3; ; n *= 2) {
+      const got = await get2(n);
+      const left = kept(got);
+      if (left.length >= want || got.length < n || n >= want * 12) return left;
+    }
+  };
   let results;
   if (options.collection) {
-    const docs = kept(await queryDocuments2(options.collection, query, fetch2, filter)).slice(0, nResults);
+    const docs = (await enough(nResults, (n) => queryDocuments2(options.collection, query, n, filter))).slice(0, nResults);
     results = docs.map((d) => ({ ...d, collection: options.collection }));
     const extra = options.crossCollection ?? 0;
     if (extra > 0) {
       const maxDistance = getConfig().CROSS_COLLECTION_MAX_DISTANCE;
-      const others = kept(await queryAllCollections2(query, (nResults + extra * 4) * (sessions ? 1 : 2), filter).catch(() => [])).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
+      const others = (await enough(nResults + extra * 4, (n) => queryAllCollections2(query, n, filter).catch(() => []))).filter((r) => r.collection !== options.collection && r.distance < maxDistance && r.metadata.archived !== true && !isFenced(r.collection)).slice(0, extra);
       results = [...results, ...others];
     }
   } else {
-    results = kept(await queryAllCollections2(query, fetch2, filter)).slice(0, nResults);
+    results = (await enough(nResults, (n) => queryAllCollections2(query, n, filter))).slice(0, nResults);
   }
   if (options.tags?.length) {
     results = results.filter((r) => {
@@ -11310,7 +11320,7 @@ async function sessionStart(input2) {
   lines.push(...await waitingLines(getConfig().USERNAME, void 0, collection));
   lines.push(...held2.lines);
   try {
-    const memories = await listMemories({ collection, limit: 5 });
+    const memories = (await listMemories({ collection, limit: 25 })).filter((r) => !isSessionSummary(r.metadata)).slice(0, 5);
     if (memories.length) {
       lines.push("", "## Top memories (by salience)");
       for (const r of memories) {

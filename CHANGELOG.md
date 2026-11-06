@@ -5,8 +5,9 @@
 ### Fixes
 - **Compaction summaries no longer crowd recall.**
   - Each `PostCompact` summary is long, so it's stored in many chunks, and they made up about a third of a busy store. Their mid-sentence fragments surfaced in the prompt hook's recall ahead of real findings: 6 of 28 hits across eight sample prompts in a real store, and all three hits on one prompt.
-  - Recall now leaves them out by default and fetches extra candidates, so it still returns the number asked for. That covers the prompt hook, `memory_recall`, DSH `yapa_memory_recall` and the reference remote's `memory_recall`, including its "latest" candidates.
-  - Pass `include_sessions: true`, or filter on the `compaction` tag, to search them. Journals stay in recall.
+  - Recall now leaves them out by default, fetching more until it has the number asked for. That covers the prompt hook, `memory_recall`, DSH `yapa_memory_recall` and the reference remote's `memory_recall`, including its "latest" candidates. Session start's top memories skip them too.
+  - Pass `include_sessions: true` to search them. Journals, and ordinary memories tagged `compaction` (log compaction, say), stay in recall.
+  - A summary is known by `source: compaction`, or by carrying both the `compaction` and `journal` tags. DSH's compaction capture now also sets `source`.
   - The summaries are still stored (`CAPTURE_COMPACTION`), and they no longer count toward `COMPACTION_THRESHOLD` or get grouped by `compaction_suggest`.
 
 ## 1.13.0 (2026-11-06)

@@ -128,9 +128,33 @@ describe('compaction summaries in recall', () => {
 
     const withSessions = await recallMemory(q, { collection: C, nResults: 7, boost: false, include_sessions: true });
     expect(withSessions.filter(r => r.metadata.source === 'compaction')).toHaveLength(4);
-    const tagged = await recallMemory(q, { collection: C, nResults: 3, boost: false, tags: ['compaction'] });
+    expect(await recallMemory(q, { collection: C, nResults: 3, boost: false, tags: ['compaction'] })).toEqual([]);
+    const tagged = await recallMemory(q, { collection: C, nResults: 3, boost: false, tags: ['compaction'], include_sessions: true });
     expect(tagged.length).toBeGreaterThan(0);
     expect(tagged.every(r => r.metadata.source === 'compaction')).toBe(true);
+  });
+
+  it('fetches more until enough are left when summaries crowd the nearest hits', async () => {
+    const C = 'project-sessions-crowd';
+    for (let i = 0; i < 12; i++) {
+      await storeMemory(`# Conversation compaction summary\n\nConsumer group lag session ${i}: the consumer group lag grew during rebalances.`, {
+        collection: C, tags: ['compaction', 'journal'], metadata: { source: 'compaction' },
+      });
+    }
+    for (const t of ['Lag alerts fire at 10,000 messages.', 'The billing consumer commits offsets every 5 seconds.', 'Static membership avoids rebalances on restart.']) {
+      await storeMemory(t, { collection: C });
+    }
+    const r = await recallMemory('consumer group lag during rebalances session', { collection: C, nResults: 3, boost: false });
+    expect(r).toHaveLength(3);
+    expect(r.every(x => !x.metadata.source)).toBe(true);
+  });
+
+  it('knows a summary by its tags too, and keeps an ordinary memory about log compaction', async () => {
+    const C = 'project-sessions-tags';
+    await storeMemory('# Conversation compaction summary\n\nSession about topic retention and log compaction settings.', { collection: C, tags: ['compaction', 'journal'] });
+    const { ids: [kafka] } = await storeMemory('Log compaction keeps the latest value per key; cleanup.policy=compact enables it.', { collection: C, tags: ['compaction', 'kafka'] });
+    const r = await recallMemory('log compaction settings', { collection: C, nResults: 5, boost: false });
+    expect(r.map(x => x.id)).toEqual([kafka]);
   });
 
   it('are not counted or grouped for memory compaction', async () => {

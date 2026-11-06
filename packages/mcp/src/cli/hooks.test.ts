@@ -146,6 +146,11 @@ describe('userPromptSubmit', () => {
     const ctx = restore().hookSpecificOutput.additionalContext as string;
     expect(ctx).toMatch(/Tuesdays 04:00 UTC/);
     expect(ctx).not.toContain('Conversation compaction summary');
+    capture();
+    await sessionStart({ session_id: 'g1', cwd: join(dir, 'proj', 'gamma'), source: 'startup' });
+    const start = restore().hookSpecificOutput.additionalContext as string;
+    expect(start).toContain('## Top memories (by salience)');
+    expect(start).not.toContain('Conversation compaction summary');
   });
 
   it('adds strongly relevant hits from other customers, labeled with their collection', async () => {
