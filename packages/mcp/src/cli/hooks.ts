@@ -18,7 +18,9 @@ import {
   getSyncPullTimestamp,
   getSyncSubscriptions,
   updateSyncSubscriptions,
-  getCollectionRedirects,
+  getUnfollowedCollections,
+  getPendingBackfills,
+  clearPendingBackfill,
   isSyncConfigured,
   resolveSyncUsername,
   captureTurn,
@@ -126,13 +128,15 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
   // global/private-*/local-* never sync: skip the sign-in and the request.
   if (!isSyncableCollection(collection)) return 0;
   try {
-    // Merged away on this machine: teammates' rows must not bring it back.
-    if (Object.hasOwn(await getCollectionRedirects(), collection)) return 0;
+    // Merged away or left on this machine: teammates' rows must not bring it back.
+    if ((await getUnfollowedCollections()).has(collection)) return 0;
     // First visit to a shared collection (a teammate's project folder, or one
     // named in the prompt): pull its whole history, then follow it so the
     // background sync keeps it current. Subscribe only after the backfill
     // finished, so a pull cut off by the timeout simply retries next prompt.
-    const followed = (await getSyncSubscriptions()).includes(collection);
+    // Followed again after leaving it: pull its whole history like a first visit.
+    const pendingBackfill = (await getPendingBackfills()).includes(collection);
+    const followed = (await getSyncSubscriptions()).includes(collection) && !pendingBackfill;
     // Another session (or the shared cycle) pulled it moments ago: nothing new
     // worth a request. A first visit (backfill) is never skipped.
     if (opts.gate && followed && !shouldPull(collection)) return 0;
@@ -146,6 +150,7 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
     if (stats.errors === 0) {
       noteSyncOk();
       recordPull(collection);
+      if (pendingBackfill) await clearPendingBackfill(collection);
     }
     if (!followed && stats.errors === 0) {
       const subs = await getSyncSubscriptions();

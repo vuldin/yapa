@@ -561,3 +561,24 @@ describe('after merging a shared collection into a private one', () => {
     expect((await listMemories({ collection: 'private-acme-legacy', limit: 50 })).some(m => m.content.includes('gradle 9'))).toBe(true);
   });
 });
+
+describe('after removing a shared collection from this machine only', () => {
+  it('a prompt in its folder never backfills or re-follows it', async () => {
+    const core = await import('@yapa/core');
+    await core.createNewCollection('project-acme-gone');
+    await core.updateSyncSubscriptions([...(await core.getSyncSubscriptions()), 'project-acme-gone']);
+    await core.removeCollection('project-acme-gone');
+    expect(await core.getLeftCollections()).toContain('project-acme-gone');
+
+    capture();
+    await userPromptSubmit({ session_id: 'g1', cwd: join(dir, 'proj', 'acme-gone'), prompt: 'what did we decide for acme-gone?' });
+    restore();
+    capture();
+    await sessionStart({ session_id: 'g1', cwd: join(dir, 'proj', 'acme-gone'), source: 'startup' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx).toContain('(removed from this machine: writes to it are refused; `sync subscribe project-acme-gone` follows it again)');
+    expect(await freshenFromRemote('project-acme-gone')).toBe(0);
+    expect(pullCollection).not.toHaveBeenCalled();
+    expect(await core.getSyncSubscriptions()).not.toContain('project-acme-gone');
+  });
+});

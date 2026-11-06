@@ -153,7 +153,7 @@ already captured in git history or in an existing memory.
 - **Before creating a new collection**, ask the user to confirm the collection name. Suggest a name based on context. Remind the user that \`private-\` or \`local-\` prefixed collections won't sync to the shared remote database.
 - When unsure which collection or prefix to use, ask the user rather than guessing
 - Use \`collection_list\` to check what collections exist before creating new ones
-- To combine or rename collections use \`collection_merge\`, never \`collection_delete\` (a shared delete removes the collection for every teammate)
+- To combine or rename collections use \`collection_merge\`, not \`collection_delete\`. A delete removes the collection from this machine only; \`scope: "everyone"\` (with \`confirm\`) deletes your documents in it for every teammate, only when the user explicitly asks
 - Always pass the inferred collection explicitly on memory/task tool calls
 
 ### Uninstall

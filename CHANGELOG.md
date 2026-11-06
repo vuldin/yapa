@@ -3,8 +3,25 @@
 ## Unreleased
 
 ### Service
-- **Deletes are soft: the owner can list, restore and purge deleted rows.** `documents:batchDelete` now moves a row into `deleted_documents` instead of dropping it; its owner can list their deleted rows (`GET /v1/me/deleted`), restore one (`POST /v1/documents:restore`, back as an update with a new `updated_at`; `id_taken` when the id is live again) or remove an id for good (`POST /v1/documents:purge`, after which any upsert of it is refused with the permanent item error `purged`). Deleted rows stay restorable for `YAPA_DELETED_RETENTION_DAYS` (default 30). Pull deletion entries now carry `reason` (`delete` or `retract`) and `purged`; older clients ignore them. The client library has the matching optional `listDeleted`/`restore`/`purge` backend methods; an older service answers them with `UnsupportedByRemoteError`. See `docs/sync-api.md` section 5, "Soft delete".
+- **Deletes are soft: the owner can list, restore and purge deleted rows.** `documents:batchDelete` now moves a row into `deleted_documents` instead of dropping it; its owner can list their deleted rows (`GET /v1/me/deleted`), restore one (`POST /v1/documents:restore`, back as an update with a new `updated_at`; `id_taken` when the id is live again) or remove an id for good (`POST /v1/documents:purge`, after which any upsert of it is refused with the permanent item error `purged`; if the id is now another user's live document, only your deleted copies go and the answer is `purged_copies`). Deleted rows stay restorable for `YAPA_DELETED_RETENTION_DAYS` (default 30). A retract (an author taking a document out of the team copy, as in a shared-to-private merge) keeps no copy: the author still has it locally. Pull deletion entries now carry `reason` (`delete` or `retract`) and `purged`; older clients ignore them. The client library has the matching optional `listDeleted`/`restore`/`purge` backend methods; an older service answers them with `UnsupportedByRemoteError`. See `docs/sync-api.md` section 5, "Soft delete".
 - **Deploy order:** apply `infra/cloudsql/sql/07_soft_delete.sql` (schema v4, by hand with psql, see `infra/cloudsql/README.md`) BEFORE deploying a `yapa-service` or `yapa-mcp` built from this release: the new pull reads the new `deletions` columns. Clients must not rely on restore or purge until both are done.
+- **A purge fully works only once teammates update.** A client from before this release treats a purged id in the deletions feed as an ordinary delete: it drops a clean copy but keeps a copy it has edited, and that copy's next push is refused with `purged`.
+
+## 1.11.0 (2026-11-06)
+
+Deleting a collection no longer deletes it for the team unless you ask: by default it is removed from this machine only, after everything only this machine has is pushed.
+
+**Upgrading:** update the plugin and restart Claude Code. Nothing to deploy. Note the behavior change: `collection_delete` now removes a shared collection from this machine only, unless you pass `scope: "everyone"`.
+
+### Features
+- **Deleting a collection no longer deletes it for the team by default.** `collection_delete` (and DSH `yapa_collection_delete`) takes `scope`:
+  - `local` (the default): a shared collection is removed from this machine only. Everything only this machine has (your new docs, and your edits to teammates' docs) is pushed first, and the delete is refused if any of it can't be; docs the service refused (a secret, a bad embedding) are named as existing only here and need `confirm`. Teammates and the sync service keep everything. This machine stops following it (no backfill, pull, recovery or push auto-subscribe), and writes to it are refused (the Scope line says so) rather than bringing it back pushed but never pulled. `sync subscribe` or `collection_create` follows it again, with its whole history on the next pull.
+  - `everyone`: needs `confirm: "<name>"`, and deletes your documents in it from the sync service and from every teammate's machine (as `collection_delete` did before). Teammates' own documents stay shared.
+  - The reply says exactly what was removed where.
+
+### Fixes
+- **Deleting a collection that has no other copy needs `confirm`.** A non-empty local-only collection (`private-*`, `local-*`, `global`), or any collection while sync is off, was deleted without confirmation, and that is permanent.
+- A claim in a local-only collection says "this machine: your other sessions see it as yours" instead of "teammates see it as yours".
 
 ## 1.10.3 (2026-11-03)
 

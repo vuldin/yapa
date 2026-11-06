@@ -176,7 +176,18 @@ describe('soft delete ownership (no database)', () => {
       ? [{ collection: 'customer-acme', origin_user: 'bob', last_editor: 'bob' }] : []));
     const r = await purgeMany(pool, ctx('alice', 'A'), ['acme-1']);
     expect(r).toEqual({ results: [{ id: 'acme-1', status: 'error', error: { code: 'not_owner', message: expect.any(String) } }], purged: 0 });
-    expect(writes(queries)).toEqual([]);
+    // The only write is the caller-scoped removal of their own deleted copies, which found none.
+    expect(writes(queries).map(q => [q.text.split(' WHERE')[0], q.values])).toEqual([['DELETE FROM deleted_documents', ['acme-1', 'alice']]]);
+  });
+
+  it('purge of a reused id removes only the caller\'s deleted copies: purged_copies, no purged_ids or feed entry', async () => {
+    const { pool, queries } = countingPool(q => {
+      if (q.text.includes('FROM documents WHERE id = $1 FOR UPDATE')) return [{ collection: 'customer-acme', origin_user: 'bob', last_editor: 'bob' }];
+      if (q.text.startsWith('DELETE FROM deleted_documents')) return [{ collection: 'customer-acme', last_editor: 'alice', origin_user: 'alice' }];
+      return [];
+    });
+    expect(await purgeMany(pool, ctx('alice', 'A'), ['acme-1'])).toEqual({ results: [{ id: 'acme-1', status: 'purged_copies' }], purged: 1 });
+    expect(queries.some(q => q.text.includes('purged_ids') || q.text.includes('INSERT INTO deletions') || q.text.startsWith('DELETE FROM documents'))).toBe(false);
   });
 
   it('purge with neither a live row nor an own deleted copy is not_found; deleted copies are matched on the caller', async () => {

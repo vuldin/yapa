@@ -35,7 +35,7 @@ import path from 'node:path';
 import { realpathSync } from 'node:fs';
 import { getConfig } from './config.js';
 import { listCollections } from './store/index.js';
-import { getCollectionRedirects, resolveCollectionRedirect } from './sync/sentinel.js';
+import { getCollectionRedirects, getLeftCollections, resolveCollectionRedirect } from './sync/sentinel.js';
 import { isSyncableCollection, looksPrivateButShared } from './sync/syncable.js';
 
 /** Outcome of scope inference for one session cwd. */
@@ -59,6 +59,8 @@ export interface CollectionDetection {
    * this is its old name.
    */
   redirectedFrom?: string;
+  /** The collection was removed from this machine (collection_delete, scope local): writes to it are refused. */
+  left?: true;
 }
 
 /** Path handling for `matchCollectionMap`; tests pass `path.win32` and a stub realpath. */
@@ -116,6 +118,12 @@ export async function detectCollection(
   customers: string[] = getConfig().CUSTOMERS,
   map: string[] = getConfig().COLLECTION_MAP,
 ): Promise<CollectionDetection> {
+  const d = await detect(cwd, roots, customers, map);
+  if (d.collection !== 'global' && (await getLeftCollections()).includes(d.collection)) d.left = true;
+  return d;
+}
+
+async function detect(cwd: string | undefined, roots: string[], customers: string[], map: string[]): Promise<CollectionDetection> {
   if (!cwd) return { collection: 'global' };
   const mapped = matchCollectionMap(cwd, map);
   if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
@@ -160,6 +168,7 @@ export function scopeNotes(d: CollectionDetection): string {
     notes.push('(shared: this name syncs; local-only names start with lowercase `private-` or `local-`)');
   }
   if (d.redirectedFrom) notes.push(`(merged from \`${d.redirectedFrom}\`)`);
+  if (d.left) notes.push(`(removed from this machine: writes to it are refused; \`sync subscribe ${d.collection}\` follows it again)`);
   return notes.length ? ` ${notes.join(' ')}` : '';
 }
 

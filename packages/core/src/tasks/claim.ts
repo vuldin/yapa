@@ -208,7 +208,7 @@ export function describeClaim(r: ClaimResult): string {
         const whose = prev.user === getConfig().USERNAME ? `your other session ${String(prev.session ?? '')}` : `${prev.user}'s expired claim`;
         return `Claimed ${r.id} (took over from ${whose}).`;
       }
-      return r.renewed ? `Claim on ${r.id} renewed.` : `Claimed ${r.id}: teammates see it as yours.`;
+      return r.renewed ? `Claim on ${r.id} renewed.` : coordinatedLocally(r.collection) ? `Claimed ${r.id} (this machine: your other sessions see it as yours).` : `Claimed ${r.id}: teammates see it as yours.`;
     }
     case 'refused': return describeRefusal(r);
     case 'unshared': return `Claim on ${r.id} is NOT shared (${r.reason}): others may start it too. It will be retried when sync is back; tell the user.`;

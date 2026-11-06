@@ -1,7 +1,8 @@
 import { getConfig } from '../config.js';
 import { queueSyncDeletes, addLocalTombstones } from '../sync/deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions, addCollectionRedirect, clearCollectionRedirect } from '../sync/sentinel.js';
+import { getSyncSubscriptions, updateSyncSubscriptions, addCollectionRedirect, addLeftCollection, clearCollectionRedirect, clearLeftCollection, rejoinCollection } from '../sync/sentinel.js';
 import { withDocLock } from '../doc-lock.js';
+import { isPushable, isRejectedUnchanged, pushDocsNow } from '../sync/push.js';
 import {
   addDocument,
   addDocumentsBatch,
@@ -46,68 +47,139 @@ export async function listCollectionsWithCounts(): Promise<CollectionInfo[]> {
 export async function createNewCollection(name: string): Promise<void> {
   await chromaCreateCollection(name);
   await clearCollectionRedirect(name);
+  // Left earlier: followed again, with its whole history on the next pull.
+  if (isSyncable(name)) await rejoinCollection(name);
+  else await clearLeftCollection(name);
 }
 
 const isSyncable = isSyncableCollection;
 
-/** A refused `removeCollection`: shared, non-empty, and not confirmed. */
+export interface RemoveCollectionOptions {
+  /**
+   * `local` (default): remove the collection from this machine only. A shared
+   * collection stays on the sync service for teammates; this machine stops
+   * following it. `everyone`: also delete your documents in it from the sync
+   * service, for every teammate (teammates' own documents stay there).
+   */
+  scope?: 'local' | 'everyone';
+  /** The exact collection name: required when the delete loses data (see removeCollection). */
+  confirm?: string;
+  /** Skip the guard (internal callers that already confirmed). */
+  force?: boolean;
+  /** Internal: record a shared collection as left (default true; a merge records a redirect instead). */
+  markLeft?: boolean;
+}
+
+export interface RemoveCollectionResult {
+  name: string;
+  scope: 'local' | 'everyone';
+  /** Documents removed from this machine. */
+  removed: number;
+  /** Your unpushed documents pushed first, so the team copy has them. */
+  pushed: number;
+  /** Your documents queued for deletion on the sync service (scope `everyone`). */
+  deletedRemotely: number;
+  /** True when the collection syncs (shared), false for private-*, local-*, global. */
+  shared: boolean;
+}
+
+/** A refused `removeCollection`: it would lose data, and was not confirmed. */
 export class CollectionDeleteRefusedError extends Error {
+  readonly code = 'collection_delete_refused';
   constructor(message: string, readonly documentCount: number) {
     super(message);
     this.name = 'CollectionDeleteRefusedError';
   }
 }
 
-export interface RemoveCollectionOptions {
-  /** Must equal the collection name to delete a non-empty shared collection. */
-  confirm?: string;
-  /** Skip the guard (internal callers that already confirmed). */
-  force?: boolean;
-}
-
 /**
- * Delete a collection by name — and make the deletion stick under sync.
- * Before this, deleting a collection was invisible to the shared database:
- * its rows stayed remote forever, and the still-active subscription made the
- * next pull recreate the collection and backfill everything back. Now your
- * own docs are queued for remote deletion, teammates' docs are tombstoned
- * locally (their shared rows stay), and the collection is unsubscribed.
+ * Delete a collection. Nothing a teammate has is lost unless the caller asks
+ * for scope `everyone`; nothing only this machine has is lost without `confirm`:
  *
- * Remote deletes are hard deletes for every teammate, so a non-empty shared
- * collection is refused unless `confirm` repeats its name. Deleting is not
- * merging: combining two collections is `mergeCollections`, which keeps
- * every document.
+ * - shared, scope `local`, sync on: your unpushed documents are pushed first
+ *   (refused if that fails, unless confirmed), then the collection is removed
+ *   here, unsubscribed and recorded as left (sentinel.ts). Teammates and the
+ *   sync service keep everything; `sync subscribe` brings it back.
+ * - shared, scope `everyone`: requires `confirm`. Your documents are deleted
+ *   on the sync service (and so from teammates' machines); teammates' own
+ *   documents stay there, tombstoned here.
+ * - local-only (private-*, local-*, global), or shared with sync off: there is
+ *   no other copy, so a non-empty collection requires `confirm`.
  */
-export async function removeCollection(name: string, opts: RemoveCollectionOptions = {}): Promise<void> {
-  if (isSyncable(name) && !opts.force && opts.confirm !== name) {
-    const docs = await getDocumentsByFilter(name, {}, 100_000).catch(() => []);
-    const count = docs.filter(d => !d.id.startsWith('__')).length;
-    if (count > 0) {
-      const reach = getConfig().SYNC_ENABLED
-        ? 'Deleting it permanently deletes the collection for EVERY teammate on the sync service.'
-        : 'Deleting it is permanent.';
-      throw new CollectionDeleteRefusedError(
-        `Refused: "${name}" is a shared collection with ${count} document${count === 1 ? '' : 's'}. ${reach} `
-        + 'This is not a merge: to combine it with another collection, use collection_merge (it keeps every document). '
-        + `To delete it anyway, confirm with the user, then pass confirm: "${name}".`,
-        count,
-      );
+export async function removeCollection(name: string, opts: RemoveCollectionOptions = {}): Promise<RemoveCollectionResult> {
+  const scope = opts.scope ?? 'local';
+  const shared = isSyncable(name);
+  const syncOn = getConfig().SYNC_ENABLED;
+  const docs = (await getDocumentsByFilter(name, {}, 100_000).catch(() => [])).filter(d => !d.id.startsWith('__'));
+  const result: RemoveCollectionResult = { name, scope, removed: docs.length, pushed: 0, deletedRemotely: 0, shared };
+  const confirmed = !!opts.force || opts.confirm === name;
+  const refuse = (why: string) => {
+    throw new CollectionDeleteRefusedError(
+      `Refused: ${why} This is not a merge: to combine it with another collection, use collection_merge (it keeps every document). `
+      + `To delete it anyway, confirm with the user, then pass confirm: "${name}".`,
+      docs.length,
+    );
+  };
+  const n = `${docs.length} document${docs.length === 1 ? '' : 's'}`;
+
+  if (docs.length > 0 && !confirmed) {
+    if (!shared) refuse(`"${name}" is local only, with ${n} and no copy anywhere else: deleting it is permanent.`);
+    if (!syncOn) refuse(`"${name}" has ${n} and sync is off, so this machine holds the only copy: deleting it is permanent.`);
+    if (scope === 'everyone') {
+      refuse(`deleting "${name}" for everyone removes your documents in it from the sync service and from every teammate's machine (${n} here).`);
     }
   }
-  if (getConfig().SYNC_ENABLED && isSyncable(name)) {
-    const docs = await getDocumentsByFilter(name, {}, 100_000).catch(() => []);
-    const me = getConfig().USERNAME;
-    const real = docs.filter(d => !d.id.startsWith('__') && d.metadata.type !== 'journal_draft');
-    await queueSyncDeletes(real.filter(d => !d.metadata.origin_user || d.metadata.origin_user === me).map(d => d.id), name);
-    await addLocalTombstones(real.filter(d => d.metadata.origin_user && d.metadata.origin_user !== me).map(d => d.id));
+
+  const me = getConfig().USERNAME;
+  const mine = (d: { metadata: Record<string, any> }) => !d.metadata.origin_user || d.metadata.origin_user === me;
+  if (shared && syncOn && scope === 'local') {
+    // Refused by the sync service (a secret, a bad embedding) and unchanged
+    // since: no push will take it, so this machine holds the only copy.
+    const stuck = docs.filter(d => d.metadata.is_synced === false && isRejectedUnchanged(d));
+    if (stuck.length && !confirmed) {
+      refuse(`${stuck.length} document${stuck.length === 1 ? '' : 's'} in "${name}" (${stuck.slice(0, 3).map(d => d.id).join(', ')}${stuck.length > 3 ? ', ...' : ''}) ${stuck.length === 1 ? 'was refused by the sync service and exists' : 'were refused by the sync service and exist'} only on this machine: deleting it here loses ${stuck.length === 1 ? 'it' : 'them'}.`);
+    }
+    // Everything else only this machine has reaches the team copy first:
+    // your new docs, and your edits to teammates' docs (the service keeps
+    // the owner and records you as the last editor).
+    const unpushed = docs.filter(isPushable).map(d => d.id);
+    if (unpushed.length) {
+      const r = await pushDocsNow(name, unpushed).catch(() => ({ pushed: [] as string[], errors: unpushed.length }));
+      result.pushed = r.pushed.length;
+      // Not "no errors": with the service unreachable nothing is pushed and nothing errs.
+      const missing = unpushed.length - r.pushed.length;
+      if (missing > 0 && !confirmed) {
+        refuse(`${missing} of your documents in "${name}" could not be pushed to the sync service, so deleting it here would lose them.`);
+      }
+    }
+  }
+  if (shared && syncOn && scope === 'everyone') {
+    const real = docs.filter(d => d.metadata.type !== 'journal_draft');
+    const own = real.filter(mine).map(d => d.id);
+    await queueSyncDeletes(own, name);
+    await addLocalTombstones(real.filter(d => !mine(d)).map(d => d.id));
+    result.deletedRemotely = own.length;
   }
   // With sync off too: a subscription left behind would recreate the
   // collection (and backfill it) as soon as sync is turned on.
-  if (isSyncable(name)) {
+  if (shared) {
     const subs = await getSyncSubscriptions();
     if (subs.includes(name)) await updateSyncSubscriptions(subs.filter(s => s !== name));
+    if (scope === 'local' && (opts.markLeft ?? true)) await addLeftCollection(name);
   }
   await chromaDeleteCollection(name);
+  return result;
+}
+
+/** One line for the user: what a removeCollection did. */
+export function removeReport(r: RemoveCollectionResult): string {
+  const docs = `${r.removed} document${r.removed === 1 ? '' : 's'}`;
+  if (!r.shared) return `Deleted "${r.name}" (${docs}) from this machine. It was local only, so it is gone.`;
+  if (r.scope === 'everyone') {
+    return `Deleted "${r.name}" (${docs}) here and, for everyone, your ${r.deletedRemotely} document${r.deletedRemotely === 1 ? '' : 's'} in it on the sync service. Teammates' own documents in it stay shared.`;
+  }
+  return `Removed "${r.name}" (${docs}) from this machine only${r.pushed ? ` after pushing ${r.pushed} unpushed document${r.pushed === 1 ? '' : 's'} of yours` : ''}. `
+    + `Teammates and the sync service keep it; this machine no longer follows it (sync subscribe ${r.name} to follow it again).`;
 }
 
 export interface MergeResult {
@@ -255,7 +327,7 @@ export async function mergeCollections(from: string, into: string, opts: { dryRu
   }
   // Empty now, so this only unsubscribes and drops the local collection; the
   // service holds no rows in it once the moved docs are pushed.
-  await removeCollection(from);
+  await removeCollection(from, { force: true, markLeft: false });
   result.sourceRemoved = true;
   // Teammates' rows keep `from` alive remotely: without this, the next prompt
   // in its folder (or a recovery pull) would recreate and re-follow it.

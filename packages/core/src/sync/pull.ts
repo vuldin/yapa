@@ -3,7 +3,7 @@ import { getConfig } from '../config.js';
 import { listCollections, addDocument, deleteDocument, getOrCreateCollection, getDocumentsByIds, getDocumentsByFilter, queryDocuments, updateDocument, patchDocument } from '../store/index.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, type RemoteDeletion, type RemoteDocument, type SyncBackend } from './backend.js';
-import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getCollectionRedirects } from './sentinel.js';
+import { getSyncPullTimestamp, updateSyncPullTimestamp, getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections, getPendingBackfills, clearPendingBackfill } from './sentinel.js';
 import { getLocalTombstones } from './deletes.js';
 import { getDeviceId } from './device.js';
 
@@ -57,8 +57,8 @@ export async function pullFromRemote(): Promise<PullStats> {
     try {
       // A collection merged away here stays away, even though the remote
       // still lists it for this user (teammates' rows, or rows not yet moved).
-      const redirects = await getCollectionRedirects();
-      const mine = (await backend.collectionsForUser()).filter(c => isSyncable(c) && !Object.hasOwn(redirects, c));
+      const unfollowed = await getUnfollowedCollections();
+      const mine = (await backend.collectionsForUser()).filter(c => isSyncable(c) && !unfollowed.has(c));
       const subs = await getSyncSubscriptions();
       const add = mine.filter(c => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
@@ -79,18 +79,20 @@ export async function pullFromRemote(): Promise<PullStats> {
   // Build pull list: local syncable collections + subscribed remote-only collections.
   // A name merged away on this machine is never pulled: a subscription left
   // behind (a merge with sync off, an older version) must not recreate it.
-  const redirects = await getCollectionRedirects();
+  const unfollowed = await getUnfollowedCollections();
   const pullCollectionNames: string[] = [];
   for (const col of collections) {
-    if (isSyncable(col.name) && !Object.hasOwn(redirects, col.name)) pullCollectionNames.push(col.name);
+    if (isSyncable(col.name) && !unfollowed.has(col.name)) pullCollectionNames.push(col.name);
   }
 
-  const backfill = new Set<string>();
+  // Followed again after leaving it: from the start of its history.
+  const pendingBackfills = (await getPendingBackfills()).filter(n => !unfollowed.has(n));
+  const backfill = new Set<string>(pendingBackfills);
   const subscriptions = await getSyncSubscriptions();
   for (const sub of subscriptions) {
-    if (!localCollectionNames.has(sub) && isSyncable(sub) && !Object.hasOwn(redirects, sub)) {
+    if ((!localCollectionNames.has(sub) || backfill.has(sub)) && isSyncable(sub) && !unfollowed.has(sub)) {
       await getOrCreateCollection(sub);
-      pullCollectionNames.push(sub);
+      if (!pullCollectionNames.includes(sub)) pullCollectionNames.push(sub);
       backfill.add(sub);
     }
   }
@@ -98,12 +100,14 @@ export async function pullFromRemote(): Promise<PullStats> {
   const followed = new Set(pullCollectionNames);
   let fatal = false;
   for (const collectionName of pullCollectionNames) {
+    const errorsBefore = stats.errors;
     await pullCollection(collectionName, backfill.has(collectionName) ? 0 : lastPull, stats, {
       includeOwnDevice: recovering,
       followedCollections: followed,
       onFatal: () => { fatal = true; },
     });
     if (fatal) break;
+    if (pendingBackfills.includes(collectionName) && stats.errors === errorsBefore) await clearPendingBackfill(collectionName);
   }
 
   // A cycle cut short (not signed in, unreachable) must not advance the pull
