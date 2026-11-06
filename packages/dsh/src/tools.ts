@@ -409,6 +409,7 @@ export function registerTools(ctx: Context): void {
       kind: { type: 'string', enum: [...MEMORY_KINDS], description: 'Only typed memories of this kind' },
       status: { type: 'string', description: 'Only typed memories with this status' },
       include_promoted: { type: 'boolean', description: 'Include promoted memories (default false)' },
+      include_sessions: { type: 'boolean', description: 'Include compaction summaries of past sessions (default false)' },
     },
     output: {
       schema: {
@@ -435,6 +436,7 @@ export function registerTools(ctx: Context): void {
         kind: args.kind,
         status: args.status,
         include_promoted: args.include_promoted,
+        include_sessions: args.include_sessions,
       });
       return {
         results: results.map(r => ({

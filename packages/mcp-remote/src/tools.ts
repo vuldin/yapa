@@ -264,17 +264,18 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         n_results: optNumber(z.number().int().min(1).max(20)).describe('Max results (default 5, max 20)'),
         other_collections: optNumber(z.number().int().min(0).max(5)).describe('With `collection`: max extra strongly-relevant hits from other collections (default 2; 0 = only that collection)'),
         include_tasks: optBoolean().describe('Append open follow-ups/tasks (default true): all open tasks of the customer the question names, or a few closely matching ones otherwise'),
+        include_sessions: optBoolean().describe('Include compaction summaries of past sessions (default false)'),
       },
       annotations: { title: 'Recall memories', ...READ_ONLY },
     },
-    instrument(ctx, 'memory_recall', async ({ query, collection, n_results, other_collections, include_tasks }) => {
+    instrument(ctx, 'memory_recall', async ({ query, collection, n_results, other_collections, include_tasks, include_sessions }) => {
       const coll = await pickCollection(collection);
       const n = n_results ?? 5;
       requireEmbed(ctx);
       const embedding = await ctx.embedder.embed(query);
       const inferred = coll === undefined ? inferCollection(query, await collectionNames()) : undefined;
       const search = (opts: { collection?: string; excludeCollection?: string; maxDistance?: number }, limit: number) =>
-        vectorSearch(pool, me, { embedding, type: 'memory', limit, ...opts });
+        vectorSearch(pool, me, { embedding, type: 'memory', limit, includeSessions: include_sessions === true, ...opts });
 
       const focusColl = coll ?? inferred;
       const now = ctx.nowSecs?.() ?? Date.now() / 1000;
@@ -289,7 +290,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       } else {
         candidates.push(...await search({ collection: coll }, n * RECALL_OVERFETCH));
       }
-      if (recency.temporal && focusColl) candidates.push(...await recentMemories(pool, me, focusColl, embedding, RECALL_RECENT_CANDIDATES));
+      if (recency.temporal && focusColl) candidates.push(...await recentMemories(pool, me, focusColl, embedding, RECALL_RECENT_CANDIDATES, include_sessions === true));
       let main = rerank(uniqueById(candidates), inferred, recency);
       main = (await wholeMemories(pool, me, main.slice(0, n * 2))).slice(0, n);
 

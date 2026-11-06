@@ -26,6 +26,9 @@ const LOCAL_ONLY_SQL = "collection <> 'global' AND collection NOT LIKE 'private-
 // Mirrors core's recall/list defaults: archived (incl. superseded and
 // compacted) and promoted memories are hidden. `->>` reads true and "true" alike.
 const ACTIVE_SQL = "COALESCE(metadata->>'archived', '') <> 'true' AND metadata->>'promoted_to' IS NULL";
+// Compaction summaries of past sessions: recalled only on request, as in core.
+const NO_SESSIONS_SQL = "NOT (COALESCE(metadata->>'source', '') = 'compaction'"
+  + " OR (COALESCE(metadata->>'tags', '') ~ '(^|[\\[\",\\s])compaction([\\]\",\\s]|$)' AND COALESCE(metadata->>'tags', '') ~ '(^|[\\[\",\\s])journal([\\]\",\\s]|$)'))";
 const COLUMNS = `id, collection, content, metadata, origin_user, last_editor,
   floor(extract(epoch from created_at))::bigint AS created_at, floor(extract(epoch from updated_at))::bigint AS updated_at`;
 
@@ -57,6 +60,8 @@ export interface VectorSearch {
   limit: number;
   /** Drop hits at or beyond this cosine distance. */
   maxDistance?: number;
+  /** Include compaction summaries of past sessions (memories). */
+  includeSessions?: boolean;
 }
 
 export async function vectorSearch(pool: pg.Pool, username: string, p: VectorSearch): Promise<DocRow[]> {
@@ -65,7 +70,7 @@ export async function vectorSearch(pool: pg.Pool, username: string, p: VectorSea
     const values: unknown[] = [toPgVector(p.embedding), p.type];
     const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
     let where = `metadata->>'type' = $2 AND ${LOCAL_ONLY_SQL}`;
-    if (p.type === 'memory') where += ` AND ${ACTIVE_SQL}`;
+    if (p.type === 'memory') where += ` AND ${ACTIVE_SQL}${p.includeSessions ? '' : ` AND ${NO_SESSIONS_SQL}`}`;
     if (p.collection !== undefined) where += ` AND collection = ${param(p.collection)}`;
     if (p.excludeCollection !== undefined) where += ` AND collection <> ${param(p.excludeCollection)}`;
     if (p.maxDistance !== undefined) where += ` AND (embedding <=> $1::vector) < ${param(p.maxDistance)}`;
@@ -86,12 +91,12 @@ export async function vectorSearch(pool: pg.Pool, username: string, p: VectorSea
  * them as candidates for time-sensitive questions ("latest meeting"), which a
  * pure similarity search can rank below older, higher-salience memories.
  */
-export async function recentMemories(pool: pg.Pool, username: string, collection: string, embedding: number[], limit: number): Promise<DocRow[]> {
+export async function recentMemories(pool: pg.Pool, username: string, collection: string, embedding: number[], limit: number, includeSessions = false): Promise<DocRow[]> {
   return withUserTx(pool, username, async c => {
     const r = await c.query(
       `SELECT ${COLUMNS}, embedding <=> $1::vector AS distance
          FROM documents
-        WHERE collection = $2 AND metadata->>'type' = 'memory' AND ${ACTIVE_SQL} AND ${LOCAL_ONLY_SQL}
+        WHERE collection = $2 AND metadata->>'type' = 'memory' AND ${ACTIVE_SQL} AND ${LOCAL_ONLY_SQL}${includeSessions ? '' : ` AND ${NO_SESSIONS_SQL}`}
         ORDER BY updated_at DESC, id DESC
         LIMIT $3`,
       [toPgVector(embedding), collection, limit],

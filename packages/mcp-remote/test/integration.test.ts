@@ -138,6 +138,25 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     expect(r.text).toContain('by bob, edited by alice');
   });
 
+  it('memory_recall leaves compaction summaries out unless include_sessions, also for "latest" questions', async () => {
+    await insert('m-sess', 'customer-acme', '# Conversation compaction summary\n\nacme session notes', 1, { type: 'memory', source: 'compaction', tags: 'compaction,journal' }, 'alice', null, 5);
+    try {
+      for (const query of ['seed:1 acme', 'seed:1 latest acme']) {
+        const r = await call('memory_recall', { query, collection: 'customer-acme', n_results: 10, include_tasks: false });
+        expect(r.text).not.toContain('m-sess');
+        const w = await call('memory_recall', { query, collection: 'customer-acme', n_results: 10, include_tasks: false, include_sessions: true });
+        expect(w.text).toContain('m-sess');
+      }
+      await insert('m-sess-tags', 'customer-acme', '# Conversation compaction summary\n\nanother acme session', 1, { type: 'memory', tags: ['compaction', 'journal'] }, 'alice', null, 5);
+      await insert('m-kafka', 'customer-acme', 'acme uses log compaction on the orders topic', 1, { type: 'memory', tags: 'compaction,kafka' }, 'alice', null, 5);
+      const r = await call('memory_recall', { query: 'seed:1 acme', collection: 'customer-acme', n_results: 10, include_tasks: false });
+      expect(r.text).not.toContain('m-sess-tags');
+      expect(r.text).toContain('m-kafka');
+    } finally {
+      await db.adminPool.query("DELETE FROM documents WHERE id IN ('m-sess', 'm-sess-tags', 'm-kafka')");
+    }
+  });
+
   it('memory_recall without collection searches all shared collections; other_collections 0 keeps to scope', async () => {
     const all = await call('memory_recall', { query: 'seed:1' });
     expect(all.text).toContain('m-other');

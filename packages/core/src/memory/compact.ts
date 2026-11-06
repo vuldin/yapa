@@ -1,3 +1,4 @@
+import { isSessionSummary } from './filters.js';
 import { getConfig } from '../config.js';
 import { archivedMetadata } from './archive.js';
 import { getDocumentsByFilter, getDocumentsByIds, metadataDelta, patchDocument, queryDocuments } from '../store/index.js';
@@ -21,7 +22,7 @@ export interface CompactionGroup {
 export async function collectionSize(collection: string): Promise<number> {
   try {
     const docs = await getDocumentsByFilter(collection, { type: 'memory' }, 10000);
-    return docs.filter(d => d.metadata.archived !== true).length;
+    return docs.filter(d => d.metadata.archived !== true && !isSessionSummary(d.metadata)).length;
   } catch {
     return 0;
   }
@@ -48,7 +49,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
   // Typed memories (findings, decisions, ...) keep their own identity and
   // status: a decision folded into a summary could no longer be waited on.
   const all = (await getDocumentsByFilter(collection, { type: 'memory' }, 10000))
-    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind));
+    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata));
 
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
 
@@ -66,6 +67,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
       !consumed.has(n.id) &&
       n.metadata.archived !== true &&
       !isMemoryKind(n.metadata.kind) &&
+      !isSessionSummary(n.metadata) &&
       n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE,
     );
 
