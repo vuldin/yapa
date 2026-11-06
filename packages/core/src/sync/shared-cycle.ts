@@ -49,7 +49,8 @@ const MIN_STALE_LOCK_MS = 10 * 60 * 1000;
 /** The sync target this process syncs: kind, remote and local store, never a password. */
 export function syncTargetKey(config: YapaConfig = getConfig()): string {
   let remote = '';
-  if (config.SYNC_SERVICE_URL) remote = `service:${config.SYNC_SERVICE_URL}`;
+  if (config.SYNC_MCP_URL) remote = `mcp:${config.SYNC_MCP_URL}`;
+  else if (config.SYNC_SERVICE_URL) remote = `service:${config.SYNC_SERVICE_URL}`;
   else if (config.SYNC_DATABASE_URL) {
     try {
       const u = new URL(config.SYNC_DATABASE_URL);

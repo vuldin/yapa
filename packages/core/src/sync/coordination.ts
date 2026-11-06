@@ -257,7 +257,7 @@ export class CoordinationUnavailableError extends Error {
 /** The service's coordination API, or a CoordinationUnavailableError. */
 export async function serviceCoordination(): Promise<Coordination> {
   if (!isSyncConfigured()) {
-    throw new CoordinationUnavailableError('not_configured', 'leases and counters need the YAPA sync service (sync_enabled + sync_service_url)');
+    throw new CoordinationUnavailableError('not_configured', 'leases and counters need the YAPA sync service (sync_enabled + sync_service_url or sync_mcp_url)');
   }
   const backend = await getSyncBackend();
   if (!backend?.coordination) {

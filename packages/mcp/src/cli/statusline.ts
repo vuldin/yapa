@@ -47,6 +47,8 @@ export interface HealthRecord {
   label?: string;
   /** The team remote's name (REMOTE_NAME). */
   remote?: string;
+  /** How to sign in again, when not `gcloud auth login`. */
+  sign_in?: string;
 }
 
 /** Set by scripts/build-plugin.mjs; the tsc build reads the version from update-check.json instead. */
@@ -160,7 +162,7 @@ export function renderSegment(health: HealthRecord | undefined, now: number, opt
     case 'disabled':
       return state('dim', '○ local only');
     case 'signed_out':
-      return state('red', `● signed out${since}${push} · run: gcloud auth login`);
+      return state('red', `● signed out${since}${push} · ${cleanLabel(health.sign_in) ?? 'run: gcloud auth login'}`);
     case 'unreachable':
       return state('yellow', `● offline${since}${push}`);
     case 'error': {

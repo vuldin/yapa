@@ -789,7 +789,7 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
       } catch (e) {
         return { text: `Sync is misconfigured: ${e instanceof Error ? e.message : e}` };
       }
-      if (!backend) return { text: 'Remote sync is enabled but has no target (set YAPA_SYNC_SERVICE_URL).' };
+      if (!backend) return { text: 'Remote sync is enabled but has no target (set YAPA_SYNC_SERVICE_URL or YAPA_SYNC_MCP_URL).' };
       const getRemoteCollections = () => backend.collections();
 
       switch (args.action) {

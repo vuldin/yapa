@@ -1586,7 +1586,7 @@ export function registerTools(server: McpServer): void {
       } catch (e) {
         return text(`Sync is misconfigured: ${e instanceof Error ? e.message : e}`);
       }
-      if (!backend) return text('Remote sync is enabled but has no target. Set the `sync_service_url` option (YAPA_SYNC_SERVICE_URL) and run `gcloud auth login`.');
+      if (!backend) return text('Remote sync is enabled but has no target. Set the `sync_service_url` option (YAPA_SYNC_SERVICE_URL) and run `gcloud auth login`, or set `sync_mcp_url` and `sync_mcp_token_cmd` for a remote served over MCP.');
       const remoteCollections = () => backend.collections();
 
       switch (action) {
