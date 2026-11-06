@@ -4,9 +4,7 @@
 
 Deleting a collection no longer deletes it for the team unless you ask: by default it is removed from this machine only, after everything only this machine has is pushed.
 
-**Upgrading:** update the plugin and restart Claude Code. Nothing to deploy.
-
-**Behaviour change:** `collection_delete` now removes a shared collection from this machine only, unless you pass `scope: "everyone"`.
+**Upgrading:** update the plugin and restart Claude Code. Nothing to deploy. Note the behavior change: `collection_delete` now removes a shared collection from this machine only, unless you pass `scope: "everyone"`.
 
 ### Features
 - **Deleting a collection no longer deletes it for the team by default.** `collection_delete` (and DSH `yapa_collection_delete`) takes `scope`:
