@@ -50,8 +50,7 @@ describe('Claude Code plugin packaging', () => {
     expect(existsSync(join(plugin, 'dist', 'yapa.mjs'))).toBe(true);
     expect(existsSync(join(plugin, 'package-lock.json'))).toBe(true);
     const core = json(join(repo, 'packages', 'core', 'package.json'));
-    const { '@modelcontextprotocol/sdk': _bundled, ...external } = core.dependencies;
-    expect(json(join(plugin, 'package.json')).dependencies).toEqual(external);
+    expect(json(join(plugin, 'package.json')).dependencies).toEqual(core.dependencies);
   });
 
   it('is listed in the repo marketplace at the right path', () => {

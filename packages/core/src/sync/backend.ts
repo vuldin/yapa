@@ -259,6 +259,8 @@ export interface SyncBackend {
    * server-side identity (Postgres) omit it and use YAPA_USERNAME.
    */
   identity?(): Promise<{ username: string; email: string }>;
+  /** Where the remote's username comes from, for `sync status` (default: your Google account). */
+  readonly identitySource?: string;
   /** Lines for `sync status`: backend, target, identity, TLS, last error. */
   describe(): Promise<string[]>;
   close(): Promise<void>;
@@ -431,7 +433,7 @@ export async function resolveSyncUsername(): Promise<string> {
 }
 
 /** Explanation for `sync status` when the configured username was replaced. */
-export function syncUsernameNote(): string | undefined {
+export function syncUsernameNote(source = (override ?? active?.backend)?.identitySource): string | undefined {
   if (!serverUsername || !configuredUsername || configuredUsername === serverUsername) return undefined;
-  return `Username: using '${serverUsername}' from your Google account (the username option '${configuredUsername}' is informational with the sync service)`;
+  return `Username: using '${serverUsername}' from ${source ?? 'your Google account'} (the username option '${configuredUsername}' is informational with the sync service)`;
 }

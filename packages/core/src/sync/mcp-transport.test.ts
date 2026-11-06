@@ -35,7 +35,13 @@ class Gateway {
   /** Answer a call itself instead of forwarding it. */
   intercept: ((args: Record<string, any>) => CallToolResult | undefined) | undefined;
   calls: Array<{ token: string; args: Record<string, any> }> = [];
-  requests: Array<{ method: string; authorization?: string }> = [];
+  requests: Array<{ method: string; authorization?: string; accept?: string; protocol?: string; session?: string }> = [];
+  /** Content types the gateway answered POSTs with. */
+  answered: string[] = [];
+  /** New sessions answer as SSE streams (the SDK default) or plain JSON. */
+  json = false;
+  /** Send a notification on the call's stream before its result. */
+  notifyFirst = false;
   sessions = new Map<string, StreamableHTTPServerTransport>();
   url = '';
   private http: HttpServer | undefined;
@@ -69,10 +75,14 @@ class Gateway {
     this.intercept = undefined;
     this.calls.length = 0;
     this.requests.length = 0;
+    this.answered.length = 0;
+    this.json = false;
+    this.notifyFirst = false;
   }
 
   private async handle(req: IncomingMessage, res: import('node:http').ServerResponse): Promise<void> {
-    this.requests.push({ method: req.method!, authorization: req.headers.authorization });
+    const header = (name: string) => (typeof req.headers[name] === 'string' ? req.headers[name] as string : undefined);
+    this.requests.push({ method: req.method!, authorization: header('authorization'), accept: header('accept'), protocol: header('mcp-protocol-version'), session: header('mcp-session-id') });
     const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
     if (!token || this.refuse.has(token)) {
       res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"invalid_token"}');
@@ -94,17 +104,24 @@ class Gateway {
       }
       const t: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: true,
+        enableJsonResponse: this.json,
         onsessioninitialized: id => { this.sessions.set(id, t); },
       });
       transport = t;
       await this.mcpServer().connect(t);
     }
+    const writeHead = res.writeHead.bind(res) as (...a: any[]) => typeof res;
+    res.writeHead = ((...a: any[]) => {
+      const h = a.find(x => x && typeof x === 'object');
+      const pairs: Array<[string, unknown]> = Array.isArray(h) ? h : Object.entries(h ?? {});
+      this.answered.push(String(pairs.find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? res.getHeader('content-type') ?? ''));
+      return writeHead(...a);
+    }) as typeof res.writeHead;
     await transport.handleRequest(req, res, body);
   }
 
   private mcpServer(): Server {
-    const server = new Server({ name: 'test-remote', version: '1' }, { capabilities: { tools: {} } });
+    const server = new Server({ name: 'test-remote', version: '1' }, { capabilities: { tools: {}, logging: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         { name: 'recall', inputSchema: { type: 'object' as const } },
@@ -120,6 +137,7 @@ class Gateway {
       }
       const token = String(extra.requestInfo?.headers.authorization ?? '').replace(/^Bearer /, '');
       this.calls.push({ token, args: a });
+      if (this.notifyFirst) await extra.sendNotification({ method: 'notifications/message', params: { level: 'info', data: 'working on it' } });
       const own = this.intercept?.(a);
       if (own) return own;
       // The person's own request, as the remote runs it.
@@ -160,6 +178,7 @@ httpBackendSuites({
   backend: opts => mcpBackend(opts),
   signInHint: /Sign in to the MCP gateway again/,
   describeLines: () => [`Backend: YAPA sync over MCP (${new URL(gateway.url).host})`, `MCP server: ${gateway.url}`],
+  usernameSource: 'your sign-in',
 });
 
 describe('sync over MCP', () => {
@@ -175,6 +194,22 @@ describe('sync over MCP', () => {
     expect(call.args.idempotency_key).toMatch(/^[0-9a-f-]{36}$/);
     expect(call.args.request_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(call.args.body.documents[0]).toMatchObject({ id: 'a', collection: 'project-x' });
+  });
+
+  it('reads a JSON response and an SSE stream (skipping notifications) alike, with the negotiated protocol version and session id', async () => {
+    setHandler(() => ({ json: { max: 5 } }));
+    gateway.json = true;
+    expect(await mcpBackend({ tokens: tokens().provider }).maxTaskNumber()).toBe(5);
+    expect(gateway.answered.filter(t => t.startsWith('application/json')).length).toBeGreaterThanOrEqual(3);
+    expect(gateway.answered.some(t => t.startsWith('text/event-stream'))).toBe(false);
+    gateway.answered.length = 0;
+    gateway.json = false;
+    gateway.notifyFirst = true;
+    expect(await mcpBackend({ tokens: tokens().provider }).maxTaskNumber()).toBe(5);
+    expect(gateway.answered.filter(t => t.startsWith('text/event-stream')).length).toBeGreaterThanOrEqual(3);
+    const [init, ...later] = gateway.requests.slice(-4);
+    expect(init).toMatchObject({ accept: 'application/json, text/event-stream', protocol: undefined, session: undefined });
+    for (const r of later) expect(r).toMatchObject({ protocol: '2025-06-18', session: expect.stringMatching(/^[0-9a-f-]{36}$/) });
   });
 
   it('GETs carry the query in the path and no body; characters outside the tool\'s path pattern are percent-encoded', async () => {

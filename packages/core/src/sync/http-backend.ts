@@ -342,6 +342,10 @@ export class HttpBackend implements SyncBackend {
     this.device = opts.device ?? getDeviceId;
   }
 
+  get identitySource(): string {
+    return this.transport.kind === 'mcp' ? 'your sign-in' : 'your Google account';
+  }
+
   private fail(err: Error, quiet = false): never {
     // Quiet calls (leases, counters) fall back locally, but a sign-out is
     // still the person's to fix, so it reaches the status line either way.
@@ -600,7 +604,7 @@ export class HttpBackend implements SyncBackend {
   /** Sign in once at startup; the service's username becomes the effective USERNAME. */
   async prepare(): Promise<void> {
     applyServerUsername((await this.me(true)).username);
-    const note = syncUsernameNote();
+    const note = syncUsernameNote(this.identitySource);
     if (note) process.stderr.write(`[yapa-sync] ${note}\n`);
   }
 
@@ -614,7 +618,7 @@ export class HttpBackend implements SyncBackend {
       const me = await this.me(true);
       applyServerUsername(me.username);
       lines.push(`Signed in as: ${me.username} (${me.email})`);
-      const note = syncUsernameNote();
+      const note = syncUsernameNote(this.identitySource);
       if (note) lines.push(note);
       lines.push('Connection: healthy');
     } catch (e) {

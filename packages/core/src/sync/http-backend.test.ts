@@ -16,6 +16,7 @@ httpBackendSuites({
   backend: opts => new HttpBackend({ baseUrl: base, ...opts }),
   signInHint: /gcloud auth login/,
   describeLines: url => ['Backend: YAPA sync service', `Service: ${url}`],
+  usernameSource: 'your Google account',
 });
 
 describe('plain HTTP', () => {

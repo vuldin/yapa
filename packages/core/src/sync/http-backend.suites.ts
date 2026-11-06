@@ -59,6 +59,8 @@ export interface SyncHarness {
   signInHint: RegExp;
   /** The `sync status` lines naming the backend. */
   describeLines(base: string): string[];
+  /** Where `sync status` says the username comes from. */
+  usernameSource: string;
 }
 
 let harness: SyncHarness;
@@ -375,7 +377,7 @@ export function httpBackendSuites(h: SyncHarness): void {
       expect(await b.health()).toEqual({ ok: true });
       const lines = await b.describe();
       expect(lines).toEqual(expect.arrayContaining([...h.describeLines(base), 'Signed in as: someone (someone@example.com)']));
-      expect(lines).toContain("Username: using 'someone' from your Google account (the username option 'tester' is informational with the sync service)");
+      expect(lines).toContain(`Username: using 'someone' from ${h.usernameSource} (the username option 'tester' is informational with the sync service)`);
       setSyncBackend(undefined); // forget the learned identity
       setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_DEVICE_ID: 'dev-A', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: base }));
     });
@@ -711,7 +713,7 @@ export function httpBackendSuites(h: SyncHarness): void {
 
       expect(await getNextTaskId()).toBe('dana-smith-8');
       expect(getConfig().USERNAME).toBe('dana-smith');
-      expect(syncUsernameNote()).toMatch(/using 'dana-smith' from your Google account/);
+      expect(syncUsernameNote()).toContain(`using 'dana-smith' from ${h.usernameSource}`);
 
       // Cached per process: more calls do not re-ask /v1/me until the token is re-minted.
       await getNextTaskId();
