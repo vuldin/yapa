@@ -1,12 +1,16 @@
 /**
  * The remote side of sync, behind one interface. Two implementations:
  *
- * - HttpBackend (http-backend.ts): the YAPA sync service (packages/service),
- *   authenticated with a Google ID token. No database credentials on the
- *   client. Selected by YAPA_SYNC_SERVICE_URL.
+ * - HttpBackend (http-backend.ts): Sync API v1. No database credentials on
+ *   the client. Over MCP (mcp-transport.ts) when YAPA_SYNC_MCP_URL is set: a
+ *   remote that serves the API as the `yapa_sync` tool, signed in with the
+ *   token from YAPA_SYNC_MCP_TOKEN_CMD. Otherwise over HTTPS to
+ *   YAPA_SYNC_SERVICE_URL, signed in with a Google ID token.
  * - PostgresBackend (postgres-backend.ts): a direct PostgreSQL+pgvector
  *   connection (advanced/self-host). Selected by YAPA_SYNC_DATABASE_URL when
- *   no service URL is set.
+ *   neither URL above is set.
+ *
+ * Precedence: MCP URL, then service URL, then database URL.
  *
  * push.ts, pull.ts, index.ts, task numbering, the MCP tools and the hooks only
  * talk to the remote through `getSyncBackend()`.
@@ -260,10 +264,17 @@ export interface SyncBackend {
   close(): Promise<void>;
 }
 
-/** Which backend the config selects: the service URL wins over a database URL. */
+/** Which backend the config selects: an MCP or service URL (both the Sync API) wins over a database URL. */
 export function syncBackendKind(config: YapaConfig = getConfig()): SyncBackendKind | undefined {
-  if (config.SYNC_SERVICE_URL) return 'service';
+  if (config.SYNC_MCP_URL || config.SYNC_SERVICE_URL) return 'service';
   if (config.SYNC_DATABASE_URL) return 'postgres';
+  return undefined;
+}
+
+/** How the Sync API is reached: MCP wins over a service URL. */
+export function syncTransportKind(config: YapaConfig = getConfig()): 'mcp' | 'http' | undefined {
+  if (config.SYNC_MCP_URL) return 'mcp';
+  if (config.SYNC_SERVICE_URL) return 'http';
   return undefined;
 }
 
@@ -276,7 +287,7 @@ let override: SyncBackend | undefined;
 let active: { key: string; backend: SyncBackend } | undefined;
 
 function keyOf(config: YapaConfig): string {
-  return JSON.stringify([config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
+  return JSON.stringify([config.SYNC_MCP_URL, config.SYNC_MCP_TOKEN_CMD, config.SYNC_SERVICE_URL, config.SYNC_ID_TOKEN_CMD, config.SYNC_DATABASE_URL, config.SYNC_CA_CERT, config.SYNC_HTTP_TIMEOUT_MS]);
 }
 
 /**
@@ -301,17 +312,24 @@ async function selectBackend(): Promise<SyncBackend | undefined> {
   if (active?.key === key) return active.backend;
   if (active) await active.backend.close().catch(() => undefined);
   serverUsername = undefined;
-  const backend: SyncBackend = kind === 'service'
-    ? new (await import('./http-backend.js')).HttpBackend()
-    : new (await import('./postgres-backend.js')).PostgresBackend();
+  const backend: SyncBackend = kind === 'postgres'
+    ? new (await import('./postgres-backend.js')).PostgresBackend()
+    : syncTransportKind(config) === 'mcp'
+      ? await mcpBackend(config)
+      : new (await import('./http-backend.js')).HttpBackend();
   active = { key, backend };
   return backend;
+}
+
+async function mcpBackend(config: YapaConfig): Promise<SyncBackend> {
+  const [{ HttpBackend }, { McpTransport, mcpTokenProvider }] = await Promise.all([import('./http-backend.js'), import('./mcp-transport.js')]);
+  return new HttpBackend({ transport: new McpTransport(config.SYNC_MCP_URL), tokens: mcpTokenProvider(config) });
 }
 
 /** Like getSyncBackend, but throws a clear error when sync has no target. */
 export async function requireSyncBackend(): Promise<SyncBackend> {
   const b = await getSyncBackend();
-  if (!b) throw new Error('sync has no target: set YAPA_SYNC_SERVICE_URL (plugin option sync_service_url)');
+  if (!b) throw new Error('sync has no target: set YAPA_SYNC_SERVICE_URL (plugin option sync_service_url) or YAPA_SYNC_MCP_URL (sync_mcp_url)');
   return b;
 }
 
@@ -370,7 +388,7 @@ export function isCycleFatal(e: unknown): boolean {
   const code = (e as { code?: unknown })?.code;
   return typeof code === 'string' && [
     'unreachable', 'unauthenticated', 'cloud_run_unauthenticated', 'cloud_run_forbidden', 'not_member', 'user_inactive',
-    'rate_limited', 'unavailable', 'token_command',
+    'rate_limited', 'unavailable', 'token_command', 'gateway_forbidden', 'no_sync_tool',
   ].includes(code);
 }
 

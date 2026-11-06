@@ -1,6 +1,8 @@
 /**
  * Sync through the YAPA service (packages/service, API v1). The client holds
  * no database credentials: every request carries the user's Google ID token.
+ * Requests travel over a SyncTransport: fetch to the service's base URL here,
+ * or an MCP tool call (mcp-transport.ts).
  *
  * Header contract (packages/service/README.md, "Client headers"):
  *   Authorization: Bearer <token>   Cloud Run IAM (it strips the signature)
@@ -71,20 +73,29 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | undef
 
 export type TokenCommandRunner = () => Promise<string>;
 
-function runTokenCommand(cmd: string): Promise<string> {
+/** Run a token command (or `fallback` when `cmd` is empty); `explain` turns its last stderr lines into the error. */
+export function runCommand(cmd: string, explain: (detail: string) => string, fallback?: { file: string; args: string[] }): Promise<string> {
   return new Promise((resolve, reject) => {
     const done = (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
       if (err) {
         const detail = redactTokens(String(stderr || err.message).trim().split('\n').filter(Boolean).slice(-2).join(' ')).slice(0, 300);
-        reject(new Error(`could not get a Google ID token from \`${cmd || 'gcloud auth print-identity-token'}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`));
+        reject(new Error(explain(detail)));
         return;
       }
       resolve(String(stdout));
     };
     const opts = { timeout: TOKEN_CMD_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 };
-    if (cmd) exec(cmd, opts, done);
-    else execFile('gcloud', ['auth', 'print-identity-token'], { ...opts, shell: process.platform === 'win32' }, done);
+    if (cmd || !fallback) exec(cmd, opts, done);
+    else execFile(fallback.file, fallback.args, { ...opts, shell: process.platform === 'win32' }, done);
   });
+}
+
+function runTokenCommand(cmd: string): Promise<string> {
+  return runCommand(
+    cmd,
+    detail => `could not get a Google ID token from \`${cmd || 'gcloud auth print-identity-token'}\`: ${detail}. Run \`gcloud auth login\` (or fix YAPA_SYNC_ID_TOKEN_CMD).`,
+    { file: 'gcloud', args: ['auth', 'print-identity-token'] },
+  );
 }
 
 /**
@@ -187,8 +198,92 @@ export class ServiceError extends Error {
   }
 }
 
+/** One Sync API request as a transport carries it. */
+export interface SyncRequest {
+  method: string;
+  /** Below the API root, with its query: `/v1/...`. */
+  path: string;
+  body?: unknown;
+  token: string;
+  device: string;
+  idempotencyKey?: string;
+}
+
+/** The remote's answer, read the same way whichever transport carried it. */
+export interface SyncResponse {
+  status: number;
+  statusText: string;
+  /** The parsed body; undefined when it was empty or not JSON. */
+  json: any;
+  header(name: string): string | null;
+}
+
+/** No answer came back (network, timeout, a broken MCP connection). */
+export class TransportError extends Error {}
+
+export interface SyncTransport {
+  readonly kind: 'http' | 'mcp';
+  /** Where requests go, safe to show. */
+  readonly target: string;
+  /** What failures call the remote, e.g. "sync service". */
+  readonly label: string;
+  /** The fix for a rejected sign-in. */
+  readonly signInHint: string;
+  /** Rejects with TransportError when no answer came back, or with a ServiceError it diagnosed itself. */
+  send(req: SyncRequest, timeoutMs: number): Promise<SyncResponse>;
+  /** `sync status` lines naming the backend. */
+  describe(): string[];
+  close(): Promise<void>;
+}
+
+/** Sync API requests over fetch, to a base URL. */
+export class FetchTransport implements SyncTransport {
+  readonly kind = 'http' as const;
+  readonly label = 'sync service';
+  readonly signInHint = 'Run `gcloud auth login` (or check YAPA_SYNC_ID_TOKEN_CMD).';
+  readonly target: string;
+
+  constructor(baseUrl: string) {
+    this.target = baseUrl.replace(/\/+$/, '');
+    if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
+  }
+
+  async send(req: SyncRequest, timeoutMs: number): Promise<SyncResponse> {
+    const body = req.body === undefined ? undefined : JSON.stringify(req.body);
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${req.token}`,
+      'x-yapa-id-token': req.token,
+      'x-yapa-device': req.device,
+      accept: 'application/json',
+    };
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    if (req.idempotencyKey) headers['idempotency-key'] = req.idempotencyKey;
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.target}${req.path}`, { method: req.method, headers, body, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e: any) {
+      throw new TransportError(e?.name === 'TimeoutError' || e?.name === 'AbortError'
+        ? `timed out after ${timeoutMs} ms`
+        : redactTokens(String(e?.cause?.message ?? e?.message ?? e)));
+    }
+    const text = await res.text().catch(() => '');
+    let json: any;
+    try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
+    return { status: res.status, statusText: res.statusText, json, header: name => res.headers.get(name) };
+  }
+
+  describe(): string[] {
+    return ['Backend: YAPA sync service', `Service: ${this.target}`];
+  }
+
+  async close(): Promise<void> {}
+}
+
 export interface HttpBackendOptions {
   baseUrl?: string;
+  /** Takes the place of baseUrl. */
+  transport?: SyncTransport;
   tokens?: IdTokenProvider;
   timeoutMs?: number;
   device?: () => string;
@@ -205,10 +300,12 @@ interface RequestOpts {
 }
 
 /** One-line, user-facing explanation of a failed service response. */
-function explain(status: number, code: string, message: string): string {
+function explain(status: number, code: string, message: string, transport: SyncTransport): string {
   switch (code) {
     case 'unauthenticated':
-      return 'the sync service rejected the sign-in (401). Run `gcloud auth login` (or check YAPA_SYNC_ID_TOKEN_CMD).';
+      return `the ${transport.label} rejected the sign-in (401). ${transport.signInHint}`;
+    case 'gateway_forbidden':
+      return `the ${transport.label} refused the request (403): your account may not use this MCP server. Ask its admin.`;
     case 'not_member':
       return 'your Google account is not mapped to a YAPA user; ask a YAPA admin to add you.';
     case 'user_inactive':
@@ -230,6 +327,7 @@ export class HttpBackend implements SyncBackend {
   readonly kind = 'service' as const;
   readonly capabilities = { deletionsFeed: true };
   readonly target: string;
+  readonly transport: SyncTransport;
   private readonly tokens: IdTokenProvider;
   private readonly timeoutMs: number;
   private readonly device: () => string;
@@ -237,8 +335,8 @@ export class HttpBackend implements SyncBackend {
 
   constructor(opts: HttpBackendOptions = {}) {
     const config = getConfig();
-    this.target = (opts.baseUrl ?? config.SYNC_SERVICE_URL).replace(/\/+$/, '');
-    if (!/^https?:\/\//.test(this.target)) throw new Error(`sync service URL must start with https:// (got "${this.target}")`);
+    this.transport = opts.transport ?? new FetchTransport(opts.baseUrl ?? config.SYNC_SERVICE_URL);
+    this.target = this.transport.target;
     this.tokens = opts.tokens ?? new IdTokenProvider(config.SYNC_ID_TOKEN_CMD, Date.now, config.SYNC_ID_TOKEN_CACHE);
     this.timeoutMs = opts.timeoutMs ?? config.SYNC_HTTP_TIMEOUT_MS;
     this.device = opts.device ?? getDeviceId;
@@ -252,9 +350,7 @@ export class HttpBackend implements SyncBackend {
   }
 
   private async request<T>(method: string, path: string, opts: RequestOpts = {}): Promise<T> {
-    const url = `${this.target}${path}`;
     const idemKey = opts.idempotent ? randomUUID() : undefined;
-    const body = opts.body === undefined ? undefined : JSON.stringify(opts.body);
     for (let attempt = 0; ; attempt++) {
       let token: string;
       try {
@@ -262,45 +358,34 @@ export class HttpBackend implements SyncBackend {
       } catch (e) {
         return this.fail(new ServiceError(e instanceof Error ? e.message : String(e), 0, 'token_command'), opts.quiet);
       }
-      const headers: Record<string, string> = {
-        authorization: `Bearer ${token}`,
-        'x-yapa-id-token': token,
-        'x-yapa-device': this.device(),
-        accept: 'application/json',
-      };
-      if (body !== undefined) headers['content-type'] = 'application/json';
-      if (idemKey) headers['idempotency-key'] = idemKey;
 
-      let res: Response;
+      let res: SyncResponse;
       try {
-        res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
-      } catch (e: any) {
-        const why = e?.name === 'TimeoutError' || e?.name === 'AbortError'
-          ? `timed out after ${this.timeoutMs} ms`
-          : redactTokens(String(e?.cause?.message ?? e?.message ?? e));
-        return this.fail(new ServiceError(`sync service unreachable (${new URL(this.target).host}): ${why}`, 0, 'unreachable'), opts.quiet);
+        res = await this.transport.send({ method, path, body: opts.body, token, device: this.device(), idempotencyKey: idemKey }, this.timeoutMs);
+      } catch (e) {
+        if (e instanceof ServiceError) return this.fail(e, opts.quiet);
+        const why = e instanceof TransportError ? e.message : redactTokens(String((e as Error)?.message ?? e));
+        return this.fail(new ServiceError(`${this.transport.label} unreachable (${new URL(this.target).host}): ${why}`, 0, 'unreachable'), opts.quiet);
       }
 
-      const text = await res.text().catch(() => '');
-      let json: any;
-      try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
-
-      if (res.ok) return json as T;
+      const json = res.json;
+      if (res.status >= 200 && res.status < 300) return json as T;
       if (res.status === 404 && opts.allow404) return undefined as T;
 
       const apiErr = json?.error;
       // Cloud Run IAM answers 401/403 itself, with an HTML body and no error code.
+      const iam = this.transport.kind === 'http';
       const code: string = apiErr?.code
-        ?? (res.status === 401 ? 'cloud_run_unauthenticated' : res.status === 403 ? 'cloud_run_forbidden' : `http_${res.status}`);
+        ?? (iam && res.status === 401 ? 'cloud_run_unauthenticated' : iam && res.status === 403 ? 'cloud_run_forbidden' : `http_${res.status}`);
       if (res.status === 401 && attempt === 0) {
         this.tokens.invalidate();
         continue;
       }
       const message = redactTokens(String(apiErr?.message ?? res.statusText ?? '')).slice(0, 300);
       const details: Record<string, unknown> = { ...(apiErr?.details ?? {}) };
-      const retryAfter = res.headers.get('retry-after');
+      const retryAfter = res.header('retry-after');
       if (retryAfter) details.retry_after = Number(retryAfter);
-      return this.fail(new ServiceError(explain(res.status, code, message), res.status, code, apiErr?.request_id, details), opts.quiet);
+      return this.fail(new ServiceError(explain(res.status, code, message, this.transport), res.status, code, apiErr?.request_id, details), opts.quiet);
     }
   }
 
@@ -524,7 +609,7 @@ export class HttpBackend implements SyncBackend {
   }
 
   async describe(): Promise<string[]> {
-    const lines = ['Backend: YAPA sync service', `Service: ${this.target}`];
+    const lines = this.transport.describe();
     try {
       const me = await this.me(true);
       applyServerUsername(me.username);
@@ -541,6 +626,7 @@ export class HttpBackend implements SyncBackend {
   async close(): Promise<void> {
     this.tokens.invalidate();
     this.meCache = undefined;
+    await this.transport.close();
   }
 }
 

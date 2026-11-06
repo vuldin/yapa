@@ -21,8 +21,10 @@ const core = readJson('packages/core/package.json');
 const mcp = readJson('packages/mcp/package.json');
 const version = mcp.version;
 
+// Pure JS, so bundled like the MCP server's own copy.
+const BUNDLED = ['@modelcontextprotocol/sdk'];
 // Resolved at runtime from plugin/node_modules (native binaries, WASM, pg).
-const EXTERNAL = Object.keys(core.dependencies);
+const EXTERNAL = Object.keys(core.dependencies).filter(d => !BUNDLED.includes(d));
 
 await build({
   entryPoints: {

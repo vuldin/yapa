@@ -131,6 +131,14 @@ export interface YapaConfig {
    */
   SYNC_SERVICE_URL: string;
   /**
+   * URL of an MCP server (usually reached through an MCP gateway) that serves
+   * the Sync API as the `yapa_sync` tool. Wins over SYNC_SERVICE_URL and
+   * SYNC_DATABASE_URL.
+   */
+  SYNC_MCP_URL: string;
+  /** Command that prints the bearer token for SYNC_MCP_URL. Required with it. */
+  SYNC_MCP_TOKEN_CMD: string;
+  /**
    * Command that prints a Google ID token for the service. Empty =
    * `gcloud auth print-identity-token` (user accounts, after `gcloud auth login`).
    */
@@ -152,7 +160,7 @@ export interface YapaConfig {
   UPDATE_SOURCE: string;
   /** Per-request timeout for the sync service. */
   SYNC_HTTP_TIMEOUT_MS: number;
-  /** Advanced/self-host: direct PostgreSQL URL (ignored when SYNC_SERVICE_URL is set). */
+  /** Advanced/self-host: direct PostgreSQL URL (ignored when SYNC_MCP_URL or SYNC_SERVICE_URL is set). */
   SYNC_DATABASE_URL: string;
   SYNC_INTERVAL_MS: number;
   SYNC_SIMILARITY_THRESHOLD: number;
@@ -354,6 +362,8 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SYNC_ENABLED: get(env, 'SYNC_ENABLED', 'false') === 'true',
     SYNC_SERVICE_URL: get(env, 'SYNC_SERVICE_URL', '').replace(/\/+$/, ''),
     SYNC_ID_TOKEN_CMD: get(env, 'SYNC_ID_TOKEN_CMD', ''),
+    SYNC_MCP_URL: get(env, 'SYNC_MCP_URL', '').trim(),
+    SYNC_MCP_TOKEN_CMD: get(env, 'SYNC_MCP_TOKEN_CMD', ''),
     SYNC_ID_TOKEN_CACHE: ((v: string) => (v === 'off' ? '' : v))(get(env, 'SYNC_ID_TOKEN_CACHE', pathJoin(homedir(), '.local', 'share', 'yapa', 'id-token'))),
     // Not recorded under vitest unless a test names a file: suites that fail
     // sync on purpose must not paint the developer's own status line red.

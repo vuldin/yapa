@@ -2,7 +2,7 @@
 import { getConfig } from '../config.js';
 import { pushToRemote, emptyPushStats, countUnpushed, type PushStats } from './push.js';
 import { pullFromRemote, emptyPullStats, type PullStats } from './pull.js';
-import { closeSyncBackend, getSyncBackend, isSyncConfigured, lastSyncError, noteSyncOk, syncBackendKind } from './backend.js';
+import { closeSyncBackend, getSyncBackend, isSyncConfigured, lastSyncError, noteSyncOk, syncBackendKind, syncTransportKind } from './backend.js';
 import { recordSyncHealth, recordUnpushed } from './health.js';
 import { readCycleRecord, recordCycle, shouldRunCycle, tryAcquireCycle } from './shared-cycle.js';
 import { getSyncPullTimestamp } from './sentinel.js';
@@ -232,12 +232,16 @@ export async function startSync(opts: { version?: string } = {}): Promise<void> 
 
   const kind = syncBackendKind();
   if (!kind) {
-    process.stderr.write('[yapa-sync] YAPA_SYNC_SERVICE_URL not set: sync disabled\n');
+    process.stderr.write('[yapa-sync] YAPA_SYNC_SERVICE_URL (or YAPA_SYNC_MCP_URL) not set: sync disabled\n');
     recordSyncHealth({ status: 'disabled' });
     return;
   }
+  const transport = syncTransportKind();
   if (kind === 'service' && getConfig().SYNC_DATABASE_URL) {
     process.stderr.write('[yapa-sync] Using the sync service; YAPA_SYNC_DATABASE_URL is ignored\n');
+  }
+  if (transport === 'mcp' && getConfig().SYNC_SERVICE_URL) {
+    process.stderr.write('[yapa-sync] Using sync over MCP; YAPA_SYNC_SERVICE_URL is ignored\n');
   }
 
   if (kind !== 'service' && !process.env.YAPA_USERNAME) {
@@ -249,7 +253,8 @@ export async function startSync(opts: { version?: string } = {}): Promise<void> 
   try {
     const backend = await getSyncBackend();
     await backend?.prepare();
-    process.stderr.write(`[yapa-sync] Connected to ${kind === 'service' ? 'the sync service' : 'the remote database'} (${backend?.target})\n`);
+    const what = transport === 'mcp' ? 'the sync service over MCP' : kind === 'service' ? 'the sync service' : 'the remote database';
+    process.stderr.write(`[yapa-sync] Connected to ${what} (${backend?.target})\n`);
   } catch (e) {
     process.stderr.write(`[yapa-sync] Sync not connected: ${e}\n`);
     process.stderr.write('[yapa-sync] Sync will retry on next interval\n');

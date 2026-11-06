@@ -33,6 +33,8 @@ export interface SyncHealth {
   label: string;
   /** What the team's remote is called (REMOTE_NAME): `yapa@vX <-> NAME`. Absent: unnamed. */
   remote?: string;
+  /** How to sign in again when it is not `gcloud auth login` (sync over MCP). */
+  sign_in?: string;
 }
 
 const SIGNED_OUT = new Set(['token_command', 'unauthenticated', 'cloud_run_unauthenticated']);
@@ -65,6 +67,7 @@ export function recordSyncHealth(update: SyncHealthUpdate, now: number = Date.no
   const config = getConfig();
   const next: SyncHealth = { status: update.status, at: now, interval_ms: config.SYNC_INTERVAL_MS, label: config.STATUS_LABEL };
   if (config.REMOTE_NAME) next.remote = config.REMOTE_NAME;
+  if (config.SYNC_MCP_URL) next.sign_in = 'sign in to the MCP gateway';
   if (prev?.last_ok_at) next.last_ok_at = prev.last_ok_at;
   const unpushed = update.unpushed ?? prev?.unpushed;
   if (unpushed !== undefined) next.unpushed = unpushed;

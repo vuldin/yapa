@@ -37,6 +37,24 @@ MCP server install (no plugin): set the same values as environment variables
 in your MCP host config: `YAPA_SYNC_ENABLED=true` and
 `YAPA_SYNC_SERVICE_URL=<base URL>`.
 
+### A remote served over MCP
+
+Some remotes serve the Sync API as an MCP tool (`yapa_sync`), usually behind an
+MCP gateway that signs you in, instead of over HTTPS. For those, set:
+
+| Option | Env | Value |
+|---|---|---|
+| `sync_enabled` | `YAPA_SYNC_ENABLED` | `true` |
+| `sync_mcp_url` | `YAPA_SYNC_MCP_URL` | the MCP server's URL on the gateway |
+| `sync_mcp_token_cmd` | `YAPA_SYNC_MCP_TOKEN_CMD` | a command that prints your bearer token for the gateway |
+
+The MCP URL wins over `sync_service_url` and `sync_database_url`. YAPA runs
+the token command when it needs a token, reuses the token until shortly
+before it expires, and runs the command again when the gateway rejects it.
+Sign in to the gateway with its own tool first; there is no `gcloud` step.
+`sync status` then reads `Backend: YAPA sync over MCP (<host>)`, and the
+status line says `sign in to the MCP gateway` when your sign-in lapses.
+
 ## 2. Sign in
 
 ```sh
@@ -116,6 +134,9 @@ gcloud auth login
 npm run conformance -- https://sync.example.com/api/yapa
 ```
 
+For a remote served over MCP:
+`YAPA_SYNC_MCP_TOKEN_CMD='<token command>' npm run conformance -- --mcp <MCP URL>`.
+
 It signs in, pushes and pulls through temporary local stores, exercises
 deletes and coordination, and writes only to a throwaway collection
 `project-yapa-it-<run>` that it cleans up (see
@@ -150,7 +171,7 @@ first pull rebuild it.
 
 ## Disconnecting
 
-Set `sync_enabled` to `false` (or clear `sync_service_url`) and restart.
+Set `sync_enabled` to `false` (or clear `sync_service_url` or `sync_mcp_url`) and restart.
 Local memories and tasks stay as they are. What was pushed stays on the
 remote: delete your own documents with `memory_forget` / `task_delete` while
 still connected, or ask the remote's admin.

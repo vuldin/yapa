@@ -7,9 +7,15 @@
  *   npm run conformance -- https://<host>[/<prefix>]                  (repo root)
  *   YAPA_LIVE_SERVICE_URL=https://<host> npx vitest run src/sync/live.test.ts   (in packages/core)
  *
- * Skipped unless YAPA_LIVE_SERVICE_URL is set. Uses your Google ID token from
- * `gcloud auth print-identity-token` (or YAPA_SYNC_ID_TOKEN_CMD). Uses its own
- * temporary local stores, never your YAPA data.
+ * Or over MCP, with YAPA_SYNC_MCP_TOKEN_CMD set:
+ *
+ *   npm run conformance -- --mcp https://<gateway>/<mcp path>
+ *   YAPA_LIVE_MCP_URL=https://<gateway>/<mcp path> npx vitest run src/sync/live.test.ts
+ *
+ * Skipped unless YAPA_LIVE_SERVICE_URL or YAPA_LIVE_MCP_URL is set. Uses your
+ * Google ID token from `gcloud auth print-identity-token` (or
+ * YAPA_SYNC_ID_TOKEN_CMD), or over MCP the token YAPA_SYNC_MCP_TOKEN_CMD
+ * prints. Uses its own temporary local stores, never your YAPA data.
  *
  * Writes only to a per-run collection project-yapa-it-<run>, only rows owned
  * by the signed-in user, and deletes every row it created afterwards (the
@@ -26,12 +32,15 @@ import { join } from 'node:path';
 import { setConfig, resetConfig, createConfig, getConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, getStore, getDocumentsByIds, type VectorStore } from '../store/index.js';
 import { HttpBackend, ServiceError } from './http-backend.js';
+import { McpTransport, mcpTokenProvider } from './mcp-transport.js';
 import { setSyncBackend, type LeaseAcquireResult } from './backend.js';
 import { pushToRemote } from './push.js';
 import { pullCollection } from './pull.js';
 import { queueSyncDelete } from './deletes.js';
 
-const URL_ = process.env.YAPA_LIVE_SERVICE_URL;
+const MCP_URL = process.env.YAPA_LIVE_MCP_URL;
+const URL_ = MCP_URL ? undefined : process.env.YAPA_LIVE_SERVICE_URL;
+const REMOTE = { YAPA_SYNC_SERVICE_URL: URL_ ?? '', YAPA_SYNC_MCP_URL: MCP_URL ?? '' };
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 const COL = `project-yapa-it-${RUN}`;
 const NOW = Math.floor(Date.now() / 1000);
@@ -41,14 +50,14 @@ function notImplemented(e: unknown): boolean {
   return e instanceof ServiceError && e.status === 404 && e.code === 'not_found';
 }
 
-describe.skipIf(!URL_)('live sync remote (opt-in conformance)', () => {
+describe.skipIf(!URL_ && !MCP_URL)('live sync remote (opt-in conformance)', () => {
   let dir: string;
   let backend: HttpBackend;
   const stores = new Map<string, VectorStore>();
   const created: string[] = [];
 
   function as(device: string) {
-    setConfig({ ...createConfig({ ...process.env, YAPA_DEVICE_ID: `it-${device}-${RUN}`, YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: URL_, YAPA_SYNC_PUSH_DEBOUNCE_MS: '0' }), USERNAME: getConfig().USERNAME });
+    setConfig({ ...createConfig({ ...process.env, YAPA_DEVICE_ID: `it-${device}-${RUN}`, YAPA_SYNC_ENABLED: 'true', ...REMOTE, YAPA_SYNC_PUSH_DEBOUNCE_MS: '0' }), USERNAME: getConfig().USERNAME });
     if (!stores.has(device)) stores.set(device, createLocalStore(join(dir, device)));
     setStore(stores.get(device)!);
   }
@@ -60,8 +69,8 @@ describe.skipIf(!URL_)('live sync remote (opt-in conformance)', () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'yapa-live-'));
-    setConfig(createConfig({ ...process.env, YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: URL_ }));
-    backend = new HttpBackend();
+    setConfig(createConfig({ ...process.env, YAPA_SYNC_ENABLED: 'true', ...REMOTE }));
+    backend = MCP_URL ? new HttpBackend({ transport: new McpTransport(MCP_URL), tokens: mcpTokenProvider(getConfig()) }) : new HttpBackend();
     setSyncBackend(backend);
     await backend.prepare(); // signs in; the remote's username becomes USERNAME
   }, 60_000);

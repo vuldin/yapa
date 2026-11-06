@@ -68,7 +68,7 @@ function renderSegment(health, now, opts = {}) {
     case "disabled":
       return state("dim", "\u25CB local only");
     case "signed_out":
-      return state("red", `\u25CF signed out${since}${push} \xB7 run: gcloud auth login`);
+      return state("red", `\u25CF signed out${since}${push} \xB7 ${cleanLabel(health.sign_in) ?? "run: gcloud auth login"}`);
     case "unreachable":
       return state("yellow", `\u25CF offline${since}${push}`);
     case "error": {

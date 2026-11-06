@@ -155,6 +155,42 @@ Unknown request fields SHOULD be ignored; the client ignores unknown response
 fields. The reference returns `X-Request-Id` on every response (and accepts
 one on the request).
 
+### Over MCP
+
+A remote MAY serve the API as one MCP tool instead, for example behind an MCP
+gateway that signs each person in and forwards who they are. The client uses
+this transport when `sync_mcp_url` (env `YAPA_SYNC_MCP_URL`) is set; it wins
+over `sync_service_url`, which wins over a database URL.
+
+- Connection: MCP Streamable HTTP to that URL with `Authorization: Bearer
+  <token>`. The token is what the command in `YAPA_SYNC_MCP_TOKEN_CMD`
+  (plugin option `sync_mcp_token_cmd`, no default) prints; it is reused and
+  cached like the ID token (section 2), in `mcp-token` beside the ID token
+  cache. No `X-Yapa-Id-Token` is sent: the remote learns the caller from the
+  MCP connection.
+- Tool: `yapa_sync`, found with `tools/list`. A gateway-prefixed name, i.e.
+  one ending in `yapa_sync` after a separator (`remote__yapa_sync`), also
+  matches.
+- Arguments: `method` (`GET`, `POST` or `PUT`); `path`, below the API root
+  with its query (`/v1/...`, at most 4096 characters; the client
+  percent-encodes `!'()*`); `body`, a JSON object, omitted on GET; `device`
+  (the `X-Yapa-Device` value); `idempotency_key` (the `Idempotency-Key`);
+  `request_id`, an `X-Request-Id` for the remote's logs.
+- Result: one text content item holding `{"status": <int>, "body": <JSON>,
+  "headers": {...}}`, the response the HTTP API would give. `headers` SHOULD
+  carry `x-request-id`, `retry-after` and `idempotent-replay` when set, and
+  `isError` SHOULD be true when `status >= 400`. The client reads the payload
+  either way, exactly as it reads an HTTP response (section 4).
+- Failures: an HTTP 401 from the gateway, a `401` result, or an error result
+  that is not JSON and says unauthorized refreshes the token once and retries
+  (same idempotency key). A gateway 403 is `gateway_forbidden`, and a server
+  without the tool is `no_sync_tool`. Connection failures, MCP errors and
+  timeouts are `unreachable`, as network errors are over HTTP. An expired MCP
+  session (HTTP 404) is reopened and the call sent once more. Any other
+  result that is not a Sync API answer is `502 mcp_tool_error`.
+- Gateways may cap the size of a tool result: such a remote SHOULD lower its
+  pull page byte budget (section 6) to fit.
+
 ## 4. Errors
 
 Every non-2xx response from the app MUST be JSON:
@@ -754,7 +790,9 @@ link failures).
 
 `npm run conformance -- <base URL>` (repository root) runs the opt-in live
 suite `packages/core/src/sync/live.test.ts` against a remote with your Google
-ID token (`gcloud auth login`, or `YAPA_SYNC_ID_TOKEN_CMD`). It checks:
+ID token (`gcloud auth login`, or `YAPA_SYNC_ID_TOKEN_CMD`). For a remote
+served over MCP (section 3), run `npm run conformance -- --mcp <MCP URL>` with
+`YAPA_SYNC_MCP_TOKEN_CMD` set. It checks:
 sign-in (`/v1/me`), push from one device and pull from a second, ownership
 lookups, delete and the deletions feed, leases with two sessions, a
 renewal without `scope` keeping the stored scope, `reclaim` over the
