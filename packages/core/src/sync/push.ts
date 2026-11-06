@@ -6,7 +6,7 @@ import { generateEmbedding } from '../embeddings.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, UnsupportedByRemoteError, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
 import { getPendingDeletes, clearPendingDeletes, getPendingPurges, clearPendingPurges } from './deletes.js';
-import { getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
+import { addSyncSubscriptions, getSyncSubscriptions, updateSyncSubscriptions, getUnfollowedCollections } from './sentinel.js';
 import { getDeviceId } from './device.js';
 
 import { isSyncableCollection as isSyncable, isDeletedUpstream, isReadOnlyDoc } from './syncable.js';
@@ -263,14 +263,9 @@ async function pushAll(): Promise<PushStats> {
   // Auto-subscribe collections that were successfully pushed
   if (pushedCollections.length > 0) {
     try {
-      const existing = await getSyncSubscriptions();
-      const existingSet = new Set(existing);
       // A name merged away or left on this machine is never re-followed implicitly.
       const unfollowed = await getUnfollowedCollections();
-      const newSubs = pushedCollections.filter(c => !existingSet.has(c) && !unfollowed.has(c));
-      if (newSubs.length > 0) {
-        await updateSyncSubscriptions([...existing, ...newSubs]);
-      }
+      await addSyncSubscriptions(pushedCollections.filter(c => !unfollowed.has(c)));
     } catch (e) {
       process.stderr.write(`[yapa-sync] Auto-subscribe error: ${e}\n`);
     }

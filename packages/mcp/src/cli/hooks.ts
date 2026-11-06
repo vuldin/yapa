@@ -21,6 +21,7 @@ import {
   pullCollection,
   getSyncPullTimestamp,
   getSyncSubscriptions,
+  addSyncSubscriptions,
   updateSyncSubscriptions,
   getUnfollowedCollections,
   getPendingBackfills,
@@ -158,8 +159,7 @@ export async function freshenFromRemote(collection: string, opts: { gate?: boole
       if (pendingBackfill) await clearPendingBackfill(collection);
     }
     if (!followed && stats.errors === 0) {
-      const subs = await getSyncSubscriptions();
-      if (!subs.includes(collection)) await updateSyncSubscriptions([...subs, collection]);
+      await addSyncSubscriptions([collection]);
     }
     return stats.pulled + stats.updated;
   } catch (e) {

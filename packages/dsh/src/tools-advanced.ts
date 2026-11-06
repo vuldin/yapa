@@ -36,6 +36,8 @@ import {
   getSyncPullTimestamp,
   getSyncState,
   getSyncSubscriptions,
+  addSyncSubscriptions,
+  removeSyncSubscriptions,
   clearCollectionRedirect,
   clearLeftCollection,
   janitorSweep,
@@ -856,8 +858,7 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
             if (valid.length === 0) {
               return { text: `None of the requested collections exist on remote. Available: ${[...remoteNames].join(', ')}` };
             }
-            const existing = await getSyncSubscriptions();
-            await updateSyncSubscriptions([...new Set([...existing, ...valid])]);
+            await addSyncSubscriptions(valid);
             // Asked for by name: a collection merged away or left here is followed again.
             for (const name of valid) {
               await clearCollectionRedirect(name);
@@ -876,9 +877,7 @@ export function registerAdvancedTools(ctx: Context, getResolved: () => ResolvedC
         case 'unsubscribe': {
           if (!args.collections?.length) return { text: 'Refused — `collections` is required for unsubscribe.' };
           try {
-            const existing = await getSyncSubscriptions();
-            const removeSet = new Set(args.collections);
-            await updateSyncSubscriptions(existing.filter(c => !removeSet.has(c)));
+            const { before: existing } = await removeSyncSubscriptions(args.collections);
             const removed = args.collections.filter(c => existing.includes(c));
             const notFound = args.collections.filter(c => !existing.includes(c));
             const lines: string[] = [];
