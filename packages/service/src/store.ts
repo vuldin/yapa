@@ -369,7 +369,7 @@ export async function deleteMany(pool: pg.Pool, ctx: RequestCtx, ids: string[], 
   const me = ctx.caller.username;
   return withUserTx(pool, me, async c => {
     const rows = await c.query(
-      `SELECT id, collection, origin_user, last_editor FROM documents WHERE id = ANY($1::text[]) AND ${LOCAL_ONLY_SQL} ORDER BY id FOR UPDATE`,
+      `SELECT id, collection, origin_user, last_editor FROM documents WHERE id = ANY($1::text[]) AND ${LOCAL_ONLY_SQL} ORDER BY id COLLATE "C" FOR UPDATE`,
       [ids],
     );
     const byId = new Map(rows.rows.map(r => [r.id as string, r]));
