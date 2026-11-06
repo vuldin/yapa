@@ -9437,6 +9437,16 @@ var init_postgres_backend = __esm({
   }
 });
 
+// packages/core/src/redact.ts
+function redactTokens(text) {
+  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, "<token>");
+}
+var init_redact = __esm({
+  "packages/core/src/redact.ts"() {
+    "use strict";
+  }
+});
+
 // packages/core/src/sync/http-backend.ts
 var http_backend_exports = {};
 __export(http_backend_exports, {
@@ -9454,9 +9464,6 @@ import { readFileSync as readFileSync6, writeFileSync as writeFileSync4, mkdirSy
 import { dirname as dirname4 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
-function redactTokens(text) {
-  return text.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]*)?/g, "<token>");
-}
 function decodeJwtPayload(token) {
   const parts = token.split(".");
   if (parts.length < 2) return void 0;
@@ -9572,9 +9579,11 @@ var REFRESH_MARGIN_MS, OPAQUE_TOKEN_TTL_MS, TOKEN_CMD_TIMEOUT_MS, MAX_UPSERT_DOC
 var init_http_backend = __esm({
   "packages/core/src/sync/http-backend.ts"() {
     "use strict";
+    init_redact();
     init_config();
     init_device();
     init_backend();
+    init_redact();
     REFRESH_MARGIN_MS = 5 * 6e4;
     OPAQUE_TOKEN_TTL_MS = 6e4;
     TOKEN_CMD_TIMEOUT_MS = 2e4;
@@ -43741,6 +43750,14 @@ init_store();
 // packages/core/src/curation/follow-through.ts
 init_store();
 init_config();
+
+// packages/core/src/curation/health.ts
+init_config();
+init_fs_lock();
+init_redact();
+
+// packages/core/src/curation/capture.ts
+init_sentinel();
 
 // packages/core/src/buckets/index.ts
 init_config();

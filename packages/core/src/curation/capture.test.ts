@@ -12,6 +12,8 @@ function deps(overrides: Partial<CaptureDeps> = {}): CaptureDeps {
     resolveConflict: vi.fn() as any,
     storeMemory: vi.fn(async () => ({ ids: ['m1'], potential_conflicts: [] })) as any,
     log: vi.fn(),
+    record: vi.fn(),
+    writable: vi.fn(async () => ({})),
     ...overrides,
   };
 }
@@ -27,6 +29,49 @@ describe('captureTurn', () => {
     expect(opts.salience).toBe(2); // clamped from 4
     expect(opts.tags).toEqual(['ports', 'auto-capture']);
     expect(opts.metadata).toMatchObject({ source: 'auto-capture', session_id: 's1', turn: 4 });
+  });
+
+  it('records each turn\'s outcome for capture health, failures included', async () => {
+    let d = deps();
+    await captureTurn(input, options, d);
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0 });
+
+    const ftError = new Error('judge timed out');
+    d = deps({ followThrough: vi.fn(async () => { throw ftError; }) as any, extractMemories: vi.fn(async () => []) as any });
+    await captureTurn(input, options, d);
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 0, skipped: 0, settled: 0, followThroughError: ftError });
+
+    const exError = new Error('claude -p exited 1');
+    d = deps({ extractMemories: vi.fn(async () => { throw exError; }) as any });
+    await expect(captureTurn(input, options, d)).rejects.toThrow('claude -p exited 1');
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn_failed', error: exError });
+  });
+
+  it('skips a collection removed from this machine without a model call or a failure', async () => {
+    const { CollectionLeftError } = await import('../sync/sentinel.js');
+    const d = deps({ writable: vi.fn(async () => { throw new CollectionLeftError('project-acme'); }) });
+    expect(await captureTurn(input, options, d)).toEqual({ stored: 0, skipped: 0, superseded: 0 });
+    expect(d.followThrough).not.toHaveBeenCalled();
+    expect(d.extractMemories).not.toHaveBeenCalled();
+    expect(d.record).not.toHaveBeenCalled();
+    const broken = new Error('store unreadable');
+    const e = deps({ writable: vi.fn(async () => { throw broken; }) });
+    await expect(captureTurn(input, options, e)).rejects.toThrow('store unreadable');
+    expect(e.record).toHaveBeenCalledWith({ kind: 'turn_failed', error: broken });
+  });
+
+  it('stores the other candidates when one is refused, and records the refusal as a store failure', async () => {
+    const refusal = new Error('typed_memory_invalid');
+    const d = deps({
+      extractMemories: vi.fn(async () => [
+        { content: 'first fact about acme', tags: [], salience: 1, sector: 'semantic', rationale: 'x' },
+        { content: 'second fact about acme', tags: [], salience: 1, sector: 'semantic', rationale: 'y' },
+      ]) as any,
+      storeMemory: vi.fn(async (c: string) => { if (c.startsWith('first')) throw refusal; return { ids: ['m2'], potential_conflicts: [] }; }) as any,
+    });
+    const r = await captureTurn(input, options, d);
+    expect(r.stored).toBe(1);
+    expect(d.record).toHaveBeenCalledWith({ kind: 'turn', stored: 1, skipped: 0, settled: 0, storeError: refusal });
   });
 
   it('supersedes a stale neighbor when the resolver says the fact changed', async () => {

@@ -13,6 +13,8 @@ import {
   listTasks,
   listCollections,
   collectionSize,
+  captureDownLine,
+  recordCapture,
   staleFindings,
   detectCollection,
   scopeNotes,
@@ -433,6 +435,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const down = syncDownLine();
   if (down) lines.push(down);
+  const captureDown = captureDownLine();
+  if (captureDown) lines.push(captureDown);
   const hint = prepareStatusLine();
   if (hint) lines.push(hint);
   const update = updateLine();
@@ -631,7 +635,9 @@ export async function postCompact(input: PostCompactInput): Promise<void> {
       sector: 'episodic',
       metadata: { source: 'compaction', session_id: input.session_id, trigger: input.trigger },
     });
+    recordCapture({ kind: 'compaction' });
   } catch (e) {
+    recordCapture({ kind: 'compaction', error: e });
     process.stderr.write(`[yapa-hook] compaction capture failed (non-fatal): ${e}\n`);
   }
 }

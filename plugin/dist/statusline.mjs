@@ -62,7 +62,8 @@ function renderSegment(health, now, opts = {}) {
   const since = health?.since ? ` since ${formatSince(health.since, now)}` : "";
   const name = cleanCollection(opts.collection);
   const tail = name ? `${name}${isLocalOnly(name) ? " (local only)" : ""}` : void 0;
-  const state = (tone, text) => `${head} ${paint(tone, text)}${tail ? ` | ${tail}` : ""}`;
+  const capture = opts.captureFailing ? ` ${paint("red", "\xB7 capture \u2717")}` : "";
+  const state = (tone, text) => `${head} ${paint(tone, text)}${capture}${tail ? ` | ${tail}` : ""}`;
   if (!health) return state("dim", "\u25CB sync status unknown");
   switch (health.status) {
     case "disabled":
@@ -186,6 +187,28 @@ function readUpdate(path) {
   } catch {
     return void 0;
   }
+}
+var localDay = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+function captureFailingAt(path, now) {
+  let h;
+  try {
+    h = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return false;
+  }
+  if (!h || typeof h.at !== "number" || !h.days) return false;
+  const err = h.last_error;
+  if (err && typeof err.at === "number" && err.stage !== "follow-through" && err.at >= (h.last_ok_at ?? 0) && now - err.at < 36e5) return true;
+  const d = h.days[localDay(now)];
+  if (!d) return false;
+  const n = (k) => Number(d[k] ?? 0);
+  const clean = d.clean === void 0 ? n("turns") - n("follow_through_failed") : n("clean");
+  const bad = n("failed") + (n("turns") - clean) + n("compactions_failed");
+  const good = clean + n("compactions") - n("compactions_failed");
+  return bad >= 2 && bad > good;
 }
 function readHealth(path) {
   try {
@@ -345,7 +368,8 @@ async function main(args, self2) {
     remote: argValue(args, "--remote") ?? argValue(args, "--label"),
     update,
     collection,
-    session
+    session,
+    captureFailing: captureFailingAt(join(dirname(healthPath), "capture-health.json"), Date.now())
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -365,6 +389,7 @@ export {
   REMOVED_MARKER,
   SCRIPT_VERSION,
   SESSION_REPORT_GRACE_MS,
+  captureFailingAt,
   copyScript,
   decodeWrapped,
   defaultSettingsPath,

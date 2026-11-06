@@ -32,6 +32,7 @@ import {
   heartbeatIfDue,
   takeClaimNotices,
   waitingOn,
+  captureDownLine,
   staleFindings,
   waitingLine,
   includesUser,
@@ -181,6 +182,9 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
             }
           }
         }
+
+        const captureDown = captureDownLine();
+        if (captureDown) lines.push('', captureDown);
 
         // Surface memory-compaction candidates once per session alongside the
         // task check (long-term store maintenance — not context compaction).

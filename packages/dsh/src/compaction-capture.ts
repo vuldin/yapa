@@ -12,7 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 // Loads the compaction event vocabulary into the session event map.
 import type {} from '@deepseek-ai/dsh-compaction';
-import { storeMemory } from '@yapa/core';
+import { recordCapture, storeMemory } from '@yapa/core';
 import { detectCollection } from './injector.js';
 import type { ResolvedConfig } from './config.js';
 
@@ -48,8 +48,10 @@ export function registerCompactionCapture(ctx: Context, getResolved: () => Resol
             metadata: { source: 'compaction' },
           },
         );
+        recordCapture({ kind: 'compaction' });
         log(`Captured compaction summary (${data.shadowedTokenCount ?? '?'} shadowed tokens) into ${collection}`);
       } catch (e) {
+        recordCapture({ kind: 'compaction', error: e });
         log(`Compaction capture failed (non-fatal): ${e}`);
       }
     })();

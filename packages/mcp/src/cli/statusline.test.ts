@@ -7,12 +7,37 @@ import { build } from 'esbuild';
 
 import {
   renderSegment, formatAgo, mergeStatusLine, removeStatusLine, isYapaStatusLine, encodeWrapped, installStatusLine,
-  uninstallStatusLine, hasStatusLine, readLastWrite, readSessionRecord, readSessionScope, readSessionStarting, sessionInfo, isLocalOnly, stdinInfo, stdinSession, type HealthRecord,
+  uninstallStatusLine, hasStatusLine, captureFailingAt, readLastWrite, readSessionRecord, readSessionScope, readSessionStarting, sessionInfo, isLocalOnly, stdinInfo, stdinSession, type HealthRecord,
 } from './statusline.js';
 
 const NOW = new Date(2026, 10, 1, 15, 0).getTime();
 const at = (h: number, m: number) => new Date(2026, 10, 1, h, m).getTime();
 const rec = (h: Partial<HealthRecord>): HealthRecord => ({ status: 'ok', at: NOW - 60_000, interval_ms: 300_000, label: 'yapa', ...h });
+
+describe('capture health in the status line', () => {
+  it('adds capture ✗ when capture is failing, read from capture-health.json', () => {
+    const d = mkdtempSync(join(tmpdir(), 'yapa-sl-cap-'));
+    try {
+      const file = join(d, 'capture-health.json');
+      expect(captureFailingAt(file, NOW)).toBe(false);
+      const day = `2026-11-01`;
+      writeFileSync(file, JSON.stringify({ at: NOW - 60_000, last_ok_at: NOW - 3_600_000, last_error: { at: NOW - 60_000, stage: 'extractor', message: 'x' }, days: { [day]: { turns: 3, failed: 1 } } }));
+      expect(captureFailingAt(file, NOW)).toBe(true);
+      writeFileSync(file, JSON.stringify({ at: NOW - 60_000, last_ok_at: NOW - 30_000, last_error: { at: NOW - 60_000, stage: 'extractor', message: 'x' }, days: { [day]: { turns: 3, failed: 1 } } }));
+      expect(captureFailingAt(file, NOW)).toBe(false);
+      writeFileSync(file, JSON.stringify({ at: NOW - 60_000, last_ok_at: NOW - 30_000, days: { [day]: { turns: 1, failed: 3 } } }));
+      expect(captureFailingAt(file, NOW)).toBe(true);
+      writeFileSync(file, JSON.stringify({ at: NOW - 60_000, last_ok_at: NOW - 3_600_000, last_error: { at: NOW - 60_000, stage: 'follow-through', message: 'x' }, days: { [day]: { turns: 2, clean: 1, follow_through_failed: 1 } } }));
+      expect(captureFailingAt(file, NOW)).toBe(false);
+      writeFileSync(file, 'not json');
+      expect(captureFailingAt(file, NOW)).toBe(false);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+    expect(renderSegment(rec({ last_ok_at: NOW - 120_000 }), NOW, { version: '1.6.0', captureFailing: true, collection: 'project-acme' }))
+      .toBe('yapa@v1.6.0 ● synced 2m ago · capture ✗ | project-acme');
+  });
+});
 
 describe('renderSegment', () => {
   const v = { version: '1.6.0' };

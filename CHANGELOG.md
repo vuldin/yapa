@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Features
+- **You can tell when capture is failing.** The per-turn capture and the compaction capture run in hook processes whose errors used to go only to a stderr nobody sees, so a broken aux model, a missing `claude` CLI or a bad `CURATION_MODEL` failed silently.
+  - Each run is now counted in `capture-health.json`, beside `sync-health.json`. That covers turns judged, memories stored, those skipped as known, items settled, and extraction, store, follow-through and compaction failures per day, plus the last error, with the model's reply and any token removed. The Claude Code hooks and DSH both record.
+  - `yapa capture status [--days N]` prints the counts and the last error.
+  - The status line adds `· capture ✗` when the latest run failed within the hour (a follow-through failure alone doesn't count, since memories were still stored), or when more runs failed than succeeded today.
+  - Session start says when capture failed in the last day and hasn't succeeded since, and what that means: memories missing, some not stored, open items not updated, or session summaries missing.
+  - Recording never fails or slows a turn.
+
 ### Fixes
 - **Questions and decisions for people outside YAPA no longer disappear from `waiting`.** An owner is matched to a YAPA user case-insensitively (`Josh`, `josh@example.com` and `josh` are one person). An owner who is no YAPA user (`Dana`, `the platform team`) is someone to ask: the item waits on whoever recorded it and reads `[question, for josh, ask Dana, 2d]`. Existing items are read the same way, with no migration. The same rule applies in session start, DSH and the reference remote's `waiting`.
 - **Follow-through no longer settles items a turn doesn't settle.** The judge must quote the words of the turn that settle an item, and a change whose quote is not in the turn is dropped, as is one whose note says the turn doesn't address the item. A question for another YAPA user is answered only in that user's turn, and a question for someone outside YAPA only by their reported answer, not by the person's own plan (follow-through prompt v2).
@@ -19,6 +27,8 @@
   - Pass `include_sessions: true` to search them. Journals, and ordinary memories tagged `compaction` (log compaction, say), stay in recall.
   - A summary is known by `source: compaction`, or by carrying both the `compaction` and `journal` tags. DSH's compaction capture now also sets `source`.
   - The summaries are still stored (`CAPTURE_COMPACTION`), and they no longer count toward `COMPACTION_THRESHOLD` or get grouped by `compaction_suggest`.
+- Capture in a folder whose collection was removed from this machine (`collection_delete`) now does nothing, without calling the aux model. Before, it ran the model and then failed to store.
+- When one captured memory is refused (an invalid typed memory, say), the turn's other memories are still stored.
 
 ## 1.13.0 (2026-11-06)
 
