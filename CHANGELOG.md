@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Old compaction summaries are archived.** Since 1.14.0 they stay out of recall and memory compaction, so nothing pruned them. The daily decay sweep now archives your own summaries older than `SESSION_SUMMARY_RETENTION_DAYS` (default 90; `0` keeps them forever), a chunked one whole. Teammates' summaries and read-only ones are left alone, and archived summaries stay reachable with `include_archived`.
+
 ## 1.14.1 (2026-11-06)
 
 Follow-through settles what a turn answers again in sessions that have worked one task for a while.

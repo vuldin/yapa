@@ -1,5 +1,6 @@
 import { getDocumentsByFilter, patchDocuments, listCollections } from '../store/index.js';
 import { sweepDeletedUpstream } from './trash.js';
+import { sweepSessionSummaries } from './summary-retention.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
 const DECAY_SENTINEL_ID = '__decay_sentinel__';
@@ -64,6 +65,7 @@ export async function runDecaySweep(now: number = Math.floor(Date.now() / 1000))
 
   // Copies archived after their owner deleted them upstream, past retention.
   await sweepDeletedUpstream(now).catch(() => 0);
+  await sweepSessionSummaries(now).catch(() => 0);
   return decayedCount;
 }
 

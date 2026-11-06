@@ -101,6 +101,7 @@ function createConfig(env = process.env) {
     OLLAMA_URL: get(env, "OLLAMA_URL", "http://localhost:11434"),
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
+    SESSION_SUMMARY_RETENTION_DAYS: Math.max(0, Math.floor(Number(get(env, "SESSION_SUMMARY_RETENTION_DAYS", "90"))) || 0),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -4721,6 +4722,45 @@ var init_trash = __esm({
   }
 });
 
+// packages/core/src/memory/summary-retention.ts
+async function sweepSessionSummaries(now = Math.floor(Date.now() / 1e3)) {
+  const { SESSION_SUMMARY_RETENTION_DAYS: days, USERNAME: me } = getConfig();
+  if (!days) return 0;
+  const cutoff = now - days * DAY2;
+  let n = 0;
+  for (const c of (await listCollections2().catch(() => [])).map((x) => x.name)) {
+    const docs = await getDocumentsByFilter2(c, { type: "memory" }, 1e5).catch(() => []);
+    const expired = /* @__PURE__ */ new Set();
+    for (const d of docs) {
+      const m = d.metadata;
+      if (!isSessionSummary(m) || m.archived === true || isReadOnlyDoc(m)) continue;
+      if (String(m.origin_user ?? m.username ?? "").toLowerCase() !== me.toLowerCase()) continue;
+      if (Number(m.created_at ?? now) > cutoff) continue;
+      expired.add(String(m.parent_id ?? d.id));
+    }
+    if (!expired.size) continue;
+    const updates = docs.filter((d) => expired.has(String(d.metadata.parent_id ?? d.id)) && d.metadata.archived !== true).map((d) => ({ id: d.id, patch: metadataDelta(d.metadata, archivedMetadata(d.metadata, { expired: "session_summary_retention" }, now)) }));
+    try {
+      await patchDocuments2(c, updates);
+      n += updates.length;
+    } catch {
+    }
+  }
+  return n;
+}
+var DAY2;
+var init_summary_retention = __esm({
+  "packages/core/src/memory/summary-retention.ts"() {
+    "use strict";
+    init_config();
+    init_store();
+    init_syncable();
+    init_archive();
+    init_filters();
+    DAY2 = 86400;
+  }
+});
+
 // packages/core/src/memory/decay.ts
 async function lastSweepAt() {
   try {
@@ -4732,7 +4772,7 @@ async function lastSweepAt() {
 }
 async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   const collections = await listCollections2();
-  const fallbackAnchor = await lastSweepAt() ?? now - DAY2;
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY3;
   let decayedCount = 0;
   for (const collection of collections) {
     try {
@@ -4740,7 +4780,7 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
       const updates = [];
       for (const doc of docs) {
         const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
-        const days = (now - anchor) / DAY2;
+        const days = (now - anchor) / DAY3;
         if (days <= 0) continue;
         const lifecycleMeta = {
           salience: doc.metadata.salience ?? 1,
@@ -4760,11 +4800,12 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
     }
   }
   await sweepDeletedUpstream(now).catch(() => 0);
+  await sweepSessionSummaries(now).catch(() => 0);
   return decayedCount;
 }
 async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
   const last = await lastSweepAt();
-  return last === void 0 || now - last > DAY2;
+  return last === void 0 || now - last > DAY3;
 }
 async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
   const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
@@ -4774,15 +4815,16 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
     last_run: now
   });
 }
-var DECAY_SENTINEL_ID, DAY2, SWEEP_LIMIT;
+var DECAY_SENTINEL_ID, DAY3, SWEEP_LIMIT;
 var init_decay = __esm({
   "packages/core/src/memory/decay.ts"() {
     "use strict";
     init_store();
     init_trash();
+    init_summary_retention();
     init_lifecycle();
     DECAY_SENTINEL_ID = "__decay_sentinel__";
-    DAY2 = 86400;
+    DAY3 = 86400;
     SWEEP_LIMIT = 1e4;
   }
 });
@@ -6072,7 +6114,7 @@ async function staleFindings(collection, opts = {}) {
   const now = opts.now ?? Math.floor(Date.now() / 1e3);
   const me = getConfig().USERNAME;
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY3 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY4 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
 }
 async function wholeText(collection, f) {
   if (!f.metadata.parent_id) return f.content;
@@ -6272,7 +6314,7 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   }
   return items;
 }
-var DAY3, list5, author, mine, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
+var DAY4, list5, author, mine, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
@@ -6281,7 +6323,7 @@ var init_sweep = __esm({
     init_syncable();
     init_provider();
     init_update2();
-    DAY3 = 86400;
+    DAY4 = 86400;
     list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     author = (m) => String(m.origin_user ?? m.username ?? "");
     mine = (m, me) => author(m).toLowerCase() === me.toLowerCase();
@@ -11036,6 +11078,7 @@ __export(src_exports, {
   sweepDeletedUpstream: () => sweepDeletedUpstream,
   sweepFindings: () => sweepFindings,
   sweepLockDebris: () => sweepLockDebris,
+  sweepSessionSummaries: () => sweepSessionSummaries,
   syncBackendKind: () => syncBackendKind,
   syncCycle: () => syncCycle,
   syncFingerprint: () => syncFingerprint,
@@ -11152,6 +11195,7 @@ var init_src = __esm({
     init_verification();
     init_kinds();
     init_sweep();
+    init_summary_retention();
     init_owners();
     init_known_users();
     init_update2();

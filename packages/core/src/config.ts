@@ -56,6 +56,8 @@ export interface YapaConfig {
   SALIENCE_DECAY_RATE: number;
   /** Days a copy archived after its owner deleted it on the sync service is kept here (memory/trash.ts). */
   DELETED_RETENTION_DAYS: number;
+  /** Days your own compaction summaries are kept before the decay sweep archives them; 0 keeps them forever. */
+  SESSION_SUMMARY_RETENTION_DAYS: number;
   SALIENCE_RANKING_WEIGHT: number;
   /** Only recall hits closer than this cosine distance count as "use" and boost salience. */
   SALIENCE_BOOST_MAX_DISTANCE: number;
@@ -313,6 +315,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     SALIENCE_DECAY_RATE: parseFloat(get(env, 'SALIENCE_DECAY_RATE', '0.98')),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, 'DELETED_RETENTION_DAYS', '30')) || 30),
+    SESSION_SUMMARY_RETENTION_DAYS: Math.max(0, Math.floor(Number(get(env, 'SESSION_SUMMARY_RETENTION_DAYS', '90'))) || 0),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, 'SALIENCE_RANKING_WEIGHT', '0.15')),
