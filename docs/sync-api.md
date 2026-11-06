@@ -115,7 +115,7 @@ the cycle.
 | `Authorization` | every request | `Bearer <ID token>` |
 | `X-Yapa-Id-Token` | every request | the same token, bare |
 | `X-Yapa-Device` | every request | this install's device id, `^[A-Za-z0-9._:-]{1,128}$` |
-| `Idempotency-Key` | `POST /v1/documents:batchUpsert`, `POST /v1/documents:batchDelete`, `POST /v1/counters:next`, `POST /v1/me/task-ids:next` | a fresh UUID v4 per logical request |
+| `Idempotency-Key` | `POST /v1/documents:batchUpsert`, `POST /v1/documents:batchDelete`, `POST /v1/documents:restore`, `POST /v1/documents:purge`, `POST /v1/counters:next`, `POST /v1/me/task-ids:next` | a fresh UUID v4 per logical request |
 | `Content-Type` | requests with a body | `application/json` |
 | `Accept` | every request | `application/json` |
 
@@ -133,8 +133,9 @@ everything is retried on the next cycle.
 
 ### Idempotency
 
-A remote SHOULD honor `Idempotency-Key` on the four routes above. Upserts and
-deletes are safe to repeat anyway; without it, a repeated `counters:next` or
+A remote SHOULD honor `Idempotency-Key` on the routes above. Upserts,
+deletes, restores and purges are safe to repeat anyway (a repeat just answers
+`not_found` for what the first call already did); without it, a repeated `counters:next` or
 `task-ids:next` (a proxy retry, say) hands out a second value, which leaves a
 harmless gap. Reference semantics:
 
@@ -177,6 +178,7 @@ The client reads `code`, `message` (truncated, tokens redacted),
 | 403 | `task_namespace` | task id outside the caller's `<username>-<n>` namespace |
 | 404 | `not_found` | missing document, or unknown route |
 | 409 | `id_taken` | task id already used by a different task |
+| 410 | `purged` | the id was purged by its owner and can never be written again (section 5, `documents:purge`) |
 | 413 | `payload_too_large` | over a size or count limit |
 | 422 | `embedding_dimension` | embedding is not exactly 384 numbers |
 | 422 | `embedding_invalid` | not an array of finite numbers, or L2 norm outside 1 +/- 0.01 |
@@ -202,7 +204,7 @@ means a wrong base URL or path prefix.
 - Per-item permanent errors in `batchUpsert` results: `secret_detected`,
   `embedding_dimension`, `embedding_invalid`, `invalid_request`,
   `invalid_collection`, `local_only_collection`, `task_namespace`,
-  `payload_too_large`, `not_owner`. The doc stays local and unsynced, is
+  `payload_too_large`, `not_owner`, `purged`. The doc stays local and unsynced, is
   marked rejected, is listed in `sync status`, and is not sent again until its
   content or metadata changes.
 - `id_taken` on a task: the client renames the task locally to the higher of
@@ -218,7 +220,8 @@ reads" lists the response fields the client uses; others are optional.
 
 Response: `{ "username": "jane-doe", "email": "jane.doe@example.com" }`.
 Client reads `username`, `email`. The reference also returns `device` and a
-`limits` object (not read).
+`limits` object (not read; `limits.deleted_retention_days` is how long a
+deleted row stays restorable, section 5 "Soft delete").
 
 Called at startup, before every push/pull cycle (cached per token), and for
 `sync status` ("Signed in as: <username> (<email>)").
@@ -246,7 +249,8 @@ Response:
       "last_editor": "jane-doe", "related_ids": [],
       "created_at": 1767225600, "updated_at": 1767225600, "synced_at": 1767225601 }
   ],
-  "deletions": [ { "id": "jane-doe-12", "deleted_by": "jane-doe", "deleted_at": 1767225700 } ],
+  "deletions": [ { "id": "jane-doe-12", "deleted_by": "jane-doe", "deleted_at": 1767225700,
+                   "reason": "delete", "purged": false } ],
   "next_cursor": "opaque",
   "has_more": false
 }
@@ -255,7 +259,9 @@ Response:
 Client reads, per document: `id`, `content`, `metadata`, `origin_user`,
 `related_ids`, `updated_at`. It ignores `collection` (it asked for one),
 `synced_at`, `created_at` (it uses `metadata.created_at`), `last_editor` and
-`embedding` (it re-embeds locally). Per deletion: `id`, `deleted_by`. Page:
+`embedding` (it re-embeds locally). Per deletion: `id`, `deleted_by`, and,
+when present, `reason` (`delete` or `retract`) and `purged` (boolean). Both
+are optional for a remote: a deletion without them is a plain delete. Page:
 `next_cursor`, `has_more`. See section 6 for the semantics.
 
 ### POST /v1/documents:batchUpsert
@@ -309,7 +315,82 @@ Per-id status: `deleted`, `not_found`, or `error` with `not_owner`. Client
 reads only `deleted`.
 
 Only the row's owner may delete it. Each deletion MUST be recorded in the
-deletions feed of its collection (section 6).
+deletions feed of its collection (section 6), with its `reason`.
+
+The reference soft-deletes: the row moves out of the live documents (pulls
+stop returning it, teammates get the deletion entry) into a store of deleted
+rows that only its owner can see, list and restore, for
+`YAPA_DELETED_RETENTION_DAYS` (default 30) days. See "Soft delete" below.
+
+### Soft delete: GET /v1/me/deleted, POST /v1/documents:restore, POST /v1/documents:purge
+
+Optional for a remote. A remote without them answers `404 not_found` (the
+JSON envelope); the client then reports that the remote does not support the
+feature and changes nothing. All three are owner-only: a caller only ever
+sees, restores or purges rows it owns.
+
+A deleted row stays restorable for the remote's retention window (reference:
+`YAPA_DELETED_RETENTION_DAYS`, default 30, reported as
+`limits.deleted_retention_days` by `GET /v1/me`). After that it is removed
+for good. The reference removes expired rows lazily, at most every 5 minutes
+per instance, from requests that touch deleted rows; rows past the window are
+never listed or restored even before the sweep runs.
+
+`GET /v1/me/deleted?collection=<c>&limit=<n>`: the caller's own deleted rows
+within retention, newest first. `collection` is optional (a local-only name is
+`403 local_only_collection`); `limit` defaults to 100, capped at 500.
+
+```json
+{ "documents": [
+  { "id": "jane-doe-12", "collection": "project-atlas", "content": "first 300 characters ...",
+    "metadata": { "type": "task", "status": "pending" }, "deleted_at": 1767225700, "reason": "delete" }
+] }
+```
+
+`content` is the first 300 characters. An id deleted more than once (deleted,
+re-created, deleted again) appears once per deleted copy.
+
+`POST /v1/documents:restore` `{ "ids": [...] }` (at most 500; honors
+`Idempotency-Key`):
+
+```json
+{ "results": [
+  { "id": "jane-doe-12", "status": "restored", "synced_at": 1767226000 },
+  { "id": "jane-doe-13", "status": "not_found" },
+  { "id": "jane-doe-14", "status": "id_taken" }
+], "restored": 1 }
+```
+
+- `restored`: the caller's newest deleted copy is a live row again, with its
+  original `origin_user`, `created_at`, content and metadata, and
+  `updated_at` = now, so clients holding an older copy or a tombstone take it
+  as an update. Its `synced_at` is new, so it appears in the documents feed
+  after its deletion entry; it is not an echo for any device (the reference
+  stamps a last device no client can send), so the device that restored it
+  pulls it back too. No deletions feed entry is written.
+- `not_found`: no deleted copy of the caller's within retention (also for a
+  teammate's row, which the caller cannot see, and for a purged id).
+- `id_taken`: a live row with that id exists now (re-created after the
+  delete). Nothing changes; the deleted copy stays restorable.
+
+`POST /v1/documents:purge` `{ "ids": [...] }` (at most 500; honors
+`Idempotency-Key`):
+
+```json
+{ "results": [
+  { "id": "jane-doe-12", "status": "purged" },
+  { "id": "jane-doe-13", "status": "not_found" },
+  { "id": "sam-4", "status": "error", "error": { "code": "not_owner", "message": "only the owner can purge a row" } }
+], "purged": 1 }
+```
+
+Purge removes the id for good: the caller's live row (if any) and every
+deleted copy the caller owns. The caller must own the live row (else
+`not_owner`, nothing changes) or, with no live row, have a deleted copy (else
+`not_found`). Each affected collection's deletions feed gets an entry with
+`purged: true` (`reason: "delete"`), so clients drop their copies, and the id
+is recorded as purged: every later upsert of it, by anyone, is refused with
+the permanent item error `purged` (`410` on `PUT /v1/documents/{id}`).
 
 ### GET /v1/collections
 
@@ -432,6 +513,16 @@ document (on this page or an earlier one) is ignored (delete, then re-create). D
 kept as long as a client may stay offline (the reference keeps them
 indefinitely); a client that misses one keeps a stale copy.
 
+A restored row (section 5, "Soft delete") comes back as a live document whose
+`synced_at` is after its deletion entry's `deleted_at` and whose `updated_at`
+is the restore time. If the deletion entry arrives in the same pull, the rule
+above (a live row already returned wins) or applying the feeds in order
+keeps the row; a client that dropped its copy (or keeps a local tombstone)
+from the earlier delete MUST accept the restored row as new. A deletion entry with
+`purged: true` means the owner removed the id for good: the remote refuses
+every later write of it (`purged`), so a copy with unpushed edits can never
+be pushed again.
+
 ## 7. Documents
 
 ### Shape
@@ -507,6 +598,8 @@ Per upsert item, in this order (the first failure is the item's error):
 4. `created_at` / `updated_at` numbers in range (`invalid_request`).
 5. No secret in content or metadata (`secret_detected`; report only the
    pattern name, never the match).
+5a. The id was not purged by its owner (`purged`, permanent; only remotes
+   with `documents:purge`).
 6. Insert of a task (`metadata.type == "task"`): the id MUST be
    `<caller>-<n>`; any insert whose id looks like `<other existing user>-<n>`
    is refused. Error `task_namespace` with `suggested_id` =
@@ -527,7 +620,9 @@ Per upsert item, in this order (the first failure is the item's error):
      similarity threshold (reference: cosine 0.95), excluding the doc itself.
      An empty array is always acceptable.
 
-Deletes are owner-only and recorded in the deletions feed. Task numbers come
+Deletes are owner-only and recorded in the deletions feed (with `reason`);
+the reference keeps deleted rows restorable by their owner for its retention
+window, and purges are owner-only too. Task numbers come
 from one per-user sequence (`task-ids:next`), floored by the highest existing
 `<caller>-<n>`.
 

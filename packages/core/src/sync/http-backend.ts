@@ -22,8 +22,9 @@ import { randomUUID } from 'node:crypto';
 import { getConfig, getEmbeddingModel } from '../config.js';
 import { getDeviceId } from './device.js';
 import {
-  applyServerUsername, chunk, isSignedOutError, noteSyncError, syncUsernameNote, type PullPage, type PullRequest, type RemoteDocument, type RemoteOwner, type SimilarMatch, type SyncBackend,
+  applyServerUsername, chunk, isSignedOutError, noteSyncError, syncUsernameNote, UnsupportedByRemoteError, type PullPage, type PullRequest, type RemoteDocument, type RemoteOwner, type SimilarMatch, type SyncBackend,
   type UpsertDoc, type UpsertOutcome, type Coordination, type Lease, type LeaseAcquireResult, type LeaseReleaseResult,
+  type DeletedDocument, type PurgeResult, type RemoteDeletion, type RestoreResult,
 } from './backend.js';
 
 /** Refresh this long before the token's `exp`. */
@@ -47,6 +48,8 @@ const PULL_PAGE_LIMIT = 500;
 const PERMANENT_ITEM_ERRORS = new Set([
   'secret_detected', 'embedding_dimension', 'embedding_invalid', 'invalid_request', 'invalid_collection',
   'local_only_collection', 'task_namespace', 'payload_too_large', 'not_owner',
+  // The owner purged the id: no write of it will ever be accepted.
+  'purged',
 ]);
 
 /** Redact anything that looks like a JWT from text that may be shown or logged. */
@@ -324,13 +327,13 @@ export class HttpBackend implements SyncBackend {
     q.set('embeddings', 'false');
     const r = await this.request<{
       documents: RemoteDocument[];
-      deletions?: Array<{ id: string; deleted_by: string; deleted_at: number }>;
+      deletions?: Array<{ id: string; deleted_by: string; deleted_at: number; reason?: unknown; purged?: unknown }>;
       next_cursor?: string;
       has_more?: boolean;
     }>('GET', `/v1/collections/${encodeURIComponent(collection)}/documents?${q}`);
     return {
       documents: (r.documents ?? []).map(d => ({ ...d, related_ids: d.related_ids ?? [], metadata: d.metadata ?? {} })),
-      deletions: r.deletions ?? [],
+      deletions: (r.deletions ?? []).map(toDeletion),
       nextCursor: r.next_cursor,
       hasMore: Boolean(r.has_more),
     };
@@ -363,6 +366,68 @@ export class HttpBackend implements SyncBackend {
       deleted += Number(r.deleted ?? 0);
     }
     return deleted;
+  }
+
+  /**
+   * Soft-delete routes (service schema v4) are user actions, not sync: they
+   * are quiet (a failure does not mark sync unhealthy, a sign-out still
+   * does), and an older service's `404 not_found` becomes an
+   * UnsupportedByRemoteError.
+   */
+  private async softDeleteCall<T>(feature: string, method: string, path: string, opts: RequestOpts = {}): Promise<T> {
+    try {
+      return await this.request<T>(method, path, { ...opts, quiet: true });
+    } catch (e) {
+      if (e instanceof ServiceError && e.status === 404 && e.code === 'not_found') throw new UnsupportedByRemoteError(feature);
+      throw e;
+    }
+  }
+
+  async listDeleted(collection?: string, limit?: number): Promise<DeletedDocument[]> {
+    const q = new URLSearchParams();
+    if (collection) q.set('collection', collection);
+    if (limit !== undefined) q.set('limit', String(limit));
+    const qs = q.toString();
+    const r = await this.softDeleteCall<{ documents?: any[] }>('listing deleted documents', 'GET', `/v1/me/deleted${qs ? `?${qs}` : ''}`);
+    return (r.documents ?? []).map(d => ({
+      id: String(d.id),
+      collection: String(d.collection),
+      content: String(d.content ?? ''),
+      metadata: d.metadata ?? {},
+      deleted_at: Number(d.deleted_at),
+      reason: d.reason === 'retract' ? 'retract' : 'delete',
+    }));
+  }
+
+  async restore(ids: string[]): Promise<RestoreResult[]> {
+    const out: RestoreResult[] = [];
+    for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
+      const r = await this.softDeleteCall<{ results?: any[] }>('restoring deleted documents', 'POST', '/v1/documents:restore', { body: { ids: part }, idempotent: true });
+      const byId = new Map((r.results ?? []).map(x => [x?.id, x]));
+      for (const id of part) {
+        const x = byId.get(id);
+        if (x?.status === 'restored') out.push({ id, status: 'restored', synced_at: Number(x.synced_at ?? 0) });
+        else out.push({ id, status: x?.status === 'id_taken' ? 'id_taken' : 'not_found' });
+      }
+    }
+    return out;
+  }
+
+  async purge(ids: string[]): Promise<PurgeResult[]> {
+    const out: PurgeResult[] = [];
+    for (const part of chunk([...new Set(ids)], MAX_DELETE_IDS)) {
+      const r = await this.softDeleteCall<{ results?: any[] }>('purging documents', 'POST', '/v1/documents:purge', { body: { ids: part }, idempotent: true });
+      const byId = new Map((r.results ?? []).map(x => [x?.id, x]));
+      for (const id of part) {
+        const x = byId.get(id);
+        if (x?.status === 'purged' || x?.status === 'not_found') out.push({ id, status: x.status });
+        else {
+          const code = String(x?.error?.code ?? 'internal');
+          out.push({ id, status: 'error', code, message: redactTokens(String(x?.error?.message ?? (x ? code : 'no result for this id'))).slice(0, 300) });
+        }
+      }
+    }
+    return out;
   }
 
   async collections(): Promise<Array<{ name: string; count: number }>> {
@@ -495,6 +560,14 @@ function toOutcome(id: string, r: any): UpsertOutcome {
   }
   // 'pending' (reserved by the API) is a successful write that is not yet visible to others.
   return { id, ok: true, status: String(r.status), ...(r.stale ? { stale: true } : {}), similar: Array.isArray(r.similar) ? r.similar : [] };
+}
+
+/** A pull's deletion entry; `reason` and `purged` only when a schema v4 service sent them. */
+function toDeletion(d: { id: string; deleted_by: string; deleted_at: number; reason?: unknown; purged?: unknown }): RemoteDeletion {
+  const out: RemoteDeletion = { id: d.id, deleted_by: d.deleted_by, deleted_at: Number(d.deleted_at) };
+  if (d.reason === 'delete' || d.reason === 'retract') out.reason = d.reason;
+  if (typeof d.purged === 'boolean') out.purged = d.purged;
+  return out;
 }
 
 function embeddingModelLabel(): string | undefined {

@@ -77,6 +77,7 @@ open routes (no DB access); from outside Cloud Run only `/health` reaches the ap
 | `YAPA_PULL_MAX_BYTES` | no | `8388608` | byte budget per pull page (min 64 KiB); a page stops early with `has_more` when exceeded |
 | `YAPA_RATE_LIMITS` | no | `on` | `off` disables the per-user token buckets (tests/local only) |
 | `YAPA_DAILY_WRITE_ALERT` | no | `20000` | per-user daily document writes that log a `daily_write_cap` warning (not a block) |
+| `YAPA_DELETED_RETENTION_DAYS` | no | `30` | days a deleted row stays listable and restorable by its owner (schema v4); older rows are removed by a background sweep at most every 5 minutes per instance |
 | `YAPA_AUTH_MODE` | no | `google` | `insecure-test` accepts `Bearer test:<email>` WITHOUT verification. Local tests only; the service refuses to start in this mode when `K_SERVICE` is set (Cloud Run) |
 
 The service needs no secrets: the database login is IAM, and OAuth client ids
@@ -106,6 +107,6 @@ docker rm -f yapa-it
 docker build -f packages/service/Dockerfile -t yapa-service .
 ```
 
-The integration suite creates a fresh database, applies `00`-`04` (skipping
+The integration suite creates a fresh database, applies `00`-`04`, `06` and `07` (skipping
 the `pgaudit` extension, which the image lacks), connects as a non-owner
 runtime role so RLS is in force, and drops the database afterwards.

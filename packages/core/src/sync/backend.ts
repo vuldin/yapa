@@ -34,6 +34,55 @@ export interface RemoteDeletion {
   deleted_by: string;
   /** Unix seconds. */
   deleted_at: number;
+  /** Why the row left (service schema v4): a delete, or a retract into a local-only collection. Absent from older remotes. */
+  reason?: 'delete' | 'retract';
+  /** The owner purged the id for good (service schema v4): drop every copy; upserts of it are refused (`purged`). */
+  purged?: boolean;
+}
+
+// ------------------------------------------------------------- soft delete
+// Service schema v4 (infra/cloudsql/sql/07_soft_delete.sql). A delete keeps
+// the row restorable by its owner for the remote's retention window
+// (GET /v1/me `limits.deleted_retention_days`, default 30).
+
+/** One of the caller's soft-deleted rows (GET /v1/me/deleted). */
+export interface DeletedDocument {
+  id: string;
+  collection: string;
+  /** The first 300 characters of the content. */
+  content: string;
+  metadata: Record<string, any>;
+  /** Unix seconds. */
+  deleted_at: number;
+  reason: 'delete' | 'retract';
+}
+
+/**
+ * `restored`: the newest deleted copy is live again with updated_at = now
+ * (pulls on every device, the restoring one included, fetch it as an update).
+ * `not_found`: no own deleted copy within retention. `id_taken`: a live row
+ * with that id exists now.
+ */
+export type RestoreResult =
+  | { id: string; status: 'restored'; synced_at: number }
+  | { id: string; status: 'not_found' | 'id_taken' };
+
+/** `purged`: the live row and every deleted copy are gone, and the id can never be written again. */
+export type PurgeResult =
+  | { id: string; status: 'purged' | 'not_found' }
+  | { id: string; status: 'error'; code: string; message: string };
+
+/**
+ * The remote does not have this route (an older sync service answers
+ * `404 not_found`). Nothing was changed; tell the user the feature needs a
+ * newer service.
+ */
+export class UnsupportedByRemoteError extends Error {
+  readonly code = 'unsupported_by_remote';
+  constructor(readonly feature: string, message = `the sync service does not support ${feature} yet (it needs a newer service release)`) {
+    super(message);
+    this.name = 'UnsupportedByRemoteError';
+  }
 }
 
 export interface PullRequest {
@@ -169,6 +218,16 @@ export interface SyncBackend {
   upsertMany(docs: UpsertDoc[]): Promise<UpsertOutcome[]>;
   /** Delete the caller's own rows. Returns how many were deleted. */
   delete(ids: string[], reason: 'delete' | 'retract'): Promise<number>;
+  /**
+   * The caller's own soft-deleted rows within retention, newest first
+   * (optionally one collection). Service only; throws UnsupportedByRemoteError
+   * on a service without the route.
+   */
+  listDeleted?(collection?: string, limit?: number): Promise<DeletedDocument[]>;
+  /** Restore the caller's own soft-deleted rows; results in input order (duplicates removed). Service only. */
+  restore?(ids: string[]): Promise<RestoreResult[]>;
+  /** Remove the caller's own ids for good (live row and deleted copies); results in input order (duplicates removed). Service only. */
+  purge?(ids: string[]): Promise<PurgeResult[]>;
   /** Shared collections with document counts. */
   collections(): Promise<Array<{ name: string; count: number }>>;
   /** Collections holding the caller's rows (recovery). */
