@@ -355,7 +355,7 @@ describe('soft delete (service schema v4)', () => {
       }
       return { json: { results: s.body.ids.map((id: string) => (id === 'theirs'
         ? { id, status: 'error', error: { code: 'not_owner', message: 'only the owner can purge a row' } }
-        : { id, status: id === 'gone' ? 'not_found' : 'purged' })) } };
+        : { id, status: id === 'gone' ? 'not_found' : id === 'reused' ? 'purged_copies' : 'purged' })) } };
     };
     const b = backend();
     expect(await b.restore(['r1', 'taken', 'gone', 'r1'])).toEqual([
@@ -364,12 +364,13 @@ describe('soft delete (service schema v4)', () => {
     expect(seen[0]).toMatchObject({ method: 'POST', path: '/v1/documents:restore', body: { ids: ['r1', 'taken', 'gone'] } });
     expect(seen[0].headers['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/);
 
-    expect(await b.purge(['p1', 'theirs', 'gone'])).toEqual([
+    expect(await b.purge(['p1', 'theirs', 'gone', 'reused'])).toEqual([
       { id: 'p1', status: 'purged' },
       { id: 'theirs', status: 'error', code: 'not_owner', message: 'only the owner can purge a row' },
       { id: 'gone', status: 'not_found' },
+      { id: 'reused', status: 'purged_copies' },
     ]);
-    expect(seen[1]).toMatchObject({ method: 'POST', path: '/v1/documents:purge', body: { ids: ['p1', 'theirs', 'gone'] } });
+    expect(seen[1]).toMatchObject({ method: 'POST', path: '/v1/documents:purge', body: { ids: ['p1', 'theirs', 'gone', 'reused'] } });
     expect(seen[1].headers['idempotency-key']).toBeTruthy();
 
     seen.length = 0;
