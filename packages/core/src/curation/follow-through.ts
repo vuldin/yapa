@@ -144,8 +144,9 @@ const excerpt = (s: string) => flat(s).replace(/^["']+|["']+$/g, '').replace(/(\
 function quotes(evidence: unknown, turn: FollowThroughTurn): boolean {
   const e = excerpt(String(evidence ?? ''));
   if (!e) return false;
+  const words = (x: string) => ` ${x.replace(/[.!?,;:]/g, ' ').replace(/\s+/g, ' ').trim()} `;
   const reply = excerpt(turn.userText ?? '');
-  if (reply && (e === reply || (reply.split(' ').length <= 4 && reply.includes(e)))) return true;
+  if (reply && (e === reply || (reply.split(' ').length <= 4 && words(e).trim() && words(reply).includes(words(e))))) return true;
   return e.length >= 8 && flat(turn.text).includes(e);
 }
 

@@ -42,6 +42,9 @@ describe('parseFollowThrough guards', () => {
     expect(short('go with B', 'go with B.')).toHaveLength(1);
     expect(short('Yes, go with Friday', 'go with Friday')).toHaveLength(1);
     expect(short('a long reply that talks about many other things', 'yes')).toEqual([]);
+    expect(short('not now, later', 'no')).toEqual([]);
+    expect(short('yes', 'e')).toEqual([]);
+    expect(short('Yes, go with Friday', 'yes')).toHaveLength(1);
     const t = { text: 'use the **quota** fix — then redeploy', userText: '', knownUsers: [] };
     expect(parseFollowThrough(reply({ id: 'mem-q', status: 'answered', note: 'quota', evidence: 'use the quota fix - then redeploy' }), [question], 'josh', t)).toHaveLength(1);
   });
