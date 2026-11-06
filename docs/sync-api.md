@@ -317,10 +317,14 @@ reads only `deleted`.
 Only the row's owner may delete it. Each deletion MUST be recorded in the
 deletions feed of its collection (section 6), with its `reason`.
 
-The reference soft-deletes: the row moves out of the live documents (pulls
-stop returning it, teammates get the deletion entry) into a store of deleted
-rows that only its owner can see, list and restore, for
-`YAPA_DELETED_RETENTION_DAYS` (default 30) days. See "Soft delete" below.
+The reference soft-deletes a `delete`: the row moves out of the live documents
+(pulls stop returning it, teammates get the deletion entry) into a store of
+deleted rows that only its owner can see, list and restore, for
+`YAPA_DELETED_RETENTION_DAYS` (default 30) days. See "Soft delete" below. A
+`retract` MUST NOT keep a copy: the doc moved into a local-only collection on
+the owner's machine (which keeps it), and the point of the move is that no
+shared copy of its content stays on the remote. Its deletion entry is written
+as for a delete, with `reason: "retract"`.
 
 ### Soft delete: GET /v1/me/deleted, POST /v1/documents:restore, POST /v1/documents:purge
 
@@ -380,15 +384,22 @@ re-created, deleted again) appears once per deleted copy.
 { "results": [
   { "id": "jane-doe-12", "status": "purged" },
   { "id": "jane-doe-13", "status": "not_found" },
-  { "id": "sam-4", "status": "error", "error": { "code": "not_owner", "message": "only the owner can purge a row" } }
-], "purged": 1 }
+  { "id": "sam-4", "status": "purged_copies" },
+  { "id": "sam-5", "status": "error", "error": { "code": "not_owner", "message": "this id is another user's live document and you have no deleted copy of it to purge" } }
+], "purged": 2 }
 ```
 
 Purge removes the id for good: the caller's live row (if any) and every
-deleted copy the caller owns. The caller must own the live row (else
-`not_owner`, nothing changes) or, with no live row, have a deleted copy (else
-`not_found`). Each affected collection's deletions feed gets an entry with
-`purged: true` (`reason: "delete"`), so clients drop their copies, and the id
+deleted copy the caller owns. With no live row, the caller must have a deleted
+copy (else `not_found`). When the id is now someone else's live document
+(reused after the caller deleted theirs), the caller's deleted copies are
+still removed and the answer is `purged_copies`: the other user's row stays,
+the id is not recorded as purged, and no feed entry is written. With no copy
+of the caller's either, the answer is `not_owner` and nothing changes.
+Otherwise each affected collection's deletions feed gets an entry with
+`purged: true` (`reason: "delete"`), so clients drop their copies (clients
+older than this release treat it as a plain delete: keep teammates updated
+for a purge to reach every copy), and the id
 is recorded as purged: every later upsert of it, by anyone, is refused with
 the permanent item error `purged` (`410` on `PUT /v1/documents/{id}`).
 

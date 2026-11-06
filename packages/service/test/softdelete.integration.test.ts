@@ -88,18 +88,21 @@ describe.skipIf(!URL_)('soft delete, restore and purge (real Postgres + RLS)', (
     ]);
   });
 
-  it('delete moves the row into deleted_documents and the feed carries the reason', async () => {
-    await upsert('alice', 'A', [doc('sd-1'), doc('sd-ret-1')]);
+  it('delete moves the row into deleted_documents and the feed carries the reason; a retract keeps no copy', async () => {
+    await upsert('alice', 'A', [doc('sd-1'), doc('sd-3'), doc('sd-ret-1')]);
     const before = (await admin("SELECT content, metadata, origin_user, created_at, related_ids FROM documents WHERE id = 'sd-1'")).rows[0];
     const sweepsBefore = sweeps;
     expect((await del('alice', ['sd-1'])).body).toEqual({ results: [{ id: 'sd-1', status: 'deleted' }], deleted: 1 });
     expect(sweeps).toBeGreaterThan(sweepsBefore);
-    await del('alice', ['sd-ret-1'], 'retract');
+    await del('alice', ['sd-3']);
+    expect((await del('alice', ['sd-ret-1'], 'retract')).body).toEqual({ results: [{ id: 'sd-ret-1', status: 'deleted' }], deleted: 1 });
 
-    expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id IN ('sd-1', 'sd-ret-1')")).rows[0].n).toBe(0);
-    const kept = (await admin("SELECT id, content, metadata, origin_user, created_at, related_ids, deleted_by, reason, vector_dims(embedding) AS dims FROM deleted_documents WHERE id IN ('sd-1', 'sd-ret-1') ORDER BY id")).rows;
+    expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id IN ('sd-1', 'sd-3', 'sd-ret-1')")).rows[0].n).toBe(0);
+    const kept = (await admin("SELECT id, content, metadata, origin_user, created_at, related_ids, deleted_by, reason, vector_dims(embedding) AS dims FROM deleted_documents WHERE id IN ('sd-1', 'sd-3', 'sd-ret-1') ORDER BY id")).rows;
+    expect(kept.map(k => k.id)).toEqual(['sd-1', 'sd-3']);
     expect(kept[0]).toEqual({ id: 'sd-1', ...before, deleted_by: 'alice', reason: 'delete', dims: 384 });
-    expect(kept[1]).toMatchObject({ id: 'sd-ret-1', reason: 'retract' });
+    // A retract only takes the row out of the team copy; the author still has it locally.
+    expect(await auditActions('sd-ret-1')).toEqual(['insert', 'retract']);
 
     const feed = (await pull('bob', 'B')).body.deletions;
     expect(feed).toEqual(expect.arrayContaining([
@@ -114,7 +117,7 @@ describe.skipIf(!URL_)('soft delete, restore and purge (real Postgres + RLS)', (
 
     const alice = await listDeleted('alice');
     expect(alice.status).toBe(200);
-    expect(alice.body.documents.map((d: { id: string }) => d.id).sort()).toEqual(['sd-1', 'sd-ret-1']);
+    expect(alice.body.documents.map((d: { id: string }) => d.id).sort()).toEqual(['sd-1', 'sd-3']);
     const one = alice.body.documents.find((d: { id: string }) => d.id === 'sd-1');
     expect(one).toEqual({ id: 'sd-1', collection: C, content: doc('sd-1').content.slice(0, 300), metadata: expect.objectContaining({ type: 'memory', tags: ['x'] }), deleted_at: expect.any(Number), reason: 'delete' });
 
@@ -168,33 +171,34 @@ describe.skipIf(!URL_)('soft delete, restore and purge (real Postgres + RLS)', (
 
   it('a non-owner cannot restore or purge', async () => {
     // bob cannot see alice's deleted row: not_found, nothing changes.
-    expect((await restore('bob', ['sd-ret-1'], 'B')).body.results).toEqual([{ id: 'sd-ret-1', status: 'not_found' }]);
-    expect((await purge('bob', ['sd-ret-1'])).body.results).toEqual([{ id: 'sd-ret-1', status: 'not_found' }]);
+    expect((await restore('bob', ['sd-3'], 'B')).body.results).toEqual([{ id: 'sd-3', status: 'not_found' }]);
+    expect((await purge('bob', ['sd-3'])).body.results).toEqual([{ id: 'sd-3', status: 'not_found' }]);
     // A live row of alice's: not_owner.
     const p = await purge('bob', ['sd-1']);
     expect(p.body).toEqual({ results: [{ id: 'sd-1', status: 'error', error: { code: 'not_owner', message: expect.any(String) } }], purged: 0 });
     expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id = 'sd-1'")).rows[0].n).toBe(1);
-    expect((await admin("SELECT count(*)::int AS n FROM deleted_documents WHERE id = 'sd-ret-1'")).rows[0].n).toBe(1);
+    expect((await admin("SELECT count(*)::int AS n FROM deleted_documents WHERE id = 'sd-3'")).rows[0].n).toBe(1);
     expect((await admin("SELECT count(*)::int AS n FROM purged_ids")).rows[0].n).toBe(0);
   });
 
   it('purge removes the live row and every deleted copy, feeds purged = true, and later upserts are refused with purged', async () => {
-    // sd-2: one deleted copy plus a live row, both alice's.
-    const r = await purge('alice', ['sd-2', 'sd-ret-1', 'sd-none'], { 'idempotency-key': 'purge-1' });
+    // sd-2: one deleted copy plus a live row, both alice's. sd-3: a deleted copy only.
+    // sd-ret-1 was retracted, so nothing of it is left to purge.
+    const r = await purge('alice', ['sd-2', 'sd-3', 'sd-ret-1', 'sd-none'], { 'idempotency-key': 'purge-1' });
     expect(r.body).toEqual({
-      results: [{ id: 'sd-2', status: 'purged' }, { id: 'sd-ret-1', status: 'purged' }, { id: 'sd-none', status: 'not_found' }],
+      results: [{ id: 'sd-2', status: 'purged' }, { id: 'sd-3', status: 'purged' }, { id: 'sd-ret-1', status: 'not_found' }, { id: 'sd-none', status: 'not_found' }],
       purged: 2,
     });
     // A retried request replays instead of re-running.
-    const again = await purge('alice', ['sd-2', 'sd-ret-1', 'sd-none'], { 'idempotency-key': 'purge-1' });
+    const again = await purge('alice', ['sd-2', 'sd-3', 'sd-ret-1', 'sd-none'], { 'idempotency-key': 'purge-1' });
     expect([again.headers.get('idempotent-replay'), again.body.purged]).toEqual(['true', 2]);
 
-    expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id IN ('sd-2', 'sd-ret-1')")).rows[0].n).toBe(0);
-    expect((await admin("SELECT count(*)::int AS n FROM deleted_documents WHERE id IN ('sd-2', 'sd-ret-1')")).rows[0].n).toBe(0);
-    expect((await admin("SELECT id, purged_by FROM purged_ids ORDER BY id")).rows).toEqual([{ id: 'sd-2', purged_by: 'alice' }, { id: 'sd-ret-1', purged_by: 'alice' }]);
+    expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id IN ('sd-2', 'sd-3')")).rows[0].n).toBe(0);
+    expect((await admin("SELECT count(*)::int AS n FROM deleted_documents WHERE id IN ('sd-2', 'sd-3')")).rows[0].n).toBe(0);
+    expect((await admin("SELECT id, purged_by FROM purged_ids ORDER BY id")).rows).toEqual([{ id: 'sd-2', purged_by: 'alice' }, { id: 'sd-3', purged_by: 'alice' }]);
 
     const feed = (await pull('bob', 'B')).body.deletions.filter((d: { purged: boolean }) => d.purged);
-    expect(feed.map((d: { id: string }) => d.id).sort()).toEqual(['sd-2', 'sd-ret-1']);
+    expect(feed.map((d: { id: string }) => d.id).sort()).toEqual(['sd-2', 'sd-3']);
     expect(feed[0]).toMatchObject({ deleted_by: 'alice', reason: 'delete', purged: true });
     expect(await auditActions('sd-2')).toEqual(['insert', 'delete', 'insert', 'purge']);
 
@@ -206,6 +210,25 @@ describe.skipIf(!URL_)('soft delete, restore and purge (real Postgres + RLS)', (
     }
     expect((await admin("SELECT count(*)::int AS n FROM documents WHERE id = 'sd-2'")).rows[0].n).toBe(0);
     expect((await restore('alice', ['sd-2'])).body.results).toEqual([{ id: 'sd-2', status: 'not_found' }]);
+  });
+
+  it('purge after the id was reused by another user removes only the caller\'s deleted copy', async () => {
+    await upsert('alice', 'A', [doc('sd-reuse')]);
+    await del('alice', ['sd-reuse']);
+    await upsert('bob', 'B', [{ ...doc('sd-reuse'), content: 'bob reused this id' }]);
+    const feedBefore = (await pull('bob', 'B')).body.deletions.filter((d: { id: string; purged: boolean }) => d.id === 'sd-reuse' && d.purged).length;
+
+    const r = await purge('alice', ['sd-reuse']);
+    expect(r.body).toEqual({ results: [{ id: 'sd-reuse', status: 'purged_copies' }], purged: 1 });
+    expect((await admin("SELECT origin_user, content FROM documents WHERE id = 'sd-reuse'")).rows).toEqual([{ origin_user: 'bob', content: 'bob reused this id' }]);
+    expect((await admin("SELECT count(*)::int AS n FROM deleted_documents WHERE id = 'sd-reuse'")).rows[0].n).toBe(0);
+    expect((await admin("SELECT count(*)::int AS n FROM purged_ids WHERE id = 'sd-reuse'")).rows[0].n).toBe(0);
+    expect((await pull('bob', 'B')).body.deletions.filter((d: { id: string; purged: boolean }) => d.id === 'sd-reuse' && d.purged).length).toBe(feedBefore);
+    expect((await auditActions('sd-reuse')).at(-1)).toBe('purge');
+    // Bob can keep writing his document.
+    expect((await upsert('bob', 'B', [{ ...doc('sd-reuse'), content: 'still bob' }])).body.results[0].status).not.toBe('error');
+    // With no deleted copy left, a second purge by alice is refused.
+    expect((await purge('alice', ['sd-reuse'])).body.results[0]).toMatchObject({ status: 'error', error: { code: 'not_owner' } });
   });
 
   it('retention: rows older than the window are not listed or restorable, and the sweep removes every user\'s', async () => {
