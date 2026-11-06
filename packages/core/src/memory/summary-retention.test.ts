@@ -62,6 +62,18 @@ describe('session summary retention', () => {
     expect((await listMemories({ collection: C, limit: 50, include_archived: true })).map(m => m.id)).toContain(old);
   });
 
+  it('treats a summary stored under the configured name as yours after the server\'s username replaces it', async () => {
+    const { applyServerUsername, setSyncBackend } = await import('../sync/backend.js');
+    const mine = await summary('Old session stored under the configured name.');
+    applyServerUsername('jdoe');
+    try {
+      expect(await sweepSessionSummaries(NOW)).toBe(1);
+      expect(await archived(mine)).toEqual([true]);
+    } finally {
+      setSyncBackend(undefined);
+    }
+  });
+
   it('archives a chunked summary whole, and a second sweep changes nothing', async () => {
     const long = await summary(Array.from({ length: 120 }, (_, i) => `Step ${i}: the importer retried batch ${i}.`).join(' '));
     expect((await getDocumentsByFilter(C, { parent_id: long }, 100)).length).toBeGreaterThan(1);

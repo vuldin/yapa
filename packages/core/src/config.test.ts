@@ -62,3 +62,13 @@ describe('shared sync cycle', () => {
     expect(createConfig({ YAPA_HOOK_PULL_WINDOW_MS: '0' }).HOOK_PULL_WINDOW_MS).toBe(0);
   });
 });
+
+describe('session summary retention', () => {
+  it('defaults to 90 days, and only an explicit 0 keeps summaries forever', () => {
+    const days = (v?: string) => createConfig(v === undefined ? {} : { YAPA_SESSION_SUMMARY_RETENTION_DAYS: v }).SESSION_SUMMARY_RETENTION_DAYS;
+    expect(days()).toBe(90);
+    expect(days('30')).toBe(30);
+    expect(days('0')).toBe(0);
+    for (const bad of ['ninety', '-5', '1.5', '']) expect(days(bad)).toBe(90);
+  });
+});

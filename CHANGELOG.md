@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Features
-- **Old compaction summaries are archived.** Since 1.14.0 they stay out of recall and memory compaction, so nothing pruned them. The daily decay sweep now archives your own summaries older than `SESSION_SUMMARY_RETENTION_DAYS` (default 90; `0` keeps them forever), a chunked one whole. Teammates' summaries and read-only ones are left alone, and archived summaries stay reachable with `include_archived`.
+- **Old compaction summaries are archived.** Since 1.14.0 they stay out of recall and memory compaction, so nothing pruned them. The daily decay sweep now archives your own summaries older than `SESSION_SUMMARY_RETENTION_DAYS` (default 90; `0` keeps them forever), a chunked one whole. Teammates' summaries and read-only ones are left alone. Archived summaries stay reachable with `memory_list` `include_archived`, or with `memory_recall` `include_archived` plus `include_sessions`. Your summaries count as yours under the configured username too, after the sync service's username replaces it.
 
 ## 1.14.1 (2026-11-06)
 

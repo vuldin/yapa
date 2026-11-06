@@ -314,7 +314,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.15` |
 | `YAPA_SALIENCE_BOOST_MAX_DISTANCE` | Recall hits closer than this cosine distance count as a use and boost salience | `0.5` |
 | `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` | Max boosts per memory per UTC day | `3` |
-| `YAPA_SESSION_SUMMARY_RETENTION_DAYS` | Days your own compaction summaries are kept; the daily decay sweep archives older ones (still reachable with `include_archived`). `0` keeps them forever | `90` |
+| `YAPA_SESSION_SUMMARY_RETENTION_DAYS` | Days your own compaction summaries are kept; the daily decay sweep archives older ones (still reachable with `memory_list` `include_archived`, or `memory_recall` with `include_archived` and `include_sessions`). `0` keeps them forever | `90` |
 | `YAPA_TRAINING_PIPELINE` | Expose the 18 ML-ops tools (curation/buckets/training/eval/adapter) | `false` |
 | `YAPA_SYNC_ENABLED` | Enable remote sync | `false` |
 | `YAPA_SYNC_SERVICE_URL` | YAPA sync service URL (wins over the database URL) | _(none)_ |

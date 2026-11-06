@@ -315,7 +315,7 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     SALIENCE_DECAY_RATE: parseFloat(get(env, 'SALIENCE_DECAY_RATE', '0.98')),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, 'DELETED_RETENTION_DAYS', '30')) || 30),
-    SESSION_SUMMARY_RETENTION_DAYS: Math.max(0, Math.floor(Number(get(env, 'SESSION_SUMMARY_RETENTION_DAYS', '90'))) || 0),
+    SESSION_SUMMARY_RETENTION_DAYS: ((v: string) => (/^\d+$/.test(v.trim()) ? Number(v) : 90))(get(env, 'SESSION_SUMMARY_RETENTION_DAYS', '90')),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, 'SALIENCE_RANKING_WEIGHT', '0.15')),

@@ -419,6 +419,17 @@ export function applyServerUsername(username: string): void {
   setConfig({ ...c, USERNAME: username });
 }
 
+/** The names your documents may carry, lowercased: the effective username and the configured one it replaced. */
+export function ownUsernames(): string[] {
+  return [...new Set([getConfig().USERNAME, configuredUsername].filter((u): u is string => !!u).map(u => u.toLowerCase()))];
+}
+
+/** Whether a document's author is you, under either name. */
+export function isOwnAuthor(metadata: Record<string, any>): boolean {
+  const a = String(metadata.origin_user ?? metadata.username ?? '').toLowerCase();
+  return !!a && ownUsernames().includes(a);
+}
+
 /**
  * The effective username: the service's (fetched once per token, then
  * cached) or YAPA_USERNAME for backends without server identity. Fails open:

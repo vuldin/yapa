@@ -101,7 +101,7 @@ function createConfig(env = process.env) {
     OLLAMA_URL: get(env, "OLLAMA_URL", "http://localhost:11434"),
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
-    SESSION_SUMMARY_RETENTION_DAYS: Math.max(0, Math.floor(Number(get(env, "SESSION_SUMMARY_RETENTION_DAYS", "90"))) || 0),
+    SESSION_SUMMARY_RETENTION_DAYS: ((v) => /^\d+$/.test(v.trim()) ? Number(v) : 90)(get(env, "SESSION_SUMMARY_RETENTION_DAYS", "90")),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -1874,12 +1874,12 @@ function docLockPath(collection, id) {
 }
 async function withDocLock(collection, id, fn) {
   const path3 = docLockPath(collection, id);
-  const mine2 = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine2.some((h) => h.paths.has(path3))) return fn();
+  const mine = (held.getStore() ?? []).filter((h) => h.active);
+  if (mine.some((h) => h.paths.has(path3))) return fn();
   return withFileLock(path3, async () => {
     const me = { paths: /* @__PURE__ */ new Set([path3]), active: true };
     try {
-      return await held.run([...mine2, me], fn);
+      return await held.run([...mine, me], fn);
     } finally {
       me.active = false;
     }
@@ -3874,6 +3874,13 @@ function applyServerUsername(username) {
   configuredUsername = c.USERNAME;
   setConfig({ ...c, USERNAME: username });
 }
+function ownUsernames() {
+  return [...new Set([getConfig().USERNAME, configuredUsername].filter((u) => !!u).map((u) => u.toLowerCase()))];
+}
+function isOwnAuthor(metadata) {
+  const a = String(metadata.origin_user ?? metadata.username ?? "").toLowerCase();
+  return !!a && ownUsernames().includes(a);
+}
 async function resolveSyncUsername() {
   const b = await getSyncBackend();
   if (b?.identity) {
@@ -4363,13 +4370,13 @@ async function requireCoordination() {
     leaseAcquire: async (req) => (await pick(req.collection)).leaseAcquire(req),
     leaseHeartbeat: async (collection, session, keys) => {
       if (collection !== void 0) return (await pick(collection)).leaseHeartbeat(collection, session, keys);
-      const mine2 = await localCoordination().leaseHeartbeat(void 0, session);
-      if (!isSyncConfigured()) return mine2;
+      const mine = await localCoordination().leaseHeartbeat(void 0, session);
+      if (!isSyncConfigured()) return mine;
       try {
         const theirs = await (await serviceCoordination()).leaseHeartbeat(void 0, session);
-        return { renewed: [...mine2.renewed, ...theirs.renewed], lost: [] };
+        return { renewed: [...mine.renewed, ...theirs.renewed], lost: [] };
       } catch (e) {
-        if (mine2.renewed.length && isCoordinationUnavailable(e)) return { ...mine2, unreachable: e.message };
+        if (mine.renewed.length && isCoordinationUnavailable(e)) return { ...mine, unreachable: e.message };
         throw e;
       }
     },
@@ -4724,7 +4731,7 @@ var init_trash = __esm({
 
 // packages/core/src/memory/summary-retention.ts
 async function sweepSessionSummaries(now = Math.floor(Date.now() / 1e3)) {
-  const { SESSION_SUMMARY_RETENTION_DAYS: days, USERNAME: me } = getConfig();
+  const days = getConfig().SESSION_SUMMARY_RETENTION_DAYS;
   if (!days) return 0;
   const cutoff = now - days * DAY2;
   let n = 0;
@@ -4734,7 +4741,7 @@ async function sweepSessionSummaries(now = Math.floor(Date.now() / 1e3)) {
     for (const d of docs) {
       const m = d.metadata;
       if (!isSessionSummary(m) || m.archived === true || isReadOnlyDoc(m)) continue;
-      if (String(m.origin_user ?? m.username ?? "").toLowerCase() !== me.toLowerCase()) continue;
+      if (!isOwnAuthor(m)) continue;
       if (Number(m.created_at ?? now) > cutoff) continue;
       expired.add(String(m.parent_id ?? d.id));
     }
@@ -4755,6 +4762,7 @@ var init_summary_retention = __esm({
     init_config();
     init_store();
     init_syncable();
+    init_backend();
     init_archive();
     init_filters();
     DAY2 = 86400;
@@ -5490,12 +5498,12 @@ async function retractSharedCopies(backend, collection) {
   if (unchecked.length === 0) return 0;
   const me = getConfig().USERNAME;
   const remote = await backend.ownersByIds(unchecked.map((d) => d.id));
-  const mine2 = unchecked.filter((d) => {
+  const mine = unchecked.filter((d) => {
     const row = remote.get(d.id);
     const localCreated = Number(d.metadata.created_at);
     return row?.owner === me && (!d.metadata.origin_user || d.metadata.origin_user === me) && Number.isFinite(localCreated) && localCreated > 0 && Math.abs(row.createdAt - localCreated) <= 1;
   });
-  const removed = mine2.length > 0 ? await backend.delete(mine2.map((d) => d.id), "retract") : 0;
+  const removed = mine.length > 0 ? await backend.delete(mine.map((d) => d.id), "retract") : 0;
   if (removed > 0) process.stderr.write(`[yapa-sync] Removed ${removed} shared cop${removed === 1 ? "y" : "ies"} of docs now in ${collection}
 `);
   for (const d of unchecked) await writeIfUnchanged(collection, d, (cur) => ({ ...cur, remote_checked_at: versionOf(d) }));
@@ -5706,8 +5714,8 @@ function claimNote(task, claims, mySessions = [currentSession()]) {
   if (!claims) return task.metadata.claim_unshared ? "claim not shared yet" : "";
   const l = claims.get(task.id);
   if (l) {
-    const mine2 = mySessions.find((s) => s && s === l.holder.session);
-    return `claimed by ${describeHolder(l, void 0, mine2)}`;
+    const mine = mySessions.find((s) => s && s === l.holder.session);
+    return `claimed by ${describeHolder(l, void 0, mine)}`;
   }
   if (task.metadata.status === "in_progress") return task.metadata.claim_unshared ? "claim not shared yet" : "no live claim";
   return "";
@@ -6112,9 +6120,8 @@ var init_update2 = __esm({
 // packages/core/src/memory/sweep.ts
 async function staleFindings(collection, opts = {}) {
   const now = opts.now ?? Math.floor(Date.now() / 1e3);
-  const me = getConfig().USERNAME;
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY4 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY4 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
 }
 async function wholeText(collection, f) {
   if (!f.metadata.parent_id) return f.content;
@@ -6267,7 +6274,6 @@ async function findDoc2(collection, id) {
 }
 async function applySweep(collection, items, opts = {}, deps = {}) {
   const update = deps.updateMemory ?? updateMemory;
-  const me = getConfig().USERNAME;
   const closing = new Set(items.filter((i) => i.verdict !== "keep").map((i) => i.id));
   const held2 = await supersedingIds(collection);
   for (const it of items) {
@@ -6286,7 +6292,7 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
       it.skipped = "read-only";
       continue;
     }
-    if (!opts.allOwners && !mine(m, me)) {
+    if (!opts.allOwners && !isOwnAuthor(m)) {
       it.skipped = `recorded by ${author(m) || "someone else"}`;
       continue;
     }
@@ -6314,19 +6320,19 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   }
   return items;
 }
-var DAY4, list5, author, mine, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
+var DAY4, list5, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
     init_store();
     init_config();
     init_syncable();
+    init_backend();
     init_provider();
     init_update2();
     DAY4 = 86400;
     list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     author = (m) => String(m.origin_user ?? m.username ?? "");
-    mine = (m, me) => author(m).toLowerCase() === me.toLowerCase();
     isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
     SWEEP_PROMPT_VERSION = "v1";
     BATCH_ITEMS = 10;
@@ -6982,7 +6988,7 @@ async function removeCollection(name, opts = {}) {
     }
   }
   const me = getConfig().USERNAME;
-  const mine2 = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
+  const mine = (d) => !d.metadata.origin_user || d.metadata.origin_user === me;
   if (shared && syncOn && scope === "local") {
     const stuck = docs.filter((d) => d.metadata.is_synced === false && isRejectedUnchanged(d));
     if (stuck.length && !confirmed) {
@@ -7000,9 +7006,9 @@ async function removeCollection(name, opts = {}) {
   }
   if (shared && syncOn && scope === "everyone") {
     const real = docs.filter((d) => d.metadata.type !== "journal_draft");
-    const own = real.filter(mine2).map((d) => d.id);
+    const own = real.filter(mine).map((d) => d.id);
     await queueSyncDeletes(own, name);
-    await addLocalTombstones(real.filter((d) => !mine2(d)).map((d) => d.id));
+    await addLocalTombstones(real.filter((d) => !mine(d)).map((d) => d.id));
     result.deletedRemotely = own.length;
   }
   if (shared) {
@@ -8752,9 +8758,9 @@ async function pullFromRemote() {
   if (recovering) {
     try {
       const unfollowed2 = await getUnfollowedCollections();
-      const mine2 = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
+      const mine = (await backend.collectionsForUser()).filter((c) => isSyncableCollection(c) && !unfollowed2.has(c));
       const subs = await getSyncSubscriptions();
-      const add = mine2.filter((c) => !subs.includes(c));
+      const add = mine.filter((c) => !subs.includes(c));
       if (add.length) await updateSyncSubscriptions([...subs, ...add]);
     } catch (e) {
       process.stderr.write(`[yapa-sync] Recovery subscribe failed: ${e}
@@ -10919,6 +10925,7 @@ __export(src_exports, {
   isDetectionStale: () => isDetectionStale,
   isMemoryKind: () => isMemoryKind,
   isOpenTyped: () => isOpenTyped,
+  isOwnAuthor: () => isOwnAuthor,
   isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
   isRejectedUnchanged: () => isRejectedUnchanged,
@@ -10969,6 +10976,7 @@ __export(src_exports, {
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
   openWaits: () => openWaits,
+  ownUsernames: () => ownUsernames,
   ownerWaitsOn: () => ownerWaitsOn,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
@@ -11891,10 +11899,10 @@ async function keepLeasesAlive(input2) {
 }
 function presenceLines(leases, now, mySessions, me) {
   if (!leases.length) return [];
-  const mine2 = new Set(mySessions.filter(Boolean));
+  const mine = new Set(mySessions.filter(Boolean));
   const out = ["", "## Work in progress (leases)"];
   for (const l of leases.slice(0, 10)) {
-    const who2 = l.holder.user === me ? mine2.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
+    const who2 = l.holder.user === me ? mine.has(l.holder.session) ? "you (this session)" : `you (another session, ${l.holder.session})` : l.holder.user;
     const title = l.title ? ` ${l.title}` : "";
     out.push(`- **${l.key}**${title}: ${who2}, for ${relTime(Math.max(0, now - l.acquired_at))}, expires in ${relTime(Math.max(0, l.expires_at - now))}`);
   }
@@ -11932,12 +11940,12 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
     if (!all) return [];
     const { waiting: w, hidden } = fenceWaiting(all, collection);
     const items = [...w.decisions, ...w.questions, ...w.actions, ...w.blocked];
-    const mine2 = items.filter((i) => includesUser(i.for, user));
+    const mine = items.filter((i) => includesUser(i.for, user));
     const anyone = items.filter((i) => i.for.length === 0).length;
-    if (!mine2.length && !anyone && !hidden) return [];
+    if (!mine.length && !anyone && !hidden) return [];
     const out = ["", "## Waiting on you"];
-    for (const i of mine2.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
-    if (mine2.length > 8) out.push(`- _\u2026${mine2.length - 8} more (call \`waiting\`)_`);
+    for (const i of mine.slice(0, 8)) out.push(waitingLine(i, { collection: true }));
+    if (mine.length > 8) out.push(`- _\u2026${mine.length - 8} more (call \`waiting\`)_`);
     if (anyone) out.push(`- _${anyone} item(s) wait on anyone with the role (call \`waiting\`)_`);
     if (hidden) out.push(`- _${hidden} more in private collections, not listed in this shared scope (call \`waiting\` to see them)_`);
     out.push("Tell the user about these when relevant; record a choice with `memory_update` (status accepted), never only in chat.");

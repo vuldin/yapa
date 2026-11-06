@@ -1,6 +1,7 @@
 import { getConfig } from '../config.js';
 import { getDocumentsByFilter, listCollections, metadataDelta, patchDocuments } from '../store/index.js';
 import { isReadOnlyDoc } from '../sync/syncable.js';
+import { isOwnAuthor } from '../sync/backend.js';
 import { archivedMetadata } from './archive.js';
 import { isSessionSummary } from './filters.js';
 
@@ -12,7 +13,7 @@ const DAY = 86400;
  * Returns the number of documents archived.
  */
 export async function sweepSessionSummaries(now: number = Math.floor(Date.now() / 1000)): Promise<number> {
-  const { SESSION_SUMMARY_RETENTION_DAYS: days, USERNAME: me } = getConfig();
+  const days = getConfig().SESSION_SUMMARY_RETENTION_DAYS;
   if (!days) return 0;
   const cutoff = now - days * DAY;
   let n = 0;
@@ -22,7 +23,7 @@ export async function sweepSessionSummaries(now: number = Math.floor(Date.now() 
     for (const d of docs) {
       const m = d.metadata;
       if (!isSessionSummary(m) || m.archived === true || isReadOnlyDoc(m)) continue;
-      if (String(m.origin_user ?? m.username ?? '').toLowerCase() !== me.toLowerCase()) continue;
+      if (!isOwnAuthor(m)) continue;
       if (Number(m.created_at ?? now) > cutoff) continue;
       expired.add(String(m.parent_id ?? d.id));
     }
