@@ -8,8 +8,9 @@
  * @module @yapa/core/memory/sweep
  */
 import { getDocumentsByFilter, getDocumentsByIds, queryDocuments, type DocumentResult } from '../store/index.js';
-import { CHUNK_OVERLAP, getConfig } from '../config.js';
+import { CHUNK_OVERLAP } from '../config.js';
 import { isReadOnlyDoc } from '../sync/syncable.js';
+import { isOwnAuthor } from '../sync/backend.js';
 import { callCurationLLM } from '../curation/provider.js';
 import { updateMemory } from './update.js';
 
@@ -19,7 +20,6 @@ const list = (v: unknown): string[] =>
   (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
 
 const author = (m: Record<string, any>) => String(m.origin_user ?? m.username ?? '');
-const mine = (m: Record<string, any>, me: string) => author(m).toLowerCase() === me.toLowerCase();
 
 const isStale = (m: Record<string, any>) => m.archived !== true && (m.status ?? 'open') === 'open' && !m.disposition;
 
@@ -28,10 +28,9 @@ export async function staleFindings(
   collection: string, opts: { minAgeDays?: number; allOwners?: boolean; now?: number } = {},
 ): Promise<DocumentResult[]> {
   const now = opts.now ?? Math.floor(Date.now() / 1000);
-  const me = getConfig().USERNAME;
   const docs = await getDocumentsByFilter(collection, { type: 'memory', kind: 'finding' }, 5000).catch(() => []);
   return docs.filter(f => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY
-    && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || mine(f.metadata, me)));
+    && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
 }
 
 export const SWEEP_PROMPT_VERSION = 'v1';
@@ -257,7 +256,6 @@ export async function applySweep(
   collection: string, items: SweepItem[], opts: { allOwners?: boolean } = {}, deps: Partial<Pick<SweepDeps, 'updateMemory'>> = {},
 ): Promise<SweepItem[]> {
   const update = deps.updateMemory ?? updateMemory;
-  const me = getConfig().USERNAME;
   const closing = new Set(items.filter(i => i.verdict !== 'keep').map(i => i.id));
   const held = await supersedingIds(collection);
   for (const it of items) {
@@ -267,7 +265,7 @@ export async function applySweep(
     const m = doc?.metadata;
     if (!m || m.type !== 'memory' || m.kind !== 'finding' || !isStale(m)) { it.skipped = 'no longer an open finding'; continue; }
     if (isReadOnlyDoc(m)) { it.skipped = 'read-only'; continue; }
-    if (!opts.allOwners && !mine(m, me)) { it.skipped = `recorded by ${author(m) || 'someone else'}`; continue; }
+    if (!opts.allOwners && !isOwnAuthor(m)) { it.skipped = `recorded by ${author(m) || 'someone else'}`; continue; }
     if (it.verdict === 'superseded') {
       const n = it.superseded_by ? (await findDoc(collection, it.superseded_by))?.metadata : undefined;
       if (!n || !lasting(n) || closing.has(it.superseded_by!)) { it.skipped = 'its newer note is gone or being closed'; continue; }

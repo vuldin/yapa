@@ -136,6 +136,22 @@ describe('sweep safety', () => {
     expect((await applySweep(C, [{ id: target, verdict: 'progress', reason: '', content: '' }]))[0].skipped).toBe('a finding closed earlier was superseded by it');
   });
 
+  it('counts a finding stored under the configured name as yours after the server\'s username replaces it', async () => {
+    const C = 'project-sweep-rename';
+    const { applyServerUsername, setSyncBackend } = await import('../sync/backend.js');
+    const id = await finding(C, 'Tagged release 5.0 and published the notes.');
+    applyServerUsername('tdoe');
+    try {
+      expect((await staleFindings(C)).map(f => f.id)).toEqual([id]);
+      const [done] = await applySweep(C, [{ id, verdict: 'progress', reason: '', content: '' }]);
+      expect(done.applied).toBe(true);
+    } finally {
+      setSyncBackend(undefined);
+      const { setConfig, createConfig } = await import('../config.js');
+      setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_COMPACTION_THRESHOLD: '100000', YAPA_FINDINGS_CLEANUP_THRESHOLD: '3' }));
+    }
+  });
+
   it('sweeps only your own findings unless asked for everyone\'s', async () => {
     const C = 'project-sweep-team';
     const mineId = await finding(C, 'Pushed the TLS fix and reran the suite.');
