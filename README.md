@@ -69,7 +69,10 @@ yapa scope add-root ~/work               # its subfolders are projects
 yapa scope add-customer acme             # ~/work/acme uses customer-acme
 yapa scope map ~/notes/acme private-acme # this folder (and below) uses private-acme
 yapa scope unmap ~/notes/acme            # also: remove-root, remove-customer
+yapa scope records-elsewhere add private-acme  # its project keeps its own records
 ```
+
+**Projects with their own records.** A project that keeps its findings, decisions and questions in its own files can mark its collection with `yapa scope records-elsewhere add`. There, only what the project publishes with `yapa memory put --ref` is typed. Capture, `learned` items and other writes are stored as plain notes, so "Waiting on you" shows the project's items, not copies of them. See [Projects with their own records](docs/collections.md#projects-with-their-own-records).
 
 **New shared collections only come from project roots.** An agent can name any collection on a write. One that would create a new shared collection is refused unless the session's folder is under a project root, or is mapped to exactly that collection, and the refusal suggests a `private-` name. Shared collections that already exist here can be written from anywhere. With no project roots and no folder mapped to a shared collection, nothing new is shared.
 
@@ -132,7 +135,7 @@ The CLI ships with the plugin as `dist/yapa.mjs` (Claude Code keeps the plugin u
 |---|---|
 | `yapa scope …` | Show or change the folder rules; `yapa scope --cwd DIR --text` prints the collection a folder uses (for scripts) |
 | `yapa task list\|next\|claim\|release\|show` | Tasks and claims for scripts, as JSON (exit 0 done, 3 refused, 4 not shared) |
-| `yapa memory list\|put\|update\|sweep-findings` | Typed memories for scripts; `put --ref` publishes a record kept elsewhere |
+| `yapa memory list\|put\|update\|sweep-findings\|untype` | Typed memories for scripts; `put --ref` publishes a record kept elsewhere; `untype` turns earlier copies into notes |
 | `yapa waiting` | Decisions, questions and steps waiting on a person |
 | `yapa coord …` | Bare leases and counters for resources that aren't tasks |
 | `yapa capture status` | Whether the per-turn capture is working |

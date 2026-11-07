@@ -1,6 +1,6 @@
 # Configuration
 
-Folder rules (project roots, customers, folder → collection mappings) aren't options: they live in one file on this machine, edited with `yapa scope`. See [Collections and folder rules](collections.md#folder-rules).
+Folder rules (project roots, customers, folder → collection mappings, collections that keep their records elsewhere) aren't options: they live in one file on this machine, edited with `yapa scope`. See [Collections and folder rules](collections.md#folder-rules).
 
 ## Claude Code plugin options
 

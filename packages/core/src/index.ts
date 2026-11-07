@@ -99,6 +99,7 @@ export * from './memory/owners.js';
 export * from './memory/known-users.js';
 export * from './memory/update.js';
 export * from './memory/external.js';
+export * from './memory/records-elsewhere.js';
 export * from './memory/links.js';
 export * from './tasks/waiting.js';
 export * from './tasks/close.js';

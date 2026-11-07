@@ -7,6 +7,7 @@ import { assertWritable } from '../sync/syncable.js';
 import { normalizeTyped, type TypedFields } from './kinds.js';
 import { linkMemoryToTasks } from './links.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
+import { typedForCollection } from './records-elsewhere.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -45,6 +46,11 @@ export interface ConflictRecord {
 export interface StoreMemoryResult {
   ids: string[];
   potential_conflicts: ConflictRecord[];
+  /**
+   * The kind was dropped: the collection keeps its records elsewhere and
+   * this memory has no external_ref, so it was stored as a note.
+   */
+  kept_as_note?: boolean;
 }
 
 interface ConflictCandidate {
@@ -120,7 +126,9 @@ export async function storeMemory(
 ): Promise<StoreMemoryResult> {
   // A collection merged away here is followed, never recreated.
   const { collection } = await resolveWriteCollection(options.collection ?? 'global');
-  const typed = options.typed ? normalizeTyped(options.typed) : {};
+  const gated = typedForCollection(collection, options.typed ? normalizeTyped(options.typed) : {});
+  const typed = gated.typed;
+  const note = gated.keptAsNote ? { kept_as_note: true } : {};
   await getOrCreateCollection(collection);
   // Superseding archives the old doc: refuse before storing anything when
   // the remote owns it. `read_only` itself is set only by the remote.
@@ -159,7 +167,7 @@ export async function storeMemory(
     await addDocument(collection, id, content, metadata);
     if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
     if (typed.task_ids?.length) await linkMemoryToTasks(id, typed.task_ids);
-    return { ids: [id], potential_conflicts };
+    return { ids: [id], potential_conflicts, ...note };
   }
 
   // Multi-chunk: batch insert
@@ -191,5 +199,5 @@ export async function storeMemory(
   await addDocumentsBatch(collection, docs);
   if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
   if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
-  return { ids: docs.map(d => d.id), potential_conflicts };
+  return { ids: docs.map(d => d.id), potential_conflicts, ...note };
 }

@@ -182,6 +182,24 @@ describe('registered tools over the local store', () => {
     expect((await call('memory_update', { id: 'mem-nope', status: 'accepted' })).isError).toBe(true);
   });
 
+  it('in a records-elsewhere collection: memory_store keeps a kind as a note, the scope tool marks it, decision_needed is refused', async () => {
+    const marked = await call('scope', { action: 'add_records_elsewhere', collection: 'private-recs' });
+    expect(marked.content[0].text).toMatch(/^private-recs now keeps its records elsewhere/);
+    const stored = await call('memory_store', { content: 'the recs gateway caps at 4 MB', collection: 'private-recs', kind: 'finding' });
+    expect(stored.content[0].text).toMatch(/^Stored memory: mem-\S+\nKept as a note, without the kind finding: this collection keeps its records/);
+    const id = stored.content[0].text.match(/(mem-\S+)/)[1];
+    const upd = await call('memory_update', { id, kind: 'finding' });
+    expect(upd.isError).toBe(true);
+    expect(upd.content[0].text).toMatch(/^Refused: giving .* a kind in private-recs/);
+    const task = (await call('task_create', { title: 'recs rollout', collection: 'private-recs' })).content[0].text.match(/(tester-\d+)/)[1];
+    const dec = await call('task_update', { id: task, decision_needed: { question: 'Ship?', options: ['yes', 'no'] } });
+    expect(dec.isError).toBe(true);
+    expect(dec.content[0].text).toMatch(/set the task to blocked/);
+    const done = await call('task_complete', { id: task, learned: [{ content: 'recs needs TLS 1.3', kind: 'limitation' }] });
+    expect(done.content[0].text).toMatch(/Kept mem-\S+ as a note, without a kind/);
+    await call('scope', { action: 'remove_records_elsewhere', collection: 'private-recs' });
+  });
+
   it('write tools note the collection this session last wrote to, for the status line', async () => {
     const saved = process.env.CLAUDE_CODE_SESSION_ID;
     process.env.CLAUDE_CODE_SESSION_ID = 'sess-lw';

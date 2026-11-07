@@ -152,7 +152,8 @@ export async function isDetectionStale(d: CollectionDetection): Promise<boolean>
   return !!d.ambiguous?.some(n => Object.hasOwn(redirects, n));
 }
 
-export type ScopeAction = 'show' | 'add_root' | 'remove_root' | 'add_customer' | 'remove_customer' | 'map' | 'unmap';
+export type ScopeAction = 'show' | 'add_root' | 'remove_root' | 'add_customer' | 'remove_customer' | 'map' | 'unmap'
+  | 'add_records_elsewhere' | 'remove_records_elsewhere';
 
 /**
  * The scope tools' shared body (MCP `scope`, DSH `yapa_scope`, `yapa scope`):
@@ -179,11 +180,13 @@ export async function runScopeAction(
   };
   const edit: ScopeEdit = a.action === 'add_customer' || a.action === 'remove_customer'
     ? { op: a.action, name: need(a.name, 'a folder name (name)') }
-    : a.action === 'map'
+    : a.action === 'add_records_elsewhere' || a.action === 'remove_records_elsewhere'
+      ? { op: a.action, collection: need(a.collection, 'a collection') }
+      : a.action === 'map'
       ? { op: 'map', dir: need(a.dir, 'a folder (dir)'), collection: need(a.collection, 'a collection') }
       : { op: a.action, dir: need(a.dir, 'a folder (dir)') };
   const r = await editScopeSettings(edit, { base: folder });
-  const target = 'dir' in edit ? scopePath(edit.dir, folder) : edit.name;
+  const target = 'dir' in edit ? scopePath(edit.dir, folder) : 'name' in edit ? edit.name : edit.collection.trim();
   const done: Record<Exclude<ScopeAction, 'show'>, [string, string]> = {
     add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
     remove_root: [`Removed project root ${target}.`, `${target} was not a project root.`],
@@ -191,6 +194,11 @@ export async function runScopeAction(
     remove_customer: [`${target} is no longer a customer.`, `${target} was not a customer.`],
     map: [`Mapped ${target} → ${edit.op === 'map' ? edit.collection.trim() : ''}.`, `${target} was already mapped to ${edit.op === 'map' ? edit.collection.trim() : ''}.`],
     unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`],
+    add_records_elsewhere: [
+      `${target} now keeps its records elsewhere: only memories its project publishes with an external ref (yapa memory put --ref) are typed there, and everything else is stored as a note. Typed copies made before now stay typed until \`yapa memory untype --collection ${target}\` (try --dry-run first).`,
+      `${target} already keeps its records elsewhere.`,
+    ],
+    remove_records_elsewhere: [`${target} no longer keeps its records elsewhere: typed memories are stored there as usual.`, `${target} was not marked as keeping its records elsewhere.`],
   };
   const lines = [done[a.action][r.changed ? 0 : 1]];
   if (r.warning) lines.push(`⚠ ${r.warning}`);

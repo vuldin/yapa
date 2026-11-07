@@ -16,6 +16,8 @@ import { getDocumentsByIds, listCollections } from '../store/index.js';
 import { isOpenTyped, normalizeTyped, type TypedFields } from '../memory/kinds.js';
 import { storeMemory } from '../memory/store.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
+import { recordsElsewhere } from '../scope-file.js';
+import { KEPT_AS_NOTE_REASON, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
 import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
 
@@ -47,6 +49,14 @@ export interface DecisionNeeded {
 export interface Recorded {
   memories: string[];
   follow_ups: string[];
+  /** Learned items stored as notes: the collection keeps its records elsewhere. */
+  kept_as_notes?: string[];
+}
+
+/** The reply sentence for learned items stored as notes (empty if none). */
+export function keptAsNotesLine(r: Recorded | undefined): string {
+  const ids = r?.kept_as_notes ?? [];
+  return ids.length ? `Kept ${ids.join(', ')} as ${ids.length === 1 ? 'a note' : 'notes'}, without a kind: ${KEPT_AS_NOTE_REASON}.` : '';
 }
 
 const list = (v: unknown): string[] =>
@@ -85,7 +95,9 @@ export async function recordForTask(
       tags,
       typed: { ...typed, task_ids: [...new Set([task.id, ...(typed.task_ids ?? [])])] },
     });
-    out.memories.push(r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, '') : r.ids[0]);
+    const id = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, '') : r.ids[0];
+    out.memories.push(id);
+    if (r.kept_as_note) (out.kept_as_notes ??= []).push(id);
   }
   for (const f of input.follow_ups ?? []) {
     if (!f.title?.trim()) continue;
@@ -108,6 +120,7 @@ export async function requestDecision(
   const task = await getTask(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error('decision_needed needs a question');
+  if (recordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, 'decision_needed (a YAPA decision the task waits on)', 'set the task to blocked with a blocked_reason that names the record');
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join('\n\n');
   const typed = normalizeTyped({
     kind: 'decision', status: 'needed', options: d.options, task_ids: [task.id],

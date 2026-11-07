@@ -19,6 +19,8 @@ Which collection a session uses is decided by its folder, from three rules kept 
 - **Customers:** folder names under a root that are customers.
 - **Folder mappings:** a folder and everything below it uses one named collection, ahead of the roots. The longest matching folder wins. This is how a folder gets a private collection (see [Private collections](#private-collections)).
 
+The same file also lists the collections whose project [keeps its records elsewhere](#projects-with-their-own-records).
+
 **New shared collections only come from project roots.** A write through the tools (`memory_store`, `memory_update`, `task_create`, `journal_append`, `journal_consolidate`, `compaction_apply`, `collection_create`, follow-ups that name a collection, `yapa memory put`) that would create a new shared collection is refused unless the session's folder is at or under a project root, or is mapped to exactly that collection. The refusal suggests a `private-` name. Writes to shared collections that already exist here work from anywhere, and so does following one (`sync subscribe`). With no project roots and no folder mapped to a shared collection, no new shared collection is created anywhere. The session's folder is the Claude Code project folder (`CLAUDE_PROJECT_DIR`), the DSH session's folder, or the CLI's current folder.
 
 Edit the rules with `yapa scope`, or the `scope` tool (`yapa_scope` in DSH), which the agent uses only when you ask it to:
@@ -30,6 +32,8 @@ yapa scope remove-root ~/work
 yapa scope add-customer acme             # ~/work/acme uses customer-acme
 yapa scope map ~/notes/acme private-acme # this folder (and below) uses private-acme
 yapa scope unmap ~/notes/acme
+yapa scope records-elsewhere add private-acme     # see "Projects with their own records"
+yapa scope records-elsewhere remove private-acme
 ```
 
 **Upgrading from 1.15 or earlier:** the folder rules used to be the `project_roots`, `customers` and `collection_map` options (`YAPA_PROJECT_ROOTS`, `YAPA_CUSTOMERS`, `YAPA_COLLECTION_MAP`; `projectRoots`, `customers`, `collectionMap` in DSH). The first YAPA process after the update moves them into the file, once, while it doesn't exist yet. After that the old options are ignored, and YAPA warns on stderr until you remove them. The plugin no longer declares them, so `/plugin` can't: delete `project_roots`, `customers` and `collection_map` from `pluginConfigs["yapa@yapa"].options` in `~/.claude/settings.json` (or the `-e YAPA_*` values of a `claude mcp add` install, or the DSH settings). Check the result with `yapa scope list`.
@@ -37,6 +41,29 @@ yapa scope unmap ~/notes/acme
 A relative folder resolves against the current folder. In the file itself, folders must be absolute or start with `~`. If the file can't be read or isn't valid, every folder is `global` until it's fixed (YAPA says so on stderr), and `yapa scope` refuses to edit it.
 
 `yapa scope [--cwd DIR]` prints the collection YAPA uses for a folder as JSON, `{collection, local_only, mapped}`, or with `--text` as `private-acme (local only)`. A project's own scripts should ask it rather than name a collection themselves, so the folder's collection is set in one place. A script that must stay private can refuse to run unless `local_only` is true.
+
+## Projects with their own records
+
+Some projects keep their findings, decisions and questions as files in their own repo, and treat those files as the record. YAPA's per-turn capture doesn't read the project's instructions, so without this setting it keeps storing typed copies of the same things. Those copies then show in "Waiting on you" and the findings backlog, and an answer given there never reaches the project's files.
+
+Mark the collection: `yapa scope records-elsewhere add private-acme` (or ask the agent, which uses the `scope` tool's `add_records_elsewhere`). In a marked collection, a memory is typed only when it carries an external ref, which is what `yapa memory put --ref` gives it. Everything else is stored as a plain note, task links kept:
+
+- **Per-turn capture** stores notes. Dedupe and recall work as before.
+- **`learned` items** on `task_complete` and `task_update` are stored as notes, and the reply lists them.
+- **`memory_store` with a kind** stores a note, and the reply says the kind was dropped and why.
+- **`memory_update`** refuses to give an untyped memory a kind. Status changes on published memories still work, so a person's answer is recorded as usual.
+- **`decision_needed`** on `task_update` is refused: record the decision in the project's files, then set the task to `blocked` with a reason.
+
+So `waiting`, session start's "Waiting on you" and the findings backlog show only what the project published there. The follow-through after each turn still settles those: when you answer a published question in a session, its status and a dated note are recorded on the memory.
+
+The project's side of the contract:
+
+1. Publish each item that waits on a person with `yapa memory put --collection C --ref <prefix>:<id>`, with a kind, status and owner. Putting the same ref again updates it in place, so the export can run after every change.
+2. When an item is settled in the project's files, put it again with its new status.
+3. Read answers back with `yapa memory list --collection C --kind question` (or `decision`): an item answered in YAPA has its status and the dated note. Copy the answer into the record. Don't put the old status again over an answer recorded in YAPA; report it until the record has it.
+4. Get the collection from `yapa scope --cwd DIR --text`, never a hard-coded name.
+
+**Cleaning up earlier copies.** Marking a collection doesn't change what's already stored. `yapa memory untype --collection private-acme --dry-run` lists your typed memories there without an external ref, with counts by kind. Without `--dry-run` it turns them into notes: kind, status, owner and the kind's fields are dropped, task links stay, and each gets a dated line saying why. A task that waited on one of them no longer does. Published memories, archived ones and teammates' are left alone. The command refuses a collection that isn't marked.
 
 ## Private collections
 

@@ -58,7 +58,7 @@ describe('resolveConfig', () => {
       expect(r).not.toHaveProperty('collectionMap');
       expect(r).not.toHaveProperty('projectRoots');
       expect(JSON.parse(readFileSync(process.env.YAPA_SCOPE_FILE, 'utf8'))).toEqual({
-        project_roots: ['/srv'], customers: [], collection_map: { '/srv/acme': 'private-acme' },
+        project_roots: ['/srv'], customers: [], collection_map: { '/srv/acme': 'private-acme' }, records_elsewhere: [],
       });
       resolveConfig({ projectRoots: ['/other'] });
       expect(JSON.parse(readFileSync(process.env.YAPA_SCOPE_FILE, 'utf8')).project_roots).toEqual(['/srv']);

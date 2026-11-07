@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import {
   getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings, applySweep, type SweepItem, type SweepResult,
   recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, SharedCollectionNotAllowedError, redirectNote, type TypedFields,
+  RecordsElsewhereError, untypeCollection,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -19,6 +20,7 @@ export const MEMORY_USAGE =
   '       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n' +
   '       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n' +
   '       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n' +
+  '       yapa memory untype --collection C [--dry-run]\n' +
   '       yapa waiting       [--collection C] [--for U | --everyone]\n' +
   'Typed fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n' +
   '  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n' +
@@ -26,6 +28,8 @@ export const MEMORY_USAGE =
   'sweep-findings asks the curation model which of your open findings older than --min-age-days (default 2) are\n' +
   '  only progress notes or superseded by a newer note, and lists them (--save FILE keeps the list). --apply --from FILE\n' +
   '  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\n' +
+  'untype turns your typed memories without an external ref (--ref) into notes, in a collection marked as keeping its\n' +
+  '  records elsewhere (yapa scope records-elsewhere add C): copies made before it was marked. --dry-run lists them.\n' +
   'Prints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n';
 
 export interface MemoryCliResult {
@@ -222,6 +226,19 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         const failed = r.items.filter(i => i.error).length;
         return { exit: failed && failed === r.items.length ? 1 : 0, json: { ok: true, ...r }, text: lines.join('\n') };
       }
+      case 'untype': {
+        const collection = flag(args, '--collection');
+        if (!collection) throw new UsageError('--collection is required');
+        const dryRun = args.includes('--dry-run');
+        const r = await untypeCollection(collection, { dryRun });
+        if (!dryRun && r.items.length) recordLastWrite(collection);
+        const kinds = Object.entries(r.by_kind).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ');
+        const head = `${r.items.length} typed memor${r.items.length === 1 ? 'y' : 'ies'} without an external ref in ${collection}${kinds ? ` (${kinds})` : ''}`
+          + (dryRun ? ': dry run, nothing changed; run again without --dry-run to keep them as notes' : r.items.length ? ': kept as notes now' : '')
+          + (r.others ? `. ${r.others} of someone else's left as they are` : '');
+        const lines = [head, ...(dryRun ? r.items.map(i => `- ${i.id} [${i.kind}${i.status ? `, ${i.status}` : ''}] ${i.content.replace(/\s+/g, ' ').slice(0, 120)}`) : [])];
+        return { exit: 0, json: { ok: true, ...r }, text: lines.join('\n') };
+      }
       default:
         throw new UsageError(`unknown command\n${MEMORY_USAGE}`);
     }
@@ -245,6 +262,7 @@ function fail(what: string, e: unknown): MemoryCliResult {
   const usage = e instanceof UsageError || e instanceof TypedMemoryError;
   const message = e instanceof Error ? e.message : String(e);
   const code = e instanceof MemoryNotFoundError ? 'not_found' : e instanceof SharedCollectionNotAllowedError ? e.code : undefined;
+  if (e instanceof RecordsElsewhereError) return { exit: 3, json: { ok: false, refused: true, error: message, code: e.code }, text: `${what}: ${message}` };
   if (e instanceof SharedCollectionNotAllowedError) return { exit: 3, json: { ok: false, refused: true, error: message, code }, text: `${what}: ${message}` };
   return { exit: usage ? 2 : 1, json: { ok: false, error: message, ...(code ? { code } : {}) }, text: `${what}: ${message}` };
 }

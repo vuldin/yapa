@@ -43,6 +43,18 @@ describe('yapa scope', () => {
     expect((await runScope(['remove-root', 'more'], dir)).text).toMatch(/^Removed project root/);
   });
 
+  it('marks and unmarks a collection that keeps its records elsewhere', async () => {
+    let r = await runScope(['records-elsewhere', 'add', 'private-acme'], dir);
+    expect(r.exit).toBe(0);
+    expect(r.text).toMatch(/^private-acme now keeps its records elsewhere/);
+    expect(r.json).toMatchObject({ records_elsewhere: ['private-acme'] });
+    expect((await runScope(['list'], dir)).text).toMatch(/records_elsewhere: private-acme/);
+    r = await runScope(['records-elsewhere', 'remove', 'private-acme'], dir);
+    expect(r.json).toMatchObject({ records_elsewhere: [] });
+    expect((await runScope(['records-elsewhere', 'frob', 'x'], dir)).exit).toBe(2);
+    expect((await runScope(['records-elsewhere', 'add'], dir)).text).toMatch(/needs a collection/);
+  });
+
   it('exits non-zero on a bad subcommand or a missing argument', async () => {
     expect((await runScope(['frobnicate'])).exit).toBe(2);
     const r = await runScope(['map', '/x']);

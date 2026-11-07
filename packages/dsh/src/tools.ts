@@ -35,6 +35,8 @@ import {
   assertMayCreateCollection,
   sessionFolder,
   runScopeAction,
+  keptAsNotesLine,
+  KEPT_AS_NOTE_REASON,
   redirectNote,
   parseRelativeDate,
   recallMemory,
@@ -116,6 +118,7 @@ const writeTarget = (name: string, exec: ExecLike) => resolveWriteCollection(nam
 const closeSummary = (r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }) => [
   r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(', ')}.` : '',
   r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(', ')}.` : '',
+  keptAsNotesLine(r.recorded),
   r.nudge ?? '',
 ].filter(Boolean).join('\n');
 const pickTyped = (args: Record<string, any>) =>
@@ -281,6 +284,7 @@ export function registerTools(ctx: Context): void {
           ids: { type: 'array', required: true, items: { type: 'string' } },
           label: { type: 'string' },
           redirect: { type: 'string' },
+          kept_as_note: { type: 'string' },
           conflicts: {
             type: 'array',
             items: {
@@ -299,6 +303,7 @@ export function registerTools(ctx: Context): void {
       render: (_args, v) => {
         const lines = [`Stored memory: ${v.ids.join(', ')}${v.label ? ` ${v.label}` : ''}`];
         if (v.redirect) lines.push(v.redirect);
+        if (v.kept_as_note) lines.push(v.kept_as_note);
         if (v.conflicts?.length) {
           lines.push('', `⚠ Potential conflicts (${v.conflicts.length}):`);
           for (const c of v.conflicts) {
@@ -322,8 +327,9 @@ export function registerTools(ctx: Context): void {
       });
       return {
         ids: result.ids,
-        ...(typed.kind ? { label: typedLabel({ status: undefined, ...typed }) } : {}),
+        ...(typed.kind && !result.kept_as_note ? { label: typedLabel({ status: undefined, ...typed }) } : {}),
         ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}),
+        ...(result.kept_as_note ? { kept_as_note: `Kept as a note, without the kind ${typed.kind}: ${KEPT_AS_NOTE_REASON}. Record it in the project's own records if it matters there.` } : {}),
         conflicts: result.potential_conflicts.map(c => ({
           id: c.id, distance: c.distance, salience: c.salience, content: c.content,
         })),
@@ -1175,14 +1181,16 @@ export function registerTools(ctx: Context): void {
     description:
       'This machine\'s folder rules, kept in one file in YAPA\'s state folder: project roots (folders whose subfolders are '
       + 'projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), '
-      + 'customer folder names, and folder → collection mappings (checked first; how a folder gets a private-* collection). '
+      + 'customer folder names, folder → collection mappings (checked first; how a folder gets a private-* collection), and '
+      + 'collections that keep their records elsewhere (the project\'s own files hold its findings, decisions and questions: there '
+      + 'only what it publishes with an external ref is typed, and the rest is stored as notes). '
       + '`show` lists them and what they mean for this session\'s folder. Change them ONLY when the user explicitly asks; never '
       + 'to get past a refused write. Changes apply right away.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['show', 'add_root', 'remove_root', 'add_customer', 'remove_customer', 'map', 'unmap'] },
+      action: { type: 'string', required: true, enum: ['show', 'add_root', 'remove_root', 'add_customer', 'remove_customer', 'map', 'unmap', 'add_records_elsewhere', 'remove_records_elsewhere'] },
       dir: { type: 'string', description: 'Folder for add_root/remove_root/map/unmap (absolute, ~, or relative to this session\'s folder)' },
       name: { type: 'string', description: 'Customer folder name for add_customer/remove_customer' },
-      collection: { type: 'string', description: 'Collection for map' },
+      collection: { type: 'string', description: 'Collection for map, add_records_elsewhere and remove_records_elsewhere' },
     },
     output: {
       schema: {
