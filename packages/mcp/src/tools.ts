@@ -91,6 +91,9 @@ import {
   checkFollowUpCollections,
   sessionFolder,
   runScopeAction,
+  keptAsNotesLine,
+  KEPT_AS_NOTE_REASON,
+  RecordsElsewhereError,
   redirectNote,
   removeCollection,
   removeDependency,
@@ -192,6 +195,7 @@ function closeText(r: { recorded?: { memories: string[]; follow_ups: string[] };
   const parts: string[] = [];
   if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(', ')}.`);
   if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(', ')}.`);
+  if (keptAsNotesLine(r.recorded)) parts.push(keptAsNotesLine(r.recorded));
   if (r.nudge) parts.push(r.nudge);
   return parts.join('\n');
 }
@@ -202,7 +206,7 @@ const writeTarget = (name: string) => resolveWriteCollection(name, { folder: ses
 const checkFollowUps = (followUps: Array<{ title: string; collection?: string }> | undefined) => checkFollowUpCollections(followUps, sessionFolder());
 
 function typedError(e: unknown) {
-  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {
+  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError) {
     return { content: [{ type: 'text' as const, text: e.message }], isError: true };
   }
   throw e;
@@ -254,8 +258,9 @@ export function registerTools(server: McpServer): void {
       } catch (e) {
         return typedError(e);
       }
-      const label = typed.kind ? ` ${typedLabel({ status: undefined, ...typed })}` : '';
+      const label = typed.kind && !result.kept_as_note ? ` ${typedLabel({ status: undefined, ...typed })}` : '';
       const lines = [`Stored memory: ${result.ids.join(', ')}${label}`];
+      if (result.kept_as_note) lines.push(`Kept as a note, without the kind ${typed.kind}: ${KEPT_AS_NOTE_REASON}. Record it in the project's own records if it matters there.`);
       if (target.redirectedFrom) lines.push(redirectNote(target));
       if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
@@ -1462,12 +1467,12 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'scope',
-    'This machine\'s folder rules, kept in one file in YAPA\'s state folder: project roots (folders whose subfolders are projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), customer folder names, and folder → collection mappings (checked first; how a folder gets a private-* collection). `show` lists them and what they mean for this session\'s folder. Change them ONLY when the user explicitly asks (for example "allow ~/work to hold shared projects"); never to get past a refused write. Changes apply right away.',
+    'This machine\'s folder rules, kept in one file in YAPA\'s state folder: project roots (folders whose subfolders are projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), customer folder names, folder → collection mappings (checked first; how a folder gets a private-* collection), and collections that keep their records elsewhere (the project\'s own files hold its findings, decisions and questions: there only what it publishes with an external ref is typed, and the rest is stored as notes). `show` lists them and what they mean for this session\'s folder. Change them ONLY when the user explicitly asks (for example "allow ~/work to hold shared projects"); never to get past a refused write. Changes apply right away.',
     {
-      action: z.enum(['show', 'add_root', 'remove_root', 'add_customer', 'remove_customer', 'map', 'unmap']),
+      action: z.enum(['show', 'add_root', 'remove_root', 'add_customer', 'remove_customer', 'map', 'unmap', 'add_records_elsewhere', 'remove_records_elsewhere']),
       dir: z.string().optional().describe('Folder for add_root/remove_root/map/unmap (absolute, ~, or relative to this session\'s folder)'),
       name: z.string().optional().describe('Customer folder name for add_customer/remove_customer'),
-      collection: z.string().optional().describe('Collection for map'),
+      collection: z.string().optional().describe('Collection for map, add_records_elsewhere and remove_records_elsewhere'),
     },
     async (args) => {
       const r = await runScopeAction(args, sessionFolder());

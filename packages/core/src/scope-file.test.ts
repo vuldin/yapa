@@ -36,7 +36,7 @@ beforeEach(() => {
 
 describe('the scope file', () => {
   it('is empty when missing, and edits create it with tidy, sorted entries', async () => {
-    expect(readScopeSettings()).toEqual({ project_roots: [], customers: [], collection_map: {} });
+    expect(readScopeSettings()).toEqual({ project_roots: [], customers: [], collection_map: {}, records_elsewhere: [] });
     await editScopeSettings({ op: 'add_root', dir: '~/work/' });
     await editScopeSettings({ op: 'add_root', dir: 'sub/../projects', }, { base: '/srv' });
     await editScopeSettings({ op: 'add_customer', name: ' globex ' });
@@ -46,6 +46,7 @@ describe('the scope file', () => {
       project_roots: [`${homedir()}/work`, '/srv/projects'].sort(),
       customers: ['globex'],
       collection_map: { '/srv/acme': 'private-acme' },
+      records_elsewhere: [],
     });
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(readScopeSettings());
   });
@@ -68,11 +69,17 @@ describe('the scope file', () => {
 
   it('treats an invalid file as no rules when reading, and refuses to edit it', async () => {
     writeFileSync(file, '{"project_roots": "/srv"');
-    expect(readScopeSettings()).toEqual({ project_roots: [], customers: [], collection_map: {} });
+    expect(readScopeSettings()).toEqual({ project_roots: [], customers: [], collection_map: {}, records_elsewhere: [] });
     expect(() => readScopeSettings({ strict: true })).toThrow(ScopeFileError);
     await expect(editScopeSettings({ op: 'add_root', dir: '/srv' })).rejects.toThrow(/not valid JSON/);
     writeFileSync(file, JSON.stringify({ project_roots: ['relative/dir'] }));
     expect(() => readScopeSettings({ strict: true })).toThrow(/must be an absolute path/);
+    writeFileSync(file, JSON.stringify({ records_elsewhere: 'private-a' }));
+    expect(() => readScopeSettings({ strict: true })).toThrow(/"records_elsewhere" must be a list/);
+    writeFileSync(file, JSON.stringify({ records_elsewhere: ['no spaces allowed'] }));
+    expect(() => readScopeSettings({ strict: true })).toThrow(/in records_elsewhere is not a valid collection name/);
+    writeFileSync(file, JSON.stringify({ records_elsewhere: ['private-b', ' private-a', 'private-b'] }));
+    expect(readScopeSettings({ strict: true }).records_elsewhere).toEqual(['private-a', 'private-b']);
   });
 
   it('refuses invalid names, and warns about a mapped name that looks private but syncs', async () => {
@@ -170,6 +177,7 @@ describe('moving the old options into the scope file', () => {
         project_roots: [`${homedir()}/work`, '/srv/projects'].sort(),
         customers: ['acme', 'globex'],
         collection_map: { [`${homedir()}/work/acme`]: 'private-acme', '/srv/a:b,c': 'private-ab' },
+        records_elsewhere: [],
       });
       const said = err.mock.calls.map(c => String(c[0])).join('');
       expect(said).toMatch(/Moved your folder rules .* into .*scope-\d+\.json/);
@@ -184,7 +192,7 @@ describe('moving the old options into the scope file', () => {
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       expect(importLegacyScope({ project_roots: ['/srv/old'], collection_map: ['/srv/old/a=private-a'] })).toBe(false);
-      expect(readScopeSettings()).toEqual({ project_roots: ['/srv/kept'], customers: [], collection_map: {} });
+      expect(readScopeSettings()).toEqual({ project_roots: ['/srv/kept'], customers: [], collection_map: {}, records_elsewhere: [] });
       expect(err.mock.calls.map(c => String(c[0])).join('')).toMatch(/still set but no longer read/);
     } finally {
       err.mockRestore();

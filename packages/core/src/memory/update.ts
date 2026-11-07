@@ -14,6 +14,7 @@ import { assertWritable } from '../sync/syncable.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { normalizeTyped, type TypedFields } from './kinds.js';
 import { linkMemoryToTasks } from './links.js';
+import { assertMayType } from './records-elsewhere.js';
 
 export interface MemoryUpdate extends TypedFields {
   /** Appended to the memory's text as "<date> <user>: <note>". */
@@ -59,6 +60,7 @@ export async function updateMemory(id: string, patch: MemoryUpdate, collection?:
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
   const typed = normalizeTyped(typedPatch, found.doc.metadata);
+  await assertMayType(found.collection, found.doc.metadata, typed);
   const now = Math.floor(Date.now() / 1000);
 
   const baseId = found.doc.metadata.parent_id ?? found.doc.id;

@@ -6,7 +6,7 @@
  *
  * Subcommands list and change the scope file: list, add-root DIR,
  * remove-root DIR, add-customer NAME, remove-customer NAME,
- * map DIR COLLECTION, unmap DIR.
+ * map DIR COLLECTION, unmap DIR, records-elsewhere add|remove COLLECTION.
  */
 import { resolve } from 'node:path';
 import { detectCollection, getConfig, isSyncableCollection, readScopeSettings, runScopeAction, type ScopeAction } from '@yapa/core';
@@ -23,8 +23,11 @@ export const SCOPE_USAGE =
   '       yapa scope add-root DIR | remove-root DIR\n' +
   '       yapa scope add-customer NAME | remove-customer NAME\n' +
   '       yapa scope map DIR COLLECTION | unmap DIR\n' +
+  '       yapa scope records-elsewhere add COLLECTION | records-elsewhere remove COLLECTION\n' +
   'Subcommands print text; --json prints the resulting file as JSON.\n' +
-  'Project roots are folders whose subfolders are projects; new shared collections are only created from sessions under one.\n';
+  'Project roots are folders whose subfolders are projects; new shared collections are only created from sessions under one.\n' +
+  'A collection that keeps its records elsewhere has its findings, decisions and questions in the project\'s own files:\n' +
+  '  there only what the project publishes (yapa memory put --ref) is typed, and the rest is stored as notes.\n';
 
 const ACTIONS: Record<string, ScopeAction> = {
   list: 'show', 'add-root': 'add_root', 'remove-root': 'remove_root', 'add-customer': 'add_customer',
@@ -35,14 +38,20 @@ export async function runScope(args: string[], cwdDefault = process.cwd()): Prom
   const [sub, ...rest] = args;
   if (sub === 'help' || sub === '--help') return { json: { ok: true }, text: SCOPE_USAGE.trimEnd(), exit: 0 };
   if (sub && !sub.startsWith('--')) {
-    const action = ACTIONS[sub];
+    let action = ACTIONS[sub];
+    if (sub === 'records-elsewhere') {
+      const verb = rest.shift();
+      action = verb === 'add' ? 'add_records_elsewhere' : verb === 'remove' ? 'remove_records_elsewhere' : (undefined as unknown as ScopeAction);
+      if (!action) return { json: { ok: false, error: 'records-elsewhere takes add or remove, then a collection' }, text: SCOPE_USAGE.trimEnd(), exit: 2 };
+    }
     if (!action) return { json: { ok: false, error: `unknown subcommand "${sub}"` }, text: SCOPE_USAGE.trimEnd(), exit: 2 };
     const positional = rest.filter((a, i) => !a.startsWith('--') && rest[i - 1] !== '--cwd');
     const folder = scopeCwd(rest, cwdDefault);
     try {
       const r = await runScopeAction({
         action,
-        ...(action === 'add_customer' || action === 'remove_customer' ? { name: positional[0] } : { dir: positional[0] }),
+        ...(action === 'add_customer' || action === 'remove_customer' ? { name: positional[0] }
+          : action === 'add_records_elsewhere' || action === 'remove_records_elsewhere' ? { collection: positional[0] } : { dir: positional[0] }),
         ...(action === 'map' ? { collection: positional[1] } : {}),
       }, folder);
       return { json: { ok: true, file: getConfig().SCOPE_FILE, ...readScopeSettings({ strict: true }) }, text: r.text, exit: 0 };

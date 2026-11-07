@@ -86,6 +86,7 @@ describe('adoptLegacyScope (upgrading from the folder options)', () => {
         project_roots: ['/srv/projects'],
         customers: ['acme'],
         collection_map: { '/srv/projects/notes': 'private-notes', '/srv/globex': 'private-globex' },
+        records_elsewhere: [],
       });
       expect(adoptLegacyScope(env)).toBe(false);
     } finally {

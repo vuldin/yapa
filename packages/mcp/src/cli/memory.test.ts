@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, patchDocument, getDocumentsByIds, setHostLLMCaller,
+  editScopeSettings, putExternal,
 } from '@yapa/core';
 import { runMemory } from './memory.js';
 
@@ -79,6 +80,33 @@ describe('yapa memory put from a folder outside every project root', () => {
       if (saved === undefined) delete process.env.CLAUDE_PROJECT_DIR;
       else process.env.CLAUDE_PROJECT_DIR = saved;
       setConfig(createConfig({ YAPA_USERNAME: 'josh' }));
+    }
+  });
+});
+
+describe('yapa memory untype', () => {
+  it('refuses an unmarked collection, lists with --dry-run, then keeps the copies as notes', async () => {
+    const L = 'private-legacy-cli';
+    const { ids: [copy] } = await storeMemory('a captured copy of record Q-7', { collection: L, typed: { kind: 'question', owner: 'josh' } });
+    const pub = await putExternal(L, 'rec:Q-7', { content: 'Q-7: the published record', typed: { kind: 'question', owner: 'josh' } });
+    let r = await runMemory('untype', ['--collection', L, '--dry-run']);
+    expect(r.exit).toBe(1);
+    expect(r.text).toMatch(/not marked/);
+    await editScopeSettings({ op: 'add_records_elsewhere', collection: L });
+    try {
+      r = await runMemory('untype', ['--collection', L, '--dry-run']);
+      expect(r.exit).toBe(0);
+      expect(r.text).toMatch(/^1 typed memory without an external ref in private-legacy-cli \(1 question\): dry run/);
+      expect(r.text).toContain(`- ${copy} [question, open]`);
+      r = await runMemory('untype', ['--collection', L]);
+      expect(r.text).toMatch(/kept as notes now/);
+      expect((await getDocumentsByIds(L, [copy]))[0].metadata.kind).toBeUndefined();
+      expect((await getDocumentsByIds(L, [pub.id]))[0].metadata.kind).toBe('question');
+      r = await runMemory('update', [copy, '--collection', L, '--kind', 'question']);
+      expect(r).toMatchObject({ exit: 3, json: { refused: true, code: 'records_elsewhere' } });
+      expect((await runMemory('untype', [])).exit).toBe(2);
+    } finally {
+      await editScopeSettings({ op: 'remove_records_elsewhere', collection: L });
     }
   });
 });

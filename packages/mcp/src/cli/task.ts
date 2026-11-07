@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
-  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError,
+  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -100,7 +100,7 @@ export async function runTask(sub: string | undefined, args: string[]): Promise<
     if (e instanceof ClaimBusyError) {
       return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
     }
-    if (e instanceof SharedCollectionNotAllowedError) {
+    if (e instanceof SharedCollectionNotAllowedError || e instanceof RecordsElsewhereError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, code: e.code, error: e.message }, text: e.message };
     }
     if (e instanceof TaskClaimedError) {
@@ -238,7 +238,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
           : release?.kind === 'unshared' ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own`
             : `${t.id} -> ${status}`;
       const more = [decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
-        recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', nudge ?? ''].filter(Boolean);
+        recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
       return {
         exit,
         json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null },

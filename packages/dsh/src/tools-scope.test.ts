@@ -32,6 +32,15 @@ describe('DSH tools judge the session\'s folder (its header cwd)', () => {
     expect((await tools.get('yapa_scope').execute({ action: 'show' }, outside)).text).toMatch(/may not create new shared collections/);
   });
 
+  it('a collection marked as keeping its records elsewhere stores a kind as a note', async () => {
+    const here = execIn(join(dir, 'home'));
+    expect((await tools.get('yapa_scope').execute({ action: 'add_records_elsewhere', collection: 'private-recs' }, here)).text).toMatch(/now keeps its records elsewhere/);
+    const r = await tools.get('yapa_memory_store').execute({ content: 'the recs cap is 4 MB', collection: 'private-recs', kind: 'finding' }, here);
+    expect(r.label).toBeUndefined();
+    expect(r.kept_as_note).toMatch(/^Kept as a note, without the kind finding/);
+    await tools.get('yapa_scope').execute({ action: 'remove_records_elsewhere', collection: 'private-recs' }, here);
+  });
+
   it('a session under a project root can', async () => {
     const inside = execIn(join(dir, 'projects', 'newco'));
     expect((await tools.get('yapa_memory_store').execute({ content: 'the newco port is 9000', collection: 'customer-newco' }, inside)).ids).toHaveLength(1);

@@ -8,6 +8,10 @@
  *   customers       folder names under a root that are customers
  *   collection_map  folder → collection, checked first (how a folder gets a
  *                   private-* scope)
+ *   records_elsewhere  collections whose project keeps its canonical records
+ *                   (findings, decisions, questions) in its own files: there
+ *                   only a memory the project publishes with an external_ref
+ *                   is typed, and everything else is stored as a note
  *
  * The file is the only place these are set. `yapa scope` and the scope
  * tools edit it; every reader sees a change on its next call.
@@ -26,18 +30,21 @@ export interface ScopeSettings {
   customers: string[];
   /** Absolute folder → collection. */
   collection_map: Record<string, string>;
+  /** Collections whose canonical records live in the project's own files. */
+  records_elsewhere: string[];
 }
 
 export type ScopeEdit =
   | { op: 'add_root' | 'remove_root'; dir: string }
   | { op: 'add_customer' | 'remove_customer'; name: string }
   | { op: 'map'; dir: string; collection: string }
-  | { op: 'unmap'; dir: string };
+  | { op: 'unmap'; dir: string }
+  | { op: 'add_records_elsewhere' | 'remove_records_elsewhere'; collection: string };
 
 /** Chroma's collection name rule. */
 const COLLECTION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]$/;
 
-const empty = (): ScopeSettings => ({ project_roots: [], customers: [], collection_map: {} });
+const empty = (): ScopeSettings => ({ project_roots: [], customers: [], collection_map: {}, records_elsewhere: [] });
 
 export class ScopeFileError extends Error {
   constructor(message: string) {
@@ -70,7 +77,10 @@ function parse(text: string, file: string): ScopeSettings {
   if (!map || typeof map !== 'object' || Array.isArray(map) || Object.values(map).some(x => typeof x !== 'string')) {
     throw new ScopeFileError(`${file}: "collection_map" must map folders to collection names`);
   }
-  return normalize({ project_roots: strings('project_roots'), customers: strings('customers'), collection_map: map as Record<string, string> }, file);
+  return normalize({
+    project_roots: strings('project_roots'), customers: strings('customers'), collection_map: map as Record<string, string>,
+    records_elsewhere: strings('records_elsewhere'),
+  }, file);
 }
 
 function normalize(s: ScopeSettings, file: string): ScopeSettings {
@@ -85,10 +95,15 @@ function normalize(s: ScopeSettings, file: string): ScopeSettings {
     if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file}: "${name}" (mapped from ${dir}) is not a valid collection name`);
     collection_map[abs(dir, 'collection_map')] = name;
   }
+  const records_elsewhere = s.records_elsewhere.map(c => c.trim());
+  for (const name of records_elsewhere) {
+    if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file}: "${name}" in records_elsewhere is not a valid collection name`);
+  }
   return {
     project_roots: [...new Set(s.project_roots.map(r => abs(r, 'project_roots')))].sort(),
     customers: [...new Set(s.customers.map(c => c.trim()).filter(Boolean))].sort(),
     collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b))),
+    records_elsewhere: [...new Set(records_elsewhere)].sort(),
   };
 }
 
@@ -97,6 +112,7 @@ const warned = new Set<string>();
 
 const copy = (s: ScopeSettings): ScopeSettings => ({
   project_roots: [...s.project_roots], customers: [...s.customers], collection_map: { ...s.collection_map },
+  records_elsewhere: [...s.records_elsewhere],
 });
 
 /**
@@ -237,6 +253,13 @@ export async function editScopeSettings(edit: ScopeEdit, opts: { file?: string; 
         break;
       }
       case 'unmap': delete s.collection_map[scopePath(edit.dir, opts.base)]; break;
+      case 'add_records_elsewhere': {
+        const name = edit.collection.trim();
+        if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`"${name}" is not a valid collection name`);
+        s.records_elsewhere.push(name);
+        break;
+      }
+      case 'remove_records_elsewhere': s.records_elsewhere = s.records_elsewhere.filter(c => c !== edit.collection.trim()); break;
     }
     const after = normalize(s, file);
     const changed = JSON.stringify(after) !== JSON.stringify(before);
@@ -339,5 +362,14 @@ export function formatScopeSettings(s: ScopeSettings, file: string = getConfig()
   const map = Object.entries(s.collection_map);
   lines.push(`- collection_map:${map.length ? '' : ' (none)'}`);
   for (const [dir, c] of map) lines.push(`  - ${dir} → ${c}${isSyncableCollection(c) ? ' (shared)' : ' (local only)'}`);
+  lines.push(`- records_elsewhere: ${s.records_elsewhere.length ? `${s.records_elsewhere.join(', ')} (only what the project publishes with an external_ref is typed there; the rest is stored as notes)` : '(none)'}`);
   return lines.join('\n');
+}
+
+/**
+ * True when `collection`'s project keeps its canonical records in its own
+ * files (records_elsewhere): a typed memory there needs an external_ref.
+ */
+export function recordsElsewhere(collection: string, s: ScopeSettings = readScopeSettings()): boolean {
+  return s.records_elsewhere.includes(collection);
 }
