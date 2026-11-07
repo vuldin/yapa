@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'nod
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { getConfig } from './config.js';
-import { lockFileFor, withFileLock, writeJsonAtomic } from './fs-lock.js';
+import { lockFileFor, withFileLock, withFileLockSync, writeJsonAtomic } from './fs-lock.js';
 import { isSyncableCollection, looksPrivateButShared } from './sync/syncable.js';
 
 export interface ScopeSettings {
@@ -107,13 +107,8 @@ const copy = (s: ScopeSettings): ScopeSettings => ({
  */
 export function readScopeSettings(opts: { file?: string; strict?: boolean } = {}): ScopeSettings {
   const file = opts.file ?? getConfig().SCOPE_FILE;
-  let key: string;
-  try {
-    const st = statSync(file);
-    key = `${st.ino}:${st.mtimeMs}:${st.size}`;
-  } catch {
-    return empty();
-  }
+  const key = scopeFileVersion(file);
+  if (key === 'missing') return empty();
   if (cache?.file === file && cache.key === key) return copy(cache.value);
   try {
     const value = parse(readFileSync(file, 'utf8'), file);
@@ -127,6 +122,80 @@ export function readScopeSettings(opts: { file?: string; strict?: boolean } = {}
       process.stderr.write(`[yapa] ${msg}. Folder rules are off until then.\n`);
     }
     return empty();
+  }
+}
+
+/** Folder rules as the old options held them: env or plugin option strings, or DSH lists. */
+export interface LegacyScope {
+  project_roots?: string | string[];
+  customers?: string | string[];
+  collection_map?: string | string[];
+}
+
+/**
+ * Move folder rules set the old way (the project_roots, customers and
+ * collection_map options) into the scope file, once: only while the file
+ * doesn't exist, so the file stays the only source afterwards. Entries that
+ * aren't valid are skipped with a warning. Returns whether it wrote the file.
+ */
+export function importLegacyScope(legacy: LegacyScope, file: string = getConfig().SCOPE_FILE): boolean {
+  const items = (v: string | string[] | undefined, split: RegExp) =>
+    (Array.isArray(v) ? v : (v ?? '').split(split)).map(x => String(x).trim()).filter(Boolean);
+  const roots = items(legacy.project_roots, /[,:]/);
+  const customers = items(legacy.customers, /[,:]/);
+  const map = items(legacy.collection_map, /[;\n]/);
+  if (!roots.length && !customers.length && !map.length) return false;
+  if (existsSync(file)) {
+    const msg = `the old project_roots, customers and collection_map options are still set but no longer read: ${file} is the only source (yapa scope list). Remove the old options.`;
+    if (!warned.has(msg)) {
+      warned.add(msg);
+      process.stderr.write(`[yapa] ${msg}\n`);
+    }
+    return false;
+  }
+  const s = empty();
+  const skipped: string[] = [];
+  const valid = (what: string, probe: Partial<ScopeSettings>) => {
+    try {
+      normalize({ ...empty(), ...probe }, file);
+      return true;
+    } catch {
+      skipped.push(what);
+      return false;
+    }
+  };
+  for (const r of roots) if (valid(r, { project_roots: [r] })) s.project_roots.push(r);
+  for (const c of customers) if (valid(c, { customers: [c] })) s.customers.push(c);
+  for (const entry of map) {
+    const eq = entry.lastIndexOf('=');
+    const dir = entry.slice(0, Math.max(eq, 0)).trim();
+    const collection = entry.slice(eq + 1).trim();
+    if (eq > 0 && valid(entry, { collection_map: { [dir]: collection } })) s.collection_map[dir] = collection;
+    else if (eq <= 0) skipped.push(entry);
+  }
+  mkdirSync(path.dirname(file), { recursive: true });
+  const wrote = withFileLockSync(lockFileFor(file), () => {
+    if (existsSync(file)) return false;
+    writeJsonAtomic(file, normalize(s, file), 0o644);
+    return true;
+  });
+  cache = undefined;
+  if (wrote) {
+    process.stderr.write(`[yapa] Moved your folder rules (project_roots, customers, collection_map) from the old options into ${file}; the options are no longer read.${skipped.length ? ` Skipped: ${skipped.join(', ')}.` : ''}\n`);
+  }
+  return wrote;
+}
+
+/**
+ * Changes whenever the scope file does (an edit here or in another process):
+ * a host that caches a detection re-detects when it differs.
+ */
+export function scopeFileVersion(file: string = getConfig().SCOPE_FILE): string {
+  try {
+    const st = statSync(file);
+    return `${st.ino}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return 'missing';
   }
 }
 
@@ -242,7 +311,7 @@ export class SharedCollectionNotAllowedError extends Error {
     const local = `private-${collection.replace(/^(project|customer)-/, '')}`;
     super(
       `Refused: "${collection}" does not exist here, and creating it would start a new shared collection that syncs to the team remote. `
-      + `New shared collections are only created from a session under a project root, and ${folder} is not under one. `
+      + `New shared collections are only created from a session under a project root, and the folder YAPA checked for this session, ${folder}, is not under one. `
       + `Use a local-only collection such as "${local}" instead. If "${collection}" already exists on the remote, run sync subscribe ${collection} first. `
       + 'Only if the user explicitly asks, allow this folder with the scope tool (add_root for a folder of projects, or map this folder to the collection), then write again.',
     );

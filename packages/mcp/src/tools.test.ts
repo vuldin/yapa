@@ -43,6 +43,7 @@ describe('withSyncOnWrite', () => {
 
 describe('registered tools over the local store', () => {
   let dir: string;
+  let savedProjectDir: string | undefined;
   const tools = new Map<string, { schema: Record<string, any>; handler: (...a: any[]) => any }>();
   /** Validate args with the tool's own schema, as the MCP SDK does, then run it. */
   const call = async (name: string, args: Record<string, any>) => {
@@ -54,6 +55,7 @@ describe('registered tools over the local store', () => {
     dir = await mkdtemp(join(tmpdir(), 'yapa-mcp-tools-test-'));
     // This session works in a project folder: it may create shared collections.
     await writeFile(join(dir, 'scope.json'), JSON.stringify({ project_roots: [join(dir, 'projects')] }));
+    savedProjectDir = process.env.CLAUDE_PROJECT_DIR;
     process.env.CLAUDE_PROJECT_DIR = join(dir, 'projects', 'acme');
     setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SCOPE_FILE: join(dir, 'scope.json') }));
     setStore(createLocalStore(dir));
@@ -66,7 +68,8 @@ describe('registered tools over the local store', () => {
   });
 
   afterAll(async () => {
-    delete process.env.CLAUDE_PROJECT_DIR;
+    if (savedProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = savedProjectDir;
     await rm(dir, { recursive: true, force: true });
     resetStore();
     resetConfig();
@@ -90,6 +93,24 @@ describe('registered tools over the local store', () => {
         expect((await listCollections()).map(c => c.name)).not.toContain('customer-newco');
         const ok = await call('memory_store', { content: 'x', collection: 'private-newco' });
         expect(ok.content[0].text).toMatch(/^Stored memory/);
+      } finally {
+        back();
+      }
+    });
+
+    it('every other write tool refuses a new shared collection too', async () => {
+      const id = await createTask('existing', {}, 'project-existing2');
+      outside();
+      try {
+        for (const [tool, args] of [
+          ['journal_consolidate', { collection: 'customer-newco' }],
+          ['compaction_apply', { collection: 'customer-newco', member_ids: ['m1', 'm2'], summary: 's' }],
+          ['memory_update', { id: 'mem-x', collection: 'customer-newco', note: 'n' }],
+          ['task_update', { id, notes: 'note-from-outside', follow_ups: [{ title: 'next', collection: 'customer-newco' }] }],
+        ] as const) {
+          await expect(call(tool, args), tool).rejects.toThrow(/Refused: "customer-newco" does not exist here/);
+        }
+        expect(String((await getTask(id))?.metadata.notes ?? '')).not.toContain('note-from-outside');
       } finally {
         back();
       }

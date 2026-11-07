@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createConfig, importLegacyScope } from '@yapa/core';
 
 const PLUGIN_OPTION_PREFIX = 'CLAUDE_PLUGIN_OPTION_';
 
@@ -85,12 +86,44 @@ export function adoptCliEnv(cwd?: string): void {
     const add = pluginSettingsEnv(process.env, settings);
     if (Object.keys(add).length) {
       Object.assign(process.env, add);
+      adoptLegacyScope();
       return; // the plugin is the install; do not mix in a legacy mcp entry
     }
   } catch {
     // no settings.json: fall through
   }
   adoptHostEnv(cwd);
+}
+
+/**
+ * Folder rules an install still holds the old way (the project_roots,
+ * customers and collection_map options: YAPA_* env, CLAUDE_PLUGIN_OPTION_*,
+ * or the plugin's options in Claude Code settings), moved into the scope
+ * file once, while it doesn't exist yet (core importLegacyScope).
+ */
+export function adoptLegacyScope(env: Record<string, string | undefined> = process.env): boolean {
+  let options: Record<string, unknown> | undefined;
+  try {
+    const dir = env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    options = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf-8'))?.pluginConfigs?.['yapa@yapa']?.options;
+  } catch {
+    options = undefined;
+  }
+  const pick = (key: string): string | undefined => {
+    for (const v of [env[`YAPA_${key.toUpperCase()}`], env[`${PLUGIN_OPTION_PREFIX}${key.toUpperCase()}`], options?.[key]]) {
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+    return undefined;
+  };
+  try {
+    return importLegacyScope(
+      { project_roots: pick('project_roots'), customers: pick('customers'), collection_map: pick('collection_map') },
+      createConfig(env).SCOPE_FILE,
+    );
+  } catch (e) {
+    process.stderr.write(`[yapa] could not move the old folder rules into the scope file: ${e instanceof Error ? e.message : e}\n`);
+    return false;
+  }
 }
 
 /** Apply resolveHostEnv to process.env (reads ~/.claude.json if present). */
@@ -103,4 +136,5 @@ export function adoptHostEnv(cwd?: string): void {
     claudeConfig = undefined; // other harness, or Claude Code not installed
   }
   Object.assign(process.env, resolveHostEnv(process.env, claudeConfig, cwd));
+  adoptLegacyScope();
 }

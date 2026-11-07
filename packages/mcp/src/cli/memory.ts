@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
   getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings, applySweep, type SweepItem, type SweepResult,
-  recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, redirectNote, type TypedFields,
+  recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, SharedCollectionNotAllowedError, redirectNote, type TypedFields,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -244,6 +244,7 @@ export async function runWaiting(args: string[]): Promise<MemoryCliResult> {
 function fail(what: string, e: unknown): MemoryCliResult {
   const usage = e instanceof UsageError || e instanceof TypedMemoryError;
   const message = e instanceof Error ? e.message : String(e);
-  const code = e instanceof MemoryNotFoundError ? 'not_found' : undefined;
+  const code = e instanceof MemoryNotFoundError ? 'not_found' : e instanceof SharedCollectionNotAllowedError ? e.code : undefined;
+  if (e instanceof SharedCollectionNotAllowedError) return { exit: 3, json: { ok: false, refused: true, error: message, code }, text: `${what}: ${message}` };
   return { exit: usage ? 2 : 1, json: { ok: false, error: message, ...(code ? { code } : {}) }, text: `${what}: ${message}` };
 }

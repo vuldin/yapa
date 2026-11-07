@@ -9,7 +9,7 @@
  * @module yapa/config
  */
 import z from '@deepseek-ai/schemastery';
-import { createConfig, type YapaConfig } from '@yapa/core';
+import { createConfig, importLegacyScope, type YapaConfig } from '@yapa/core';
 
 /** User-facing plugin configuration (cordis patch row + settings namespace). */
 export interface Config {
@@ -37,6 +37,12 @@ export interface Config {
   syncMcpTokenCmd?: string;
   syncMcpTool?: string;
   syncIntervalMs?: number;
+  /** @deprecated Moved into the scope file once, then ignored (yapa_scope). */
+  projectRoots?: string[];
+  /** @deprecated Moved into the scope file once, then ignored (yapa_scope). */
+  customers?: string[];
+  /** @deprecated Moved into the scope file once, then ignored (yapa_scope). */
+  collectionMap?: string[];
   /** Inject semantic recall into prompt assembly on new human prompts. */
   injectRecall?: boolean;
   /** Inject open tasks into prompt assembly once per scope per session. */
@@ -102,6 +108,9 @@ export const Config: z<Config> = z.object({
   syncMcpTokenCmd: z.string(),
   syncMcpTool: z.string(),
   syncIntervalMs: z.number(),
+  projectRoots: z.array(z.string()),
+  customers: z.array(z.string()),
+  collectionMap: z.array(z.string()),
   injectRecall: z.boolean(),
   injectTasks: z.boolean(),
   recallResults: z.number(),
@@ -172,8 +181,6 @@ export interface ResolvedConfig {
   approvalGate: boolean;
 }
 
-const warnedLegacy = new Set<string>();
-
 /**
  * Merge env → plugin config → settings override into one resolved view.
  * Any field left undefined at every layer falls back to the env-derived
@@ -183,13 +190,11 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
   const merged: Config = { ...plugin, ...Object.fromEntries(
     Object.entries(settings ?? {}).filter(([, v]) => v !== undefined),
   ) };
-  for (const key of ['projectRoots', 'customers', 'collectionMap']) {
-    if (key in merged && !warnedLegacy.has(key)) {
-      warnedLegacy.add(key);
-      process.stderr.write(`[yapa] ${key} is no longer read: folder rules live in the scope file (yapa_scope)\n`);
-    }
-  }
   const envBase = createConfig();
+  // The old folder settings move into the scope file once, then are ignored.
+  if (merged.projectRoots || merged.customers || merged.collectionMap) {
+    importLegacyScope({ project_roots: merged.projectRoots, customers: merged.customers, collection_map: merged.collectionMap }, envBase.SCOPE_FILE);
+  }
   const core: YapaConfig = {
     ...envBase,
     // The plugin's default store is the embedded one (no server). An explicit

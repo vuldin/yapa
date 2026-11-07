@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { pluginSettingsEnv, resolveHostEnv } from './env.js';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { adoptLegacyScope, pluginSettingsEnv, resolveHostEnv } from './env.js';
 
 describe('pluginSettingsEnv (yapa coord from a plain shell)', () => {
   const settings = {
@@ -66,5 +69,37 @@ describe('resolveHostEnv', () => {
     expect(add.YAPA_HOOK_INJECT_RULES).toBe('true');
     expect(add.YAPA_MODEL_CACHE_DIR).toBe('/data/models');
     expect(resolveHostEnv({}, undefined).YAPA_HOOK_INJECT_RULES).toBeUndefined();
+  });
+});
+
+describe('adoptLegacyScope (upgrading from the folder options)', () => {
+  it('moves the plugin options from Claude Code settings into the scope file once', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yapa-legacy-scope-'));
+    try {
+      mkdirSync(join(dir, 'claude'));
+      writeFileSync(join(dir, 'claude', 'settings.json'), JSON.stringify({
+        enabledPlugins: { 'yapa@yapa': true },
+        pluginConfigs: { 'yapa@yapa': { options: { project_roots: '/srv/projects', collection_map: '/srv/projects/notes=private-notes;/srv/globex=private-globex' } } },
+      }));
+      const env = { CLAUDE_CONFIG_DIR: join(dir, 'claude'), YAPA_SCOPE_FILE: join(dir, 'scope.json'), YAPA_CUSTOMERS: 'acme' };
+      expect(adoptLegacyScope(env)).toBe(true);
+      expect(JSON.parse(readFileSync(join(dir, 'scope.json'), 'utf8'))).toEqual({
+        project_roots: ['/srv/projects'],
+        customers: ['acme'],
+        collection_map: { '/srv/projects/notes': 'private-notes', '/srv/globex': 'private-globex' },
+      });
+      expect(adoptLegacyScope(env)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does nothing without old options', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yapa-legacy-scope-'));
+    try {
+      expect(adoptLegacyScope({ CLAUDE_CONFIG_DIR: join(dir, 'none'), YAPA_SCOPE_FILE: join(dir, 'scope.json') })).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -215,23 +215,8 @@ function list(value: string): string[] {
   return value.split(/[,:]/).map(v => v.trim()).filter(Boolean);
 }
 
-const warned = new Set<string>();
-/** One stderr line per distinct message per process (config is rebuilt often). */
-function warnOnce(message: string): void {
-  if (warned.has(message)) return;
-  warned.add(message);
-  process.stderr.write(`[yapa] ${message}\n`);
-}
-
-/**
- * The scope file's path. The folder rules used to be options
- * (PROJECT_ROOTS, CUSTOMERS, COLLECTION_MAP); a value still set for one is
- * ignored, with a one-time warning.
- */
+/** The scope file's path (the folder rules; see scope-file.ts). */
 function scopeFile(env: Record<string, string | undefined>): string {
-  for (const key of ['PROJECT_ROOTS', 'CUSTOMERS', 'COLLECTION_MAP']) {
-    if (get(env, key)) warnOnce(`${key} is no longer read: folder rules live in the scope file (yapa scope list)`);
-  }
   return get(env, 'SCOPE_FILE', process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-scope-${process.pid}.json`) : pathJoin(homedir(), '.local', 'share', 'yapa', 'scope.json'));
 }
 

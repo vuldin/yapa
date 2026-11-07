@@ -46,17 +46,27 @@ describe('resolveConfig', () => {
     expect(r.core.CHROMA_URL).toBe('http://b:2');
   });
 
-  it('ignores the old folder settings, with a warning: folder rules live in the scope file', () => {
+  it('moves the old folder settings into the scope file once, and leaves them out of the resolved config', async () => {
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'yapa-dsh-legacy-'));
+    process.env.YAPA_SCOPE_FILE = join(dir, 'scope.json');
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const r = resolveConfig({ collectionMap: ['~/work/acme/=private-acme'] } as never, { projectRoots: ['/srv'] } as never);
+      const r = resolveConfig({ collectionMap: ['/srv/acme=private-acme'] }, { projectRoots: ['/srv'] });
       expect(r).not.toHaveProperty('collectionMap');
       expect(r).not.toHaveProperty('projectRoots');
-      const said = err.mock.calls.map(c => String(c[0])).join('');
-      expect(said).toMatch(/collectionMap is no longer read/);
-      expect(said).toMatch(/projectRoots is no longer read/);
+      expect(JSON.parse(readFileSync(process.env.YAPA_SCOPE_FILE, 'utf8'))).toEqual({
+        project_roots: ['/srv'], customers: [], collection_map: { '/srv/acme': 'private-acme' },
+      });
+      resolveConfig({ projectRoots: ['/other'] });
+      expect(JSON.parse(readFileSync(process.env.YAPA_SCOPE_FILE, 'utf8')).project_roots).toEqual(['/srv']);
+      expect(err.mock.calls.map(c => String(c[0])).join('')).toMatch(/still set but no longer read/);
     } finally {
       err.mockRestore();
+      delete process.env.YAPA_SCOPE_FILE;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

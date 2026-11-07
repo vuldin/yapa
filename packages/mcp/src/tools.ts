@@ -88,6 +88,7 @@ import {
   removeReport,
   resolveWriteCollection,
   assertMayCreateCollection,
+  checkFollowUpCollections,
   sessionFolder,
   runScopeAction,
   redirectNote,
@@ -198,10 +199,7 @@ function closeText(r: { recorded?: { memories: string[]; follow_ups: string[] };
 /** Where a write from this session lands; a new shared collection only from a folder that may create one. */
 const writeTarget = (name: string) => resolveWriteCollection(name, { folder: sessionFolder() });
 
-/** Check follow-ups' collections before a close writes anything. */
-async function checkFollowUps(followUps: Array<{ collection?: string }> | undefined): Promise<void> {
-  for (const f of followUps ?? []) if (f.collection) await writeTarget(f.collection);
-}
+const checkFollowUps = (followUps: Array<{ title: string; collection?: string }> | undefined) => checkFollowUpCollections(followUps, sessionFolder());
 
 function typedError(e: unknown) {
   if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {

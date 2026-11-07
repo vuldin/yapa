@@ -15,6 +15,7 @@
 import { getDocumentsByIds, listCollections } from '../store/index.js';
 import { isOpenTyped, normalizeTyped, type TypedFields } from '../memory/kinds.js';
 import { storeMemory } from '../memory/store.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 import { createTask, type TaskOptions } from './create.js';
 import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
 
@@ -61,6 +62,15 @@ export function validateLearned(items: LearnedItem[] = []): void {
     const { content: _c, tags: _t, ...typed } = it;
     normalizeTyped(typed);
   }
+}
+
+/**
+ * For a host tool acting for a session in `folder`: refuse follow-ups that
+ * would create a new shared collection the folder may not create, before
+ * anything is written (see resolveWriteCollection).
+ */
+export async function checkFollowUpCollections(followUps: FollowUp[] | undefined, folder: string): Promise<void> {
+  for (const f of followUps ?? []) if (f.collection) await resolveWriteCollection(f.collection, { folder });
 }
 
 export async function recordForTask(
@@ -158,6 +168,6 @@ export const describeWaits = (w: OpenWait[]) =>
 
 /** The reply line when a task closes with nothing recorded for it. */
 export function captureNudge(taskId: string, metadata: Record<string, any>, recorded?: Recorded): string | undefined {
-  if (recorded?.memories.length || list(metadata.memory_ids).length) return undefined;
+  if (recorded?.memories.length || recorded?.follow_ups.length || list(metadata.memory_ids).length) return undefined;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
 }

@@ -94,15 +94,12 @@ describe('detectCollection', () => {
     const base = mkdtempSync(join(tmpdir(), 'yapa-scope-file-'));
     const file = join(base, 'scope.json');
     writeFileSync(file, JSON.stringify({ project_roots: ['/srv/work', '/home/u/projects'], customers: ['acme', 'globex'] }));
-    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     setConfig(createConfig({ YAPA_SCOPE_FILE: file, YAPA_PROJECT_ROOTS: '/elsewhere' }));
     try {
       expect((await detectCollection('/srv/work/globex/notes')).collection).toBe('customer-globex');
       expect((await detectCollection('/home/u/projects/dsh')).collection).toBe('project-dsh');
       expect((await detectCollection('/elsewhere/x')).collection).toBe('global');
-      expect(err.mock.calls.map(c => String(c[0])).join('')).toMatch(/PROJECT_ROOTS is no longer read/);
     } finally {
-      err.mockRestore();
       resetConfig();
       rmSync(base, { recursive: true, force: true });
     }

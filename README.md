@@ -372,6 +372,8 @@ yapa scope map ~/notes/acme private-acme # this folder (and below) uses private-
 yapa scope unmap ~/notes/acme
 ```
 
+**Upgrading from 1.15 or earlier:** the folder rules used to be the `project_roots`, `customers` and `collection_map` options (`YAPA_PROJECT_ROOTS`, `YAPA_CUSTOMERS`, `YAPA_COLLECTION_MAP`; `projectRoots`, `customers`, `collectionMap` in DSH). The first YAPA process after the update moves them into the file, once, while it doesn't exist yet. After that the old options are ignored (YAPA warns on stderr until you remove them). Check the result with `yapa scope list`.
+
 A relative folder resolves against the current folder. In the file itself, folders must be absolute or start with `~`. If the file can't be read or isn't valid, every folder is `global` until it's fixed (YAPA says so on stderr), and `yapa scope` refuses to edit it.
 
 `yapa scope [--cwd DIR]` prints the collection YAPA uses for a folder as JSON, `{collection, local_only, mapped}`, or with `--text` as `private-acme (local only)`. A project's own scripts should ask it rather than name a collection themselves, so the folder's collection is set in one place. A script that must stay private can refuse to run unless `local_only` is true.
