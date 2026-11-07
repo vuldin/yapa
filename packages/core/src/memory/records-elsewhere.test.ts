@@ -154,6 +154,11 @@ describe('a marked collection merged into another', () => {
     const r = await runScopeAction({ action: 'add_records_elsewhere', collection: OLD }, dir);
     expect(r.text).toMatch(/^private-before was merged into private-after on this machine, so private-after is the one marked/);
     expect(readScopeSettings().records_elsewhere).toContain(NEW);
+    const off = await runScopeAction({ action: 'remove_records_elsewhere', collection: NEW }, dir);
+    expect(off.text).toMatch(/^private-after no longer keeps its records elsewhere/);
+    expect(readScopeSettings().records_elsewhere).not.toContain(OLD);
+    expect(readScopeSettings().records_elsewhere).not.toContain(NEW);
+    expect((await storeMemory('typed again', { collection: NEW, typed: { kind: 'idea' } })).kept_as_note).toBeUndefined();
   });
 });
 

@@ -186,7 +186,16 @@ export async function runScopeAction(
       : a.action === 'map'
       ? { op: 'map', dir: need(a.dir, 'a folder (dir)'), collection: need(a.collection, 'a collection') }
       : { op: a.action, dir: need(a.dir, 'a folder (dir)') };
-  const r = await editScopeSettings(edit, { base: folder });
+  let r = await editScopeSettings(edit, { base: folder });
+  if (edit.op === 'remove_records_elsewhere') {
+    // A mark on a name merged into this one marks this one too: drop it as well.
+    const redirects = await getCollectionRedirects();
+    const name = edit.collection.trim();
+    for (const old of r.settings.records_elsewhere.filter(c => resolveCollectionRedirect(c, redirects).collection === name)) {
+      const more = await editScopeSettings({ op: 'remove_records_elsewhere', collection: old }, { base: folder });
+      r = { ...more, changed: r.changed || more.changed };
+    }
+  }
   const target = 'dir' in edit ? scopePath(edit.dir, folder) : 'name' in edit ? edit.name : edit.collection.trim();
   const done: Record<Exclude<ScopeAction, 'show'>, [string, string]> = {
     add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
