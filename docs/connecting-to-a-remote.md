@@ -108,8 +108,7 @@ itself at the first session (option `statusline`, `YAPA_STATUSLINE`). Name the r
 `claude plugin install yapa@yapa --config remote_name=<name>`. It shows
 `yapa@v<version> <-> <name> ● synced 2m ago`, and turns red
 (`signed out since 09:12 · run: gcloud auth login`) when your sign-in lapses;
-`gcloud auth login` fixes it without a restart. See the README's "Sync health
-in the status line".
+`gcloud auth login` fixes it without a restart. See [The status line](sync.md#the-status-line).
 
 ## What syncs
 

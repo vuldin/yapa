@@ -65,7 +65,7 @@ Three layers, lowest to highest precedence:
 Folder rules (project roots, customers, folder → collection mappings) are not
 settings: they live in `~/.local/share/yapa/scope.json`, shared with the
 Claude Code plugin and the `yapa` CLI, and are edited with `yapa scope` or the
-`yapa_scope` tool (see "Folder rules" in the README). New shared collections
+`yapa_scope` tool (see [Collections and folder rules](../../docs/collections.md#folder-rules)). New shared collections
 are only created from sessions under a project root. The old `projectRoots`,
 `customers` and `collectionMap` settings are ignored, with a warning.
 
