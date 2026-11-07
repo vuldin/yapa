@@ -42,7 +42,7 @@ node dist/yapa.mjs hooks install      # Claude Code only: the always-on hooks, i
 
 - Set `YAPA_STORAGE=local` as shown: outside the plugin, the default storage is a ChromaDB server at `localhost:8000`.
 - The hooks read the same `-e` settings from the `yapa` entry in `~/.claude.json`, so they always agree with the server. With `YAPA_HOOK_INJECT_RULES=true`, session start injects YAPA's standing rules, as the plugin does. `hooks install` replaces YAPA hooks from an older install instead of adding a second set, and `hooks uninstall` removes only YAPA's.
-- **Cursor and OpenCode:** register the same command, `node <clone>/plugin/dist/yapa-mcp.mjs`, as a local (stdio) MCP server in their config, with `YAPA_STORAGE=local` and `YAPA_USERNAME` in its environment. These hosts have no hooks, so the per-prompt recall, the capture after each turn and the session-start context don't run there; the agent uses the tools directly.
+- **Cursor and OpenCode:** register the same command, `node <clone>/plugin/dist/yapa-mcp.mjs`, as a local (stdio) MCP server in their config, with `YAPA_STORAGE=local` and `YAPA_USERNAME` in its environment. These hosts have no hooks, so the per-prompt recall, the capture after each turn, the session-start context and the standing rules don't reach the agent there; it works from the tools and their descriptions. YAPA takes the session's folder from the server's working directory, so if the host starts the server somewhere else, every folder is `global` and new shared collections are refused.
 
 ## Getting started
 
@@ -141,7 +141,7 @@ The settings most people touch:
 
 | Plugin option (env var) | Default | Meaning |
 |---|---|---|
-| `storage` (`YAPA_STORAGE`) | `local` | The embedded store, or `chroma` for a ChromaDB server |
+| `storage` (`YAPA_STORAGE`) | `local` in the plugins; `chroma` for a server registered by hand | The embedded store, or `chroma` for a ChromaDB server |
 | `sync_enabled`, `sync_service_url` or `sync_mcp_url` | off | Team sync with a remote (see [Sync](#sync)) |
 | `remote_name` | empty | Your remote's name on the status line |
 | `response_capture` | on | Capture and record after each turn |

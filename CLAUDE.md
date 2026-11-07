@@ -6,7 +6,7 @@ Notes for changing YAPA itself. To install or use it, see [README.md](README.md)
 
 - `npm ci`, then `npm run build:all`: the workspaces, then the plugin bundle in `plugin/dist`.
 - `npm test` builds first, then runs every workspace's tests: core, mcp, dsh, service and mcp-remote. The mcp and DSH tests import the built `@yapa/core`. The first run downloads the embedding model.
-- Under vitest, the scope file, sync health, lease and coordination state default to temp paths. Tests set their own store and config; don't rely on the defaults for anything else.
+- Under vitest, the scope file, lease and coordination state default to temp paths, and the sync health file (with the state derived from it), the status line and the update check are off. Tests set their own store and config; don't rely on the defaults for anything else.
 - Suites against real databases and services are opt-in: see [docs/sync.md](docs/sync.md#testing-sync).
 - Docs are part of a change. A user-visible behavior goes in the README or the page under `docs/` that covers it.
 

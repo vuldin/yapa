@@ -25,7 +25,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `YAPA_STORAGE` | `chroma` \| `local` (embedded store, no server) | `chroma` for MCP; the DSH plugin defaults to `local` |
+| `YAPA_STORAGE` | `chroma` \| `local` (embedded store, no server) | `chroma` for a server registered by hand; the Claude Code and DSH plugins default to `local` |
 | `YAPA_LOCAL_STORE_PATH` | Root dir for the embedded store | `~/.local/share/yapa/store` |
 | `YAPA_CHROMA_URL` | ChromaDB server URL (when `YAPA_STORAGE=chroma`) | `http://localhost:8000` |
 | `YAPA_USERNAME` | Username for task ID prefixes and sync attribution | OS login name |
