@@ -7370,7 +7370,7 @@ function createConfig(env = process.env) {
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
     HOOK_PULL_WINDOW_MS: parseInt(get(env, "HOOK_PULL_WINDOW_MS", "30000"), 10),
-    HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
+    SESSION_START_MAX_CHARS: Math.min(1e4, Math.max(1e3, parseInt(get(env, "SESSION_START_MAX_CHARS", "9000"), 10) || 9e3)),
     RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "true") !== "false",
     CAPTURE_MIN_CHARS: parseInt(get(env, "CAPTURE_MIN_CHARS", "280"), 10),
     CAPTURE_MAX_MEMORIES: parseInt(get(env, "CAPTURE_MAX_MEMORIES", "3"), 10),
@@ -11878,7 +11878,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.16.0" : fromPackage();
+var YAPA_VERSION = true ? "1.17.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -48068,6 +48068,19 @@ Last error: ${last.message}` : ""}`);
   );
 }
 
+// packages/mcp/src/rules.ts
+var SERVER_INSTRUCTIONS = `YAPA gives you persistent memory (memory_*), durable tasks (task_*) and collections that scope both, so what you learn outlives this session.
+
+Context: when a "# YAPA Context" or "# YAPA Recall" block is injected (Claude Code hooks), use it and don't repeat that recall unless you need a more specific query. Without one, call scope (action show) for this folder's collection, then memory_recall and task_list for it when work starts.
+
+Scope: the "**Scope:**" line names the active collection. If it says AMBIGUOUS, ask the user which collection to use before storing anything. Always pass the collection explicitly. Before creating a new collection, confirm its name with the user (collection_list shows what exists). Hits marked "from <collection>" come from another project or customer: check them when troubleshooting, and say where an answer came from. private-*, local-* and global never sync (global is personal; team knowledge goes in a shared collection). A new shared collection can only be created from a session under a project root; if a write is refused, use a private- name or ask the user. Change the folder rules (scope tool) only when the user asks. Combine or rename collections with collection_merge, never collection_delete.
+
+Capture as you go, not at the end: memory_store (salience >= 2) when a root cause is found, a config value, endpoint or credential location is learned, the user states a preference, decision or correction, a non-obvious fact turns up, a fix took real effort, or a decision or commitment surfaces. Give it a kind: finding (a result, root cause or trap), decision (accepted; or needed, with options, a recommendation and the owner, when only a person can choose: never leave that only in chat), limitation (with exit_criteria), question (with the owner who must answer), or idea. Settle potential_conflicts before moving on: supersede (supersedes) or coexist. Don't store conversation state, or what git or an existing memory already holds. Record a person's answer with memory_update. Tell the user about items waiting on them (waiting). A project's own instructions win where they keep these records elsewhere.
+
+Tasks: task_create before multi-step or long-lived work, for a follow-up, or when something can't finish this turn. Set in_progress when you start: it claims the task. Before starting a task someone else has claimed, tell the user. If refused, say who holds it and offer other work; reclaim only your own other session, after the user confirms; if the claim is not shared, say others may start it too. Finish with task_complete, recording learned and follow_ups in the same call. When blocked, task_update with status blocked and a reason, or decision_needed when a person must choose. When the scope changes, amend the task instead of creating a duplicate. Tags: auto (an unattended session may do it), needs-human, needs:<user>. "by <user>" marks a teammate's item: coordinate before changing their tasks. Pass on any "**YAPA claim:**" line to the user.
+
+Leases (lease, yapa coord): only when the project's own instructions call for them. Before starting work listed under "Work in progress", tell the user who holds it; if an acquire is refused, say who holds it and don't retry in a loop; if you took over an expired lease, say whose it was. Journal: journal_append a one-line note when a meaningful step completes. When a compaction candidate is listed, compaction_suggest then compaction_apply. If a yapa tool reports a storage or sync error, tell the user (sync with action status diagnoses it).`;
+
 // packages/mcp/src/cli/env.ts
 import { readFileSync as readFileSync18 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
@@ -48295,7 +48308,7 @@ function registerPrompts(server2) {
 var server = new McpServer({
   name: "yapa",
   version: YAPA_VERSION
-});
+}, { instructions: SERVER_INSTRUCTIONS });
 registerTools(server);
 registerResources(server);
 registerPrompts(server);

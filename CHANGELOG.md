@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.17.0 (2026-11-07)
+
+YAPA's context costs fewer repeated tokens and now reaches the model in full. Both changes came from measuring YAPA's token cost on real sessions, now written up in [Token cost](docs/cost.md).
+
+**Upgrading:** update the plugin and restart Claude Code. There's no schema change. `YAPA_HOOK_INJECT_RULES` no longer does anything; you can remove it from a `claude mcp add` entry. If that install also has a YAPA block in CLAUDE.md written by `setup_instructions`, you can remove that too: the server's instructions replace it. New setting: `YAPA_SESSION_START_MAX_CHARS` (default 9,000).
+
+### Features
+- **Session start reaches the model in full.** YAPA's standing rules are now the MCP server's instructions, loaded once at session start in every MCP host, Cursor and OpenCode included. The session-start context (open tasks, what waits on you, top memories) is kept under Claude Code's 10,000-character hook limit (`YAPA_SESSION_START_MAX_CHARS`, default 9,000), shrinking the least useful sections first. Before, it often ran over, and the model saw only a 2,000-character preview of the rules.
+- **Prompt recall no longer repeats what's already in context.** A memory hit shown earlier in the session is named with a short preview instead of being injected again; in measured sessions that was nearly half of all recall text. An edited memory is shown again, ending with the edit, and everything is shown in full again after a compaction or `/clear`. Same in Claude Code and DSH.
+
+### Fixes
+- A state folder that can't be written no longer stops the prompt hook (the capture notice lookup now fails open).
+
+### Docs
+- A new [Token cost](docs/cost.md) page: what YAPA adds to a session's tokens, measured from real sessions, and when it can save more than it costs.
+
 ## 1.16.0 (2026-11-06)
 
 Which collection a folder uses is now set in one file on this machine, and new shared collections can only be created from sessions under a project root.

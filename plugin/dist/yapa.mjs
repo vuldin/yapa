@@ -121,7 +121,7 @@ function createConfig(env = process.env) {
     SYNC_CA_CERT: get(env, "SYNC_CA_CERT", ""),
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, "HOOK_PULL_TIMEOUT_MS", "4000"), 10),
     HOOK_PULL_WINDOW_MS: parseInt(get(env, "HOOK_PULL_WINDOW_MS", "30000"), 10),
-    HOOK_INJECT_RULES: get(env, "HOOK_INJECT_RULES", "false") === "true",
+    SESSION_START_MAX_CHARS: Math.min(1e4, Math.max(1e3, parseInt(get(env, "SESSION_START_MAX_CHARS", "9000"), 10) || 9e3)),
     RESPONSE_CAPTURE: get(env, "RESPONSE_CAPTURE", "true") !== "false",
     CAPTURE_MIN_CHARS: parseInt(get(env, "CAPTURE_MIN_CHARS", "280"), 10),
     CAPTURE_MAX_MEMORIES: parseInt(get(env, "CAPTURE_MAX_MEMORIES", "3"), 10),
@@ -2356,6 +2356,7 @@ var init_filters = __esm({
 });
 
 // packages/core/src/memory/recall.ts
+import { createHash as createHash2 } from "node:crypto";
 function isFenced(collection) {
   return !!collection && collection !== "global" && !isSyncableCollection(collection);
 }
@@ -2427,6 +2428,32 @@ function track(p) {
 }
 async function settleRecallBoosts() {
   while (pendingBoosts.size) await Promise.all([...pendingBoosts]);
+}
+function shownKey(r) {
+  return `${r.id}:${createHash2("sha1").update(r.content).digest("hex").slice(0, 12)}`;
+}
+function splitShown(results, shown) {
+  const shownIds = new Set([...shown].map((k) => k.slice(0, k.lastIndexOf(":"))));
+  const out = { fresh: [], edited: [], repeats: [] };
+  for (const r of results) {
+    if (shown.has(shownKey(r))) out.repeats.push(r);
+    else if (shownIds.has(r.id)) out.edited.push(r);
+    else out.fresh.push(r);
+  }
+  return out;
+}
+function recallSnippet(r, edited = false, max = 240) {
+  if (r.content.length <= max) return r.content;
+  return edited ? `(edited) \u2026${r.content.slice(-max)}` : `${r.content.slice(0, max)}\u2026`;
+}
+function shownEarlierLine(repeats, activeCollection) {
+  const items = repeats.map((r) => {
+    const preview = r.content.replace(/\s+/g, " ").trim();
+    const short = preview.length > 60 ? `${preview.slice(0, 59)}\u2026` : preview;
+    const where = r.collection && r.collection !== activeCollection ? `from \`${r.collection}\`: ` : "";
+    return `${r.id} (${where}"${short}")`;
+  });
+  return `Also matched, shown earlier in this session: ${items.join("; ")}.`;
 }
 var pendingBoosts;
 var init_recall = __esm({
@@ -5487,14 +5514,14 @@ var init_close = __esm({
 });
 
 // packages/core/src/sync/push.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 function emptyPushStats() {
   return { pushed: 0, linked: 0, deleted: 0, purged: 0, retracted: 0, rejected: 0, renamed: 0, errors: 0 };
 }
 function syncFingerprint(doc) {
   const skip = /* @__PURE__ */ new Set([...LOCAL_ONLY_KEYS, "is_synced", "origin_device", "remote_checked_at"]);
   const meta = Object.fromEntries(Object.entries(doc.metadata).filter(([k]) => !skip.has(k)).sort(([a], [b]) => a.localeCompare(b)));
-  return createHash2("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
+  return createHash3("sha256").update(doc.content).update("\n").update(JSON.stringify(meta)).digest("hex").slice(0, 32);
 }
 async function writeIfUnchanged(collection, doc, metadata) {
   return withDocLock(collection, doc.id, async () => {
@@ -9328,7 +9355,7 @@ var init_pull = __esm({
 });
 
 // packages/core/src/sync/shared-cycle.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { closeSync as closeSync2, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
 import { dirname as dirname7, join as join9 } from "node:path";
 function syncTargetKey(config = getConfig()) {
@@ -9344,7 +9371,7 @@ function syncTargetKey(config = getConfig()) {
     }
   }
   const store = config.STORAGE === "local" ? `local:${config.LOCAL_STORE_PATH}` : `chroma:${config.CHROMA_URL}`;
-  return createHash3("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
+  return createHash4("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
 }
 function sharedDir(config = getConfig()) {
   if (!config.SYNC_COORDINATE || !config.SYNC_HEALTH_FILE) return void 0;
@@ -10160,7 +10187,7 @@ RULES
 });
 
 // packages/core/src/training/index.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash5 } from "crypto";
 import { existsSync as existsSync4, mkdirSync as mkdirSync11, readFileSync as readFileSync15, writeFileSync as writeFileSync8 } from "fs";
 import { join as join12 } from "path";
 function getBackend() {
@@ -10177,7 +10204,7 @@ function previewDir() {
   return dir;
 }
 function sha256(content) {
-  return createHash4("sha256").update(content, "utf-8").digest("hex");
+  return createHash5("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -11351,6 +11378,7 @@ __export(src_exports, {
   readSyncHealth: () => readSyncHealth,
   readUpdateState: () => readUpdateState,
   recallMemory: () => recallMemory,
+  recallSnippet: () => recallSnippet,
   recordCapture: () => recordCapture,
   recordCycle: () => recordCycle,
   recordForTask: () => recordForTask,
@@ -11408,7 +11436,10 @@ __export(src_exports, {
   shouldPull: () => shouldPull,
   shouldRunCycle: () => shouldRunCycle,
   shouldRunDecay: () => shouldRunDecay,
+  shownEarlierLine: () => shownEarlierLine,
+  shownKey: () => shownKey,
   splitManifest: () => splitManifest,
+  splitShown: () => splitShown,
   staleFindings: () => staleFindings,
   startCuration: () => startCuration,
   startSync: () => startSync,
@@ -11556,55 +11587,6 @@ var init_src = __esm({
     init_doc_lock();
     init_session_record();
     init_trash();
-  }
-});
-
-// packages/mcp/src/rules.ts
-var CLAUDE_CODE_RULES;
-var init_rules = __esm({
-  "packages/mcp/src/rules.ts"() {
-    "use strict";
-    CLAUDE_CODE_RULES = `## YAPA \u2014 Memory & Task Assistant (standing rules)
-
-You have YAPA's persistent memory and durable task tools (the yapa MCP server: \`memory_*\`, \`task_*\`, \`journal_*\`, \`collection_*\`, \`compaction_*\`, \`sync\`). Hooks already do the routine work: this block plus open tasks and top memories are injected at session start, and a semantic recall for each prompt is injected as \`# YAPA Recall\` (after pulling teammates' latest writes for the active collection). Do not repeat that recall unless you need a different or more specific query.
-
-### Scope
-The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). A new shared collection can only be created from a session under a project root (or a folder mapped to it); elsewhere the write is refused, and you use a \`private-\` name or ask the user. Change the folder rules (the \`scope\` tool) only when the user explicitly asks. \`private-*\`, \`local-*\` and \`global\` collections never sync (\`global\` is personal; team-wide knowledge goes in a shared collection). To combine or rename collections use \`collection_merge\` (it keeps every document), not \`collection_delete\`. \`collection_delete\` removes a collection from this machine only; pass \`scope: "everyone"\` (with \`confirm\`) only when the user explicitly asks to delete it for the whole team.
-
-### Capture as you go (do not batch to the end)
-Call \`memory_store\` (salience >= 2.0) when: a bug's root cause is identified; a config value, env var, endpoint, or credential location is learned; the user states a preference, decision, or correction; a non-obvious technical fact is discovered; a solution took real effort; a decision or commitment surfaces.
-\`memory_store\` returns \`potential_conflicts\`: decide supersede (re-store with \`supersedes: "<old id>"\`) or coexist before moving on. Reserve \`memory_forget\` for memories that should never have existed (forgetting a teammate's memory only removes it for you).
-Do not store ephemeral conversation state, obvious code patterns, or anything already in git history or an existing memory.
-
-### Where what you learn goes
-Give a memory a \`kind\` when it is one of these, so it can be listed and waited on:
-- a result, root cause, retraction or methodology trap: \`kind: finding\` (status open; resolve it later with a \`disposition\`: decision, task, limitation, or no-action with a reason)
-- a choice that was made: \`kind: decision\`, status \`accepted\`
-- a choice only a person can make: \`kind: decision\`, status \`needed\`, with \`options\`, a \`recommendation\` and the \`owner\` who decides. Never leave such a choice only in chat. When it is for the task you are on, use \`task_update\` with \`decision_needed\` instead: it records the decision and the task waits on it.
-- something that can't be done yet: \`kind: limitation\`, with \`exit_criteria\`
-- a question for a person or another team: \`kind: question\`, with the \`owner\` who must answer
-- an idea nobody has committed to: \`kind: idea\`
-- follow-up work: a task
-A project's own instructions win where they keep these records elsewhere. Record a person's answer with \`memory_update\` (a decision: status accepted or rejected, the choice as \`note\`; a question: status answered). Session start lists what waits on you under "Waiting on you"; \`waiting\` lists everything: tell the user about items that are theirs.
-
-### Tasks
-Call \`task_create\` in the active collection BEFORE starting multi-step or long-lived work, when a follow-up is identified, or when something can't finish this turn. On completion \`task_complete\` (pass \`duration\` for hands-on effort when known), and record what the task produced in the same call: \`learned\` (typed memories, linked to the task) and \`follow_ups\` (new tasks). If the reply says nothing was recorded, consider whether something should have been. On a blocker \`task_update\` with status \`blocked\` and a reason; when the blocker is a person's choice, \`decision_needed\` instead (then take other work: the task comes back once the decision is recorded). On scope change amend the task instead of duplicating it. Tags \`auto\` (an unattended session may do all of it), \`needs-human\` (a step only a person takes) and \`needs:<user>\` (one person must take it) triage a task; \`task_next\` never offers a \`needs-human\` task and, with \`auto_only\`, only offers \`auto\` ones. Items marked "by <user>" were written by a teammate (for their tasks, coordinate before changing them); "from <collection>" marks a hit from another customer or project.
-
-### Journal
-Call \`journal_append\` with a one-line note when a meaningful step completes. Drafts are consolidated into a \`journal\` memory automatically when the session ends.
-
-### Task claims
-Setting a task to \`in_progress\` claims it for this session (a lease on its id: on the sync service in a shared collection, on this machine in a local-only one such as \`private-*\`), so teammates and your other sessions don't start the same work; leaving \`in_progress\` (complete, blocked, pending, delete) releases it. Set \`in_progress\` when you actually start a task. If the update is refused, nothing changed: tell the user who holds it and since when, and offer other work. If it names your own other session, pass \`reclaim: true\` only after the user confirms that session is finished or theirs to take over. If the reply says the claim is NOT shared (offline, signed out), tell the user others may start it too. Task lines show "claimed by <who>"; before starting a task claimed by someone else, tell the user. A "**YAPA claim:**" line in the context means a claim was taken over or clashed: pass it on to the user.
-
-### Shared work (leases)
-For other shared resources, some projects coordinate through bare YAPA leases (the \`lease\` tool, or a project script calling \`yapa coord\`). Take one only when the project's own instructions or tooling call for it, never on your own initiative. Session start lists live leases in the active collection under "Work in progress": before starting something listed there, tell the user who holds it. If an acquire is refused, say who holds the work and since when, and offer something else; don't retry in a loop. If you took over an expired lease, say whose it was. If the service is unreachable, say the work is not shared. Heartbeats are automatic while this session is active; don't schedule them.
-
-### Memory compaction
-When the injected context lists a "compaction candidate", call \`compaction_suggest\` for it, write a rolling summary per group, and submit with \`compaction_apply\`.
-
-### Storage errors
-If a yapa tool fails with a storage or sync error, do not swallow it: tell the user, and use \`sync\` (action \`status\`) to diagnose remote problems.
-`;
   }
 });
 
@@ -12012,7 +11994,7 @@ var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
-    SCRIPT_VERSION = true ? "1.16.0" : void 0;
+    SCRIPT_VERSION = true ? "1.17.0" : void 0;
     SEMVER2 = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
     DEFAULT_INTERVAL_MS = 3e5;
     STALE_INTERVALS = 3;
@@ -12041,7 +12023,7 @@ var YAPA_VERSION;
 var init_version = __esm({
   "packages/mcp/src/version.ts"() {
     "use strict";
-    YAPA_VERSION = true ? "1.16.0" : fromPackage();
+    YAPA_VERSION = true ? "1.17.0" : fromPackage();
   }
 });
 
@@ -12050,11 +12032,13 @@ var hooks_exports = {};
 __export(hooks_exports, {
   attribution: () => attribution,
   bundledStatusLineScript: () => bundledStatusLineScript,
+  fitContext: () => fitContext,
   freshenFromRemote: () => freshenFromRemote,
   postCompact: () => postCompact,
   prepareStatusLine: () => prepareStatusLine,
   presenceLines: () => presenceLines,
   pushWritten: () => pushWritten,
+  readRecalled: () => readRecalled,
   reloadConfig: () => reloadConfig,
   sessionEnd: () => sessionEnd,
   sessionStart: () => sessionStart,
@@ -12066,7 +12050,7 @@ __export(hooks_exports, {
   userText: () => userText,
   waitingLines: () => waitingLines
 });
-import { existsSync as existsSync5, mkdirSync as mkdirSync14, readFileSync as readFileSync21, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync14, readFileSync as readFileSync21, readdirSync as readdirSync7, rmSync as rmSync8, statSync as statSync6, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname12, join as join17 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -12226,10 +12210,48 @@ function recordPrompt(sessionId2, prompt2) {
 `);
   }
 }
+function readRecalled(sessionId2) {
+  if (!sessionId2) return /* @__PURE__ */ new Set();
+  try {
+    const ids = JSON.parse(readFileSync21(stateFile2(sessionId2, "recalled"), "utf-8"));
+    return new Set(Array.isArray(ids) ? ids.map(String) : []);
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function recordRecalled(sessionId2, ids) {
+  if (!sessionId2) return;
+  try {
+    writeFileSync11(stateFile2(sessionId2, "recalled"), JSON.stringify([.../* @__PURE__ */ new Set([...readRecalled(sessionId2), ...ids])]));
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] could not record recalled ids: ${e}
+`);
+  }
+}
+function clearRecalled(sessionId2) {
+  if (!sessionId2) return;
+  try {
+    rmSync8(stateFile2(sessionId2, "recalled"), { force: true });
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] could not clear recalled ids: ${e}
+`);
+  }
+}
+function sweepRecalled(now = Date.now()) {
+  try {
+    const dir = stateDir();
+    for (const f of readdirSync7(dir)) {
+      if (!f.endsWith(".recalled")) continue;
+      const path2 = join17(dir, f);
+      if (now - statSync6(path2).mtimeMs > RECALLED_MAX_AGE_MS) rmSync8(path2, { force: true });
+    }
+  } catch {
+  }
+}
 function takeNotice(sessionId2) {
   if (!sessionId2) return void 0;
-  const file = stateFile2(sessionId2, "notice");
   try {
+    const file = stateFile2(sessionId2, "notice");
     const notice = readFileSync21(file, "utf-8").trim();
     rmSync8(file, { force: true });
     return notice || void 0;
@@ -12307,55 +12329,93 @@ async function waitingLines(user, budgetMs = 2e3, collection = "global") {
     return [];
   }
 }
+function fitContext(sections, max) {
+  const level = sections.map(() => -1);
+  const render = () => sections.flatMap((s, i) => level[i] < 0 ? s.lines : s.shrink[level[i]]).join("\n");
+  let text = render();
+  while (text.length > max) {
+    let pick = -1;
+    const cost = (i) => (sections[i].priority ?? 0) + 10 * (level[i] + 1);
+    for (let i = 0; i < sections.length; i++) {
+      if (level[i] + 1 >= (sections[i].shrink?.length ?? 0)) continue;
+      if (pick < 0 || cost(i) < cost(pick)) pick = i;
+    }
+    if (pick < 0) break;
+    level[pick]++;
+    text = render();
+  }
+  if (text.length <= max) return text;
+  const note = "\n_(YAPA context cut to fit; call `task_list`, `waiting` or `memory_list` for the rest.)_";
+  if (max < note.length) return text.slice(0, Math.max(0, max));
+  const cut = text.lastIndexOf("\n", max - note.length);
+  return text.slice(0, cut > 0 ? cut : max - note.length) + note;
+}
 async function sessionStart(input2) {
   noteSessionStarting(input2.session_id);
+  if (input2.source !== "resume") clearRecalled(input2.session_id);
+  if (input2.source === "startup") sweepRecalled();
   const detection = await detectCollection(input2.cwd);
   const collection = detection.collection;
   recordSessionScope(input2.session_id, collection);
   const pulled = await freshenFromRemote(collection);
-  const lines = [];
-  if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, "");
-  lines.push("# YAPA Context", "", scopeLine(detection));
-  if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
+  const head = ["# YAPA Context", "", scopeLine(detection)];
+  if (pulled) head.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const down = syncDownLine();
-  if (down) lines.push(down);
+  if (down) head.push(down);
   const captureDown = captureDownLine();
-  if (captureDown) lines.push(captureDown);
+  if (captureDown) head.push(captureDown);
   const hint = prepareStatusLine();
-  if (hint) lines.push(hint);
+  if (hint) head.push(hint);
   const update = updateLine();
-  if (update) lines.push(update);
+  if (update) head.push(update);
   const notice = takeNotice(input2.session_id);
-  if (notice) lines.push(`_${notice}_`);
+  if (notice) head.push(`_${notice}_`);
   const [held2] = await Promise.all([presence(collection, input2), keepLeasesAlive(input2)]);
-  lines.push(...claimNoticeLines());
+  head.push(...claimNoticeLines());
+  const sections = [{ lines: head }];
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
     if (tasks.length) {
-      lines.push("", "## Open tasks");
-      for (const t of tasks.slice(0, 10)) {
+      const line = (t) => {
         const status = t.metadata.status ?? "open";
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : "";
         const claim = claimNote(t, held2.claims, leaseSessions(input2));
-        lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${t.title}`);
-      }
-      if (tasks.length > 10) lines.push(`- _\u2026${tasks.length - 10} more (call \`task_list\` for the full list)_`);
+        return `- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${clip(t.title, 200)}`;
+      };
+      const list9 = (n) => [
+        "",
+        "## Open tasks",
+        ...tasks.slice(0, n).map(line),
+        ...tasks.length > n ? [`- _\u2026${tasks.length - n} more (call \`task_list\` for the full list)_`] : []
+      ];
+      sections.push({ lines: list9(10), shrink: [list9(5), ["", `_${tasks.length} open task(s) in ${collection}: call \`task_list\`._`]], priority: 5 });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}
 `);
   }
-  lines.push(...await waitingLines(getConfig().USERNAME, void 0, collection));
-  lines.push(...held2.lines);
+  const waiting = (await waitingLines(getConfig().USERNAME, void 0, collection)).map((l) => clip(l, 500));
+  if (waiting.length) {
+    const items = waiting.filter((l) => l.startsWith("- **"));
+    const summaries = waiting.filter((l) => l.startsWith("- _"));
+    const tail = waiting.filter((l) => !l.startsWith("- ") && l !== "" && !l.startsWith("## "));
+    sections.push({
+      lines: waiting,
+      shrink: [
+        [...waiting.slice(0, 2), ...items.slice(0, 3), ...items.length > 3 ? ["- _\u2026more: call `waiting`_"] : summaries, ...tail],
+        ["", "_Items are waiting on you or anyone: call `waiting`._"]
+      ],
+      priority: 6
+    });
+  }
+  if (held2.lines.length) {
+    sections.push({ lines: held2.lines, shrink: [["", "_Work is in progress in this collection: `lease` with action `list` shows who holds what._"]], priority: 4 });
+  }
   try {
     const memories = (await listMemories({ collection, limit: 25 })).filter((r) => !isSessionSummary(r.metadata)).slice(0, 5);
     if (memories.length) {
-      lines.push("", "## Top memories (by salience)");
-      for (const r of memories) {
-        const sal = r.metadata.salience?.toFixed(2) ?? "?";
-        const snippet = r.content.length > 200 ? r.content.slice(0, 200) + "\u2026" : r.content;
-        lines.push(`- **${r.id}** (salience ${sal}${attribution(r.metadata)}): ${snippet}`);
-      }
+      const list9 = (n, chars) => ["", "## Top memories (by salience)", ...memories.slice(0, n).map((r) => `- **${r.id}** (salience ${r.metadata.salience?.toFixed(2) ?? "?"}${attribution(r.metadata)}): ${clip(r.content, chars)}`)];
+      sections.push({ lines: list9(5, 200), shrink: [list9(3, 120), []], priority: 2 });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] memory list failed: ${e}
@@ -12364,9 +12424,13 @@ async function sessionStart(input2) {
   try {
     const candidates = await findCompactionCandidates();
     if (candidates.length) {
-      lines.push("", "## Compaction candidates");
-      lines.push("These collections are above the size threshold. Consider calling `compaction_suggest` then `compaction_apply`:");
-      for (const c of candidates) lines.push(`- ${c}`);
+      const named = candidates.includes(collection) ? [collection, ...candidates.filter((c) => c !== collection)] : candidates;
+      const shown = named.slice(0, 3).join(", ") + (named.length > 3 ? `, and ${named.length - 3} more` : "");
+      sections.push({
+        lines: ["", "## Compaction candidates", `Above the size threshold: ${shown}. Consider \`compaction_suggest\` then \`compaction_apply\`.`],
+        shrink: [[]],
+        priority: 1
+      });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] compaction check failed: ${e}
@@ -12375,7 +12439,11 @@ async function sessionStart(input2) {
   try {
     const stale2 = (await staleFindings(collection)).length;
     if (stale2 >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
-      lines.push("", "## Findings backlog", `${stale2} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`);
+      sections.push({
+        lines: ["", "## Findings backlog", `${stale2} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`],
+        shrink: [["", `_${stale2} open findings in ${collection} need a disposition (\`yapa memory sweep-findings\`)._`]],
+        priority: 3
+      });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] findings check failed: ${e}
@@ -12384,11 +12452,8 @@ async function sessionStart(input2) {
   if (input2.source !== "compact") {
     await withTimeout(consolidateStaleDrafts().catch(() => []), STALE_JOURNAL_BUDGET_MS);
   }
-  lines.push(
-    "",
-    "_Hooks ran recall + task_list automatically. You do not need to repeat these unless you need a more specific query._"
-  );
-  context("SessionStart", lines);
+  sections.push({ lines: ["", "_Hooks ran recall and task_list for you: call them yourself only for more than is shown here, or for a more specific query._"], priority: 9 });
+  emit({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: fitContext(sections, getConfig().SESSION_START_MAX_CHARS ?? 9e3) } });
 }
 function userText(prompt2) {
   if (!prompt2.includes("<task-notification") && !prompt2.includes("[SYSTEM NOTIFICATION")) return prompt2.trim();
@@ -12420,14 +12485,18 @@ async function userPromptSubmit(input2) {
       emit({});
       return;
     }
-    if (recall.length) lines.push("", "## Top matches");
-    for (const r of recall) {
+    const { fresh, edited, repeats } = splitShown(recall, readRecalled(input2.session_id));
+    const show = [...fresh, ...edited];
+    if (show.length) lines.push("", "## Top matches");
+    for (const r of show) {
       const sal = r.metadata.salience?.toFixed(2) ?? "?";
       const dist = r.distance.toFixed(3);
-      const snippet = r.content.length > 240 ? r.content.slice(0, 240) + "\u2026" : r.content;
+      const snippet = recallSnippet(r, edited.includes(r));
       const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : "";
       lines.push(`- **${r.id}** (salience ${sal}, distance ${dist}${where}${attribution(r.metadata)}): ${snippet}`);
     }
+    if (repeats.length) lines.push("", shownEarlierLine(repeats, collection));
+    recordRecalled(input2.session_id, show.map(shownKey));
   } catch (e) {
     process.stderr.write(`[yapa-hook] memory_recall failed: ${e}
 `);
@@ -12471,6 +12540,7 @@ async function stop(input2) {
 }
 async function postCompact(input2) {
   emit({});
+  clearRecalled(input2.session_id);
   const summary = (input2.compact_summary ?? "").trim();
   if (!getConfig().CAPTURE_COMPACTION || !summary) return;
   try {
@@ -12506,12 +12576,11 @@ async function sessionEnd(input2) {
 function reloadConfig() {
   setConfig(createConfig(process.env));
 }
-var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, HOOK_PUSH_TIMEOUT_MS, HEALTH_FRESH_MS, relTime;
+var HOOK_PULL_OVERLAP_SECONDS, STALE_JOURNAL_BUDGET_MS, LEASE_LIST_BUDGET_MS, HEARTBEAT_BUDGET_MS, HOOK_PUSH_TIMEOUT_MS, HEALTH_FRESH_MS, RECALLED_MAX_AGE_MS, relTime, clip;
 var init_hooks = __esm({
   "packages/mcp/src/cli/hooks.ts"() {
     "use strict";
     init_src();
-    init_rules();
     init_statusline();
     init_version();
     HOOK_PULL_OVERLAP_SECONDS = 600;
@@ -12520,7 +12589,9 @@ var init_hooks = __esm({
     HEARTBEAT_BUDGET_MS = 1500;
     HOOK_PUSH_TIMEOUT_MS = 5e3;
     HEALTH_FRESH_MS = 10 * 6e4;
+    RECALLED_MAX_AGE_MS = 7 * 864e5;
     relTime = (secs) => secs < 120 ? `${secs}s` : secs < 7200 ? `${Math.round(secs / 60)}m` : `${(secs / 3600).toFixed(1)}h`;
+    clip = (s, n) => s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
   }
 });
 
@@ -13334,7 +13405,6 @@ function resolveHostEnv(env, claudeConfig, cwd) {
     }
   }
   if (env.CLAUDE_PLUGIN_ROOT) {
-    offer("YAPA_HOOK_INJECT_RULES", "true");
     if (env.CLAUDE_PLUGIN_DATA) offer("YAPA_MODEL_CACHE_DIR", join15(env.CLAUDE_PLUGIN_DATA, "models"));
     return add;
   }
