@@ -74,7 +74,7 @@ starting Claude Code in `~/work/projects/acme/...` uses collection
 `customer-acme`; `~/work/projects/tools/...` uses `project-tools`. Anything
 else is `global` (local-only, see Privacy), and new shared collections are
 only created from sessions under a project root. These folder rules live in
-`~/.local/share/yapa/scope.json`; see "Folder rules" in the README.
+`~/.local/share/yapa/scope.json`; see [Collections and folder rules](collections.md#folder-rules).
 
 ## 4. Restart and verify
 
