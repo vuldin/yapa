@@ -1039,7 +1039,7 @@ SLA; acceptable for a pilot.
    `hd` via userinfo), or a static `yapa_sk_` key for `svc-*` principals.
    The service publishes RFC 9728 protected-resource metadata pointing at
    Google. A thin authorization server stays an option for connectors that
-   need one (docs/adp-onboarding.md).
+   need one.
 4. **Conflicts: last-writer-wins in v1.** The server writes an
    `overwrote_teammate_edit` audit event whenever a write replaces a version
    last written by a different user. Stricter governance belongs to ADP

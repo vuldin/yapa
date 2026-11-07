@@ -173,7 +173,7 @@ Folder rules aren't options: they're in the scope file above. Everything else, i
 - `packages/mcp` (`yapa-mcp`): the MCP server and the `yapa` CLI, which also runs the Claude Code hooks.
 - `packages/dsh` (`yapa`): the DeepSeek Harness plugin.
 - `packages/service` (`@yapa/service`): the YAPA sync service, Sync API v1 over HTTP ([README](packages/service/README.md)).
-- `packages/mcp-remote`: a read-only remote MCP server over a sync service's shared store, for agents that don't run YAPA locally ([README](packages/mcp-remote/README.md)).
+- `packages/mcp-remote`: a read-only remote MCP server over a sync service's shared store, for agents that don't run YAPA locally.
 - `plugin/`: the Claude Code plugin, a prebuilt bundle of `packages/mcp` (`plugin/dist`), its manifest, hooks and skills, built by `npm run build:all`.
 
 Building, testing and releasing: [CLAUDE.md](CLAUDE.md).

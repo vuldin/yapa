@@ -1,7 +1,6 @@
 /**
- * yapa-mcp configuration, read from the environment once at startup. Every
- * variable is documented in packages/mcp-remote/README.md. Database settings
- * use the same names as yapa-service.
+ * yapa-mcp configuration, read from the environment once at startup. Database
+ * settings use the same names as yapa-service.
  */
 import { ConfigError, READER_USERNAME_RE, type DbConfig, type RateLimitClass } from '@yapa/service/lib';
 import { DEFAULT_TOOLS, READ_TOOLS } from './tools.js';

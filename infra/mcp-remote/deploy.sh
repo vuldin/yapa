@@ -52,7 +52,7 @@ terraform init -input=false -backend-config="bucket=${STATE_BUCKET}" >/dev/null
 
 # The secret must exist and have a version before a revision can reference
 # `latest`. First run only: create it, then add an empty key set ({} =
-# no static keys; OAuth only) that `docs/adp-onboarding.md` replaces later.
+# no static keys; OAuth only), replaced later with `gcloud secrets versions add`.
 SECRET="$(sed -n 's/^[[:space:]]*static_keys_secret_id[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' terraform.tfvars 2>/dev/null | head -n1)"
 SECRET="${SECRET:-yapa-mcp-static-keys}"
 if ! gcloud secrets versions describe latest --secret "$SECRET" --project "$PROJECT_ID" >/dev/null 2>&1; then

@@ -3,7 +3,7 @@ region                = "us-central1"
 cloudsql_state_bucket = "<STATE_BUCKET>"
 allowed_hd            = "<COMPANY_DOMAIN>"
 
-# "YAPA ADP" Web OAuth client (docs/adp-onboarding.md). Empty = static keys only.
+# Web OAuth client IDs the service accepts. Empty = static keys only.
 oauth_client_ids = [
   # "<ADP_WEB_CLIENT_ID>.apps.googleusercontent.com",
 ]

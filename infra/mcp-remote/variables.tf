@@ -84,7 +84,7 @@ variable "static_keys_secret_id" {
 }
 
 variable "static_keys_version" {
-  description = "Secret version the revision reads. \"latest\" is only resolved when a revision starts; set the version number after adding one so the change rolls out a new revision (docs/adp-onboarding.md, rotation)."
+  description = "Secret version the revision reads. \"latest\" is only resolved when a revision starts; set the version number after adding one so the change rolls out a new revision."
   type        = string
   default     = "latest"
 }

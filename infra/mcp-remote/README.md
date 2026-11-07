@@ -1,7 +1,6 @@
 # infra/mcp-remote: Cloud Run for yapa-mcp (josh-313)
 
-Terraform for the remote MCP service (`packages/mcp-remote`, onboarding in
-`docs/adp-onboarding.md`). Separate root; state in the same bucket under
+Terraform for the remote MCP service (`packages/mcp-remote`). Separate root; state in the same bucket under
 prefix `yapa/mcp-remote`; reads the Cloud SQL outputs through
 `terraform_remote_state` (prefix `yapa/cloudsql`), like `infra/service`.
 
@@ -36,7 +35,7 @@ prefix `yapa/mcp-remote`; reads the Cloud SQL outputs through
     `YAPA_MCP_STATIC_KEYS` from Secret Manager (`static_keys_version`, default `latest`).
 - Secret `yapa-mcp-static-keys` with `secretAccessor` for the runtime SA.
   Terraform never holds a version: values (hashes only) are added with
-  `gcloud secrets versions add` (see `docs/adp-onboarding.md`). The first
+  `gcloud secrets versions add`. The first
   `deploy.sh` run adds `{}` so the revision can start.
 - Alerts: 5xx share > 2% for 10 min; auth failures > 50 per 5 min (higher than
   yapa-service's 20: an open endpoint sees scanner noise).
@@ -69,7 +68,7 @@ credentials (`/health` 200, metadata 200, `POST /mcp` 401).
 Secret changes (new static key, rotation) are read when a revision starts.
 Add the version, then set `static_keys_version = "<number>"` in
 `terraform.tfvars` and apply with the current image; the changed version
-rolls out a new revision (steps in `docs/adp-onboarding.md`).
+rolls out a new revision.
 
 ## Cost
 

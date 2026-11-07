@@ -8,7 +8,7 @@
 //
 // Prints the key ONCE (paste it into ADP; it is not stored anywhere) and the
 // JSON entry to merge into the YAPA_MCP_STATIC_KEYS secret, which holds only
-// the sha256. See docs/adp-onboarding.md for rotation.
+// the sha256.
 import { createHash, randomBytes } from 'node:crypto';
 
 const PRINCIPAL_RE = /^svc-[a-z0-9-]{1,60}$/;
