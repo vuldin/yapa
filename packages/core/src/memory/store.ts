@@ -7,7 +7,7 @@ import { assertWritable } from '../sync/syncable.js';
 import { normalizeTyped, type TypedFields } from './kinds.js';
 import { linkMemoryToTasks } from './links.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
-import { typedForCollection } from './records-elsewhere.js';
+import { keepsRecordsElsewhere, typedForCollection } from './records-elsewhere.js';
 
 export interface StoreOptions {
   tags?: string[];
@@ -126,7 +126,8 @@ export async function storeMemory(
 ): Promise<StoreMemoryResult> {
   // A collection merged away here is followed, never recreated.
   const { collection } = await resolveWriteCollection(options.collection ?? 'global');
-  const gated = typedForCollection(collection, options.typed ? normalizeTyped(options.typed) : {});
+  const normalized = options.typed ? normalizeTyped(options.typed) : {};
+  const gated = typedForCollection(!!normalized.kind && await keepsRecordsElsewhere(collection), normalized);
   const typed = gated.typed;
   const note = gated.keptAsNote ? { kept_as_note: true } : {};
   await getOrCreateCollection(collection);

@@ -16,8 +16,7 @@ import { getDocumentsByIds, listCollections } from '../store/index.js';
 import { isOpenTyped, normalizeTyped, type TypedFields } from '../memory/kinds.js';
 import { storeMemory } from '../memory/store.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
-import { recordsElsewhere } from '../scope-file.js';
-import { KEPT_AS_NOTE_REASON, RecordsElsewhereError } from '../memory/records-elsewhere.js';
+import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
 import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
 
@@ -120,7 +119,7 @@ export async function requestDecision(
   const task = await getTask(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error('decision_needed needs a question');
-  if (recordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, 'decision_needed (a YAPA decision the task waits on)', 'set the task to blocked with a blocked_reason that names the record');
+  if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, 'decision_needed (a YAPA decision the task waits on)', 'set the task to blocked with a blocked_reason that names the record');
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join('\n\n');
   const typed = normalizeTyped({
     kind: 'decision', status: 'needed', options: d.options, task_ids: [task.id],

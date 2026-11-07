@@ -12,7 +12,8 @@
 import { addDocument, getDocumentsByFilter, getDocumentsByIds, metadataDelta, patchDocument } from '../store/index.js';
 import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
-import { recordsElsewhere } from '../scope-file.js';
+import { readScopeSettings } from '../scope-file.js';
+import { getCollectionRedirects, resolveCollectionRedirect } from '../sync/sentinel.js';
 import { isMemoryKind, TYPED_KEYS } from './kinds.js';
 
 export const KEPT_AS_NOTE_REASON = 'this collection keeps its records in the project\'s own files, so only what the project publishes there (yapa memory put --ref) is typed';
@@ -27,12 +28,24 @@ export class RecordsElsewhereError extends Error {
 }
 
 /**
- * The typed fields to store for a new memory in `collection`: unchanged,
- * or, in a records-elsewhere collection without an external_ref, only its
+ * True when `collection` keeps its records elsewhere: it is listed, or a
+ * listed collection was merged into it (the mark follows the merge).
+ */
+export async function keepsRecordsElsewhere(collection: string): Promise<boolean> {
+  const listed = readScopeSettings().records_elsewhere;
+  if (!listed.length) return false;
+  if (listed.includes(collection)) return true;
+  const redirects = await getCollectionRedirects();
+  return listed.some(c => resolveCollectionRedirect(c, redirects).collection === collection);
+}
+
+/**
+ * The typed fields to store for a new memory: unchanged, or, in a
+ * records-elsewhere collection (`marked`) without an external_ref, only its
  * task links (`keptAsNote` then says the kind was dropped).
  */
-export function typedForCollection(collection: string, typed: Record<string, any>): { typed: Record<string, any>; keptAsNote: boolean } {
-  if (!isMemoryKind(typed.kind) || typed.external_ref || !recordsElsewhere(collection)) return { typed, keptAsNote: false };
+export function typedForCollection(marked: boolean, typed: Record<string, any>): { typed: Record<string, any>; keptAsNote: boolean } {
+  if (!marked || !isMemoryKind(typed.kind) || typed.external_ref) return { typed, keptAsNote: false };
   return { typed: typed.task_ids?.length ? { task_ids: typed.task_ids } : {}, keptAsNote: true };
 }
 
@@ -41,9 +54,9 @@ export function typedForCollection(collection: string, typed: Record<string, any
  * records-elsewhere collection (a status change on a published one, such as
  * a person's answer, still goes through).
  */
-export function assertMayType(collection: string, current: Record<string, any>, typed: Record<string, any>): void {
+export async function assertMayType(collection: string, current: Record<string, any>, typed: Record<string, any>): Promise<void> {
   if (!isMemoryKind(typed.kind) || isMemoryKind(current.kind)) return;
-  if (typed.external_ref || current.external_ref || !recordsElsewhere(collection)) return;
+  if (typed.external_ref || current.external_ref || !(await keepsRecordsElsewhere(collection))) return;
   throw new RecordsElsewhereError(collection, `giving ${current.parent_id ?? 'this memory'} a kind`);
 }
 
@@ -72,8 +85,10 @@ const UNTYPED_KEYS = TYPED_KEYS.filter(k => k !== 'task_ids' && k !== 'external_
  * copies made before the collection was marked. Archived memories are left
  * as they are.
  */
-export async function untypeCollection(collection: string, opts: { dryRun?: boolean } = {}): Promise<UntypeResult> {
-  if (!recordsElsewhere(collection)) {
+export async function untypeCollection(requested: string, opts: { dryRun?: boolean } = {}): Promise<UntypeResult> {
+  // A collection merged away here is followed: its memories moved with it.
+  const collection = resolveCollectionRedirect(requested, await getCollectionRedirects()).collection;
+  if (!(await keepsRecordsElsewhere(collection))) {
     throw new Error(`${collection} is not marked as keeping its records elsewhere: mark it first (yapa scope records-elsewhere add ${collection})`);
   }
   const me = getConfig().USERNAME;

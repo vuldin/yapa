@@ -178,10 +178,11 @@ export async function runScopeAction(
     if (!v?.trim()) throw new Error(`${a.action} needs ${what}`);
     return v;
   };
+  let merged: { collection: string; redirectedFrom?: string } | undefined;
   const edit: ScopeEdit = a.action === 'add_customer' || a.action === 'remove_customer'
     ? { op: a.action, name: need(a.name, 'a folder name (name)') }
     : a.action === 'add_records_elsewhere' || a.action === 'remove_records_elsewhere'
-      ? { op: a.action, collection: need(a.collection, 'a collection') }
+      ? { op: a.action, collection: a.action === 'add_records_elsewhere' ? (merged = resolveCollectionRedirect(need(a.collection, 'a collection').trim(), await getCollectionRedirects())).collection : need(a.collection, 'a collection') }
       : a.action === 'map'
       ? { op: 'map', dir: need(a.dir, 'a folder (dir)'), collection: need(a.collection, 'a collection') }
       : { op: a.action, dir: need(a.dir, 'a folder (dir)') };
@@ -201,6 +202,7 @@ export async function runScopeAction(
     remove_records_elsewhere: [`${target} no longer keeps its records elsewhere: typed memories are stored there as usual.`, `${target} was not marked as keeping its records elsewhere.`],
   };
   const lines = [done[a.action][r.changed ? 0 : 1]];
+  if (merged?.redirectedFrom) lines.unshift(`${merged.redirectedFrom} was merged into ${merged.collection} on this machine, so ${merged.collection} is the one marked.`);
   if (r.warning) lines.push(`⚠ ${r.warning}`);
   lines.push('', formatScopeSettings(r.settings));
   return { ok: true, text: lines.join('\n') };

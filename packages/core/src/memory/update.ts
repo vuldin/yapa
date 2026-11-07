@@ -60,7 +60,7 @@ export async function updateMemory(id: string, patch: MemoryUpdate, collection?:
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
   const typed = normalizeTyped(typedPatch, found.doc.metadata);
-  assertMayType(found.collection, found.doc.metadata, typed);
+  await assertMayType(found.collection, found.doc.metadata, typed);
   const now = Math.floor(Date.now() / 1000);
 
   const baseId = found.doc.metadata.parent_id ?? found.doc.id;

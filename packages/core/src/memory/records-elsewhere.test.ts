@@ -3,13 +3,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setConfig, resetConfig, createConfig } from '../config.js';
-import { setStore, resetStore, createLocalStore, getDocumentsByIds, getDocumentsByFilter, addDocument } from '../store/index.js';
+import { setStore, resetStore, createLocalStore, getDocumentsByIds, getDocumentsByFilter, addDocument, getOrCreateCollection } from '../store/index.js';
 import { editScopeSettings, readScopeSettings, formatScopeSettings, ScopeFileError } from '../scope-file.js';
 import { runScopeAction } from '../scope.js';
 import { storeMemory } from './store.js';
 import { updateMemory } from './update.js';
 import { putExternal } from './external.js';
 import { untypeCollection, RecordsElsewhereError } from './records-elsewhere.js';
+import { mergeCollections } from '../collections/manage.js';
 import { createTask } from '../tasks/create.js';
 import { recordForTask, requestDecision, keptAsNotesLine } from '../tasks/close.js';
 import { waitingOn } from '../tasks/waiting.js';
@@ -134,6 +135,25 @@ describe('storing in a records-elsewhere collection', () => {
     expect((await meta(rec.memories[0])).task_ids).toEqual([t]);
     await expect(requestDecision(t, { question: 'Ship Friday?', options: ['yes', 'no'] })).rejects.toThrow(/set the task to blocked/);
     expect((await getDocumentsByFilter(C, { type: 'memory', kind: 'decision' }, 10))).toEqual([]);
+  });
+});
+
+describe('a marked collection merged into another', () => {
+  it('carries the mark: writes landing in the target are checked, and untype follows the old name', async () => {
+    const OLD = 'private-before', NEW = 'private-after';
+    await storeMemory('a typed copy made before the mark', { collection: OLD, typed: { kind: 'finding' } });
+    await editScopeSettings({ op: 'add_records_elsewhere', collection: OLD });
+    await getOrCreateCollection(NEW);
+    await mergeCollections(OLD, NEW);
+    const viaOld = await storeMemory('stored under the old name', { collection: OLD, typed: { kind: 'finding' } });
+    expect(viaOld.kept_as_note).toBe(true);
+    expect((await storeMemory('stored under the new name', { collection: NEW, typed: { kind: 'idea' } })).kept_as_note).toBe(true);
+    const dry = await untypeCollection(OLD, { dryRun: true });
+    expect(dry.collection).toBe(NEW);
+    expect(dry.by_kind).toEqual({ finding: 1 });
+    const r = await runScopeAction({ action: 'add_records_elsewhere', collection: OLD }, dir);
+    expect(r.text).toMatch(/^private-before was merged into private-after on this machine, so private-after is the one marked/);
+    expect(readScopeSettings().records_elsewhere).toContain(NEW);
   });
 });
 

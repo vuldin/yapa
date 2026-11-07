@@ -54,7 +54,7 @@ Mark the collection: `yapa scope records-elsewhere add private-acme` (or ask the
 - **`memory_update`** refuses to give an untyped memory a kind. Status changes on published memories still work, so a person's answer is recorded as usual.
 - **`decision_needed`** on `task_update` is refused: record the decision in the project's files, then set the task to `blocked` with a reason.
 
-So `waiting`, session start's "Waiting on you" and the findings backlog show only what the project published there. The follow-through after each turn still settles those: when you answer a published question in a session, its status and a dated note are recorded on the memory.
+So `waiting`, session start's "Waiting on you" and the findings backlog show only what the project published there. The mark follows a merge: when a marked collection is merged into another, writes that land in the target are checked the same way. Like the other folder rules, the setting is this machine's: in a shared collection, typed memories a teammate (or you, on another machine without the mark) stores still sync in typed. The follow-through after each turn still settles those: when you answer a published question in a session, its status and a dated note are recorded on the memory.
 
 The project's side of the contract:
 
