@@ -113,6 +113,10 @@ The status line under the prompt shows the version, the remote and sync health, 
 
 Before connecting, read [Connecting to a remote](docs/connecting-to-a-remote.md): the first sync pushes every shared collection on this machine. How sync works: [Sync](docs/sync.md).
 
+### Token cost
+
+In one user's measured sessions, YAPA added about 4.5–5% to a session's token cost. That's mostly the recall hits and tool results that stay in context, plus a few cents an hour of Haiku for the capture after each turn. Finding relevant memories costs no tokens, since semantic search runs locally with MiniLM. It can save more than it costs when work keeps returning to the same projects and problems, because a recalled memory replaces re-discovering it, but the data can't show how much each reuse saved. The measurements and their limits: [Token cost](docs/cost.md).
+
 ### Privacy
 
 - `private-*`, `local-*` and `global` collections never sync, not even to your other machines.
@@ -164,6 +168,7 @@ Folder rules aren't options: they're in the scope file above. Everything else, i
 - [Connecting to a remote](docs/connecting-to-a-remote.md) and the [Sync API](docs/sync-api.md)
 - [Tools and hooks](docs/tools.md): every tool and hook
 - [Configuration](docs/configuration.md): every option and variable
+- [Token cost](docs/cost.md): what YAPA adds to a session's tokens, and what it can save
 - [Training pipeline](docs/training-pipeline.md): the optional ML-ops tools
 - Team pilot: [onboarding](docs/pilot-onboarding.md), [two-person test](docs/second-user-test.md), [feedback](docs/pilot-feedback-template.md)
 - DSH: [install](packages/dsh/install.md), [architecture](packages/dsh/architecture.md), [session flow](docs/dsh-session-flow.md), [future work](docs/future-work.md)
