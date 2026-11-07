@@ -19,7 +19,7 @@ need YAPA installed, configured and verified per
 ## Setup (both)
 
 Each person makes a `yapa-pilot-test` folder under one of their
-`project_roots` and starts Claude Code there. That folder maps to the shared
+project roots (`yapa scope list`) and starts Claude Code there. That folder maps to the shared
 collection `project-yapa-pilot-test` on both machines.
 
 ```sh

@@ -4,18 +4,18 @@ import { pluginSettingsEnv, resolveHostEnv } from './env.js';
 describe('pluginSettingsEnv (yapa coord from a plain shell)', () => {
   const settings = {
     enabledPlugins: { 'yapa@yapa': true },
-    pluginConfigs: { 'yapa@yapa': { options: { sync_enabled: true, sync_service_url: 'https://svc.example', username: '', project_roots: '~/p' } } },
+    pluginConfigs: { 'yapa@yapa': { options: { sync_enabled: true, sync_service_url: 'https://svc.example', username: '', status_label: 'team' } } },
   };
 
   it('maps the enabled plugin options to YAPA_* (booleans as strings, empty values skipped)', () => {
-    expect(pluginSettingsEnv({}, settings)).toEqual({ YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://svc.example', YAPA_PROJECT_ROOTS: '~/p' });
+    expect(pluginSettingsEnv({}, settings)).toEqual({ YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_SERVICE_URL: 'https://svc.example', YAPA_STATUS_LABEL: 'team' });
   });
 
-  it('passes the collection map through like any other option', () => {
-    const withMap = { ...settings, pluginConfigs: { 'yapa@yapa': { options: { collection_map: '~/work/acme=private-acme' } } } };
-    expect(pluginSettingsEnv({}, withMap)).toEqual({ YAPA_COLLECTION_MAP: '~/work/acme=private-acme' });
-    expect(resolveHostEnv({ CLAUDE_PLUGIN_ROOT: '/p', CLAUDE_PLUGIN_OPTION_COLLECTION_MAP: '~/work/acme=private-acme' }, undefined).YAPA_COLLECTION_MAP)
-      .toBe('~/work/acme=private-acme');
+  it('passes a path option through like any other', () => {
+    const withCa = { ...settings, pluginConfigs: { 'yapa@yapa': { options: { sync_ca_cert: '~/certs/ca=1.pem' } } } };
+    expect(pluginSettingsEnv({}, withCa)).toEqual({ YAPA_SYNC_CA_CERT: '~/certs/ca=1.pem' });
+    expect(resolveHostEnv({ CLAUDE_PLUGIN_ROOT: '/p', CLAUDE_PLUGIN_OPTION_SYNC_CA_CERT: '~/certs/ca=1.pem' }, undefined).YAPA_SYNC_CA_CERT)
+      .toBe('~/certs/ca=1.pem');
   });
 
   it('never overrides explicit env, and ignores a disabled or absent plugin', () => {

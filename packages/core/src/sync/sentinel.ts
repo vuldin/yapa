@@ -1,4 +1,6 @@
-import { addDocument, getOrCreateCollection, getDocumentsByFilter } from '../store/index.js';
+import { addDocument, getOrCreateCollection, getDocumentsByFilter, listCollections } from '../store/index.js';
+import { mayCreateSharedFrom, SharedCollectionNotAllowedError } from '../scope-file.js';
+import { isSyncableCollection } from './syncable.js';
 import { withDocLock } from '../doc-lock.js';
 
 const SYNC_PULL_SENTINEL_ID = '__sync_pull_sentinel__';
@@ -223,14 +225,33 @@ export interface WriteCollection {
  * the next push publish into it again. Used by every write entry point
  * (memory store, task create, external put, journal); a read store failure
  * leaves the name as is.
+ *
+ * With `folder` (a host tool acting for a session there), a write that would
+ * create a new shared collection is refused unless the folder may create it
+ * (scope-file.ts mayCreateSharedFrom). Background writes pass no folder: they
+ * go to the folder's own detected collection.
  */
-export async function resolveWriteCollection(name: string): Promise<WriteCollection> {
+export async function resolveWriteCollection(name: string, opts: { folder?: string } = {}): Promise<WriteCollection> {
   if (name === 'global') return { collection: name };
   const w = resolveCollectionRedirect(name, await getCollectionRedirects());
   // Removed from this machine: a write would bring it back pushed but never
   // pulled (teammates' docs missing from recall). Following it again is explicit.
   if ((await getLeftCollections()).includes(w.collection)) throw new CollectionLeftError(w.collection);
+  if (opts.folder !== undefined) await assertMayCreateCollection(w.collection, opts.folder);
   return w;
+}
+
+/**
+ * Refuse creating the shared collection `name` from a session in `folder`
+ * when the folder may not (see resolveWriteCollection). A collection that
+ * already exists here, or one this machine left (following it again joins
+ * it), is never refused.
+ */
+export async function assertMayCreateCollection(name: string, folder: string): Promise<void> {
+  if (!isSyncableCollection(name) || mayCreateSharedFrom(folder, name)) return;
+  const existing = await listCollections();
+  if (existing.some(c => c.name === name) || (await getLeftCollections()).includes(name)) return;
+  throw new SharedCollectionNotAllowedError(name, folder);
 }
 
 /** A write to a collection removed from this machine (collection_delete, scope local). */

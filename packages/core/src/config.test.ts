@@ -16,22 +16,10 @@ describe('createConfig', () => {
     expect(createConfig({ YAPA_USERNAME: 'josh' }).USERNAME).toBe('josh');
   });
 
-  it('parses list settings and expands ~ in project roots', () => {
-    const c = createConfig({ YAPA_PROJECT_ROOTS: '~/work/, /srv/projects', YAPA_CUSTOMERS: 'acme, globex' });
-    expect(c.PROJECT_ROOTS).toEqual([`${process.env.HOME}/work`, '/srv/projects']);
-    expect(c.CUSTOMERS).toEqual(['acme', 'globex']);
-  });
-
-  it('parses the collection map: ";" or newline separated path=collection entries, ~ expanded, paths resolved', () => {
-    expect(createConfig({}).COLLECTION_MAP).toEqual([]);
-    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    try {
-      const c = createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/ = private-acme; /srv/x/../y//=local-y\n/srv/a:b,c=private-ab;typo' });
-      expect(c.COLLECTION_MAP).toEqual([`${process.env.HOME}/work/acme=private-acme`, '/srv/y=local-y', '/srv/a:b,c=private-ab']);
-    } finally {
-      err.mockRestore();
-    }
-    expect(createConfig({ COLLECTION_MAP: '/a=private-a' }).COLLECTION_MAP).toEqual(['/a=private-a']);
+  it('keeps the folder rules in the scope file, never in options', () => {
+    expect(createConfig({ YAPA_SCOPE_FILE: '/x/scope.json' }).SCOPE_FILE).toBe('/x/scope.json');
+    expect(createConfig({}).SCOPE_FILE).toMatch(/yapa-test-scope-\d+\.json$/);
+    expect(createConfig({ YAPA_PROJECT_ROOTS: '/srv' })).not.toHaveProperty('PROJECT_ROOTS');
   });
 
   it('keeps multi-user safety defaults conservative', () => {

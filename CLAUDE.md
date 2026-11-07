@@ -279,7 +279,7 @@ Now execute these steps in order, without asking anything else:
    ```
    node ABSOLUTE_PATH/packages/mcp/dist/cli/index.js hooks install
    ```
-   If the user keeps work under a projects folder, also add `-e YAPA_PROJECT_ROOTS=<that folder>` to the `claude mcp add` command so each subfolder gets its own collection.
+   If the user keeps work under a projects folder, make it a project root so each subfolder gets its own collection (and sessions there may create shared collections): `node ABSOLUTE_PATH/packages/mcp/dist/cli/index.js scope add-root <that folder>`. This writes `~/.local/share/yapa/scope.json`, the only place folder rules are kept.
 
    Cursor — merge into `mcpServers` in `~/.cursor/mcp.json`:
    ```json
@@ -456,6 +456,7 @@ Now execute these steps in order, without asking anything else:
      - General/cross-cutting knowledge → `global`
      - Private/personal data → `private-{name}` or `local-{name}` (these do NOT sync to remote)
    - **Before creating a new collection**, ask the user to confirm the collection name. Suggest a name based on context. Remind the user that `private-` or `local-` prefixed collections won't sync to the shared remote database.
+   - A new shared collection can only be created from a session under a project root (or a folder mapped to it); elsewhere the write is refused. Use a `private-` name or ask the user, and change the folder rules (the `scope` tool) only when the user explicitly asks.
    - When unsure which collection to use, ask the user
    - Use `collection_list` to check what collections exist before creating new ones
    - Always pass the inferred collection explicitly on memory/task tool calls

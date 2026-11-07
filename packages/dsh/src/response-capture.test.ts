@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Mock the core before importing the plugin modules that use it.
 // (vi.hoisted: the vi.mock factory is hoisted above plain const declarations.)
@@ -63,7 +66,14 @@ function driveTurn(listeners: Map<string, Listener>, opts: { userText?: string; 
   fire('turn/end', { turn: 1, reason: { kind: opts.reason ?? 'completed' } });
 }
 
-const resolved = resolveConfig({ projectRoots: ['/home/vuldin/projects'] });
+const scopeDir = mkdtempSync(join(tmpdir(), 'yapa-dsh-capture-'));
+process.env.YAPA_SCOPE_FILE = join(scopeDir, 'scope.json');
+writeFileSync(process.env.YAPA_SCOPE_FILE, JSON.stringify({ project_roots: ['/home/vuldin/projects'] }));
+afterAll(() => {
+  delete process.env.YAPA_SCOPE_FILE;
+  rmSync(scopeDir, { recursive: true, force: true });
+});
+const resolved = resolveConfig({});
 const longText = 'x'.repeat(300);
 
 describe('response capture', () => {
@@ -198,7 +208,7 @@ describe('response capture', () => {
   });
 
   it('does nothing when captureResponses is disabled', async () => {
-    const off = resolveConfig({ projectRoots: ['/home/vuldin/projects'], captureResponses: false });
+    const off = resolveConfig({ captureResponses: false });
     const { listeners } = makeCtx(off);
     driveTurn(listeners, { userText: longText, assistantText: longText });
     await whenCapturesIdle();

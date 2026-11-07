@@ -18,6 +18,7 @@ export * from './embeddings.js';
 export * from './chunking.js';
 export * from './lifecycle.js';
 export * from './scope.js';
+export * from './scope-file.js';
 export * from './metadata-adapter.js';
 
 // Memory subsystem.

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConfig, createLocalStore, resetConfig, resetStore, setConfig, setStore } from '@yapa/core';
@@ -8,7 +8,8 @@ import { runScope } from './scope.js';
 let dir: string;
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'yapa-scope-cli-'));
-  setConfig(createConfig({ YAPA_PROJECT_ROOTS: join(dir, 'work'), YAPA_COLLECTION_MAP: `${join(dir, 'personal')}=private-acme` }));
+  writeFileSync(join(dir, 'scope.json'), JSON.stringify({ project_roots: [join(dir, 'work')], collection_map: { [join(dir, 'personal')]: 'private-acme' } }));
+  setConfig(createConfig({ YAPA_SCOPE_FILE: join(dir, 'scope.json') }));
   setStore(createLocalStore(join(dir, 'store')));
 });
 afterAll(() => {
@@ -27,5 +28,25 @@ describe('yapa scope', () => {
   it('a folder under project_roots gets its shared collection; elsewhere global', async () => {
     expect((await runScope(['--cwd', join(dir, 'work', 'acme')])).json).toMatchObject({ collection: 'project-acme', local_only: false, mapped: false });
     expect((await runScope([], join(dir, 'elsewhere'))).text).toBe('global (local only)');
+  });
+
+  it('lists and edits the folder rules, relative to the current folder', async () => {
+    let r = await runScope(['add-root', 'more'], dir);
+    expect(r.exit).toBe(0);
+    expect(r.text).toMatch(new RegExp(`^Added project root ${join(dir, 'more')}`));
+    expect(JSON.parse(readFileSync(join(dir, 'scope.json'), 'utf8')).project_roots).toContain(join(dir, 'more'));
+    r = await runScope(['map', join(dir, 'solo'), 'project-solo'], dir);
+    expect(r.json).toMatchObject({ ok: true, collection_map: { [join(dir, 'solo')]: 'project-solo' } });
+    r = await runScope(['list', '--cwd', join(dir, 'solo')], dir);
+    expect(r.text).toMatch(/may create only its mapped shared collection, project-solo/);
+    expect((await runScope(['unmap', join(dir, 'solo')], dir)).text).toMatch(/^Removed the mapping/);
+    expect((await runScope(['remove-root', 'more'], dir)).text).toMatch(/^Removed project root/);
+  });
+
+  it('exits non-zero on a bad subcommand or a missing argument', async () => {
+    expect((await runScope(['frobnicate'])).exit).toBe(2);
+    const r = await runScope(['map', '/x']);
+    expect(r).toMatchObject({ exit: 1, json: { ok: false } });
+    expect(r.text).toMatch(/map needs a collection/);
   });
 });

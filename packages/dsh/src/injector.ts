@@ -95,7 +95,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       // moves the folder's scope: re-detect when the redirects changed.
       if (state.detection && await isDetectionStale(state.detection)) state.detection = undefined;
       const detection = state.detection
-        ?? (state.detection = await detectCollection(agent.session.header.cwd, resolved.projectRoots, resolved.customers, resolved.collectionMap));
+        ?? (state.detection = await detectCollection(agent.session.header.cwd));
       const collection = detection.collection;
 
       // The newest direct human prompt claimed for this step, if any.

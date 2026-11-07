@@ -9,7 +9,7 @@
  * @module yapa/config
  */
 import z from '@deepseek-ai/schemastery';
-import { createConfig, normalizeCollectionMap, type YapaConfig } from '@yapa/core';
+import { createConfig, type YapaConfig } from '@yapa/core';
 
 /** User-facing plugin configuration (cordis patch row + settings namespace). */
 export interface Config {
@@ -37,16 +37,6 @@ export interface Config {
   syncMcpTokenCmd?: string;
   syncMcpTool?: string;
   syncIntervalMs?: number;
-  /** Absolute workspace roots used for collection detection from session cwd. */
-  projectRoots?: string[];
-  /** Folder names (first path segment under a project root) that are customers → `customer-{name}` scope. Everything else defaults to `project-{name}`. */
-  customers?: string[];
-  /**
-   * Explicit folder → collection entries, `path=collection` (`~` expanded),
-   * checked before `projectRoots`: the longest matching path wins. How a
-   * folder gets a `private-*`/`local-*` scope.
-   */
-  collectionMap?: string[];
   /** Inject semantic recall into prompt assembly on new human prompts. */
   injectRecall?: boolean;
   /** Inject open tasks into prompt assembly once per scope per session. */
@@ -112,9 +102,6 @@ export const Config: z<Config> = z.object({
   syncMcpTokenCmd: z.string(),
   syncMcpTool: z.string(),
   syncIntervalMs: z.number(),
-  projectRoots: z.array(z.string()),
-  customers: z.array(z.string()),
-  collectionMap: z.array(z.string()),
   injectRecall: z.boolean(),
   injectTasks: z.boolean(),
   recallResults: z.number(),
@@ -140,9 +127,6 @@ export const Config: z<Config> = z.object({
 
 /** Defaults for the plugin's own (non-core) knobs. */
 export const PLUGIN_DEFAULTS = {
-  projectRoots: [] as string[],
-  customers: [] as string[],
-  collectionMap: [] as string[],
   injectRecall: true,
   injectTasks: true,
   recallResults: 3,
@@ -167,9 +151,6 @@ export const PLUGIN_DEFAULTS = {
 /** Resolved runtime view: the core config plus plugin-only knobs. */
 export interface ResolvedConfig {
   core: YapaConfig;
-  projectRoots: string[];
-  customers: string[];
-  collectionMap: string[];
   injectRecall: boolean;
   injectTasks: boolean;
   recallResults: number;
@@ -191,6 +172,8 @@ export interface ResolvedConfig {
   approvalGate: boolean;
 }
 
+const warnedLegacy = new Set<string>();
+
 /**
  * Merge env → plugin config → settings override into one resolved view.
  * Any field left undefined at every layer falls back to the env-derived
@@ -200,6 +183,12 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
   const merged: Config = { ...plugin, ...Object.fromEntries(
     Object.entries(settings ?? {}).filter(([, v]) => v !== undefined),
   ) };
+  for (const key of ['projectRoots', 'customers', 'collectionMap']) {
+    if (key in merged && !warnedLegacy.has(key)) {
+      warnedLegacy.add(key);
+      process.stderr.write(`[yapa] ${key} is no longer read: folder rules live in the scope file (yapa_scope)\n`);
+    }
+  }
   const envBase = createConfig();
   const core: YapaConfig = {
     ...envBase,
@@ -224,13 +213,9 @@ export function resolveConfig(plugin: Config, settings?: Partial<Config>): Resol
     ...(merged.syncMcpTool !== undefined && { SYNC_MCP_TOOL: merged.syncMcpTool.trim() }),
     ...(merged.syncIntervalMs !== undefined && { SYNC_INTERVAL_MS: merged.syncIntervalMs }),
     ...(merged.trainingPipeline !== undefined && { TRAINING_PIPELINE: merged.trainingPipeline }),
-    ...(merged.collectionMap !== undefined && { COLLECTION_MAP: normalizeCollectionMap(merged.collectionMap) }),
   };
   return {
     core,
-    projectRoots: merged.projectRoots ?? PLUGIN_DEFAULTS.projectRoots,
-    customers: merged.customers ?? PLUGIN_DEFAULTS.customers,
-    collectionMap: normalizeCollectionMap(merged.collectionMap ?? PLUGIN_DEFAULTS.collectionMap),
     injectRecall: merged.injectRecall ?? PLUGIN_DEFAULTS.injectRecall,
     injectTasks: merged.injectTasks ?? PLUGIN_DEFAULTS.injectTasks,
     recallResults: merged.recallResults ?? PLUGIN_DEFAULTS.recallResults,

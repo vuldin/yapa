@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
   getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings, applySweep, type SweepItem, type SweepResult,
-  recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, redirectNote, type TypedFields,
+  recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, redirectNote, type TypedFields,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -155,7 +155,7 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         if (!collection || !ref) throw new UsageError('--collection and --ref are required');
         const { content, tags, typed } = split(await input(args));
         if (!content?.trim()) throw new UsageError('content is required (--content or "content" in --stdin-json)');
-        const target = await resolveWriteCollection(collection);
+        const target = await resolveWriteCollection(collection, { folder: sessionFolder() });
         const r = await putExternal(target.collection, ref, { content, typed, tags });
         recordLastWrite(target.collection);
         return {

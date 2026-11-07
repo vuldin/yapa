@@ -46,11 +46,18 @@ describe('resolveConfig', () => {
     expect(r.core.CHROMA_URL).toBe('http://b:2');
   });
 
-  it('resolves the collection map (~ expanded) for scope detection and the core config', () => {
-    expect(resolveConfig({}).collectionMap).toEqual([]);
-    const r = resolveConfig({ collectionMap: ['~/work/acme/=private-acme'] }, { collectionMap: ['~/work/acme=local-acme', '/srv/x=private-x'] });
-    expect(r.collectionMap).toEqual([`${process.env.HOME}/work/acme=local-acme`, '/srv/x=private-x']);
-    expect(r.core.COLLECTION_MAP).toEqual(r.collectionMap);
+  it('ignores the old folder settings, with a warning: folder rules live in the scope file', () => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const r = resolveConfig({ collectionMap: ['~/work/acme/=private-acme'] } as never, { projectRoots: ['/srv'] } as never);
+      expect(r).not.toHaveProperty('collectionMap');
+      expect(r).not.toHaveProperty('projectRoots');
+      const said = err.mock.calls.map(c => String(c[0])).join('');
+      expect(said).toMatch(/collectionMap is no longer read/);
+      expect(said).toMatch(/projectRoots is no longer read/);
+    } finally {
+      err.mockRestore();
+    }
   });
 
   it('ignores undefined settings fields (inherits lower layers)', () => {
@@ -99,13 +106,13 @@ describe('tool registration', () => {
       'yapa_compaction_apply', 'yapa_compaction_suggest', 'yapa_decay_sweep',
       'yapa_journal_append', 'yapa_journal_consolidate',
       'yapa_memory_forget', 'yapa_memory_list', 'yapa_memory_recall', 'yapa_memory_store', 'yapa_memory_update',
-      'yapa_status', 'yapa_waiting', 'yapa_task_add_dependency', 'yapa_task_complete', 'yapa_task_create',
+      'yapa_scope', 'yapa_status', 'yapa_waiting', 'yapa_task_add_dependency', 'yapa_task_complete', 'yapa_task_create',
       'yapa_task_delete', 'yapa_task_list', 'yapa_task_next', 'yapa_task_remove_dependency', 'yapa_task_search', 'yapa_task_update', 'yapa_trash',
       // advanced but mission-central: janitor, consolidated sync, storage import
       'yapa_janitor_now', 'yapa_sync', 'yapa_storage_import',
     ].sort());
     expect(names.every(n => n.startsWith('yapa_'))).toBe(true);
-    expect(names.length).toBe(29);
+    expect(names.length).toBe(30);
   });
 
   it('adds the 18 ML-ops tools when trainingPipeline is enabled', async () => {

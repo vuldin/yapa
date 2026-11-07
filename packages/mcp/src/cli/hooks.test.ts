@@ -26,9 +26,11 @@ function restore(): any {
   return out ? JSON.parse(out) : {};
 }
 
-function configure(env: Record<string, string> = {}) {
+function configure(env: Record<string, string> = {}, map: Record<string, string> = {}) {
+  const scopeFile = join(dir, 'scope.json');
+  writeFileSync(scopeFile, JSON.stringify({ project_roots: [join(dir, 'proj')], collection_map: map }));
   setConfig(createConfig({
-    YAPA_USERNAME: 'josh', YAPA_DEVICE_ID: 'dev-A', YAPA_PROJECT_ROOTS: join(dir, 'proj'),
+    YAPA_USERNAME: 'josh', YAPA_DEVICE_ID: 'dev-A', YAPA_SCOPE_FILE: scopeFile,
     YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_DATABASE_URL: 'postgres://x', YAPA_HOOK_PULL_TIMEOUT_MS: '200',
     ...env,
   }));
@@ -572,7 +574,7 @@ describe('waiting on you', () => {
 
 describe('collection_map: a folder with a private collection', () => {
   const cwd = () => join(dir, 'work', 'acme-private', 'src');
-  const mapped = () => configure({ YAPA_COLLECTION_MAP: `${join(dir, 'work', 'acme-private')}=private-acme`, YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' });
+  const mapped = () => configure({ YAPA_RESPONSE_CAPTURE: 'true', YAPA_ANTHROPIC_API_KEY: 'k' }, { [join(dir, 'work', 'acme-private')]: 'private-acme' });
 
   it('every hook scopes to the mapped collection and never contacts the remote', async () => {
     mapped();

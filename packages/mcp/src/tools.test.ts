@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -52,7 +52,10 @@ describe('registered tools over the local store', () => {
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), 'yapa-mcp-tools-test-'));
-    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true' }));
+    // This session works in a project folder: it may create shared collections.
+    await writeFile(join(dir, 'scope.json'), JSON.stringify({ project_roots: [join(dir, 'projects')] }));
+    process.env.CLAUDE_PROJECT_DIR = join(dir, 'projects', 'acme');
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SCOPE_FILE: join(dir, 'scope.json') }));
     setStore(createLocalStore(dir));
     const server: any = {
       tool: (name: string, ...rest: any[]) => {
@@ -63,9 +66,59 @@ describe('registered tools over the local store', () => {
   });
 
   afterAll(async () => {
+    delete process.env.CLAUDE_PROJECT_DIR;
     await rm(dir, { recursive: true, force: true });
     resetStore();
     resetConfig();
+  });
+
+  describe('a session outside every project root', () => {
+    const outside = () => { process.env.CLAUDE_PROJECT_DIR = join(dir, 'home'); };
+    const back = () => { process.env.CLAUDE_PROJECT_DIR = join(dir, 'projects', 'acme'); };
+
+    it('cannot create a new shared collection by writing to it, or by collection_create', async () => {
+      outside();
+      try {
+        for (const [tool, args] of [
+          ['memory_store', { content: 'x', collection: 'customer-newco' }],
+          ['task_create', { title: 'x', collection: 'customer-newco' }],
+          ['journal_append', { entry: 'x', collection: 'customer-newco' }],
+          ['collection_create', { name: 'customer-newco' }],
+        ] as const) {
+          await expect(call(tool, args), tool).rejects.toThrow(/Refused: "customer-newco" does not exist here/);
+        }
+        expect((await listCollections()).map(c => c.name)).not.toContain('customer-newco');
+        const ok = await call('memory_store', { content: 'x', collection: 'private-newco' });
+        expect(ok.content[0].text).toMatch(/^Stored memory/);
+      } finally {
+        back();
+      }
+    });
+
+    it('still writes to shared collections that exist, and refuses a new one in follow_ups before closing', async () => {
+      const id = await createTask('existing work', {}, 'project-existing');
+      outside();
+      try {
+        expect((await call('task_create', { title: 'more', collection: 'project-existing' })).content[0].text).toMatch(/^Created task/);
+        await expect(call('task_complete', { id, follow_ups: [{ title: 'next', collection: 'project-brandnew' }] })).rejects.toThrow(/Refused/);
+        expect((await getTask(id))?.status).not.toBe('done');
+      } finally {
+        back();
+      }
+    });
+
+    it('may create shared collections once the user allows its folder with the scope tool', async () => {
+      outside();
+      try {
+        const shown = await call('scope', { action: 'show' });
+        expect(shown.content[0].text).toMatch(/may not create new shared collections/);
+        await call('scope', { action: 'map', dir: join(dir, 'home'), collection: 'project-home' });
+        expect((await call('collection_create', { name: 'project-home' })).content[0].text).toBe('Created collection "project-home"');
+        await expect(call('collection_create', { name: 'project-other' })).rejects.toThrow(/Refused/);
+      } finally {
+        back();
+      }
+    });
   });
 
   it('task_update renames a task via title, and rejects an empty title', async () => {
@@ -111,7 +164,7 @@ describe('registered tools over the local store', () => {
   it('write tools note the collection this session last wrote to, for the status line', async () => {
     const saved = process.env.CLAUDE_CODE_SESSION_ID;
     process.env.CLAUDE_CODE_SESSION_ID = 'sess-lw';
-    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SYNC_HEALTH_FILE: join(dir, 'state', 'sync-health.json') }));
+    setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SCOPE_FILE: join(dir, 'scope.json'), YAPA_SYNC_HEALTH_FILE: join(dir, 'state', 'sync-health.json') }));
     const last = () => readLastWrite('sess-lw')?.collection;
     try {
       await call('memory_store', { content: 'the lw port is 9000', collection: 'project-lw-a' });
@@ -129,7 +182,7 @@ describe('registered tools over the local store', () => {
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
       else process.env.CLAUDE_CODE_SESSION_ID = saved;
-      setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true' }));
+      setConfig(createConfig({ YAPA_USERNAME: 'tester', YAPA_SYNC_ENABLED: 'true', YAPA_SCOPE_FILE: join(dir, 'scope.json') }));
     }
   });
 

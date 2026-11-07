@@ -17,7 +17,7 @@
  *
  * Anything outside the configured roots (or a dot-folder) → `global`.
  *
- * Before any of that, an explicit `COLLECTION_MAP` entry (`path=collection`)
+ * Before any of that, an explicit `collection_map` entry (folder → collection)
  * decides: the longest path that holds the cwd wins, and its collection is
  * used as-is (never ambiguous). This is how a folder gets a `private-*` or
  * `local-*` scope, which the roots rule never produces.
@@ -25,15 +25,12 @@
  * Last, a collection merged away on this machine (`collection_merge`) is
  * followed to its target, so a folder keeps landing where its notes went.
  *
- * Shared by every host: the Claude Code hooks (roots/customers/map from
- * `YAPA_PROJECT_ROOTS` / `YAPA_CUSTOMERS` / `YAPA_COLLECTION_MAP`) and the
- * DSH plugin (its own config).
+ * Roots, customers and the map come from the scope file (scope-file.ts),
+ * shared by every host.
  *
  * @module @yapa/core/scope
  */
-import path from 'node:path';
-import { realpathSync } from 'node:fs';
-import { getConfig } from './config.js';
+import { collectionMapEntries, editScopeSettings, formatScopeSettings, matchCollectionMap, mayCreateSharedFrom, pathWithin, readScopeSettings, scopePath, type ScopeEdit } from './scope-file.js';
 import { listCollections } from './store/index.js';
 import { getCollectionRedirects, getLeftCollections, resolveCollectionRedirect } from './sync/sentinel.js';
 import { isSyncableCollection, looksPrivateButShared } from './sync/syncable.js';
@@ -52,7 +49,7 @@ export interface CollectionDetection {
    * the agent asks the user instead of silently picking one.
    */
   ambiguous?: [string, string];
-  /** The cwd matched a `COLLECTION_MAP` entry. */
+  /** The cwd matched a `collection_map` entry. */
   mapped?: true;
   /**
    * The folder's collection was merged into `collection` on this machine;
@@ -63,62 +60,19 @@ export interface CollectionDetection {
   left?: true;
 }
 
-/** Path handling for `matchCollectionMap`; tests pass `path.win32` and a stub realpath. */
-export interface PathOptions {
-  path?: typeof path;
-  /** The real path of an existing path, else undefined. */
-  realpath?: (p: string) => string | undefined;
-}
-
-const realpathOrUndefined = (p: string): string | undefined => {
-  try {
-    return realpathSync.native(p);
-  } catch {
-    return undefined;
-  }
-};
-
 /**
- * The `COLLECTION_MAP` entry whose path holds `cwd`, longest path first.
- * Paths are compared resolved, on separator boundaries (`/a/acme` never
- * claims `/a/acme-old`), case-insensitively on Windows, and through
- * symlinks: the cwd and each entry that exists also match by their real
- * path. Entries without `=`, with an empty side, or relative are ignored
- * (config parsing already warned about them).
- */
-export function matchCollectionMap(cwd: string, entries: string[], opts: PathOptions = {}): string | undefined {
-  const P = opts.path ?? path;
-  const real = opts.realpath ?? realpathOrUndefined;
-  const fold = P.sep === '\\' ? (s: string) => s.toLowerCase() : (s: string) => s;
-  const forms = (p: string) => [...new Set([p, real(p)].filter((x): x is string => !!x).map(fold))];
-  const here = forms(P.resolve(cwd));
-  const holds = (dir: string, c: string) => c === dir || c.startsWith(dir.endsWith(P.sep) ? dir : dir + P.sep);
-  let best: { length: number; collection: string } | undefined;
-  for (const entry of entries) {
-    const eq = entry.lastIndexOf('=');
-    if (eq < 0) continue;
-    const dir = entry.slice(0, eq).trim();
-    const collection = entry.slice(eq + 1).trim();
-    if (!dir || !collection || !P.isAbsolute(dir)) continue;
-    const resolved = P.resolve(dir);
-    if (!forms(resolved).some(d => here.some(c => holds(d, c)))) continue;
-    if (!best || resolved.length > best.length) best = { length: resolved.length, collection };
-  }
-  return best?.collection;
-}
-
-/**
- * Infer the active collection from the session cwd: a `COLLECTION_MAP` entry
+ * Infer the active collection from the session cwd: a `collection_map` entry
  * first, else the first path segment under a configured project root,
  * prefixed per the module rule above; then follow local merge redirects.
  */
 export async function detectCollection(
   cwd: string | undefined,
-  roots: string[] = getConfig().PROJECT_ROOTS,
-  customers: string[] = getConfig().CUSTOMERS,
-  map: string[] = getConfig().COLLECTION_MAP,
+  roots?: string[],
+  customers?: string[],
+  map?: string[],
 ): Promise<CollectionDetection> {
-  const d = await detect(cwd, roots, customers, map);
+  const s = roots && customers && map ? undefined : readScopeSettings();
+  const d = await detect(cwd, roots ?? s!.project_roots, customers ?? s!.customers, map ?? collectionMapEntries(s!));
   if (d.collection !== 'global' && (await getLeftCollections()).includes(d.collection)) d.left = true;
   return d;
 }
@@ -128,9 +82,9 @@ async function detect(cwd: string | undefined, roots: string[], customers: strin
   const mapped = matchCollectionMap(cwd, map);
   if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
   for (const rawRoot of roots) {
-    const root = rawRoot.replace(/\/+$/, '');
+    const root = rawRoot.replace(/\/+$/, '') || '/';
     // Path-boundary match: root /a/proj must not claim /a/projects-x.
-    if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
+    if (!pathWithin(cwd, root)) continue;
     const relative = cwd.slice(root.length).replace(/^\/+/, '');
     const segment = relative.split('/')[0];
     if (!segment || segment.startsWith('.')) return { collection: 'global' };
@@ -196,4 +150,50 @@ export async function isDetectionStale(d: CollectionDetection): Promise<boolean>
   if (Object.hasOwn(redirects, d.collection)) return true;
   if (d.redirectedFrom && !Object.hasOwn(redirects, d.redirectedFrom)) return true;
   return !!d.ambiguous?.some(n => Object.hasOwn(redirects, n));
+}
+
+export type ScopeAction = 'show' | 'add_root' | 'remove_root' | 'add_customer' | 'remove_customer' | 'map' | 'unmap';
+
+/**
+ * The scope tools' shared body (MCP `scope`, DSH `yapa_scope`, `yapa scope`):
+ * show the folder rules and what they mean for `folder`, or change one.
+ * Folders resolve against `folder`.
+ */
+export async function runScopeAction(
+  a: { action: ScopeAction; dir?: string; name?: string; collection?: string },
+  folder: string,
+): Promise<{ ok: boolean; text: string }> {
+  if (a.action === 'show') {
+    const s = readScopeSettings({ strict: true });
+    const d = await detectCollection(folder);
+    const shared = s.project_roots.some(r => pathWithin(folder, r))
+      ? 'may create new shared collections (it is under a project root)'
+      : d.mapped && isSyncableCollection(d.collection) && mayCreateSharedFrom(folder, d.collection, s)
+        ? `may create only its mapped shared collection, ${d.collection}`
+        : 'may not create new shared collections (not under a project root)';
+    return { ok: true, text: `${formatScopeSettings(s)}\n\nThis session's folder, ${folder}: collection ${d.collection}${scopeNotes(d)}; it ${shared}.` };
+  }
+  const need = (v: string | undefined, what: string) => {
+    if (!v?.trim()) throw new Error(`${a.action} needs ${what}`);
+    return v;
+  };
+  const edit: ScopeEdit = a.action === 'add_customer' || a.action === 'remove_customer'
+    ? { op: a.action, name: need(a.name, 'a folder name (name)') }
+    : a.action === 'map'
+      ? { op: 'map', dir: need(a.dir, 'a folder (dir)'), collection: need(a.collection, 'a collection') }
+      : { op: a.action, dir: need(a.dir, 'a folder (dir)') };
+  const r = await editScopeSettings(edit, { base: folder });
+  const target = 'dir' in edit ? scopePath(edit.dir, folder) : edit.name;
+  const done: Record<Exclude<ScopeAction, 'show'>, [string, string]> = {
+    add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
+    remove_root: [`Removed project root ${target}.`, `${target} was not a project root.`],
+    add_customer: [`Folders named ${target} under a project root now use customer-${target}.`, `${target} was already a customer.`],
+    remove_customer: [`${target} is no longer a customer.`, `${target} was not a customer.`],
+    map: [`Mapped ${target} → ${edit.op === 'map' ? edit.collection.trim() : ''}.`, `${target} was already mapped to ${edit.op === 'map' ? edit.collection.trim() : ''}.`],
+    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`],
+  };
+  const lines = [done[a.action][r.changed ? 0 : 1]];
+  if (r.warning) lines.push(`⚠ ${r.warning}`);
+  lines.push('', formatScopeSettings(r.settings));
+  return { ok: true, text: lines.join('\n') };
 }

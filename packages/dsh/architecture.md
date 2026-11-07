@@ -113,7 +113,7 @@ DSH plugin (web profile shown):
 # once:
 dsh plugin --profile web add yapa        # or the symlink route in install.md
 # cordis.patch.yml row:
-#   - insert: [{ id: yapa, name: 'yapa', config: { username: …, projectRoots: […], storage: local } }]
+#   - insert: [{ id: yapa, name: 'yapa', config: { username: …, storage: local } }]
 
 dsh web                                   # everything starts with the harness
 ```

@@ -32,6 +32,9 @@ import {
   mergeCollections,
   mergeReportLines,
   resolveWriteCollection,
+  assertMayCreateCollection,
+  sessionFolder,
+  runScopeAction,
   redirectNote,
   parseRelativeDate,
   recallMemory,
@@ -104,6 +107,11 @@ const closeParams = {
     },
   },
 } as const;
+
+type ExecLike = { agent?: { session: { header: { cwd?: string } } } } | undefined;
+/** The session's folder, for the new-shared-collection rule. */
+const folderOf = (exec: ExecLike) => exec?.agent?.session.header.cwd || sessionFolder();
+const writeTarget = (name: string, exec: ExecLike) => resolveWriteCollection(name, { folder: folderOf(exec) });
 
 const closeSummary = (r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }) => [
   r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(', ')}.` : '',
@@ -301,9 +309,9 @@ export function registerTools(ctx: Context): void {
         return text(lines.join('\n'));
       },
     },
-    async execute(args) {
+    async execute(args, exec) {
       const typed = pickTyped(args);
-      const target = await resolveWriteCollection(args.collection ?? 'global');
+      const target = await writeTarget(args.collection ?? 'global', exec);
       const result = await storeMemory(args.content, {
         tags: args.tags,
         salience: args.salience,
@@ -354,12 +362,12 @@ export function registerTools(ctx: Context): void {
       },
       render: (_args, v) => text(`Updated ${v.id} in ${v.collection}${v.label ? ` ${v.label}` : ''}`),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const r = await updateMemory(args.id, {
         ...pickTyped(args),
         ...(args.note !== undefined ? { note: args.note } : {}),
         ...(args.tags ? { tags: args.tags } : {}),
-      }, args.collection ? (await resolveWriteCollection(args.collection)).collection : undefined);
+      }, args.collection ? (await writeTarget(args.collection, exec)).collection : undefined);
       const label = typedLabel(r.metadata);
       return { id: r.id, collection: r.collection, ...(label ? { label } : {}) };
     },
@@ -660,9 +668,9 @@ export function registerTools(ctx: Context): void {
       },
       render: (_args, v) => text(`Compaction applied. Summary: ${v.summary_id}. Archived: ${v.archived}/${v.requested}.`),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const result = await applyCompaction({
-        collection: (await resolveWriteCollection(args.collection)).collection,
+        collection: (await writeTarget(args.collection, exec)).collection,
         member_ids: args.member_ids,
         summary: args.summary,
         tags: args.tags,
@@ -693,7 +701,7 @@ export function registerTools(ctx: Context): void {
       render: (_args, v) => text(`Journal draft saved: ${v.id}${v.redirect ? `\n${v.redirect}` : ''}`),
     },
     async execute(args, exec) {
-      const target = await resolveWriteCollection(args.collection ?? 'global');
+      const target = await writeTarget(args.collection ?? 'global', exec);
       const id = await journalAppend(args.entry, target.collection, exec.agent?.id);
       return { id, ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}) };
     },
@@ -774,9 +782,9 @@ export function registerTools(ctx: Context): void {
         `Created task ${v.id}: "${v.title}"${v.due_date ? ` (due: ${formatTaskDate(v.due_date)})` : ''}${v.redirect ? `\n${v.redirect}` : ''}`,
       ),
     },
-    async execute(args) {
+    async execute(args, exec) {
       const due_date = args.due ? parseRelativeDate(args.due) ?? undefined : undefined;
-      const target = await resolveWriteCollection(args.collection ?? 'global');
+      const target = await writeTarget(args.collection ?? 'global', exec);
       const id = await createTask(args.title, {
         priority: args.priority,
         due_date,
@@ -1163,6 +1171,35 @@ export function registerTools(ctx: Context): void {
   }));
 
   ctx.tools.register(defineTool({
+    name: 'yapa_scope',
+    description:
+      'This machine\'s folder rules, kept in one file in YAPA\'s state folder: project roots (folders whose subfolders are '
+      + 'projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), '
+      + 'customer folder names, and folder → collection mappings (checked first; how a folder gets a private-* collection). '
+      + '`show` lists them and what they mean for this session\'s folder. Change them ONLY when the user explicitly asks; never '
+      + 'to get past a refused write. Changes apply right away.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['show', 'add_root', 'remove_root', 'add_customer', 'remove_customer', 'map', 'unmap'] },
+      dir: { type: 'string', description: 'Folder for add_root/remove_root/map/unmap (absolute, ~, or relative to this session\'s folder)' },
+      name: { type: 'string', description: 'Customer folder name for add_customer/remove_customer' },
+      collection: { type: 'string', description: 'Collection for map' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { text: { type: 'string', required: true } },
+      },
+      render: (_args, v) => text(v.text),
+    },
+    async execute(args, exec) {
+      const r = await runScopeAction(args as Parameters<typeof runScopeAction>[0], folderOf(exec));
+      return { text: r.text };
+    },
+    presentCall: args => ({ card: 'generic', title: `Folder rules: ${args.action}`, kind: 'other' }),
+  }));
+
+  ctx.tools.register(defineTool({
     name: 'yapa_collection_create',
     description:
       'Create a new collection. Confirm the name with the user first; remember that '
@@ -1178,7 +1215,8 @@ export function registerTools(ctx: Context): void {
       },
       render: (_args, v) => text(`Created collection "${v.name}"`),
     },
-    async execute(args) {
+    async execute(args, exec) {
+      await assertMayCreateCollection(args.name, folderOf(exec));
       await createNewCollection(args.name);
       return { name: args.name };
     },
