@@ -372,7 +372,7 @@ yapa scope map ~/notes/acme private-acme # this folder (and below) uses private-
 yapa scope unmap ~/notes/acme
 ```
 
-**Upgrading from 1.15 or earlier:** the folder rules used to be the `project_roots`, `customers` and `collection_map` options (`YAPA_PROJECT_ROOTS`, `YAPA_CUSTOMERS`, `YAPA_COLLECTION_MAP`; `projectRoots`, `customers`, `collectionMap` in DSH). The first YAPA process after the update moves them into the file, once, while it doesn't exist yet. After that the old options are ignored (YAPA warns on stderr until you remove them). Check the result with `yapa scope list`.
+**Upgrading from 1.15 or earlier:** the folder rules used to be the `project_roots`, `customers` and `collection_map` options (`YAPA_PROJECT_ROOTS`, `YAPA_CUSTOMERS`, `YAPA_COLLECTION_MAP`; `projectRoots`, `customers`, `collectionMap` in DSH). The first YAPA process after the update moves them into the file, once, while it doesn't exist yet. After that the old options are ignored, and YAPA warns on stderr until you remove them. The plugin no longer declares them, so `/plugin` can't: delete `project_roots`, `customers` and `collection_map` from `pluginConfigs["yapa@yapa"].options` in `~/.claude/settings.json` (or the `-e YAPA_*` values of a `claude mcp add` install, or the DSH settings). Check the result with `yapa scope list`.
 
 A relative folder resolves against the current folder. In the file itself, folders must be absolute or start with `~`. If the file can't be read or isn't valid, every folder is `global` until it's fixed (YAPA says so on stderr), and `yapa scope` refuses to edit it.
 
