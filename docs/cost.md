@@ -10,7 +10,7 @@ What YAPA adds to a session's token bill, and what it can save, from one user's 
 **The data:**
 - 27 Claude Code sessions with at least 15 minutes of activity, October 25 to November 6, 2026.
 - 157 active hours. A gap between transcript events counts up to 5 minutes, so unattended `/loop` sessions count too.
-- Mostly Opus 5.5 (about 7% of the hours were Sonnet), on YAPA 1.14 to 1.16.
+- Mostly Opus 5.5 (Sonnet was about 10% of the hours and 7% of the cost), on YAPA 1.14 to 1.16.
 - Subagent transcripts are left out of both sides.
 
 Your numbers will differ with the model, how long your context grows, and how much you talk to the agent.
@@ -42,7 +42,7 @@ Each block YAPA adds is written to the cache once, then read again on every late
 | Session start (rules and context) | ~1 | ~1,860 | 0.7% |
 | YAPA's tool names in the deferred-tool list, and loading their schemas | every request; <1 load | — ; ~800 a load | ~0.2% (not in the total above) |
 
-Two simplifications make YAPA's share slightly low, by a few tenths of a percent:
+Two simplifications make YAPA's share slightly low:
 - a block re-written after its 1-hour cache entry expires is counted only once;
 - tool inputs (which the model writes) are priced as cache writes, not output.
 
@@ -56,7 +56,7 @@ Two things in this data changed how YAPA builds its context. The effects below a
 - **Session start reaches the model in full.** Claude Code passes the model at most 10,000 characters of a hook's context; past that, only a 2,000-character preview. The standing rules (7.2KB) and the context together ran over in about half of the session starts in this window. In those sessions the model saw part of the rules and none of the open tasks, waiting items or top memories.
   - The rules are now the MCP server's instructions: about 3,600 characters, or 1,500 tokens.
   - The context is kept under a 9,000-character budget.
-  - Session start now averages about 1.8 times what it did, since nothing is cut off any more, so its share rises from about 0.7% to about 1.2%. That's the price of the context actually arriving.
+  - Session start now averages about 1.8 times what it did, since nothing is cut off any more, so its share rises from about 0.7% to about 1.2%. That's the price of the context actually arriving. Subagents, left out here, also carry the instructions now, about 0.05% more.
 
 Together they bring YAPA's share to about **4.6%**, a little lower than before. More of it is now context the model actually gets, and less is repeated text.
 
@@ -71,7 +71,7 @@ Measured once: an extractor call on 6.2KB of turn text, plus its 3.3KB system pr
 
 ## Semantic search and MiniLM
 
-No LLM reads an embedding. YAPA turns each memory and each prompt into a vector and picks the closest memories with arithmetic (cosine distance) on the CPU. Only the few memories it picks enter the session, about 520 tokens per prompt for three hits.
+No LLM reads an embedding. YAPA turns each memory and each prompt into a vector and picks the closest memories with arithmetic (cosine distance) on the CPU. Only the few memories it picks enter the session: about 130 tokens a hit, and about 520 a prompt with the recall header.
 
 **What it replaces.** Without semantic search, there are two other ways to find what's relevant:
 - **Keyword search** costs no tokens either, but it misses anything phrased differently.
@@ -87,7 +87,7 @@ No LLM reads an embedding. YAPA turns each memory and each prompt into a vector 
 Re-discovery is where the savings would be.
 
 - **Without YAPA:** a fact found in one session (a root cause, a config value, a decision, why an approach failed) is gone in the next. The agent finds it again by reading files, running commands and asking you. It's lost across a compaction too, unless the summary kept it.
-- **With YAPA:** it comes back as a recall hit of about 150 tokens, or as a memory linked to the task.
+- **With YAPA:** it comes back as a recall hit of about 130 tokens, or as a memory linked to the task.
 
 The data gives a break-even point, not a proof:
 
