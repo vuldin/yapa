@@ -10,6 +10,8 @@ import {
   recallMemory,
   shownKey,
   shownEarlierLine,
+  splitShown,
+  recallSnippet,
   listMemories,
   isSessionSummary,
   listTasks,
@@ -381,8 +383,8 @@ function sweepRecalled(now = Date.now()): void {
 /** Take (and clear) the capture notice the last Stop hook left for this session. */
 function takeNotice(sessionId: string | undefined): string | undefined {
   if (!sessionId) return undefined;
-  const file = stateFile(sessionId, 'notice');
   try {
+    const file = stateFile(sessionId, 'notice');
     const notice = readFileSync(file, 'utf-8').trim();
     rmSync(file, { force: true });
     return notice || undefined;
@@ -641,19 +643,18 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
       emit({});
       return;
     }
-    const shown = readRecalled(input.session_id);
-    const fresh = recall.filter(r => !shown.has(shownKey(r)));
-    const repeats = recall.filter(r => shown.has(shownKey(r)));
-    if (fresh.length) lines.push('', '## Top matches');
-    for (const r of fresh) {
+    const { fresh, edited, repeats } = splitShown(recall, readRecalled(input.session_id));
+    const show = [...fresh, ...edited];
+    if (show.length) lines.push('', '## Top matches');
+    for (const r of show) {
       const sal = r.metadata.salience?.toFixed(2) ?? '?';
       const dist = r.distance.toFixed(3);
-      const snippet = r.content.length > 240 ? r.content.slice(0, 240) + '…' : r.content;
+      const snippet = recallSnippet(r, edited.includes(r));
       const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : '';
       lines.push(`- **${r.id}** (salience ${sal}, distance ${dist}${where}${attribution(r.metadata)}): ${snippet}`);
     }
     if (repeats.length) lines.push('', shownEarlierLine(repeats, collection));
-    recordRecalled(input.session_id, fresh.map(shownKey));
+    recordRecalled(input.session_id, show.map(shownKey));
   } catch (e) {
     process.stderr.write(`[yapa-hook] memory_recall failed: ${e}\n`);
     emit({});

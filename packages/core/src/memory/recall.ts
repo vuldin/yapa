@@ -181,6 +181,28 @@ export function shownKey(r: Pick<RecallResult, 'id' | 'content'>): string {
 }
 
 /**
+ * Split recall hits by what a session was already shown (keys from
+ * shownKey): `fresh` were never shown, `edited` were shown before with other
+ * content (show their end, where an edit lands), `repeats` are unchanged.
+ */
+export function splitShown(results: RecallResult[], shown: Set<string>): { fresh: RecallResult[]; edited: RecallResult[]; repeats: RecallResult[] } {
+  const shownIds = new Set([...shown].map(k => k.slice(0, k.lastIndexOf(':'))));
+  const out = { fresh: [] as RecallResult[], edited: [] as RecallResult[], repeats: [] as RecallResult[] };
+  for (const r of results) {
+    if (shown.has(shownKey(r))) out.repeats.push(r);
+    else if (shownIds.has(r.id)) out.edited.push(r);
+    else out.fresh.push(r);
+  }
+  return out;
+}
+
+/** A hit's snippet: its start, or for an edited one its end (edits and notes are appended). */
+export function recallSnippet(r: Pick<RecallResult, 'content'>, edited = false, max = 240): string {
+  if (r.content.length <= max) return r.content;
+  return edited ? `(edited) …${r.content.slice(-max)}` : `${r.content.slice(0, max)}…`;
+}
+
+/**
  * The line that names hits already shown earlier in the session: each id
  * with a short preview, and its collection when it isn't the active one, so
  * the topic stays clear even when the earlier block has scrolled far back.
@@ -192,5 +214,5 @@ export function shownEarlierLine(repeats: RecallResult[], activeCollection: stri
     const where = r.collection && r.collection !== activeCollection ? `from \`${r.collection}\`: ` : '';
     return `${r.id} (${where}"${short}")`;
   });
-  return `_Also matched, shown earlier in this session: ${items.join('; ')}._`;
+  return `Also matched, shown earlier in this session: ${items.join('; ')}.`;
 }

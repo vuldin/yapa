@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -200,13 +200,53 @@ describe('userPromptSubmit', () => {
       expect(next).toContain('Also matched, shown earlier in this session:');
     });
 
-    it('shows an edited memory in full again', async () => {
-      const first = await ask('rep-edit', 'what pauses the acme backups?');
-      const id = ids(first).find(i => first.includes(`**${i}**`) && first.includes('nightly acme backups'))!;
-      await updateMemory(id, { note: 'moved to Fridays from December' });
-      const again = await ask('rep-edit', 'what pauses the acme backups?');
-      expect(ids(again)).toContain(id);
-      expect(again).toContain('moved to Fridays');
+    it('shows an edited memory again, with its end, where the edit is', async () => {
+      const long = `acme failover drill runbook: ${'step '.repeat(80)}done.`;
+      const { ids: [id] } = await storeMemory(long, { collection: 'project-acme', salience: 3 });
+      const first = await ask('rep-edit', 'what is the acme failover drill runbook?');
+      expect(ids(first)).toContain(id);
+      await updateMemory(id, { note: 'drill moved to Fridays from December' });
+      const again = await ask('rep-edit', 'what is the acme failover drill runbook?');
+      expect(again).toMatch(new RegExp(`\\*\\*${id}\\*\\*[^\\n]*\\(edited\\) …[\\s\\S]*?drill moved to Fridays`));
+      const third = await ask('rep-edit', 'what is the acme failover drill runbook?');
+      expect(ids(third)).not.toContain(id);
+    });
+
+    it('sweeps week-old state at startup only, keeping recent sessions\' lists', async () => {
+      const sessions = join(dir, 'plugin-data', 'sessions');
+      mkdirSync(sessions, { recursive: true });
+      const old = join(sessions, 'old-session.recalled');
+      const recent = join(sessions, 'recent-session.recalled');
+      writeFileSync(old, '[]');
+      writeFileSync(recent, '[]');
+      const weekAgo = (Date.now() - 8 * 86_400_000) / 1000;
+      utimesSync(old, weekAgo, weekAgo);
+      capture();
+      await sessionStart({ session_id: 'sweeper', cwd: join(dir, 'proj', 'acme'), source: 'resume' });
+      restore();
+      expect(existsSync(old)).toBe(true);
+      capture();
+      await sessionStart({ session_id: 'sweeper', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
+      restore();
+      expect(existsSync(old)).toBe(false);
+      expect(existsSync(recent)).toBe(true);
+    });
+
+    it('still recalls when the state folder can\'t be written', async () => {
+      const saved = process.env.CLAUDE_PLUGIN_DATA;
+      const blocked = join(dir, 'blocked-data');
+      mkdirSync(blocked, { recursive: true });
+      writeFileSync(join(blocked, 'sessions'), 'not a folder');
+      process.env.CLAUDE_PLUGIN_DATA = blocked;
+      try {
+        expect(ids(await ask('rep-blocked')).length).toBeGreaterThan(0);
+        expect(ids(await ask('rep-blocked')).length).toBeGreaterThan(0);
+        capture();
+        await sessionStart({ session_id: 'rep-blocked', cwd: join(dir, 'proj', 'acme'), source: 'compact' });
+        expect(restore().hookSpecificOutput.additionalContext).toContain('# YAPA Context');
+      } finally {
+        process.env.CLAUDE_PLUGIN_DATA = saved;
+      }
     });
 
     it('come back in full after a compaction, a /clear or a new session, but not on resume', async () => {

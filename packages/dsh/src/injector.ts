@@ -41,6 +41,8 @@ import {
   fenceWaiting,
   shownKey,
   shownEarlierLine,
+  splitShown,
+  recallSnippet,
   type RecallResult,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
@@ -152,13 +154,14 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         }).catch(() => []);
         signal.throwIfAborted();
         const recalled = (state.recalled ??= new Set<string>());
-        fresh = results.filter(r => !recalled.has(shownKey(r)));
-        const repeats = results.filter(r => recalled.has(shownKey(r)));
+        const split = splitShown(results, recalled);
+        fresh = [...split.fresh, ...split.edited];
+        const repeats = split.repeats;
         if (fresh.length) {
           lines.push('', '## Recalled memories (for the current prompt)');
           for (const r of fresh) {
             const sal = r.metadata.salience?.toFixed(2) ?? '?';
-            const snippet = r.content.length > 240 ? `${r.content.slice(0, 240)}…` : r.content;
+            const snippet = recallSnippet(r, split.edited.includes(r));
             const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : '';
             lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}${where}): ${snippet}`);
           }

@@ -49,3 +49,21 @@ describe('DSH recall of hits already shown in the session', () => {
     expect(await injected('acme staging config, once more')).toContain('**mem-');
   });
 });
+
+describe('DSH recall when the injected context is truncated', () => {
+  it('counts a hit as shown only if it made it into the message', async () => {
+    const own: Record<string, any> = {};
+    registerInjector({ on: (name: string, fn: any) => { own[name] = fn; } } as any, () => resolveConfig({ injectTasks: false, maxContextBytes: 120 }));
+    const ask = async (text: string) => {
+      const prompt = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } as any });
+      const a = { id: 'agent-t', session: { id: 'agent-t', header: { cwd: join(dir, 'projects', 'acme') } } };
+      const decision = await own['agent/pre-step']({ agent: a, messages: [prompt], signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [prompt] }));
+      const m = decision.messages.find((x: any) => x.source?.plugin === 'yapa');
+      return m ? m.content.map((c: any) => c.text).join('') : '';
+    };
+    const first = await ask('where is the acme staging config?');
+    expect(first).toContain('(truncated)');
+    expect(first).not.toMatch(/\*\*mem-[a-z0-9-]+\*\*/);
+    expect(await ask('where is the acme staging config?')).not.toContain('shown earlier in this session');
+  });
+});
