@@ -529,11 +529,12 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   const waiting = (await waitingLines(getConfig().USERNAME, undefined, collection)).map(l => clip(l, 500));
   if (waiting.length) {
     const items = waiting.filter(l => l.startsWith('- **'));
+    const summaries = waiting.filter(l => l.startsWith('- _'));
     const tail = waiting.filter(l => !l.startsWith('- ') && l !== '' && !l.startsWith('## '));
     sections.push({
       lines: waiting,
       shrink: [
-        [...waiting.slice(0, 2), ...items.slice(0, 3), ...(items.length > 3 ? ['- _…more: call `waiting`_'] : []), ...tail],
+        [...waiting.slice(0, 2), ...items.slice(0, 3), ...(items.length > 3 ? ['- _…more: call `waiting`_'] : summaries), ...tail],
         ['', '_Items are waiting on you or anyone: call `waiting`._'],
       ],
       priority: 6,
@@ -589,8 +590,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
     await withTimeout(consolidateStaleDrafts().catch(() => []), STALE_JOURNAL_BUDGET_MS);
   }
 
-  sections.push({ lines: ['', '_Hooks ran recall + task_list automatically. You do not need to repeat these unless you need a more specific query._'], priority: 9 });
-  emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: fitContext(sections, getConfig().SESSION_START_MAX_CHARS) } });
+  sections.push({ lines: ['', '_Hooks ran recall and task_list for you: call them yourself only for more than is shown here, or for a more specific query._'], priority: 9 });
+  emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: fitContext(sections, getConfig().SESSION_START_MAX_CHARS ?? 9_000) } });
 }
 
 /**

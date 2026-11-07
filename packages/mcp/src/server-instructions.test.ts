@@ -16,19 +16,30 @@ describe('the MCP server', () => {
         },
         stdio: ['pipe', 'pipe', 'ignore'],
       });
-      const reply = new Promise<any>((resolve, reject) => {
-        let buf = '';
-        child.stdout.on('data', d => {
-          buf += d;
-          const nl = buf.indexOf('\n');
-          if (nl >= 0) resolve(JSON.parse(buf.slice(0, nl)));
+      try {
+        const reply = new Promise<any>((resolve, reject) => {
+          let buf = '';
+          child.stdout.on('data', d => {
+            buf += d;
+            const nl = buf.indexOf('\n');
+            if (nl < 0) return;
+            try {
+              resolve(JSON.parse(buf.slice(0, nl)));
+            } catch (e) {
+              reject(e);
+            }
+          });
+          child.on('error', reject);
+          child.on('exit', code => reject(new Error(`server exited ${code} before answering`)));
         });
-        child.on('error', reject);
-      });
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } }) + '\n');
-      const r = await reply;
-      child.kill();
-      expect(r.result.instructions).toBe(SERVER_INSTRUCTIONS);
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } }) + '\n');
+        const r = await reply;
+        expect(r.result.instructions).toBe(SERVER_INSTRUCTIONS);
+      } finally {
+        const exited = child.exitCode !== null ? Promise.resolve() : new Promise(res => child.once('exit', res));
+        child.kill();
+        await exited;
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

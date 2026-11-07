@@ -262,8 +262,9 @@ describe('sessionStart', () => {
     expect(tight.length).toBeLessThanOrEqual(3000);
     expect(tight).toContain('**Scope:** `private-crowded`');
     expect(tight).not.toContain('## Top memories');
-    expect(tight).toMatch(/## Waiting on you|waiting on you or anyone/);
-    expect(tight).toMatch(/## Open tasks|open task\(s\) in private-crowded: call `task_list`/);
+    expect(tight).toContain('open task(s) in private-crowded: call `task_list`');
+    expect(tight).toContain('…more: call `waiting`');
+    expect(tight).not.toContain('context cut to fit');
     await deleteCollection(crowded);
     configure();
   });
