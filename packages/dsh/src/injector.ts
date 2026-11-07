@@ -17,6 +17,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-agent';
+// Loads the compaction event vocabulary into the session event map.
+import type {} from '@deepseek-ai/dsh-compaction';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { UserMessage } from '@deepseek-ai/dsh-session';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -47,6 +49,8 @@ interface AgentState {
   detection?: CollectionDetection;
   /** The scope file version `detection` was made with. */
   scopeVersion?: string;
+  /** Memory ids recall already put in this session's context (until a compaction drops them). */
+  recalled?: Set<string>;
   /** ID of the human message the last recall injection ran for. */
   recalledMessageId?: string;
   /** Collections whose open tasks were already surfaced this session. */
@@ -78,6 +82,11 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
 
   ctx.on('session/disposed', session => {
     states.delete(session.id);
+  });
+
+  // A compaction summarizes earlier recall away: show those hits in full again.
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'compaction/summary') states.get(session.id)?.recalled?.clear();
   });
 
   ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {
@@ -138,15 +147,20 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
           crossCollection: resolved.core.CROSS_COLLECTION_RESULTS,
         }).catch(() => []);
         signal.throwIfAborted();
-        if (results.length) {
+        const recalled = (state.recalled ??= new Set<string>());
+        const fresh = results.filter(r => !recalled.has(r.id));
+        const repeats = results.filter(r => recalled.has(r.id));
+        if (fresh.length) {
           lines.push('', '## Recalled memories (for the current prompt)');
-          for (const r of results) {
+          for (const r of fresh) {
             const sal = r.metadata.salience?.toFixed(2) ?? '?';
             const snippet = r.content.length > 240 ? `${r.content.slice(0, 240)}…` : r.content;
             const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : '';
             lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}${where}): ${snippet}`);
           }
         }
+        if (repeats.length) lines.push('', `_Also matched, shown earlier in this session: ${repeats.map(r => r.id).join(', ')}._`);
+        for (const r of fresh) recalled.add(r.id);
         state.recalledMessageId = promptMessage.id;
       }
 
