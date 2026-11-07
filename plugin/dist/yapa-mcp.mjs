@@ -2244,8 +2244,8 @@ var require_resolve = __commonJS({
       }
       return count;
     }
-    function getFullPath(resolver, id = "", normalize) {
-      if (normalize !== false)
+    function getFullPath(resolver, id = "", normalize2) {
+      if (normalize2 !== false)
         id = normalizeId(id);
       const p = resolver.parse(id);
       return _getFullPath(resolver, p);
@@ -3874,13 +3874,13 @@ var require_fast_uri = __commonJS({
       }
       return stringScheme;
     }
-    function normalize(uri, options) {
+    function normalize2(uri, options) {
       if (typeof uri === "string") {
         uri = /** @type {T} */
         normalizeString(uri, options);
       } else if (typeof uri === "object") {
         uri = /** @type {T} */
-        parse3(serialize(uri, options), options);
+        parse4(serialize(uri, options), options);
       }
       return uri;
     }
@@ -3923,8 +3923,8 @@ var require_fast_uri = __commonJS({
     function resolveComponent(base, relative, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
-        base = parse3(serialize(base, options), options);
-        relative = parse3(serialize(relative, options), options);
+        base = parse4(serialize(base, options), options);
+        relative = parse4(serialize(relative, options), options);
       }
       options = options || {};
       if (!options.tolerant && relative.scheme) {
@@ -4242,7 +4242,7 @@ var require_fast_uri = __commonJS({
       }
       return { parsed, malformedAuthorityOrPort, malformedPercentEncoding, malformedSchemeSpecific, malformedHost, malformedScheme };
     }
-    function parse3(uri, opts) {
+    function parse4(uri, opts) {
       return parseWithStatus(uri, opts).parsed;
     }
     function normalizeString(uri, opts) {
@@ -4274,12 +4274,12 @@ var require_fast_uri = __commonJS({
     }
     var fastUri = {
       SCHEMES,
-      normalize,
+      normalize: normalize2,
       resolve,
       resolveComponent,
       equal,
       serialize,
-      parse: parse3
+      parse: parse4
     };
     module.exports = fastUri;
     module.exports.default = fastUri;
@@ -7238,8 +7238,8 @@ var require_dist = __commonJS({
         return ajv;
       }
       const [formats, exportName] = opts.mode === "fast" ? [formats_1.fastFormats, fastName] : [formats_1.fullFormats, fullName];
-      const list6 = opts.formats || formats_1.formatNames;
-      addFormats(ajv, list6, formats, exportName);
+      const list5 = opts.formats || formats_1.formatNames;
+      addFormats(ajv, list5, formats, exportName);
       if (opts.keywords)
         (0, limit_1.default)(ajv);
       return ajv;
@@ -7251,11 +7251,11 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list6, fs, exportName) {
+    function addFormats(ajv, list5, fs, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
-      for (const f of list6)
+      for (const f of list5)
         ajv.addFormat(f, fs[f]);
     }
     module.exports = exports = formatsPlugin;
@@ -7264,65 +7264,11 @@ var require_dist = __commonJS({
   }
 });
 
-// packages/core/src/sync/syncable.ts
-function isSyncableCollection(name) {
-  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
-}
-function looksPrivateButShared(name) {
-  return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
-}
-function isDeletedUpstream(metadata) {
-  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== "";
-}
-function isReadOnlyDoc(metadata) {
-  return metadata?.read_only === true;
-}
-function assertWritable(id, metadata) {
-  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
-}
-var init_syncable = __esm({
-  "packages/core/src/sync/syncable.ts"() {
-    "use strict";
-  }
-});
-
 // packages/core/src/config.ts
 import { homedir as homedir2, tmpdir, userInfo } from "os";
-import path, { join as pathJoin } from "path";
-function list(value) {
-  return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
-}
-function splitCollectionMap(value) {
-  return value.split(/[;\n]/).map((v) => v.trim()).filter(Boolean);
-}
-function warnOnce(message) {
-  if (warned.has(message)) return;
-  warned.add(message);
-  process.stderr.write(`[yapa] ${message}
-`);
-}
-function normalizeCollectionMap(entries, pathImpl = path) {
-  const out = [];
-  for (const raw of entries) {
-    const entry = raw.trim();
-    if (!entry) continue;
-    const eq = entry.lastIndexOf("=");
-    const dir = eq < 0 ? "" : entry.slice(0, eq).trim().replace(/^~(?=[\\/]|$)/, homedir2());
-    const collection = eq < 0 ? "" : entry.slice(eq + 1).trim();
-    if (!dir || !collection) {
-      warnOnce(`collection_map: ignoring "${entry}" (expected path=collection; separate entries with ";")`);
-      continue;
-    }
-    if (!pathImpl.isAbsolute(dir)) {
-      warnOnce(`collection_map: ignoring "${entry}" (the path must be absolute or start with ~)`);
-      continue;
-    }
-    if (looksPrivateButShared(collection)) {
-      warnOnce(`collection_map: "${collection}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`);
-    }
-    out.push(`${pathImpl.resolve(dir)}=${collection}`);
-  }
-  return out;
+import { join as pathJoin } from "path";
+function scopeFile(env) {
+  return get(env, "SCOPE_FILE", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-scope-${process.pid}.json`) : pathJoin(homedir2(), ".local", "share", "yapa", "scope.json"));
 }
 function get(env, key, fallback = "") {
   const pick2 = (v) => v === void 0 || v === "" ? void 0 : v;
@@ -7361,9 +7307,7 @@ function createConfig(env = process.env) {
     // Bare USERNAME is deliberately not consulted: on Windows it's the OS login
     // already, and elsewhere it's often unset. Default = the OS login name.
     USERNAME: env.YAPA_USERNAME || osUsername(),
-    PROJECT_ROOTS: list(get(env, "PROJECT_ROOTS", "")).map((r) => r.replace(/^~(?=\/|$)/, homedir2()).replace(/\/+$/, "")),
-    CUSTOMERS: list(get(env, "CUSTOMERS", "")),
-    COLLECTION_MAP: normalizeCollectionMap(splitCollectionMap(get(env, "COLLECTION_MAP", ""))),
+    SCOPE_FILE: scopeFile(env),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
@@ -7476,18 +7420,16 @@ function getEmbeddingModel(config2 = getConfig()) {
       return "";
   }
 }
-var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, CHUNK_SIZE, CHUNK_OVERLAP, warned, active;
+var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, CHUNK_SIZE, CHUNK_OVERLAP, active;
 var init_config = __esm({
   "packages/core/src/config.ts"() {
     "use strict";
-    init_syncable();
     SALIENCE_START = 1;
     SALIENCE_BOOST_ON_ACCESS = 0.1;
     SALIENCE_FLOOR = 0.05;
     SALIENCE_MAX = 5;
     CHUNK_SIZE = 2e3;
     CHUNK_OVERLAP = 200;
-    warned = /* @__PURE__ */ new Set();
   }
 });
 
@@ -8295,7 +8237,7 @@ function matchesFilter(metadata, filter) {
   return true;
 }
 function createLocalStore(rootDir) {
-  const cache2 = /* @__PURE__ */ new Map();
+  const cache3 = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
   const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
@@ -8313,12 +8255,12 @@ function createLocalStore(rootDir) {
       }
       const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
-      cache2.set(name, parsed);
+      cache3.set(name, parsed);
       cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache2.delete(name);
+        cache3.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -8326,14 +8268,14 @@ function createLocalStore(rootDir) {
     }
   }
   async function load2(name) {
-    const cached3 = cache2.get(name);
+    const cached3 = cache3.get(name);
     if (!cached3) return readFromDisk(name);
     try {
       const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache2.delete(name);
+        cache3.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -8353,7 +8295,7 @@ function createLocalStore(rootDir) {
       await rm(tmp, { force: true });
       throw e;
     }
-    cache2.set(cf.name, cf);
+    cache3.set(cf.name, cf);
     cacheMtimes.set(cf.name, identity(await stat(file2, { bigint: true })));
   }
   function mutate(name, apply) {
@@ -8366,7 +8308,7 @@ function createLocalStore(rootDir) {
           const out = apply(cur);
           if (out) await writeAtomic(out);
         } catch (e) {
-          cache2.delete(name);
+          cache3.delete(name);
           cacheMtimes.delete(name);
           throw e;
         }
@@ -8401,7 +8343,7 @@ function createLocalStore(rootDir) {
       await withFileLock(lockFileFor(fileFor(name)), async () => {
         await rm(fileFor(name), { force: true });
       }, { waitMs: 15e3 });
-      cache2.delete(name);
+      cache3.delete(name);
       cacheMtimes.delete(name);
       writeChains.delete(name);
     },
@@ -8626,6 +8568,282 @@ var init_store = __esm({
   }
 });
 
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+function looksPrivateButShared(name) {
+  return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
+}
+function isDeletedUpstream(metadata) {
+  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== "";
+}
+function isReadOnlyDoc(metadata) {
+  return metadata?.read_only === true;
+}
+function assertWritable(id, metadata) {
+  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
+}
+var init_syncable = __esm({
+  "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/scope-file.ts
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, realpathSync, statSync as statSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import path from "node:path";
+function scopePath(dir, base = process.cwd()) {
+  const expanded = dir.trim().replace(/^~(?=[\\/]|$)/, homedir3());
+  return path.resolve(base, expanded);
+}
+function parse3(text, file2) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new ScopeFileError(`${file2} is not valid JSON (${e.message}); fix or remove it`);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ScopeFileError(`${file2} must hold a JSON object`);
+  const o = raw;
+  const strings = (key) => {
+    const v = o[key] ?? [];
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new ScopeFileError(`${file2}: "${key}" must be a list of strings`);
+    return v;
+  };
+  const map2 = o.collection_map ?? {};
+  if (!map2 || typeof map2 !== "object" || Array.isArray(map2) || Object.values(map2).some((x) => typeof x !== "string")) {
+    throw new ScopeFileError(`${file2}: "collection_map" must map folders to collection names`);
+  }
+  return normalize({ project_roots: strings("project_roots"), customers: strings("customers"), collection_map: map2 }, file2);
+}
+function normalize(s, file2) {
+  const abs = (dir, key) => {
+    const d = dir.trim().replace(/^~(?=[\\/]|$)/, homedir3());
+    if (!path.isAbsolute(d)) throw new ScopeFileError(`${file2}: "${key}" entry "${dir}" must be an absolute path or start with ~`);
+    return path.resolve(d);
+  };
+  const collection_map = {};
+  for (const [dir, c] of Object.entries(s.collection_map)) {
+    const name = c.trim();
+    if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file2}: "${name}" (mapped from ${dir}) is not a valid collection name`);
+    collection_map[abs(dir, "collection_map")] = name;
+  }
+  return {
+    project_roots: [...new Set(s.project_roots.map((r) => abs(r, "project_roots")))].sort(),
+    customers: [...new Set(s.customers.map((c) => c.trim()).filter(Boolean))].sort(),
+    collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b)))
+  };
+}
+function readScopeSettings(opts = {}) {
+  const file2 = opts.file ?? getConfig().SCOPE_FILE;
+  const key = scopeFileVersion(file2);
+  if (key === "missing") return empty();
+  if (cache?.file === file2 && cache.key === key) return copy(cache.value);
+  try {
+    const value = parse3(readFileSync3(file2, "utf8"), file2);
+    cache = { file: file2, key, value };
+    return copy(value);
+  } catch (e) {
+    if (opts.strict) throw e;
+    const msg = e.message;
+    if (!warned.has(msg)) {
+      warned.add(msg);
+      process.stderr.write(`[yapa] ${msg}. Folder rules are off until then.
+`);
+    }
+    return empty();
+  }
+}
+function importLegacyScope(legacy, file2 = getConfig().SCOPE_FILE) {
+  const items = (v, split) => (Array.isArray(v) ? v : (v ?? "").split(split)).map((x) => String(x).trim()).filter(Boolean);
+  const roots = items(legacy.project_roots, /[,:]/);
+  const customers = items(legacy.customers, /[,:]/);
+  const map2 = items(legacy.collection_map, /[;\n]/);
+  if (!roots.length && !customers.length && !map2.length) return false;
+  if (existsSync2(file2)) {
+    const msg = `the old project_roots, customers and collection_map options are still set but no longer read: ${file2} is the only source (yapa scope list). Remove the old options.`;
+    if (!warned.has(msg)) {
+      warned.add(msg);
+      process.stderr.write(`[yapa] ${msg}
+`);
+    }
+    return false;
+  }
+  const s = empty();
+  const skipped = [];
+  const valid = (what, probe) => {
+    try {
+      normalize({ ...empty(), ...probe }, file2);
+      return true;
+    } catch {
+      skipped.push(what);
+      return false;
+    }
+  };
+  for (const r of roots) if (valid(r, { project_roots: [r] })) s.project_roots.push(r);
+  for (const c of customers) if (valid(c, { customers: [c] })) s.customers.push(c);
+  for (const entry of map2) {
+    const eq = entry.lastIndexOf("=");
+    const dir = entry.slice(0, Math.max(eq, 0)).trim();
+    const collection = entry.slice(eq + 1).trim();
+    if (eq > 0 && valid(entry, { collection_map: { [dir]: collection } })) s.collection_map[dir] = collection;
+    else if (eq <= 0) skipped.push(entry);
+  }
+  mkdirSync3(path.dirname(file2), { recursive: true });
+  const wrote = withFileLockSync(lockFileFor(file2), () => {
+    if (existsSync2(file2)) return false;
+    writeJsonAtomic(file2, normalize(s, file2), 420);
+    return true;
+  });
+  cache = void 0;
+  if (wrote) {
+    process.stderr.write(`[yapa] Moved your folder rules (project_roots, customers, collection_map) from the old options into ${file2}; the options are no longer read.${skipped.length ? ` Skipped: ${skipped.join(", ")}.` : ""}
+`);
+  }
+  return wrote;
+}
+function scopeFileVersion(file2 = getConfig().SCOPE_FILE) {
+  try {
+    const st = statSync2(file2);
+    return `${st.ino}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "missing";
+  }
+}
+function collectionMapEntries(s) {
+  return Object.entries(s.collection_map).map(([dir, c]) => `${dir}=${c}`);
+}
+async function editScopeSettings(edit, opts = {}) {
+  const file2 = opts.file ?? getConfig().SCOPE_FILE;
+  mkdirSync3(path.dirname(file2), { recursive: true });
+  return withFileLock(lockFileFor(file2), () => {
+    const before = existsSync2(file2) ? parse3(readFileSync3(file2, "utf8"), file2) : empty();
+    const s = copy(before);
+    let warning;
+    switch (edit.op) {
+      case "add_root":
+        s.project_roots.push(scopePath(edit.dir, opts.base));
+        break;
+      case "remove_root": {
+        const dir = scopePath(edit.dir, opts.base);
+        s.project_roots = s.project_roots.filter((r) => r !== dir);
+        break;
+      }
+      case "add_customer": {
+        const name = edit.name.trim();
+        if (!name || /[\\/]/.test(name)) throw new ScopeFileError(`"${edit.name}" is not a folder name`);
+        s.customers.push(name);
+        break;
+      }
+      case "remove_customer":
+        s.customers = s.customers.filter((c) => c !== edit.name.trim());
+        break;
+      case "map": {
+        const name = edit.collection.trim();
+        if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`"${name}" is not a valid collection name`);
+        if (looksPrivateButShared(name)) warning = `"${name}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`;
+        s.collection_map[scopePath(edit.dir, opts.base)] = name;
+        break;
+      }
+      case "unmap":
+        delete s.collection_map[scopePath(edit.dir, opts.base)];
+        break;
+    }
+    const after = normalize(s, file2);
+    const changed = JSON.stringify(after) !== JSON.stringify(before);
+    if (changed) writeJsonAtomic(file2, after, 420);
+    cache = void 0;
+    return { changed, settings: after, ...warning ? { warning } : {} };
+  });
+}
+function matchCollectionMap(cwd, entries, opts = {}) {
+  const P = opts.path ?? path;
+  const real = opts.realpath ?? realpathOrUndefined;
+  const fold = P.sep === "\\" ? (s) => s.toLowerCase() : (s) => s;
+  const forms = (p) => [...new Set([p, real(p)].filter((x) => !!x).map(fold))];
+  const here = forms(P.resolve(cwd));
+  const holds = (dir, c) => c === dir || c.startsWith(dir.endsWith(P.sep) ? dir : dir + P.sep);
+  let best;
+  for (const entry of entries) {
+    const eq = entry.lastIndexOf("=");
+    if (eq < 0) continue;
+    const dir = entry.slice(0, eq).trim();
+    const collection = entry.slice(eq + 1).trim();
+    if (!dir || !collection || !P.isAbsolute(dir)) continue;
+    const resolved = P.resolve(dir);
+    if (!forms(resolved).some((d) => here.some((c) => holds(d, c)))) continue;
+    if (!best || resolved.length > best.length) best = { length: resolved.length, collection };
+  }
+  return best?.collection;
+}
+function pathWithin(dir, root) {
+  return dir === root || dir.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+}
+function sessionFolder(env = process.env) {
+  return path.resolve(env.CLAUDE_PROJECT_DIR || process.cwd());
+}
+function mayCreateSharedFrom(folder, collection, s = readScopeSettings()) {
+  if (!isSyncableCollection(collection)) return true;
+  const dir = path.resolve(folder);
+  if (s.project_roots.some((r) => pathWithin(dir, r))) return true;
+  return matchCollectionMap(dir, collectionMapEntries(s)) === collection;
+}
+function formatScopeSettings(s, file2 = getConfig().SCOPE_FILE) {
+  const lines = [`Folder rules (${file2}):`];
+  lines.push(`- project_roots: ${s.project_roots.length ? s.project_roots.join(", ") : '(none: every folder is "global", and no new shared collection can be created)'}`);
+  lines.push(`- customers: ${s.customers.length ? s.customers.join(", ") : "(none)"}`);
+  const map2 = Object.entries(s.collection_map);
+  lines.push(`- collection_map:${map2.length ? "" : " (none)"}`);
+  for (const [dir, c] of map2) lines.push(`  - ${dir} \u2192 ${c}${isSyncableCollection(c) ? " (shared)" : " (local only)"}`);
+  return lines.join("\n");
+}
+var COLLECTION_NAME_RE, empty, ScopeFileError, cache, warned, copy, realpathOrUndefined, SharedCollectionNotAllowedError;
+var init_scope_file = __esm({
+  "packages/core/src/scope-file.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    init_syncable();
+    COLLECTION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]$/;
+    empty = () => ({ project_roots: [], customers: [], collection_map: {} });
+    ScopeFileError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ScopeFileError";
+      }
+    };
+    warned = /* @__PURE__ */ new Set();
+    copy = (s) => ({
+      project_roots: [...s.project_roots],
+      customers: [...s.customers],
+      collection_map: { ...s.collection_map }
+    });
+    realpathOrUndefined = (p) => {
+      try {
+        return realpathSync.native(p);
+      } catch {
+        return void 0;
+      }
+    };
+    SharedCollectionNotAllowedError = class extends Error {
+      constructor(collection, folder) {
+        const local2 = `private-${collection.replace(/^(project|customer)-/, "")}`;
+        super(
+          `Refused: "${collection}" does not exist here, and creating it would start a new shared collection that syncs to the team remote. New shared collections are only created from a session under a project root, and the folder YAPA checked for this session, ${folder}, is not under one. Use a local-only collection such as "${local2}" instead. If "${collection}" already exists on the remote, run sync subscribe ${collection} first. Only if the user explicitly asks, allow this folder with the scope tool (add_root for a folder of projects, or map this folder to the collection), then write again.`
+        );
+        this.collection = collection;
+        this.folder = folder;
+        this.name = "SharedCollectionNotAllowedError";
+      }
+      collection;
+      folder;
+      code = "shared_collection_not_allowed";
+    };
+  }
+});
+
 // packages/core/src/doc-lock.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
@@ -8796,11 +9014,18 @@ function resolveCollectionRedirect(name, redirects) {
   }
   return current === name ? { collection: name } : { collection: current, redirectedFrom: name };
 }
-async function resolveWriteCollection(name) {
+async function resolveWriteCollection(name, opts = {}) {
   if (name === "global") return { collection: name };
   const w = resolveCollectionRedirect(name, await getCollectionRedirects());
   if ((await getLeftCollections()).includes(w.collection)) throw new CollectionLeftError(w.collection);
+  if (opts.folder !== void 0) await assertMayCreateCollection(w.collection, opts.folder);
   return w;
+}
+async function assertMayCreateCollection(name, folder) {
+  if (!isSyncableCollection(name) || mayCreateSharedFrom(folder, name)) return;
+  const existing = await listCollections2();
+  if (existing.some((c) => c.name === name) || (await getLeftCollections()).includes(name)) return;
+  throw new SharedCollectionNotAllowedError(name, folder);
 }
 async function getPendingBackfills() {
   try {
@@ -8844,6 +9069,8 @@ var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
     init_store();
+    init_scope_file();
+    init_syncable();
     init_doc_lock();
     SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
@@ -8971,7 +9198,7 @@ var init_deletes = __esm({
 });
 
 // packages/core/src/sync/health.ts
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 function healthStatusFor(code) {
   if (typeof code === "string" && SIGNED_OUT.has(code)) return "signed_out";
@@ -8981,7 +9208,7 @@ function healthStatusFor(code) {
 function readSyncHealth(path2 = getConfig().SYNC_HEALTH_FILE) {
   if (!path2) return void 0;
   try {
-    const h = JSON.parse(readFileSync3(path2, "utf-8"));
+    const h = JSON.parse(readFileSync4(path2, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -9006,7 +9233,7 @@ function recordSyncHealth(update, now = Date.now(), path2 = getConfig().SYNC_HEA
     if ("message" in update && update.message) next.message = update.message.slice(0, 300);
   }
   try {
-    mkdirSync3(dirname2(path2), { recursive: true, mode: 448 });
+    mkdirSync4(dirname2(path2), { recursive: true, mode: 448 });
     const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync2(tmp, JSON.stringify(next) + "\n", { mode: 384 });
     renameSync2(tmp, path2);
@@ -9035,7 +9262,7 @@ var init_health = __esm({
 
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname3 } from "node:path";
 function getDeviceId() {
   const config2 = getConfig();
@@ -9044,19 +9271,19 @@ function getDeviceId() {
   const path2 = config2.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync4(path2, "utf-8").trim();
+    id = readFileSync5(path2, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync4(dirname3(path2), { recursive: true });
+      mkdirSync5(dirname3(path2), { recursive: true });
       writeFileSync3(path2, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync4(path2, "utf-8").trim() || id;
+        id = readFileSync5(path2, "utf-8").trim() || id;
       } catch {
       }
     }
@@ -9073,7 +9300,7 @@ var init_device = __esm({
 });
 
 // packages/core/src/sync/postgres.ts
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 import pg from "pg";
 function buildPoolConfig(databaseUrl, caCertPath) {
   let url2;
@@ -9085,7 +9312,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
     const host = /[?&]host=([^&]*)/.exec(databaseUrl)?.[1];
     if (host && decodeURIComponent(host).startsWith("/")) return { connectionString: databaseUrl, ssl: false, tls: "off" };
     if (caCertPath) {
-      return { connectionString: databaseUrl, ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
+      return { connectionString: databaseUrl, ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 }, tls: "verify-ca" };
     }
     return { connectionString: databaseUrl, ssl: { rejectUnauthorized: false }, tls: "unverified" };
   }
@@ -9094,7 +9321,7 @@ function buildPoolConfig(databaseUrl, caCertPath) {
   const connectionString = url2.toString();
   const verified = () => ({
     connectionString,
-    ssl: { ca: readFileSync5(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
+    ssl: { ca: readFileSync6(caCertPath, "utf-8"), rejectUnauthorized: true, checkServerIdentity: () => void 0 },
     tls: "verify-ca"
   });
   const unverified = { connectionString, ssl: { rejectUnauthorized: false }, tls: "unverified" };
@@ -9490,7 +9717,7 @@ __export(http_backend_exports, {
   redactTokens: () => redactTokens,
   runCommand: () => runCommand
 });
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync4, mkdirSync as mkdirSync5, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
 import { dirname as dirname4 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -9675,7 +9902,7 @@ var init_http_backend = __esm({
       loadCached() {
         if (!this.cachePath) return false;
         try {
-          const [first = "", stored] = readFileSync6(this.cachePath, "utf-8").split("\n");
+          const [first = "", stored] = readFileSync7(this.cachePath, "utf-8").split("\n");
           const token = first.trim();
           if (!token) return false;
           const jwt2 = Number.isFinite(Number(decodeJwtPayload(token)?.exp));
@@ -9693,7 +9920,7 @@ var init_http_backend = __esm({
       saveCached(token) {
         if (!this.cachePath) return;
         try {
-          mkdirSync5(dirname4(this.cachePath), { recursive: true, mode: 448 });
+          mkdirSync6(dirname4(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
           const opaque = this.opaqueTtlMs !== void 0 && !Number.isFinite(Number(decodeJwtPayload(token)?.exp));
           writeFileSync4(tmp, opaque ? `${token}
@@ -10069,7 +10296,7 @@ import { join as join5, dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 function mcpTokenProvider(config2) {
   const cmd = config2.SYNC_MCP_TOKEN_CMD.trim();
-  const cache2 = config2.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config2.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const cache3 = config2.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config2.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
   const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
   return new IdTokenProvider(async () => {
     if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
@@ -10078,7 +10305,7 @@ function mcpTokenProvider(config2) {
     const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
     if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
     return token;
-  }, Date.now, cache2, OPAQUE_TOKEN_TTL_MS2);
+  }, Date.now, cache3, OPAQUE_TOKEN_TTL_MS2);
 }
 function pickSyncTool(names, host, explicit = "") {
   if (explicit) {
@@ -10494,7 +10721,7 @@ var init_backend = __esm({
 });
 
 // packages/core/src/sync/local-coordination.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
+import { readdirSync as readdirSync2, readFileSync as readFileSync8 } from "node:fs";
 import { join as join6 } from "node:path";
 function assertMatch(v, re, what) {
   if (typeof v !== "string" || !re.test(v)) throw bad(`${what} must match ${re.source}`);
@@ -10528,7 +10755,7 @@ function stateFile(dir, collection) {
 }
 function readState2(file2) {
   try {
-    const s = JSON.parse(readFileSync7(file2, "utf-8"));
+    const s = JSON.parse(readFileSync8(file2, "utf-8"));
     return { leases: s?.leases ?? {}, counters: s?.counters ?? {} };
   } catch (e) {
     if (e.code === "ENOENT") return { leases: {}, counters: {} };
@@ -10733,7 +10960,7 @@ var init_local_coordination = __esm({
 });
 
 // packages/core/src/sync/coordination.ts
-import { readdirSync as readdirSync3, readFileSync as readFileSync8, rmSync as rmSync3 } from "node:fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync9, rmSync as rmSync3 } from "node:fs";
 import { join as join7 } from "node:path";
 function currentSession(explicit, env = process.env) {
   for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
@@ -10746,7 +10973,7 @@ function markerPath(session) {
 }
 function readMarker(session) {
   try {
-    return JSON.parse(readFileSync8(markerPath(session), "utf-8"));
+    return JSON.parse(readFileSync9(markerPath(session), "utf-8"));
   } catch {
     return void 0;
   }
@@ -10786,15 +11013,15 @@ function noticesPath() {
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list6 = [];
+      let list5 = [];
       try {
-        list6 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list5 = JSON.parse(readFileSync9(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list6)) list6 = [];
-      if (list6.some((n) => n.text === text)) return;
-      list6.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list6.slice(-20));
+      if (!Array.isArray(list5)) list5 = [];
+      if (list5.some((n) => n.text === text)) return;
+      list5.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list5.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -11651,7 +11878,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.15.0" : fromPackage();
+var YAPA_VERSION = true ? "1.16.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -17143,18 +17370,18 @@ var validateAsync = async (schema, value, _ctx) => {
   return result.issues.length === 0;
 };
 var _encode = (_Err) => {
-  const parse3 = _parse(_Err);
+  const parse4 = _parse(_Err);
   const fn = (schema, value, _ctx, _params) => {
     const ctx = _ctx ? { ..._ctx, direction: "backward" } : { direction: "backward" };
-    return parse3(schema, value, ctx, finalizeParams(fn, _params));
+    return parse4(schema, value, ctx, finalizeParams(fn, _params));
   };
   return fn;
 };
 var encode = /* @__PURE__ */ _encode($ZodRealError);
 var _decode = (_Err) => {
-  const parse3 = _parse(_Err);
+  const parse4 = _parse(_Err);
   const fn = (schema, value, _ctx, _params) => {
-    return parse3(schema, value, _ctx, finalizeParams(fn, _params));
+    return parse4(schema, value, _ctx, finalizeParams(fn, _params));
   };
   return fn;
 };
@@ -18649,7 +18876,7 @@ function capSize(inst, size) {
   if (!caps.length)
     return;
   const cap = Math.min(...caps.map((c) => c[0]));
-  const parse3 = inst._zod.parse;
+  const parse4 = inst._zod.parse;
   inst._zod.parse = (payload, ctx) => {
     const n = size(payload.value);
     if (n > cap && !ctx?.skipChecks && ctx?.direction !== "backward") {
@@ -18663,7 +18890,7 @@ function capSize(inst, size) {
         }
       }
     }
-    return parse3(payload, ctx);
+    return parse4(payload, ctx);
   };
 }
 var arraySize = (input2) => Array.isArray(input2) ? input2.length : -1;
@@ -20503,15 +20730,15 @@ function bucketFor(state, inst) {
 var handoff;
 var open = [];
 var memo = {
-  alloc(_inst, payload, empty) {
+  alloc(_inst, payload, empty2) {
     const bucket = handoff;
     if (!bucket)
-      return empty;
+      return empty2;
     handoff = void 0;
-    const entry = { value: empty, issues: null };
+    const entry = { value: empty2, issues: null };
     bucket.set(payload.value, entry);
     open.push(entry);
-    return empty;
+    return empty2;
   },
   guard(inst) {
     var _a3;
@@ -31490,8 +31717,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list6 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list6)
+  const list5 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list5)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -32328,21 +32555,21 @@ function visit(schema, fnOrHandlers) {
     const h = fnOrHandlers[node2._zod.def.type];
     return h ? h(node2, rewritten) : node2;
   };
-  const cache2 = /* @__PURE__ */ new Map();
+  const cache3 = /* @__PURE__ */ new Map();
   function run2(s) {
-    const cached3 = cache2.get(s);
+    const cached3 = cache3.get(s);
     if (cached3 === RESOLVING) {
       return new $ZodLazy({
         type: "lazy",
-        getter: () => cache2.get(s)
+        getter: () => cache3.get(s)
       });
     }
     if (cached3 !== void 0)
       return cached3;
-    cache2.set(s, RESOLVING);
+    cache3.set(s, RESOLVING);
     const inner = mapInner(s);
     const mapped = fn(inner, inner !== s);
-    cache2.set(s, mapped);
+    cache3.set(s, mapped);
     return mapped;
   }
   function mapInner(s) {
@@ -41316,12 +41543,97 @@ function detectSector(content) {
 }
 
 // packages/core/src/scope.ts
-init_config();
+init_scope_file();
 init_store();
 init_sentinel();
 init_syncable();
+async function detectCollection(cwd, roots, customers, map2) {
+  const s = roots && customers && map2 ? void 0 : readScopeSettings();
+  const d = await detect(cwd, roots ?? s.project_roots, customers ?? s.customers, map2 ?? collectionMapEntries(s));
+  if (d.collection !== "global" && (await getLeftCollections()).includes(d.collection)) d.left = true;
+  return d;
+}
+async function detect(cwd, roots, customers, map2) {
+  if (!cwd) return { collection: "global" };
+  const mapped = matchCollectionMap(cwd, map2);
+  if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
+  for (const rawRoot of roots) {
+    const root = rawRoot.replace(/\/+$/, "") || "/";
+    if (!pathWithin(cwd, root)) continue;
+    const relative = cwd.slice(root.length).replace(/^\/+/, "");
+    const segment = relative.split("/")[0];
+    if (!segment || segment.startsWith(".")) return { collection: "global" };
+    const existing = (await listCollections2().catch(() => [])).map((c) => c.name);
+    const redirects = await getCollectionRedirects();
+    const known = (name) => existing.includes(name) || Object.hasOwn(redirects, name);
+    const hasCustomer = known(`customer-${segment}`);
+    const hasProject = known(`project-${segment}`);
+    if (hasCustomer && hasProject) {
+      return follow({
+        collection: `project-${segment}`,
+        ambiguous: [`project-${segment}`, `customer-${segment}`]
+      }, redirects);
+    }
+    if (hasCustomer) return follow({ collection: `customer-${segment}` }, redirects);
+    if (hasProject) return follow({ collection: `project-${segment}` }, redirects);
+    if (customers.includes(segment)) return follow({ collection: `customer-${segment}` }, redirects);
+    return follow({ collection: `project-${segment}` }, redirects);
+  }
+  return { collection: "global" };
+}
+function scopeNotes(d) {
+  const notes = [];
+  if (d.collection !== "global" && !isSyncableCollection(d.collection)) notes.push("(local only, never synced)");
+  else if (d.mapped && looksPrivateButShared(d.collection)) {
+    notes.push("(shared: this name syncs; local-only names start with lowercase `private-` or `local-`)");
+  }
+  if (d.redirectedFrom) notes.push(`(merged from \`${d.redirectedFrom}\`)`);
+  if (d.left) notes.push(`(removed from this machine: writes to it are refused; \`sync subscribe ${d.collection}\` follows it again)`);
+  return notes.length ? ` ${notes.join(" ")}` : "";
+}
+function follow(d, redirects) {
+  const { collection, redirectedFrom } = resolveCollectionRedirect(d.collection, redirects);
+  const out = { ...d, collection };
+  if (redirectedFrom) out.redirectedFrom = redirectedFrom;
+  if (d.ambiguous) {
+    const [a, b] = d.ambiguous.map((n) => resolveCollectionRedirect(n, redirects).collection);
+    if (a === b) delete out.ambiguous;
+    else out.ambiguous = [a, b];
+  }
+  return out;
+}
+async function runScopeAction(a, folder) {
+  if (a.action === "show") {
+    const s = readScopeSettings({ strict: true });
+    const d = await detectCollection(folder);
+    const shared = s.project_roots.some((r2) => pathWithin(folder, r2)) ? "may create new shared collections (it is under a project root)" : d.mapped && isSyncableCollection(d.collection) && mayCreateSharedFrom(folder, d.collection, s) ? `may create only its mapped shared collection, ${d.collection}` : "may not create new shared collections (not under a project root)";
+    return { ok: true, text: `${formatScopeSettings(s)}
+
+This session's folder, ${folder}: collection ${d.collection}${scopeNotes(d)}; it ${shared}.` };
+  }
+  const need = (v, what) => {
+    if (!v?.trim()) throw new Error(`${a.action} needs ${what}`);
+    return v;
+  };
+  const edit = a.action === "add_customer" || a.action === "remove_customer" ? { op: a.action, name: need(a.name, "a folder name (name)") } : a.action === "map" ? { op: "map", dir: need(a.dir, "a folder (dir)"), collection: need(a.collection, "a collection") } : { op: a.action, dir: need(a.dir, "a folder (dir)") };
+  const r = await editScopeSettings(edit, { base: folder });
+  const target = "dir" in edit ? scopePath(edit.dir, folder) : edit.name;
+  const done = {
+    add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
+    remove_root: [`Removed project root ${target}.`, `${target} was not a project root.`],
+    add_customer: [`Folders named ${target} under a project root now use customer-${target}.`, `${target} was already a customer.`],
+    remove_customer: [`${target} is no longer a customer.`, `${target} was not a customer.`],
+    map: [`Mapped ${target} \u2192 ${edit.op === "map" ? edit.collection.trim() : ""}.`, `${target} was already mapped to ${edit.op === "map" ? edit.collection.trim() : ""}.`],
+    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`]
+  };
+  const lines = [done[a.action][r.changed ? 0 : 1]];
+  if (r.warning) lines.push(`\u26A0 ${r.warning}`);
+  lines.push("", formatScopeSettings(r.settings));
+  return { ok: true, text: lines.join("\n") };
+}
 
 // packages/core/src/index.ts
+init_scope_file();
 init_metadata_adapter();
 
 // packages/core/src/memory/store.ts
@@ -41391,13 +41703,13 @@ var TypedMemoryError = class extends Error {
 function isMemoryKind(k) {
   return typeof k === "string" && MEMORY_KINDS.includes(k);
 }
-var list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+var list = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 function normalizeTyped(fields, current = {}) {
   const out = {};
   for (const k of TYPED_KEYS) {
     const v = fields[k];
     if (v === void 0) continue;
-    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list2(v) : typeof v === "string" ? v.trim() : v;
+    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list(v) : typeof v === "string" ? v.trim() : v;
   }
   if (!Object.keys(out).length) return out;
   const curKind = isMemoryKind(current.kind) ? current.kind : void 0;
@@ -41423,7 +41735,7 @@ function normalizeTyped(fields, current = {}) {
       throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(", ")}`);
     }
     const merged = { ...current, ...out };
-    if (kind === "decision" && status === "needed" && list2(merged.options).length < 2) {
+    if (kind === "decision" && status === "needed" && list(merged.options).length < 2) {
       throw new TypedMemoryError("a decision that is needed lists at least two options (and ideally a recommendation)");
     }
     if (kind === "finding" && status === "resolved") {
@@ -41434,7 +41746,7 @@ function normalizeTyped(fields, current = {}) {
       if (d === "no-action" && !String(merged.disposition_reason ?? "").trim()) {
         throw new TypedMemoryError("a no-action disposition gives disposition_reason");
       }
-      if (d !== "no-action" && !list2(merged.disposition_ids).length) {
+      if (d !== "no-action" && !list(merged.disposition_ids).length) {
         throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
       }
     }
@@ -41455,7 +41767,7 @@ function typedLabel(meta3) {
 // packages/core/src/memory/links.ts
 init_doc_lock();
 init_store();
-var list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+var list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
 async function findDoc(id) {
   for (const c of await listCollections2().catch(() => [])) {
     const [d] = await getDocumentsByIds2(c.name, [id]).catch(() => []);
@@ -41474,7 +41786,7 @@ async function linkMemoryToTasks(memoryId, taskIds) {
     const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
       if (!fresh) return false;
-      const cur = list3(fresh.metadata.memory_ids);
+      const cur = list2(fresh.metadata.memory_ids);
       if (cur.includes(memoryId)) return true;
       await updateDocument2(t.collection, tid, {
         ...fresh.metadata,
@@ -42245,14 +42557,18 @@ init_config();
 
 // packages/core/src/tasks/close.ts
 init_store();
+init_sentinel();
 init_create();
-var list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+var list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
 function validateLearned(items = []) {
   for (const it of items) {
     if (!it.content?.trim()) throw new Error("each learned item needs content");
     const { content: _c, tags: _t, ...typed } = it;
     normalizeTyped(typed);
   }
+}
+async function checkFollowUpCollections(followUps, folder) {
+  for (const f of followUps ?? []) if (f.collection) await resolveWriteCollection(f.collection, { folder });
 }
 async function recordForTask(task, input2) {
   const out = { memories: [], follow_ups: [] };
@@ -42287,7 +42603,7 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   });
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
-  const waits = [.../* @__PURE__ */ new Set([...list4(task.metadata.waits_on), decision])];
+  const waits = [.../* @__PURE__ */ new Set([...list3(task.metadata.waits_on), decision])];
   const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
   return { ...u, decision };
 }
@@ -42304,7 +42620,7 @@ async function findMemory(id, prefer) {
 }
 async function openWaits(metadata, collection) {
   const out = [];
-  for (const start of list4(metadata.waits_on)) {
+  for (const start of list3(metadata.waits_on)) {
     let id = start;
     let found = await findMemory(id, collection);
     for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
@@ -42319,7 +42635,7 @@ async function openWaits(metadata, collection) {
 }
 var describeWaits = (w) => `waiting on ${w.map((x) => `${x.kind} ${x.id} (${x.status}${x.owner ? `, for ${x.owner}` : ""})`).join(", ")}`;
 function captureNudge(taskId, metadata, recorded) {
-  if (recorded?.memories.length || list4(metadata.memory_ids).length) return void 0;
+  if (recorded?.memories.length || recorded?.follow_ups.length || list3(metadata.memory_ids).length) return void 0;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
 }
 
@@ -42723,11 +43039,11 @@ function usersIn(docs) {
   return out;
 }
 var CACHE_MS = 6e4;
-var cache;
+var cache2;
 async function knownUsers() {
   const store = getStore();
   const me = getConfig().USERNAME;
-  if (cache && cache.store === store && cache.user === me && Date.now() - cache.at < CACHE_MS) return cache.users;
+  if (cache2 && cache2.store === store && cache2.user === me && Date.now() - cache2.at < CACHE_MS) return cache2.users;
   const users = new Set([me].filter(Boolean));
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
   await Promise.all(names.map(async (c) => {
@@ -42738,13 +43054,13 @@ async function knownUsers() {
     ])).flat();
     for (const u of usersIn(docs)) users.add(u);
   }));
-  cache = { at: Date.now(), store, user: me, users };
+  cache2 = { at: Date.now(), store, user: me, users };
   return users;
 }
 
 // packages/core/src/tasks/waiting.ts
 init_config();
-var list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+var list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 var firstLine = (s) => {
   const line = s.split("\n").find((l) => l.trim()) ?? "";
   const t = line.replace(/^#+\s*/, "").trim();
@@ -42772,7 +43088,7 @@ async function waitingOn(opts = {}) {
   for (const { collection, decisions, questions, tasks } of read) {
     const open3 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open3) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open3) for (const m of list4(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -42790,7 +43106,7 @@ async function waitingOn(opts = {}) {
         by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list5(m.options).length ? { options: list5(m.options) } : {},
+        ...list4(m.options).length ? { options: list4(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -42799,7 +43115,7 @@ async function waitingOn(opts = {}) {
     for (const t of open3) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list5(m.tags));
+      const people = taskNeedsPeople(list4(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
@@ -43887,14 +44203,14 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync4, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync10, writeFileSync as writeFileSync5 } from "fs";
 import { join as join8 } from "path";
 function artifactDir(kind) {
   return join8(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync2(dir)) mkdirSync6(dir, { recursive: true });
+  if (!existsSync3(dir)) mkdirSync7(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -44567,7 +44883,7 @@ init_health();
 init_fs_lock();
 init_config();
 import { createHash as createHash3 } from "node:crypto";
-import { closeSync as closeSync2, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync6, writeSync as writeSync2 } from "node:fs";
+import { closeSync as closeSync2, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync6, writeSync as writeSync2 } from "node:fs";
 import { dirname as dirname6, join as join9 } from "node:path";
 var DUE_FRACTION = 0.9;
 var MIN_STALE_LOCK_MS = 10 * 60 * 1e3;
@@ -44603,14 +44919,14 @@ function paths(config2 = getConfig()) {
 }
 function readJson(path2) {
   try {
-    return JSON.parse(readFileSync10(path2, "utf-8"));
+    return JSON.parse(readFileSync11(path2, "utf-8"));
   } catch {
     return void 0;
   }
 }
 function writeJson(path2, value) {
   try {
-    mkdirSync7(dirname6(path2), { recursive: true, mode: 448 });
+    mkdirSync8(dirname6(path2), { recursive: true, mode: 448 });
     const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     writeFileSync6(tmp, JSON.stringify(value) + "\n", { mode: 384 });
     renameSync4(tmp, path2);
@@ -44638,7 +44954,7 @@ function tryAcquireCycle(opts = {}, config2 = getConfig()) {
   const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
   for (let attempt2 = 0; attempt2 < 2; attempt2++) {
     try {
-      mkdirSync7(p.dir, { recursive: true, mode: 448 });
+      mkdirSync8(p.dir, { recursive: true, mode: 448 });
       const fd = openSync2(p.lock, "wx", 384);
       try {
         writeSync2(fd, JSON.stringify(body));
@@ -44685,7 +45001,7 @@ init_sentinel();
 
 // packages/core/src/update-check.ts
 init_config();
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync11, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync12, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
 var FETCH_TIMEOUT_MS = 5e3;
@@ -44709,7 +45025,7 @@ function updateStatePath() {
 function readUpdateState(path2 = updateStatePath()) {
   if (!path2) return void 0;
   try {
-    const s = JSON.parse(readFileSync11(path2, "utf-8"));
+    const s = JSON.parse(readFileSync12(path2, "utf-8"));
     return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
   } catch {
     return void 0;
@@ -44718,7 +45034,7 @@ function readUpdateState(path2 = updateStatePath()) {
 function writeUpdateState(s, path2 = updateStatePath()) {
   if (!path2) return;
   try {
-    mkdirSync8(dirname7(path2), { recursive: true, mode: 448 });
+    mkdirSync9(dirname7(path2), { recursive: true, mode: 448 });
     const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync7(tmp, JSON.stringify(s) + "\n", { mode: 384 });
     renameSync5(tmp, path2);
@@ -45004,7 +45320,7 @@ init_device();
 init_config();
 init_store();
 import { createHash as createHash4 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync10, readFileSync as readFileSync14, writeFileSync as writeFileSync9 } from "fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync11, readFileSync as readFileSync15, writeFileSync as writeFileSync9 } from "fs";
 import { join as join12 } from "path";
 
 // packages/core/src/training/fireworks.ts
@@ -45167,21 +45483,21 @@ function extractJobIdFromText(stdout) {
 
 // packages/core/src/training/registry.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync12, writeFileSync as writeFileSync8 } from "fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync10, readFileSync as readFileSync13, writeFileSync as writeFileSync8 } from "fs";
 import { join as join11 } from "path";
 function registryPath() {
   return join11(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
   const dir = join11(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync3(dir)) mkdirSync9(dir, { recursive: true });
+  if (!existsSync4(dir)) mkdirSync10(dir, { recursive: true });
 }
 function load() {
   ensureDir();
   const path2 = registryPath();
-  if (!existsSync3(path2)) return { version: 1, adapters: [] };
+  if (!existsSync4(path2)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync12(path2, "utf-8"));
+    const parsed = JSON.parse(readFileSync13(path2, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -45223,7 +45539,7 @@ function updateAdapter(id, updates) {
 
 // packages/core/src/training/synthesis.ts
 init_config();
-import { readFileSync as readFileSync13 } from "fs";
+import { readFileSync as readFileSync14 } from "fs";
 var SYNTHESIS_SYSTEM_PROMPT = `You convert a single memory into one or more training examples for supervised fine-tuning.
 
 GOAL
@@ -45326,7 +45642,7 @@ function extractJsonArray2(raw) {
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
 function readManifestSource(path2) {
-  const content = readFileSync13(path2, "utf-8");
+  const content = readFileSync14(path2, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -45355,7 +45671,7 @@ function getBackend() {
 }
 function previewDir() {
   const dir = join12(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync4(dir)) mkdirSync10(dir, { recursive: true });
+  if (!existsSync5(dir)) mkdirSync11(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
@@ -45364,7 +45680,7 @@ function sha256(content) {
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
   const manifestPath = artifactPath("training-manifests", manifestName);
-  if (!existsSync4(manifestPath)) {
+  if (!existsSync5(manifestPath)) {
     throw new Error(`Training manifest not found: ${manifestPath}. Run bucket_route_now first.`);
   }
   const sourceMemories = readManifestSource(manifestPath);
@@ -45402,10 +45718,10 @@ async function trainingTrigger(args) {
   if (args.confirm !== true) {
     throw new Error("Refusing to submit \u2014 confirm must be true.");
   }
-  if (!existsSync4(args.previewPath)) {
+  if (!existsSync5(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
-  const contentOnDisk = readFileSync14(args.previewPath, "utf-8");
+  const contentOnDisk = readFileSync15(args.previewPath, "utf-8");
   const diskHash = sha256(contentOnDisk);
   if (diskHash !== args.previewRef) {
     throw new Error(
@@ -45957,7 +46273,7 @@ init_sentinel();
 // packages/core/src/last-write.ts
 init_config();
 init_coordination();
-import { mkdirSync as mkdirSync11, readdirSync as readdirSync5, readFileSync as readFileSync15, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync10 } from "node:fs";
+import { mkdirSync as mkdirSync12, readdirSync as readdirSync5, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync3, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname8, join as join13 } from "node:path";
 var PRUNE_AFTER_MS = 7 * 24 * 3600 * 1e3;
 var pruned = false;
@@ -45974,7 +46290,7 @@ function recordLastWrite(collection, opts = {}) {
   if (!collection || !session || !dir) return;
   const now = opts.now ?? Date.now();
   try {
-    mkdirSync11(dir, { recursive: true, mode: 448 });
+    mkdirSync12(dir, { recursive: true, mode: 448 });
     const file2 = lastWriteFile(session, dir);
     const tmp = `${file2}.${process.pid}.tmp`;
     writeFileSync10(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
@@ -45992,7 +46308,7 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
     for (const name of readdirSync5(dir)) {
       const p = join13(dir, name);
       try {
-        if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
+        if (now - statSync3(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
       }
     }
@@ -46006,7 +46322,7 @@ init_doc_lock();
 // packages/core/src/session-record.ts
 init_config();
 init_fs_lock();
-import { readdirSync as readdirSync6, readFileSync as readFileSync16, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
+import { readdirSync as readdirSync6, readFileSync as readFileSync17, rmSync as rmSync6, statSync as statSync4 } from "node:fs";
 import { dirname as dirname9, join as join14 } from "node:path";
 var PRUNE_AFTER_MS2 = 7 * 24 * 3600 * 1e3;
 function sessionRecordDir() {
@@ -46039,7 +46355,7 @@ function removeSessionRecord(opts = {}) {
   if (!session || !dir) return;
   const file2 = sessionRecordFile(session, dir);
   try {
-    const r = JSON.parse(readFileSync16(file2, "utf-8"));
+    const r = JSON.parse(readFileSync17(file2, "utf-8"));
     if (r.pid === process.pid) rmSync6(file2, { force: true });
   } catch {
   }
@@ -46051,15 +46367,15 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
       const p = join14(dir, name);
       if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
-          if (now - statSync3(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
+          if (now - statSync4(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
         } catch {
         }
         continue;
       }
       if (!name.endsWith(".json")) continue;
       try {
-        const r = JSON.parse(readFileSync16(p, "utf-8"));
-        if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
+        const r = JSON.parse(readFileSync17(p, "utf-8"));
+        if (!pidAlive(r.pid) || now - statSync4(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
       } catch {
         rmSync6(p, { force: true });
       }
@@ -46241,6 +46557,8 @@ function closeText(r) {
   if (r.nudge) parts.push(r.nudge);
   return parts.join("\n");
 }
+var writeTarget = (name) => resolveWriteCollection(name, { folder: sessionFolder() });
+var checkFollowUps = (followUps) => checkFollowUpCollections(followUps, sessionFolder());
 function typedError(e) {
   if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {
     return { content: [{ type: "text", text: e.message }], isError: true };
@@ -46284,7 +46602,7 @@ ${result.instructions}`
     async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       let result;
-      const target = await resolveWriteCollection(collection ?? "global");
+      const target = await writeTarget(collection ?? "global");
       try {
         result = await storeMemory(content, { tags, salience, sector, collection: target.collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
         recordLastWrite(target.collection);
@@ -46419,7 +46737,7 @@ ${r.content}`
     async ({ id, collection, note, tags, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       try {
-        const target = collection ? await resolveWriteCollection(collection) : void 0;
+        const target = collection ? await writeTarget(collection) : void 0;
         const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, target?.collection);
         recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
@@ -46480,7 +46798,7 @@ ${r.content}`
       tags: external_exports.array(external_exports.string()).optional().describe("Additional tags for the summary (the `compacted` tag is always added)")
     },
     async ({ collection, member_ids, summary, tags }) => {
-      const target = await resolveWriteCollection(collection);
+      const target = await writeTarget(collection);
       const result = await applyCompaction({ collection: target.collection, member_ids, summary, tags });
       recordLastWrite(target.collection);
       const moved = target.redirectedFrom ? `
@@ -46501,7 +46819,7 @@ ${redirectNote(target)}` : "";
       collection: external_exports.string().optional().describe('Collection to scope the draft to. Defaults to "global".')
     },
     async ({ entry, collection }) => {
-      const target = await resolveWriteCollection(collection ?? "global");
+      const target = await writeTarget(collection ?? "global");
       const id = await journalAppend(entry, target.collection);
       recordLastWrite(target.collection);
       const moved = target.redirectedFrom ? `
@@ -46517,7 +46835,7 @@ ${redirectNote(target)}` : "";
       summary: external_exports.string().optional().describe("Optional final summary text. If omitted, the consolidated content is the concatenation of all drafts in chronological order.")
     },
     async ({ collection, summary }) => {
-      const target = await resolveWriteCollection(collection ?? "global");
+      const target = await writeTarget(collection ?? "global");
       const result = await journalConsolidate({ collection: target.collection, summary });
       recordLastWrite(target.collection);
       if (!result) {
@@ -47042,7 +47360,7 @@ ${redirectNote(target)}` : "";
     },
     async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? void 0 : void 0;
-      const target = await resolveWriteCollection(collection ?? "global");
+      const target = await writeTarget(collection ?? "global");
       const id = await createTask(title, {
         priority,
         due_date,
@@ -47157,6 +47475,7 @@ ${redirectNote(target)}`;
       if (decision_needed && status && status !== "pending") {
         return { content: [{ type: "text", text: "decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending." }], isError: true };
       }
+      await checkFollowUps(follow_ups);
       const updates = {};
       if (claim_scope) updates.claim_scope = claim_scope;
       if (title) updates.title = title;
@@ -47224,6 +47543,7 @@ ${rec}`;
       ...CLOSE_PARAMS
     },
     async ({ id, duration: duration3, learned, follow_ups }) => {
+      await checkFollowUps(follow_ups);
       let durationMinutes;
       if (duration3) {
         const parsed = parseDuration(duration3);
@@ -47419,12 +47739,27 @@ ${rec}`;
     }
   );
   server2.tool(
+    "scope",
+    "This machine's folder rules, kept in one file in YAPA's state folder: project roots (folders whose subfolders are projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), customer folder names, and folder \u2192 collection mappings (checked first; how a folder gets a private-* collection). `show` lists them and what they mean for this session's folder. Change them ONLY when the user explicitly asks (for example \"allow ~/work to hold shared projects\"); never to get past a refused write. Changes apply right away.",
+    {
+      action: external_exports.enum(["show", "add_root", "remove_root", "add_customer", "remove_customer", "map", "unmap"]),
+      dir: external_exports.string().optional().describe("Folder for add_root/remove_root/map/unmap (absolute, ~, or relative to this session's folder)"),
+      name: external_exports.string().optional().describe("Customer folder name for add_customer/remove_customer"),
+      collection: external_exports.string().optional().describe("Collection for map")
+    },
+    async (args) => {
+      const r = await runScopeAction(args, sessionFolder());
+      return { content: [{ type: "text", text: r.text }] };
+    }
+  );
+  server2.tool(
     "collection_create",
     "Create a new collection",
     {
       name: external_exports.string().describe("Collection name (e.g., customer-acme, project-api)")
     },
     async ({ name }) => {
+      await assertMayCreateCollection(name, sessionFolder());
       await createNewCollection(name);
       return { content: [{ type: "text", text: `Created collection "${name}"` }] };
     }
@@ -47733,6 +48068,37 @@ Last error: ${last.message}` : ""}`);
   );
 }
 
+// packages/mcp/src/cli/env.ts
+import { readFileSync as readFileSync18 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join15 } from "node:path";
+var PLUGIN_OPTION_PREFIX = "CLAUDE_PLUGIN_OPTION_";
+function adoptLegacyScope(env = process.env) {
+  let options;
+  try {
+    const dir = env.CLAUDE_CONFIG_DIR ?? join15(homedir4(), ".claude");
+    options = JSON.parse(readFileSync18(join15(dir, "settings.json"), "utf-8"))?.pluginConfigs?.["yapa@yapa"]?.options;
+  } catch {
+    options = void 0;
+  }
+  const pick2 = (key) => {
+    for (const v of [env[`YAPA_${key.toUpperCase()}`], env[`${PLUGIN_OPTION_PREFIX}${key.toUpperCase()}`], options?.[key]]) {
+      if (typeof v === "string" && v.trim()) return v;
+    }
+    return void 0;
+  };
+  try {
+    return importLegacyScope(
+      { project_roots: pick2("project_roots"), customers: pick2("customers"), collection_map: pick2("collection_map") },
+      createConfig(env).SCOPE_FILE
+    );
+  } catch (e) {
+    process.stderr.write(`[yapa] could not move the old folder rules into the scope file: ${e instanceof Error ? e.message : e}
+`);
+    return false;
+  }
+}
+
 // packages/mcp/src/resources.ts
 function registerResources(server2) {
   server2.resource(
@@ -47979,6 +48345,7 @@ async function startupDecay() {
   }
 }
 async function main() {
+  adoptLegacyScope();
   recordSessionStart(YAPA_VERSION);
   if (getConfig().STORAGE === "local") {
     process.stderr.write(`\u2705 YAPA started with the embedded local store at ${getConfig().LOCAL_STORE_PATH} (embeddings: ${getConfig().EMBEDDING_PROVIDER})

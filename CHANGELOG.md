@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.16.0 (2026-11-06)
+
+Which collection a folder uses is now set in one file on this machine, and new shared collections can only be created from sessions under a project root.
+
+**Upgrading (breaking):** `project_roots`, `customers` and `collection_map` are no longer plugin options or `YAPA_*` variables, and DSH's `projectRoots`, `customers` and `collectionMap` settings are gone too. They now live in `~/.local/share/yapa/scope.json`. Update the plugin and restart Claude Code. The first YAPA process after the update moves your old values into the file, once, while it doesn't exist yet. Check the result with `yapa scope list`, then delete the old values: `pluginConfigs["yapa@yapa"].options` in `~/.claude/settings.json` (`/plugin` can't, since the plugin no longer declares them), the `-e YAPA_*` values of a `claude mcp add` install, or the DSH settings. Until you do, YAPA warns on stderr that they're ignored. There's no schema change.
+
+### Features
+- **Folder rules in one file.** `~/.local/share/yapa/scope.json` (`YAPA_SCOPE_FILE`) holds the project roots, customer folder names and folder → collection mappings. It's the only source, shared by the Claude Code hooks and tools, the CLI and DSH, and a change applies on the next hook or tool call with no restart. Edit it with `yapa scope list | add-root | remove-root | add-customer | remove-customer | map | unmap`, or the `scope` tool (`yapa_scope` in DSH), which the agent uses only when you ask. A file that isn't valid turns every rule off (every folder is `global`) until it's fixed, and edits refuse to touch it.
+- **New shared collections only come from project roots.** A tool write that would create a new shared collection is refused unless the session's folder is at or under a project root, or is mapped to exactly that collection. This covers `memory_store`, `memory_update`, `task_create`, `journal_append`, `journal_consolidate`, `compaction_apply`, `collection_create`, follow-ups that name a collection, and `yapa memory put`. The session's folder is the Claude Code project folder, the DSH session's folder, or the CLI's current folder. The refusal names the folder and suggests a `private-` name, and the CLI exits 3. Writes to shared collections that already exist here, and `sync subscribe`, work from anywhere. With no project roots, no new shared collection is created anywhere.
+
+### Fixes
+- Closing a task that recorded follow-ups but no memories no longer says "Nothing was recorded".
+
 ## 1.15.0 (2026-11-06)
 
 Hook-written memories reach teammates right away, merges keep your claims, old compaction summaries are archived, and background curation leaves records the remote owns alone.
