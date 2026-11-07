@@ -17,7 +17,8 @@ const USAGE =
   '       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n' +
   '       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n' +
   '       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n' +
-  '       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n';
+  '       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder\n' +
+  '       yapa scope <command> [options]            list and change the folder rules: project roots, customers, mappings (yapa scope help)\n';
 
 const COORD_USAGE =
   'Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n' +
@@ -253,8 +254,9 @@ async function main(): Promise<void> {
     // The folder's own settings (a project-scoped install), read before core's config.
     adoptCliEnv(scopeCwd(args));
     const r = await runScope(args);
-    process.stdout.write((args.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
-    await exitAfterFlush(0);
+    const text = args.includes('--text') || (args[0] !== undefined && !args[0].startsWith('--') && !args.includes('--json'));
+    (r.exit ? process.stderr : process.stdout).write((text ? r.text : JSON.stringify(r.json)) + '\n');
+    await exitAfterFlush(r.exit ?? 0);
   }
   if (command === 'hooks') {
     await runHooksCommand(sub, rest);

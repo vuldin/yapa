@@ -63,3 +63,22 @@ describe('yapa memory sweep-findings', () => {
     ]) expect((await runMemory('sweep-findings', args)).exit).toBe(2);
   });
 });
+
+describe('yapa memory put from a folder outside every project root', () => {
+  it('refuses a new shared collection (exit 3), and writes to an existing one', async () => {
+    const scope = join(dir, 'scope.json');
+    writeFileSync(scope, JSON.stringify({ project_roots: [join(dir, 'projects')] }));
+    const saved = process.env.CLAUDE_PROJECT_DIR;
+    process.env.CLAUDE_PROJECT_DIR = join(dir, 'home');
+    setConfig(createConfig({ YAPA_USERNAME: 'josh', YAPA_SCOPE_FILE: scope }));
+    try {
+      const r = await runMemory('put', ['--collection', 'project-brandnew', '--ref', 'r1', '--content', 'x']);
+      expect(r).toMatchObject({ exit: 3, json: { ok: false, refused: true, code: 'shared_collection_not_allowed' } });
+      expect((await runMemory('put', ['--collection', C, '--ref', 'r1', '--content', 'x'])).exit).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = saved;
+      setConfig(createConfig({ YAPA_USERNAME: 'josh' }));
+    }
+  });
+});

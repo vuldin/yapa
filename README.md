@@ -96,9 +96,6 @@ Configure options, or `claude plugin configure yapa`):
 | `username` | OS login name | Name on task IDs and on everything you sync (with the sync service it comes from your Google account; this is then informational) |
 | `storage` | `local` | `local` embedded store (no server) or `chroma` |
 | `chroma_url` | `http://localhost:8000` | ChromaDB server when `storage` is `chroma` |
-| `project_roots` | _(empty)_ | Comma-separated folders whose subfolders map to `project-{name}` / `customer-{name}` collections |
-| `customers` | _(empty)_ | Folder names under a root that are customers |
-| `collection_map` | _(empty)_ | `path=collection` entries separated by `;`, e.g. `~/work/acme=private-acme;~/work/globex=local-globex`: a session in that folder (or below) uses that collection, ahead of `project_roots` (see [Private collections](#private-collections)) |
 | `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
 | `sync_mcp_url`, `sync_mcp_token_cmd`, `sync_mcp_tool` | empty | Team sync with a remote that serves the Sync API as an MCP tool, signed in with the token the command prints ([Connecting to a remote](docs/connecting-to-a-remote.md#a-remote-served-over-mcp)) |
 | `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
@@ -106,6 +103,8 @@ Configure options, or `claude plugin configure yapa`):
 | `statusline` | on | Add YAPA's status line to `~/.claude/settings.json` at session start (an existing one is kept; removing YAPA's keeps it removed) |
 | `status_label` | _(empty)_ | Deprecated: use `remote_name` (still read when that is empty) |
 | `response_capture` | on | After each turn: capture durable findings (typed: finding, decision made, limitation, question, idea) and record what the turn settles in open decisions, questions and findings (see hooks below) |
+
+Which collection a folder uses (project roots, customers, folder mappings) is not an option: it lives in one file on this machine, edited with `yapa scope`. See [Folder rules](#folder-rules).
 
 For a whole team, add the marketplace and enable the plugin in managed or
 repo settings (`extraKnownMarketplaces` + `enabledPlugins: {"yapa@yapa": true}`).
@@ -201,7 +200,7 @@ implements YAPA's Claude Code hooks. The plugin registers them automatically;
 
 | Hook | What it does |
 |------|--------------|
-| `SessionStart` | Detects scope from `cwd` and `YAPA_PROJECT_ROOTS`, pulls teammates' latest writes for that collection, injects open tasks + what waits on you (decisions, questions, person-only steps, across collections) + top memories + compaction candidates (plus the standing rules under the plugin). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
+| `SessionStart` | Detects scope from `cwd` and the [folder rules](#folder-rules), pulls teammates' latest writes for that collection, injects open tasks + what waits on you (decisions, questions, person-only steps, across collections) + top memories + compaction candidates (plus the standing rules under the plugin). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
 | `UserPromptSubmit` | Pulls the active collection from the shared DB (bounded by `YAPA_HOOK_PULL_TIMEOUT_MS`, fail-open), then injects the top 3 recall matches for the prompt. Teammates' items are marked `by <user>`; hits from other collections `from <collection>`. |
 | `Stop` (async) | Unless `YAPA_RESPONSE_CAPTURE=false`: judges the finished turn (the buffered prompt + Claude Code's `last_assistant_message`) with an aux model: it stores durable findings as `auto-capture` memories (salience ≤ 2.0, deduplicated, typed when they are a finding, a decision made, a limitation, a question or an idea, and linked to the task the session holds), and it records what the turn settles in the open items it touches (a person's choice on a needed decision, an answer to a question, a finding's disposition), so a task waiting on a decision comes back by itself. Uses `claude -p --model haiku` when no curation API key is configured, so subscription users need no key. The result shows as a one-line notice on the next prompt. |
 | `PostCompact` (async) | Stores Claude Code's compaction summary as an episodic `compaction` memory, so it outlives the context window. Recall and session start's top memories leave these summaries out unless asked (`memory_recall` with `include_sessions: true`), and they don't count toward memory compaction. |
@@ -306,9 +305,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_LOCAL_STORE_PATH` | Root dir for the embedded store | `~/.local/share/yapa/store` |
 | `YAPA_CHROMA_URL` | ChromaDB server URL (when `YAPA_STORAGE=chroma`) | `http://localhost:8000` |
 | `YAPA_USERNAME` | Username for task ID prefixes and sync attribution | OS login name |
-| `YAPA_PROJECT_ROOTS` | Comma/colon-separated folders whose first-level subfolders become `project-{name}` (or `customer-{name}`) scopes | _(none: everything is `global`)_ |
-| `YAPA_CUSTOMERS` | Folder names under a project root that map to `customer-{name}` | _(none)_ |
-| `YAPA_COLLECTION_MAP` | `path=collection` entries separated by `;` or newlines (not `,` or `:`, which occur in paths), `~` expanded; paths must be absolute. The longest path holding the cwd wins, before `YAPA_PROJECT_ROOTS`; the only way a folder gets a `private-*`/`local-*` scope | _(none)_ |
+| `YAPA_SCOPE_FILE` | The [folder rules](#folder-rules) file | `~/.local/share/yapa/scope.json` |
 | `YAPA_EMBEDDING_PROVIDER` | Embedding provider — `chromadb` is in-process MiniLM (zero-config, no server call); `fireworks`/`openai`/`voyage`/`ollama` use HTTP APIs | `chromadb` |
 | `YAPA_SALIENCE_DECAY_RATE` | Per-day decay multiplier for episodic memories (semantic: its square root) | `0.98` |
 | `YAPA_SALIENCE_RANKING_WEIGHT` | How much salience influences retrieval ranking (0.0 = pure distance, higher = salience-dominant) | `0.15` |
@@ -354,9 +351,32 @@ Remote sync lets multiple machines or teammates share memories and tasks. It is 
 4. Check with the `sync` tool, `action: 'status'`: it shows the backend, the service URL, who you are signed in as, the last error, and any docs the service refused.
 5. The status line shows sync health under the prompt from the first session (option `statusline`), e.g. `yapa@v1.7.0 <-> acme ● synced 2m ago` or, when your sign-in lapses, `yapa@v1.7.0 <-> acme ● signed out since 09:12 · run: gcloud auth login`. See [The status line](#sync-health-in-the-status-line).
 
-### Which collection a folder uses
+### Folder rules
 
-`yapa scope [--cwd DIR]` prints the collection YAPA uses for a folder (from `collection_map`, then `project_roots`) as JSON, `{collection, local_only, mapped}`, or with `--text` as `private-acme (local only)`. A project's own scripts should ask it rather than name a collection themselves, so the folder's collection is set in one place, the `collection_map` option. A script that must stay private can refuse to run unless `local_only` is true.
+Which collection a session uses is decided by its folder, from three rules kept in one file on this machine, `~/.local/share/yapa/scope.json` (`YAPA_SCOPE_FILE`). It's the only place they're set, shared by the Claude Code hooks and tools, the CLI and the DSH plugin. A change applies on the next hook or tool call, with no restart.
+
+- **Project roots:** folders whose subfolders are projects. A session in `~/work/api` (root `~/work`) uses `project-api`, or `customer-api` when that collection exists or `api` is a listed customer. The root itself, and anything outside every root, is `global`.
+- **Customers:** folder names under a root that are customers.
+- **Folder mappings:** a folder and everything below it uses one named collection, ahead of the roots. The longest matching folder wins. This is how a folder gets a private collection (see [Private collections](#private-collections)).
+
+**New shared collections only come from project roots.** A write through the tools (`memory_store`, `task_create`, `journal_append`, `collection_create`, follow-ups, `yapa memory put`) that would create a new shared collection is refused unless the session's folder is at or under a project root, or is mapped to exactly that collection. The refusal suggests a `private-` name. Writes to shared collections that already exist here work from anywhere, and so does following one (`sync subscribe`). With no project roots, no new shared collection is created anywhere. The session's folder is the Claude Code project folder (`CLAUDE_PROJECT_DIR`), the DSH session's folder, or the CLI's current folder.
+
+Edit the rules with `yapa scope`, or the `scope` tool (`yapa_scope` in DSH), which the agent uses only when you ask it to:
+
+```
+yapa scope list                          # the rules, and what they mean for this folder
+yapa scope add-root ~/work               # its subfolders are projects; sessions there may create shared collections
+yapa scope remove-root ~/work
+yapa scope add-customer acme             # ~/work/acme uses customer-acme
+yapa scope map ~/notes/acme private-acme # this folder (and below) uses private-acme
+yapa scope unmap ~/notes/acme
+```
+
+**Upgrading from 1.15 or earlier:** the folder rules used to be the `project_roots`, `customers` and `collection_map` options (`YAPA_PROJECT_ROOTS`, `YAPA_CUSTOMERS`, `YAPA_COLLECTION_MAP`; `projectRoots`, `customers`, `collectionMap` in DSH). The first YAPA process after the update moves them into the file, once, while it doesn't exist yet. After that the old options are ignored, and YAPA warns on stderr until you remove them. The plugin no longer declares them, so `/plugin` can't: delete `project_roots`, `customers` and `collection_map` from `pluginConfigs["yapa@yapa"].options` in `~/.claude/settings.json` (or the `-e YAPA_*` values of a `claude mcp add` install, or the DSH settings). Check the result with `yapa scope list`.
+
+A relative folder resolves against the current folder. In the file itself, folders must be absolute or start with `~`. If the file can't be read or isn't valid, every folder is `global` until it's fixed (YAPA says so on stderr), and `yapa scope` refuses to edit it.
+
+`yapa scope [--cwd DIR]` prints the collection YAPA uses for a folder as JSON, `{collection, local_only, mapped}`, or with `--text` as `private-acme (local only)`. A project's own scripts should ask it rather than name a collection themselves, so the folder's collection is set in one place. A script that must stay private can refuse to run unless `local_only` is true.
 
 ### Sync health in the status line
 
@@ -380,7 +400,7 @@ yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago | project-acme
 
 - **Install:** automatic. With the option `statusline` on (the default), the session-start hook writes `statusLine` in `~/.claude/settings.json`, pointing at a stable copy of the script (`~/.local/share/yapa/statusline.mjs`, refreshed by the session-start hook so plugin updates reach it). A status line you already had keeps running, with the YAPA segment as a line beneath it. `node ~/.local/share/yapa/statusline.mjs --uninstall` (or `yapa statusline uninstall`) restores it, and YAPA then leaves it removed; `/yapa:statusline` or `yapa statusline install` adds it back.
 - **Which YAPA this session runs:** the version is the one this session's own MCP server reported when it started (`~/.local/share/yapa/sessions/<session id>.json`), not the installed script's. A session still running an older YAPA after an update shows `yapa@v1.8.0 (restart for v1.10.1)`; one whose server never reported (older than 1.10.1, or no YAPA server) shows `yapa (restart for v1.10.1)` once it has run a minute.
-- **Where this session writes:** after ` | `, the collection this session last wrote to through the YAPA tools, the `yapa memory` / `yapa task` CLI or a lease or counter (`lease`, `counter_next`, `yapa coord`); before its first write, the collection its hooks detected for the folder (`collection_map`, then `project_roots`). A collection that never leaves this machine is tagged `(local only)`, e.g. `| private-acme (local only)`. Reads, sync pulls and background sweeps never change it. Each session keeps its own, in `~/.local/share/yapa/last-write/` and `sessions/`.
+- **Where this session writes:** after ` | `, the collection this session last wrote to through the YAPA tools, the `yapa memory` / `yapa task` CLI or a lease or counter (`lease`, `counter_next`, `yapa coord`); before its first write, the collection its hooks detected for the folder (its [folder rules](#folder-rules)). A collection that never leaves this machine is tagged `(local only)`, e.g. `| private-acme (local only)`. Reads, sync pulls and background sweeps never change it. Each session keeps its own, in `~/.local/share/yapa/last-write/` and `sessions/`.
 - **Name:** the option `remote_name` (`YAPA_REMOTE_NAME`). The older `status_label` is still read when `remote_name` is empty.
 - **New releases:** the MCP server checks once a day (the plugin manifest on `main`, `YAPA_UPDATE_SOURCE`; `YAPA_UPDATE_CHECK=false` turns it off) and keeps the answer in `~/.local/share/yapa/update-check.json`. The status line shows `(v1.8.0 available)`, and the next session start tells Claude the update command (`claude plugin marketplace update yapa && claude plugin update yapa@yapa`, then restart). The note clears itself once you run the new version.
 - **Capture health:** every per-turn capture (extraction and follow-through) and every compaction capture is counted in `~/.local/share/yapa/capture-health.json`, beside `sync-health.json`. That covers the Claude Code hooks and DSH, two weeks of days, and the last error. `yapa capture status [--days N]` prints the counts and the last error. When capture failed in the last day and hasn't succeeded since, session start says so.
@@ -492,12 +512,11 @@ Collections prefixed with `private-` or `local-`, and `global`, are never synced
 
 A doc in a private collection never keeps a shared copy: if one of **your** docs ends up there (moved, restored, or synced by an older YAPA version), the next sync deletes its shared row. Only the same doc is removed (matched by id and creation time), never a different shared task that happens to reuse the id. A private copy of a **teammate's** doc is just a personal copy; their shared row stays. Each private doc is checked once per version, so steady-state syncs make no extra remote lookups.
 
-**A folder with a private collection.** `project_roots` only produces `project-*` and `customer-*` scopes. To give a folder a private one, map it with `collection_map` (`YAPA_COLLECTION_MAP`): `~/work/acme=private-acme;~/work/acme/shared-docs=project-acme`. A session in a mapped folder, or anywhere below it, uses that collection; the longest matching path wins, and the map is checked before `project_roots`. The hooks (session start, prompt recall, response capture, compaction capture) and the DSH plugin all follow it, and the scope line says so: ``**Scope:** `private-acme` (local only, never synced)``.
+**A folder with a private collection.** Project roots only produce `project-*` and `customer-*` scopes. To give a folder a private one, map it: `yapa scope map ~/work/acme private-acme`, and `yapa scope map ~/work/acme/shared-docs project-acme` for a shared subfolder. A session in a mapped folder, or anywhere below it, uses that collection; the longest matching folder wins, and mappings are checked before project roots. The hooks (session start, prompt recall, response capture, compaction capture) and the DSH plugin all follow it, and the scope line says so: ``**Scope:** `private-acme` (local only, never synced)``.
 
-- Separate entries with `;` (or newlines in an env file). Commas and colons are part of the path, so `C:\work\acme=private-acme` and `/srv/a:b=local-ab` work.
 - Paths must be absolute or start with `~`. Paths are compared after resolving `..` and through symlinks (a folder reached through a link matches its real path, and the other way round), on separator boundaries (`~/work/acme` never claims `~/work/acme-old`), and case-insensitively on Windows.
-- A relative entry, or one without `=`, is ignored with a warning on stderr. A collection name that looks meant to be private but is not (`Private-acme`, `privat-acme`, `local_acme`) is used as written and syncs, so YAPA warns on stderr and the scope line says `(shared: this name syncs ...)`. Local-only names start with lowercase `private-` or `local-`.
-- A map entry beats `project_roots` for its whole subtree. A broad entry such as `~=local-me` therefore overrides every project root under your home folder; put specific entries next to it (the longest path wins) for folders that should stay shared.
+- A collection name that looks meant to be private but is not (`Private-acme`, `privat-acme`, `local_acme`) is used as written and syncs, so `yapa scope map` warns and the scope line says `(shared: this name syncs ...)`. Local-only names start with lowercase `private-` or `local-`.
+- A mapping beats the project roots for its whole subtree. A broad one such as `~` → `local-me` therefore overrides every project root under your home folder; put specific entries next to it (the longest path wins) for folders that should stay shared.
 
 **The recall fence.** The prompt hook adds a few strongly relevant hits from other collections. Those extras never come from a `private-*` or `local-*` collection, so a private note does not surface while you work in a shared project. Recall in the private collection itself (its folder, or `memory_recall` with that `collection`) finds it as usual. Session start's "Waiting on you" is fenced the same way: in a shared scope, decisions, questions and tasks from private collections are only counted, not listed (the `waiting` tool still lists them).
 

@@ -46,11 +46,28 @@ describe('resolveConfig', () => {
     expect(r.core.CHROMA_URL).toBe('http://b:2');
   });
 
-  it('resolves the collection map (~ expanded) for scope detection and the core config', () => {
-    expect(resolveConfig({}).collectionMap).toEqual([]);
-    const r = resolveConfig({ collectionMap: ['~/work/acme/=private-acme'] }, { collectionMap: ['~/work/acme=local-acme', '/srv/x=private-x'] });
-    expect(r.collectionMap).toEqual([`${process.env.HOME}/work/acme=local-acme`, '/srv/x=private-x']);
-    expect(r.core.COLLECTION_MAP).toEqual(r.collectionMap);
+  it('moves the old folder settings into the scope file once, and leaves them out of the resolved config', async () => {
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'yapa-dsh-legacy-'));
+    process.env.YAPA_SCOPE_FILE = join(dir, 'scope.json');
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const r = resolveConfig({ collectionMap: ['/srv/acme=private-acme'] }, { projectRoots: ['/srv'] });
+      expect(r).not.toHaveProperty('collectionMap');
+      expect(r).not.toHaveProperty('projectRoots');
+      expect(JSON.parse(readFileSync(process.env.YAPA_SCOPE_FILE, 'utf8'))).toEqual({
+        project_roots: ['/srv'], customers: [], collection_map: { '/srv/acme': 'private-acme' },
+      });
+      resolveConfig({ projectRoots: ['/other'] });
+      expect(JSON.parse(readFileSync(process.env.YAPA_SCOPE_FILE, 'utf8')).project_roots).toEqual(['/srv']);
+      expect(err.mock.calls.map(c => String(c[0])).join('')).toMatch(/still set but no longer read/);
+    } finally {
+      err.mockRestore();
+      delete process.env.YAPA_SCOPE_FILE;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('ignores undefined settings fields (inherits lower layers)', () => {
@@ -99,13 +116,13 @@ describe('tool registration', () => {
       'yapa_compaction_apply', 'yapa_compaction_suggest', 'yapa_decay_sweep',
       'yapa_journal_append', 'yapa_journal_consolidate',
       'yapa_memory_forget', 'yapa_memory_list', 'yapa_memory_recall', 'yapa_memory_store', 'yapa_memory_update',
-      'yapa_status', 'yapa_waiting', 'yapa_task_add_dependency', 'yapa_task_complete', 'yapa_task_create',
+      'yapa_scope', 'yapa_status', 'yapa_waiting', 'yapa_task_add_dependency', 'yapa_task_complete', 'yapa_task_create',
       'yapa_task_delete', 'yapa_task_list', 'yapa_task_next', 'yapa_task_remove_dependency', 'yapa_task_search', 'yapa_task_update', 'yapa_trash',
       // advanced but mission-central: janitor, consolidated sync, storage import
       'yapa_janitor_now', 'yapa_sync', 'yapa_storage_import',
     ].sort());
     expect(names.every(n => n.startsWith('yapa_'))).toBe(true);
-    expect(names.length).toBe(29);
+    expect(names.length).toBe(30);
   });
 
   it('adds the 18 ML-ops tools when trainingPipeline is enabled', async () => {

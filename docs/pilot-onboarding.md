@@ -58,18 +58,23 @@ from a shell: `claude plugin configure yapa@yapa`). Set:
 | `sync_enabled` | `true` |
 | `sync_service_url` | `<SERVICE_URL>` |
 | `storage` | `local` (default; no server needed) |
-| `project_roots` | folders whose subfolders are customers/projects, e.g. `~/work/projects` |
-| `customers` | subfolder names under those roots that are customers, e.g. `acme,globex` |
-| `collection_map` | optional: `path=collection` entries separated by `;` for folders that need a specific collection, e.g. `~/work/projects/acme-notes=private-acme` (checked before `project_roots`; the only way to get a private scope) |
 | `username` | leave as is; with the sync service your name comes from your Google account |
 | `response_capture` | on by default: after each turn, saves typed findings and records answers to open decisions and questions; `false` turns it off |
 | `remote_name` | the team remote's name, shown on the status line (`yapa@v<version> <-> <REMOTE_NAME>`) |
 | `statusline` | on by default: YAPA adds its status line to your Claude Code settings at the first session |
 
-How scope works: with `project_roots=~/work/projects` and `customers=acme`,
+Then tell YAPA which folders hold your projects. After the restart in step 4, ask Claude:
+
+```
+Make ~/work/projects a YAPA project root, and acme a customer
+```
+
+How scope works: with project root `~/work/projects` and customer `acme`,
 starting Claude Code in `~/work/projects/acme/...` uses collection
 `customer-acme`; `~/work/projects/tools/...` uses `project-tools`. Anything
-else is `global` (local-only, see Privacy).
+else is `global` (local-only, see Privacy), and new shared collections are
+only created from sessions under a project root. These folder rules live in
+`~/.local/share/yapa/scope.json`; see "Folder rules" in the README.
 
 ## 4. Restart and verify
 

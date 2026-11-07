@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
-  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, TaskClaimedError, TypedMemoryError, updateTask, validateLearned,
+  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -99,6 +99,9 @@ export async function runTask(sub: string | undefined, args: string[]): Promise<
   } catch (e) {
     if (e instanceof ClaimBusyError) {
       return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
+    }
+    if (e instanceof SharedCollectionNotAllowedError) {
+      return { exit: EXIT.refused, json: { ok: false, refused: true, code: e.code, error: e.message }, text: e.message };
     }
     if (e instanceof TaskClaimedError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
@@ -191,6 +194,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       const waitsOn = list(flag(args, '--waits-on'));
       if (decisionNeeded && status !== 'pending') throw new UsageError('--decision-needed-file goes with --status pending');
       validateLearned(learned);
+      await checkFollowUpCollections(followUps, sessionFolder());
       // The note, tags and waits_on are appended under the task's lock, to
       // the task as it is now: another session's note added meanwhile stays.
       const listOf = (v: unknown): string[] => (Array.isArray(v) ? v : String(v ?? '').split(',').filter(Boolean));

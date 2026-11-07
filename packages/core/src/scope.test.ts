@@ -13,11 +13,12 @@ vi.mock('./sync/sentinel.js', async importOriginal => ({
 
 import { listCollections } from './store/index.js';
 import { getCollectionRedirects, resolveCollectionRedirect } from './sync/sentinel.js';
-import { detectCollection, matchCollectionMap, scopeNotes, isDetectionStale } from './scope.js';
-import { setConfig, resetConfig, createConfig, normalizeCollectionMap, splitCollectionMap } from './config.js';
+import { detectCollection, scopeNotes, isDetectionStale } from './scope.js';
+import { matchCollectionMap } from './scope-file.js';
+import { setConfig, resetConfig, createConfig } from './config.js';
 import { looksPrivateButShared } from './sync/syncable.js';
 import path, { join } from 'node:path';
-import { mkdtempSync, mkdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const mocked = vi.mocked(listCollections);
@@ -89,19 +90,23 @@ describe('detectCollection', () => {
     expect((await detectCollection('/home/u/projects/dsh', ['/home/u/projects/'])).collection).toBe('project-dsh');
   });
 
-  it('defaults roots and customers from YAPA_PROJECT_ROOTS / YAPA_CUSTOMERS', async () => {
-    setConfig(createConfig({ YAPA_PROJECT_ROOTS: '/srv/work:/home/u/projects', YAPA_CUSTOMERS: 'acme,globex' }));
+  it('defaults roots and customers from the scope file, and ignores the old env options', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'yapa-scope-file-'));
+    const file = join(base, 'scope.json');
+    writeFileSync(file, JSON.stringify({ project_roots: ['/srv/work', '/home/u/projects'], customers: ['acme', 'globex'] }));
+    setConfig(createConfig({ YAPA_SCOPE_FILE: file, YAPA_PROJECT_ROOTS: '/elsewhere' }));
     try {
       expect((await detectCollection('/srv/work/globex/notes')).collection).toBe('customer-globex');
       expect((await detectCollection('/home/u/projects/dsh')).collection).toBe('project-dsh');
-      expect((await detectCollection('/tmp/x')).collection).toBe('global');
+      expect((await detectCollection('/elsewhere/x')).collection).toBe('global');
     } finally {
       resetConfig();
+      rmSync(base, { recursive: true, force: true });
     }
   });
 
-  it('treats everything as global when no roots are configured', async () => {
-    setConfig(createConfig({}));
+  it('treats everything as global when the scope file is missing', async () => {
+    setConfig(createConfig({ YAPA_SCOPE_FILE: join(tmpdir(), 'yapa-no-such-scope.json') }));
     try {
       expect((await detectCollection('/home/u/projects/dsh')).collection).toBe('global');
     } finally {
@@ -138,14 +143,17 @@ describe('detectCollection: collection_map', () => {
     expect(matchCollectionMap('/anything', ['/=local-root'])).toBe('local-root');
   });
 
-  it('reads YAPA_COLLECTION_MAP, with ~ expanded', async () => {
-    setConfig(createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/=private-acme; /srv/x=local-x' }));
+  it('reads the scope file\'s collection_map, with ~ expanded', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'yapa-scope-file-'));
+    const file = join(base, 'scope.json');
+    writeFileSync(file, JSON.stringify({ collection_map: { '~/work/acme/': 'private-acme', '/srv/x': 'local-x' } }));
+    setConfig(createConfig({ YAPA_SCOPE_FILE: file }));
     try {
-      expect(createConfig({ YAPA_COLLECTION_MAP: '~/work/acme/=private-acme' }).COLLECTION_MAP).toEqual([`${process.env.HOME}/work/acme=private-acme`]);
       expect((await detectCollection(`${process.env.HOME}/work/acme/src`)).collection).toBe('private-acme');
       expect((await detectCollection('/srv/x')).collection).toBe('local-x');
     } finally {
       resetConfig();
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });
@@ -153,9 +161,8 @@ describe('detectCollection: collection_map', () => {
 describe('collection_map paths', () => {
   const noReal = { realpath: () => undefined };
 
-  it('keeps a ":" inside a path (entries split on ";" and newlines only)', async () => {
-    const map = normalizeCollectionMap(splitCollectionMap('/srv/a:b/acme=private-acme;\n/srv/c,d=local-cd'));
-    expect(map).toEqual(['/srv/a:b/acme=private-acme', '/srv/c,d=local-cd']);
+  it('keeps a ":" or "," inside a path', async () => {
+    const map = ['/srv/a:b/acme=private-acme', '/srv/c,d=local-cd'];
     expect(matchCollectionMap('/srv/a:b/acme/src', map, noReal)).toBe('private-acme');
     expect(matchCollectionMap('/srv/c,d', map, noReal)).toBe('local-cd');
     expect(matchCollectionMap('/srv/a', map, noReal)).toBeUndefined();
@@ -163,8 +170,7 @@ describe('collection_map paths', () => {
 
   it('matches Windows paths on backslash boundaries, case-insensitively', () => {
     const win = { path: path.win32, realpath: () => undefined };
-    const map = normalizeCollectionMap(splitCollectionMap('C:\\work\\acme\\=private-acme;C:\\work\\acme\\shared=project-acme'), path.win32);
-    expect(map).toEqual(['C:\\work\\acme=private-acme', 'C:\\work\\acme\\shared=project-acme']);
+    const map = ['C:\\work\\acme\\=private-acme', 'C:\\work\\acme\\shared=project-acme'];
     expect(matchCollectionMap('C:\\work\\acme\\src', map, win)).toBe('private-acme');
     expect(matchCollectionMap('c:\\Work\\ACME\\src', map, win)).toBe('private-acme');
     expect(matchCollectionMap('C:/work/acme/shared/docs', map, win)).toBe('project-acme');
@@ -191,29 +197,7 @@ describe('collection_map paths', () => {
     }
   });
 
-  it('drops relative entries and entries without "=", with a warning', () => {
-    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    try {
-      expect(normalizeCollectionMap(['work/acme=private-acme', 'typo', '/ok=private-ok'])).toEqual(['/ok=private-ok']);
-      const said = err.mock.calls.map(c => String(c[0])).join('');
-      expect(said).toMatch(/ignoring "work\/acme=private-acme" \(the path must be absolute/);
-      expect(said).toMatch(/ignoring "typo" \(expected path=collection/);
-    } finally {
-      err.mockRestore();
-    }
-  });
-
-  it('warns about a mapped name that looks private but syncs, and says so in the scope line', async () => {
-    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    try {
-      normalizeCollectionMap(['/w/x=Private-acme', '/w/y=privat-acme', '/w/z=private-fine']);
-      const said = err.mock.calls.map(c => String(c[0])).join('');
-      expect(said).toMatch(/"Private-acme" is a shared collection name and syncs/);
-      expect(said).toMatch(/"privat-acme" is a shared collection name/);
-      expect(said).not.toMatch(/private-fine/);
-    } finally {
-      err.mockRestore();
-    }
+  it('says in the scope line when a mapped name looks private but syncs', async () => {
     for (const n of ['Private-acme', 'LOCAL-x', 'private_acme', 'priv-acme', 'local_x']) expect(looksPrivateButShared(n)).toBe(true);
     for (const n of ['private-acme', 'local-x', 'project-acme', 'global', 'localization-team']) expect(looksPrivateButShared(n)).toBe(false);
     const d = await detectCollection('/w/x', ROOTS, [], ['/w/x=Private-acme']);

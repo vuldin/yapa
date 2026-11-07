@@ -87,6 +87,10 @@ import {
   restoreDeleted,
   removeReport,
   resolveWriteCollection,
+  assertMayCreateCollection,
+  checkFollowUpCollections,
+  sessionFolder,
+  runScopeAction,
   redirectNote,
   removeCollection,
   removeDependency,
@@ -192,6 +196,11 @@ function closeText(r: { recorded?: { memories: string[]; follow_ups: string[] };
   return parts.join('\n');
 }
 
+/** Where a write from this session lands; a new shared collection only from a folder that may create one. */
+const writeTarget = (name: string) => resolveWriteCollection(name, { folder: sessionFolder() });
+
+const checkFollowUps = (followUps: Array<{ title: string; collection?: string }> | undefined) => checkFollowUpCollections(followUps, sessionFolder());
+
 function typedError(e: unknown) {
   if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {
     return { content: [{ type: 'text' as const, text: e.message }], isError: true };
@@ -238,7 +247,7 @@ export function registerTools(server: McpServer): void {
     async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       let result;
-      const target = await resolveWriteCollection(collection ?? 'global');
+      const target = await writeTarget(collection ?? 'global');
       try {
         result = await storeMemory(content, { tags, salience, sector, collection: target.collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
         recordLastWrite(target.collection);
@@ -376,7 +385,7 @@ export function registerTools(server: McpServer): void {
     async ({ id, collection, note, tags, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       try {
-        const target = collection ? await resolveWriteCollection(collection) : undefined;
+        const target = collection ? await writeTarget(collection) : undefined;
         const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, target?.collection);
         recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
@@ -441,7 +450,7 @@ export function registerTools(server: McpServer): void {
       tags: z.array(z.string()).optional().describe('Additional tags for the summary (the `compacted` tag is always added)'),
     },
     async ({ collection, member_ids, summary, tags }) => {
-      const target = await resolveWriteCollection(collection);
+      const target = await writeTarget(collection);
       const result = await applyCompaction({ collection: target.collection, member_ids, summary, tags });
       recordLastWrite(target.collection);
       const moved = target.redirectedFrom ? `\n${redirectNote(target)}` : '';
@@ -463,7 +472,7 @@ export function registerTools(server: McpServer): void {
       collection: z.string().optional().describe('Collection to scope the draft to. Defaults to "global".'),
     },
     async ({ entry, collection }) => {
-      const target = await resolveWriteCollection(collection ?? 'global');
+      const target = await writeTarget(collection ?? 'global');
       const id = await journalAppend(entry, target.collection);
       recordLastWrite(target.collection);
       const moved = target.redirectedFrom ? `\n${redirectNote(target)}` : '';
@@ -479,7 +488,7 @@ export function registerTools(server: McpServer): void {
       summary: z.string().optional().describe('Optional final summary text. If omitted, the consolidated content is the concatenation of all drafts in chronological order.'),
     },
     async ({ collection, summary }) => {
-      const target = await resolveWriteCollection(collection ?? 'global');
+      const target = await writeTarget(collection ?? 'global');
       const result = await journalConsolidate({ collection: target.collection, summary });
       recordLastWrite(target.collection);
       if (!result) {
@@ -1063,7 +1072,7 @@ export function registerTools(server: McpServer): void {
     },
     async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? undefined : undefined;
-      const target = await resolveWriteCollection(collection ?? 'global');
+      const target = await writeTarget(collection ?? 'global');
       const id = await createTask(title, {
         priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, claim_scope,
       }, target.collection);
@@ -1169,6 +1178,7 @@ export function registerTools(server: McpServer): void {
       if (decision_needed && status && status !== 'pending') {
         return { content: [{ type: 'text' as const, text: 'decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending.' }], isError: true };
       }
+      await checkFollowUps(follow_ups);
       const updates: Record<string, any> = {};
       if (claim_scope) updates.claim_scope = claim_scope;
       if (title) updates.title = title;
@@ -1236,6 +1246,7 @@ export function registerTools(server: McpServer): void {
       ...CLOSE_PARAMS,
     },
     async ({ id, duration, learned, follow_ups }) => {
+      await checkFollowUps(follow_ups);
       let durationMinutes: number | undefined;
       if (duration) {
         const parsed = parseDuration(duration);
@@ -1450,12 +1461,28 @@ export function registerTools(server: McpServer): void {
   );
 
   server.tool(
+    'scope',
+    'This machine\'s folder rules, kept in one file in YAPA\'s state folder: project roots (folders whose subfolders are projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), customer folder names, and folder → collection mappings (checked first; how a folder gets a private-* collection). `show` lists them and what they mean for this session\'s folder. Change them ONLY when the user explicitly asks (for example "allow ~/work to hold shared projects"); never to get past a refused write. Changes apply right away.',
+    {
+      action: z.enum(['show', 'add_root', 'remove_root', 'add_customer', 'remove_customer', 'map', 'unmap']),
+      dir: z.string().optional().describe('Folder for add_root/remove_root/map/unmap (absolute, ~, or relative to this session\'s folder)'),
+      name: z.string().optional().describe('Customer folder name for add_customer/remove_customer'),
+      collection: z.string().optional().describe('Collection for map'),
+    },
+    async (args) => {
+      const r = await runScopeAction(args, sessionFolder());
+      return { content: [{ type: 'text' as const, text: r.text }] };
+    },
+  );
+
+  server.tool(
     'collection_create',
     'Create a new collection',
     {
       name: z.string().describe('Collection name (e.g., customer-acme, project-api)'),
     },
     async ({ name }) => {
+      await assertMayCreateCollection(name, sessionFolder());
       await createNewCollection(name);
       return { content: [{ type: 'text' as const, text: `Created collection "${name}"` }] };
     },

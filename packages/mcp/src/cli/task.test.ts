@@ -106,3 +106,28 @@ describe('yapa task capture at close', () => {
     expect((await runTask('release', ['cleanup:triage', '--collection', 'project-cap'])).exit).toBe(0);
   });
 });
+
+describe('yapa task release from a folder outside every project root', () => {
+  it('refuses a follow-up in a new shared collection (exit 3) before the task changes', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const { listCollections } = await import('@yapa/core');
+    const scope = join(dir, 'scope.json');
+    writeFileSync(scope, JSON.stringify({ project_roots: [join(dir, 'projects')] }));
+    const saved = process.env.CLAUDE_PROJECT_DIR;
+    process.env.CLAUDE_PROJECT_DIR = join(dir, 'home');
+    setConfig(createConfig({ YAPA_USERNAME: 'josh', YAPA_SYNC_ENABLED: 'false', YAPA_LOCAL_COORD_DIR: join(dir, 'coord'), YAPA_LEASE_STATE_DIR: join(dir, 'leases'), YAPA_SCOPE_FILE: scope }));
+    try {
+      const id = await createTask('close me', {}, 'project-cli');
+      const f = join(dir, 'follow-ups.json');
+      writeFileSync(f, JSON.stringify([{ title: 'next', collection: 'project-brandnew' }]));
+      const r = await runTask('release', [id, '--status', 'complete', '--follow-ups-file', f]);
+      expect(r).toMatchObject({ exit: 3, json: { ok: false, refused: true, code: 'shared_collection_not_allowed' } });
+      expect((await getTask(id))?.metadata.status).not.toBe('done');
+      expect((await listCollections()).map(c => c.name)).not.toContain('project-brandnew');
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = saved;
+      setConfig(createConfig({ YAPA_USERNAME: 'josh', YAPA_SYNC_ENABLED: 'false', YAPA_LOCAL_COORD_DIR: join(dir, 'coord'), YAPA_LEASE_STATE_DIR: join(dir, 'leases') }));
+    }
+  });
+});

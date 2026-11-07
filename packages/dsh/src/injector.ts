@@ -40,11 +40,13 @@ import {
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
-import { detectCollection, isDetectionStale, scopeNotes, type CollectionDetection } from './scope.js';
+import { detectCollection, isDetectionStale, scopeFileVersion, scopeNotes, type CollectionDetection } from './scope.js';
 
 interface AgentState {
   /** Cache of the detected collection for this agent's session. */
   detection?: CollectionDetection;
+  /** The scope file version `detection` was made with. */
+  scopeVersion?: string;
   /** ID of the human message the last recall injection ran for. */
   recalledMessageId?: string;
   /** Collections whose open tasks were already surfaced this session. */
@@ -93,9 +95,12 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
 
       // Cached per session, but a merge since (here or in another process)
       // moves the folder's scope: re-detect when the redirects changed.
-      if (state.detection && await isDetectionStale(state.detection)) state.detection = undefined;
+      // A folder-rules change (yapa_scope, yapa scope) moves it too.
+      const version = scopeFileVersion();
+      if (state.detection && (state.scopeVersion !== version || await isDetectionStale(state.detection))) state.detection = undefined;
+      state.scopeVersion = version;
       const detection = state.detection
-        ?? (state.detection = await detectCollection(agent.session.header.cwd, resolved.projectRoots, resolved.customers, resolved.collectionMap));
+        ?? (state.detection = await detectCollection(agent.session.header.cwd));
       const collection = detection.collection;
 
       // The newest direct human prompt claimed for this step, if any.

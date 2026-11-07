@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
   getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings, applySweep, type SweepItem, type SweepResult,
-  recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, redirectNote, type TypedFields,
+  recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, SharedCollectionNotAllowedError, redirectNote, type TypedFields,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -155,7 +155,7 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         if (!collection || !ref) throw new UsageError('--collection and --ref are required');
         const { content, tags, typed } = split(await input(args));
         if (!content?.trim()) throw new UsageError('content is required (--content or "content" in --stdin-json)');
-        const target = await resolveWriteCollection(collection);
+        const target = await resolveWriteCollection(collection, { folder: sessionFolder() });
         const r = await putExternal(target.collection, ref, { content, typed, tags });
         recordLastWrite(target.collection);
         return {
@@ -244,6 +244,7 @@ export async function runWaiting(args: string[]): Promise<MemoryCliResult> {
 function fail(what: string, e: unknown): MemoryCliResult {
   const usage = e instanceof UsageError || e instanceof TypedMemoryError;
   const message = e instanceof Error ? e.message : String(e);
-  const code = e instanceof MemoryNotFoundError ? 'not_found' : undefined;
+  const code = e instanceof MemoryNotFoundError ? 'not_found' : e instanceof SharedCollectionNotAllowedError ? e.code : undefined;
+  if (e instanceof SharedCollectionNotAllowedError) return { exit: 3, json: { ok: false, refused: true, error: message, code }, text: `${what}: ${message}` };
   return { exit: usage ? 2 : 1, json: { ok: false, error: message, ...(code ? { code } : {}) }, text: `${what}: ${message}` };
 }

@@ -42,12 +42,6 @@ dsh plugin --profile web add link:/absolute/path/to/yapa/packages/dsh
       config:
         username: YOUR_USERNAME            # used for task ID prefixes
         # chromaUrl: http://localhost:8000 # default
-        # projectRoots: [/home/you/projects]  # cwd → collection detection
-        # customers: [acme]                   # folder names under projectRoots that are
-                                              # customers (→ customer-{name}); all other
-                                              # folders default to project-{name}
-        # collectionMap: ['~/projects/acme=private-acme']  # folder → collection,
-                                              # checked first; longest path wins
         # syncEnabled: false
         # syncDatabaseUrl: postgres://…    # optional remote sync
         # syncMcpUrl: https://…            # or: a remote serving the Sync API over MCP
@@ -68,16 +62,14 @@ Three layers, lowest to highest precedence:
 3. **`~/.dsh/settings.yaml` under `yapa:`** — user overrides, hot-reloaded
    (change `syncIntervalMs`, `chromaUrl`, etc. without a restart).
 
-Plugin-only knobs (layer 2/3 only): `projectRoots`, `customers` (folder names
-under a project root that are customers — they get `customer-{name}` scope;
-every other folder defaults to `project-{name}`; if both collections exist for
-a folder the injected scope is flagged ambiguous and the agent asks),
-`collectionMap` (`path=collection` entries, one per list item, `~` expanded,
-checked before `projectRoots`; the longest matching path wins; the way to
-give a folder a `private-*`/`local-*` scope; relative paths and entries
-without `=` are ignored with a warning, and a broad entry such as
-`~=local-me` overrides every project root below it),
-`injectRecall`, `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
+Folder rules (project roots, customers, folder → collection mappings) are not
+settings: they live in `~/.local/share/yapa/scope.json`, shared with the
+Claude Code plugin and the `yapa` CLI, and are edited with `yapa scope` or the
+`yapa_scope` tool (see "Folder rules" in the README). New shared collections
+are only created from sessions under a project root. The old `projectRoots`,
+`customers` and `collectionMap` settings are ignored, with a warning.
+
+Plugin-only knobs (layer 2/3 only): `injectRecall`, `injectTasks`, `recallResults`, `maxContextBytes`, `autoJournalConsolidate`,
 `decayOnStartup`, `scheduleBridge` (due-dated tasks become `schedule_create`
 reminders), `captureCompaction` (harness compaction summaries are stored as
 memories), `captureResponses` (every completed turn is judged by the aux-LLM

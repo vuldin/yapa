@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import { registerTools } from './tools.js';
+import { adoptLegacyScope } from './cli/env.js';
 import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
 
@@ -83,6 +84,7 @@ async function startupDecay(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  adoptLegacyScope();
   // Which YAPA this session runs, for the status line (sessions/<id>.json).
   recordSessionStart(YAPA_VERSION);
   if (getConfig().STORAGE === 'local') {

@@ -65,9 +65,10 @@ Give a memory a \`kind\` when it is one of these, so it can be listed and waited
 When injected context flags a "compaction candidate" collection, call \`yapa_compaction_suggest\`, write a rolling summary per group, and submit via \`yapa_compaction_apply\`. This consolidates LONG-TERM memories — unrelated to harness context-window compaction.
 
 ### Collections
-- Folder scopes default to \`project-{name}\` — most folders are projects. Use \`customer-{name}\` only for folders that are customer names (via the plugin's \`customers\` config, an existing \`customer-{name}\` collection, or the user saying so). Cross-cutting → \`global\`; private/personal → \`private-{name}\` or \`local-{name}\` (these do NOT sync to the shared remote database).
+- Folder scopes default to \`project-{name}\` — most folders are projects. Use \`customer-{name}\` only for folders that are customer names (the folder rules' customers list, an existing \`customer-{name}\` collection, or the user saying so). Cross-cutting → \`global\`; private/personal → \`private-{name}\` or \`local-{name}\` (these do NOT sync to the shared remote database).
 - If you are ever unsure which collection (or prefix) applies, ask the user rather than guessing.
 - Before creating a new collection, confirm the name with the user. Use \`yapa_collection_list\` to check what exists.
+- A new shared collection can only be created from a session under a project root (or a folder mapped to it); elsewhere the write is refused, and you use a \`private-\` name or ask the user. Change the folder rules (\`yapa_scope\`) only when the user explicitly asks.
 - To combine or rename collections use \`yapa_collection_merge\`, not \`yapa_collection_delete\`. A delete removes the collection from this machine only; \`scope: "everyone"\` (with \`confirm\`) deletes your documents in it for every teammate: only when the user explicitly asks.
 - Always pass the inferred collection explicitly on yapa tool calls.
 
