@@ -38,6 +38,18 @@ Each block YAPA adds to the context is written to the cache once, then read agai
 
 Prompt recall is the largest part, because it happens on every prompt. Recall adds hits to every prompt, including weak matches. In this data the agent visibly used a recalled memory in about 8% of turns, by citing its id or quoting it. The rate falls as matches get weaker: 4–6% of hits closer than distance 0.5 were used, against 1–2% beyond 0.7.
 
+### What the measurements led to
+
+Two things in this data changed how YAPA builds its context. The numbers below are estimates from the same transcripts, to be measured again on new sessions.
+
+- **Recall no longer repeats itself.** 58% of recall hits, 49% of all recall text, had already been shown earlier in the same session and were still in context. Such a hit is now named in a short line (its id and a 60-character preview) instead of being injected again. Recall text falls by about 37%, so prompt recall's share drops from about 1.5% to about 0.95%.
+- **Session start reaches the model in full.** Claude Code passes the model at most 10,000 characters of a hook's context; past that, only a 2,000-character preview. The standing rules (7.2KB) and the context together ran over in about a third of session starts, so the model saw part of the rules and none of the open tasks, waiting items or top memories.
+  - The rules are now the MCP server's instructions, condensed to about 1,100 tokens.
+  - The context is kept under a 9,000-character budget, about 1,600 tokens on a real store.
+  - Session start now costs about 2,700 tokens every time instead of 1,300 on average, so its share rises from about 0.5% to about 1.0%. That's the price of the context actually arriving.
+
+Together they leave YAPA's share about where it was, **~3.3%**, but more of it is now context the model actually gets, and less is repeated text.
+
 ## The capture after each turn
 
 After each turn, YAPA asks a small model (Claude Haiku, through `claude -p` when no curation key is set) up to three things:
@@ -90,6 +102,7 @@ The fair summary: YAPA costs about 3–4% of a session's tokens. It saves tokens
 
 ## Keeping the cost down
 
-- **Keep recall relevant.** Most of YAPA's share is recall that stays in context. Good collections help: specific project folders and private mappings keep the top hits on the work at hand.
-- **Compaction resets it.** After a compaction, earlier recall blocks are summarized away instead of being re-read.
+- **Keep recall relevant.** Most of YAPA's share is recall that stays in context. Good collections help: specific project folders and private mappings keep the top hits on the work at hand. Hits already shown in the session cost one short line each.
+- **Compaction resets it.** After a compaction, earlier recall blocks are summarized away instead of being re-read, and recall shows its hits in full again.
+- **Session start has a budget.** `YAPA_SESSION_START_MAX_CHARS` (default 9,000) caps the session-start context. A lower value shrinks it further: fewer tasks and waiting items, and top memories dropped first.
 - **Turn off the per-turn capture** (`response_capture: false`) if you don't want the Haiku calls. You lose the automatic findings and the decisions recorded from your answers.
