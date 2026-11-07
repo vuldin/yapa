@@ -113,6 +113,10 @@ The status line under the prompt shows the version, the remote and sync health, 
 
 Before connecting, read [Connecting to a remote](docs/connecting-to-a-remote.md): the first sync pushes every shared collection on this machine. How sync works: [Sync](docs/sync.md).
 
+### Token cost
+
+In measured sessions, YAPA added about 3–4% to a session's token cost: mostly the recall hits that stay in context, plus a few cents an hour of Haiku for the capture after each turn. Embeddings run locally and cost no tokens. It saves tokens when work returns to the same projects and problems, because a recalled finding replaces re-discovering it. The measurements, and what can't be measured: [Token cost](docs/cost.md).
+
 ### Privacy
 
 - `private-*`, `local-*` and `global` collections never sync, not even to your other machines.
@@ -164,6 +168,7 @@ Folder rules aren't options: they're in the scope file above. Everything else, i
 - [Connecting to a remote](docs/connecting-to-a-remote.md) and the [Sync API](docs/sync-api.md)
 - [Tools and hooks](docs/tools.md): every tool and hook
 - [Configuration](docs/configuration.md): every option and variable
+- [Token cost](docs/cost.md): what YAPA adds to a session's tokens, and what it can save
 - [Training pipeline](docs/training-pipeline.md): the optional ML-ops tools
 - Team pilot: [onboarding](docs/pilot-onboarding.md), [two-person test](docs/second-user-test.md), [feedback](docs/pilot-feedback-template.md)
 - DSH: [install](packages/dsh/install.md), [architecture](packages/dsh/architecture.md), [session flow](docs/dsh-session-flow.md), [future work](docs/future-work.md)
