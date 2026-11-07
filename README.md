@@ -115,7 +115,7 @@ Before connecting, read [Connecting to a remote](docs/connecting-to-a-remote.md)
 
 ### Token cost
 
-In measured sessions, YAPA added about 3–4% to a session's token cost: mostly the recall hits that stay in context, plus a few cents an hour of Haiku for the capture after each turn. Finding relevant memories costs no tokens: semantic search runs locally with MiniLM, where having an LLM read the store instead would cost hundreds of thousands of tokens per prompt. It saves tokens when work returns to the same projects and problems, because a recalled finding replaces re-discovering it. The measurements, and what can't be measured: [Token cost](docs/cost.md).
+In one user's measured sessions, YAPA added about 4.5–5% to a session's token cost. That's mostly the recall hits and tool results that stay in context, plus a few cents an hour of Haiku for the capture after each turn. Finding relevant memories costs no tokens, since semantic search runs locally with MiniLM. It can save more than it costs when work keeps returning to the same projects and problems, because a recalled memory replaces re-discovering it, but the data can't show how much each reuse saved. The measurements and their limits: [Token cost](docs/cost.md).
 
 ### Privacy
 
