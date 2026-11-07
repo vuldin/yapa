@@ -37,13 +37,12 @@ export function resolveHostEnv(
     }
   }
 
-  // Running as a plugin hook: the plugin replaces the CLAUDE.md rules block
-  // with SessionStart injection, and shares the model cache with its server.
+  // Running as a plugin hook: the hooks share the model cache with the
+  // plugin's server.
   // Plugin options are then the ONLY source — falling through to a legacy
   // `claude mcp add` entry would mix two installs' settings (e.g. hooks
   // syncing as one user while the plugin's server runs as another).
   if (env.CLAUDE_PLUGIN_ROOT) {
-    offer('YAPA_HOOK_INJECT_RULES', 'true');
     if (env.CLAUDE_PLUGIN_DATA) offer('YAPA_MODEL_CACHE_DIR', join(env.CLAUDE_PLUGIN_DATA, 'models'));
     return add;
   }

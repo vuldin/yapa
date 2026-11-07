@@ -64,11 +64,10 @@ describe('resolveHostEnv', () => {
     expect(add.YAPA_CHROMA_URL).toBeUndefined();
   });
 
-  it('turns on rules injection and the shared model cache when running as a plugin hook', () => {
+  it('shares the model cache with the plugin\'s server when running as a plugin hook', () => {
     const add = resolveHostEnv({ CLAUDE_PLUGIN_ROOT: '/p', CLAUDE_PLUGIN_DATA: '/data' }, undefined);
-    expect(add.YAPA_HOOK_INJECT_RULES).toBe('true');
     expect(add.YAPA_MODEL_CACHE_DIR).toBe('/data/models');
-    expect(resolveHostEnv({}, undefined).YAPA_HOOK_INJECT_RULES).toBeUndefined();
+    expect(resolveHostEnv({}, undefined).YAPA_MODEL_CACHE_DIR).toBeUndefined();
   });
 });
 

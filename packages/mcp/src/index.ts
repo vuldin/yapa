@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import { registerTools } from './tools.js';
+import { SERVER_INSTRUCTIONS } from './rules.js';
 import { adoptLegacyScope } from './cli/env.js';
 import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
@@ -28,7 +29,7 @@ import {
 const server = new McpServer({
   name: 'yapa',
   version: YAPA_VERSION,
-});
+}, { instructions: SERVER_INSTRUCTIONS });
 
 registerTools(server);
 registerResources(server);

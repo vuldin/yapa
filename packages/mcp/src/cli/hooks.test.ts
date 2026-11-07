@@ -11,8 +11,8 @@ const { pullCollection, captureTurn, heartbeatIfDue, pushDocsNow } = vi.hoisted(
 }));
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue, pushDocsNow }));
 
-import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories, updateMemory } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten } from './hooks.js';
+import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories, createTask, deleteCollection, updateMemory } from '@yapa/core';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten, fitContext } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -332,17 +332,91 @@ describe('background-task notifications', () => {
 });
 
 describe('sessionStart', () => {
-  it('injects the standing rules only when asked to (plugin installs)', async () => {
+  it('carries the context only: the standing rules come from the MCP server\'s instructions', async () => {
     capture();
     await sessionStart({ session_id: 's1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
-    expect(restore().hookSpecificOutput.additionalContext).not.toContain('standing rules');
-
-    configure({ YAPA_HOOK_INJECT_RULES: 'true' });
-    capture();
-    await sessionStart({ session_id: 's1', cwd: join(dir, 'proj', 'acme'), source: 'compact' });
     const ctx = restore().hookSpecificOutput.additionalContext as string;
-    expect(ctx).toContain('standing rules');
-    expect(ctx).toContain('# YAPA Context');
+    expect(ctx.startsWith('# YAPA Context')).toBe(true);
+    expect(ctx).not.toContain('standing rules');
+  });
+
+  it('stays under the budget with a crowded collection, shrinking the least useful sections first', async () => {
+    const crowded = 'private-crowded';
+    const cwd = join(dir, 'crowded');
+    configure({}, { [cwd]: crowded });
+    for (let i = 0; i < 14; i++) await createTask(`Task ${i}: ${'a long title that keeps going '.repeat(12)}`, { priority: 'high' }, crowded);
+    for (let i = 0; i < 6; i++) await storeMemory(`Crowded fact ${i}: ${'detail '.repeat(80)}`, { collection: crowded, salience: 3 });
+    for (let i = 0; i < 8; i++) {
+      await storeMemory(`Which option for ${i}?`, { collection: crowded, typed: { kind: 'decision', status: 'needed', options: ['a', 'b'], owner: 'josh', recommendation: `b, because ${'reasons '.repeat(120)}` } });
+    }
+    const start = async () => {
+      capture();
+      await sessionStart({ session_id: 's-crowded', cwd, source: 'startup' });
+      return restore().hookSpecificOutput.additionalContext as string;
+    };
+
+    const roomy = await start();
+    expect(roomy.length).toBeLessThanOrEqual(9000);
+    expect(roomy).toContain('## Top memories');
+    expect(roomy).toMatch(/b, because (reasons ){20}/);
+    expect(roomy).not.toMatch(/(reasons ){120}/);
+
+    configure({ YAPA_SESSION_START_MAX_CHARS: '3000' }, { [cwd]: crowded });
+    const tight = await start();
+    expect(tight.length).toBeLessThanOrEqual(3000);
+    expect(tight).toContain('**Scope:** `private-crowded`');
+    expect(tight).not.toContain('## Top memories');
+    expect(tight).toContain('open task(s) in private-crowded: call `task_list`');
+    expect(tight).toContain('…more: call `waiting`');
+    expect(tight).not.toContain('context cut to fit');
+    await deleteCollection(crowded);
+    configure();
+  });
+});
+
+describe('fitContext', () => {
+  const big = (label: string, n: number) => ['', `## ${label}`, ...Array.from({ length: n }, (_, i) => `- ${label} ${i} ${'x'.repeat(80)}`)];
+
+  it('keeps everything when it fits', () => {
+    expect(fitContext([{ lines: ['# Head'] }, { lines: ['tail'] }], 100)).toBe('# Head\ntail');
+  });
+
+  it('shrinks the lowest priority first, one step at a time', () => {
+    const text = fitContext([
+      { lines: ['# Head'] },
+      { lines: big('Tasks', 10), shrink: [big('Tasks', 3), ['tasks: call task_list']], priority: 5 },
+      { lines: big('Memories', 10), shrink: [[]], priority: 2 },
+    ], 1200);
+    expect(text).toContain('Tasks 9');
+    expect(text).not.toContain('Memories');
+    const tighter = fitContext([
+      { lines: ['# Head'] },
+      { lines: big('Tasks', 10), shrink: [big('Tasks', 3), ['tasks: call task_list']], priority: 5 },
+      { lines: big('Memories', 10), shrink: [[]], priority: 2 },
+    ], 400);
+    expect(tighter).toContain('Tasks 2');
+    expect(tighter).not.toContain('Tasks 3');
+  });
+
+  it('takes one step from every section before cutting any to its last step', () => {
+    const text = fitContext([
+      { lines: ['# Head'] },
+      { lines: big('Tasks', 10), shrink: [big('Tasks', 3), ['tasks: call task_list']], priority: 5 },
+      { lines: big('Waiting', 10), shrink: [big('Waiting', 3), ['waiting: call waiting']], priority: 6 },
+    ], 900);
+    expect(text).toContain('Tasks 2');
+    expect(text).toContain('Waiting 2');
+    expect(text).not.toContain('call task_list');
+  });
+
+  it('never returns more than max, even below the note\'s length', () => {
+    for (const max of [0, 10, 50, 120]) expect(fitContext([{ lines: big('Head', 50) }], max).length).toBeLessThanOrEqual(max);
+  });
+
+  it('cuts at a line boundary, with a note, when nothing is left to shrink', () => {
+    const text = fitContext([{ lines: big('Head', 50) }], 500);
+    expect(text.length).toBeLessThanOrEqual(500);
+    expect(text).toMatch(/context cut to fit/);
   });
 });
 

@@ -53,6 +53,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_DEVICE_ID` | Stable id for this machine (else generated once at `YAPA_DEVICE_ID_PATH`) | _(generated)_ |
 | `YAPA_HOOK_PULL_TIMEOUT_MS` | Cap on the hooks' pre-recall pull | `4000` |
 | `YAPA_HOOK_PULL_WINDOW_MS` | The prompt hook skips its pull when any session pulled that collection this recently (`0` = always pull) | `30000` |
+| `YAPA_SESSION_START_MAX_CHARS` | Character budget for the session-start context (1,000–10,000; Claude Code shows the model at most 10,000 characters of hook context). Crowded sections shrink to fit | `9000` |
 | `YAPA_RESPONSE_CAPTURE` | After each turn (Stop hook): capture typed findings and record what the turn settles in open decisions and questions | `true` |
 | `YAPA_CURATION_LLM_PROVIDER` | Aux model for capture/curation: `anthropic` \| `openai` \| `fireworks` \| `ollama` \| `claude-cli` | `anthropic` (hooks fall back to `claude-cli` without a key) |
 | `YAPA_MODEL_CACHE_DIR` | Where the in-process embedder caches model weights | library default |
