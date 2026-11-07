@@ -15,65 +15,11 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// packages/core/src/sync/syncable.ts
-function isSyncableCollection(name) {
-  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
-}
-function looksPrivateButShared(name) {
-  return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
-}
-function isDeletedUpstream(metadata) {
-  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== "";
-}
-function isReadOnlyDoc(metadata) {
-  return metadata?.read_only === true;
-}
-function assertWritable(id, metadata) {
-  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
-}
-var init_syncable = __esm({
-  "packages/core/src/sync/syncable.ts"() {
-    "use strict";
-  }
-});
-
 // packages/core/src/config.ts
-import { homedir as homedir2, tmpdir, userInfo } from "os";
-import path, { join as pathJoin } from "path";
-function list(value) {
-  return value.split(/[,:]/).map((v) => v.trim()).filter(Boolean);
-}
-function splitCollectionMap(value) {
-  return value.split(/[;\n]/).map((v) => v.trim()).filter(Boolean);
-}
-function warnOnce(message2) {
-  if (warned.has(message2)) return;
-  warned.add(message2);
-  process.stderr.write(`[yapa] ${message2}
-`);
-}
-function normalizeCollectionMap(entries, pathImpl = path) {
-  const out = [];
-  for (const raw of entries) {
-    const entry = raw.trim();
-    if (!entry) continue;
-    const eq = entry.lastIndexOf("=");
-    const dir = eq < 0 ? "" : entry.slice(0, eq).trim().replace(/^~(?=[\\/]|$)/, homedir2());
-    const collection = eq < 0 ? "" : entry.slice(eq + 1).trim();
-    if (!dir || !collection) {
-      warnOnce(`collection_map: ignoring "${entry}" (expected path=collection; separate entries with ";")`);
-      continue;
-    }
-    if (!pathImpl.isAbsolute(dir)) {
-      warnOnce(`collection_map: ignoring "${entry}" (the path must be absolute or start with ~)`);
-      continue;
-    }
-    if (looksPrivateButShared(collection)) {
-      warnOnce(`collection_map: "${collection}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`);
-    }
-    out.push(`${pathImpl.resolve(dir)}=${collection}`);
-  }
-  return out;
+import { homedir, tmpdir, userInfo } from "os";
+import { join as pathJoin } from "path";
+function scopeFile(env) {
+  return get(env, "SCOPE_FILE", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-scope-${process.pid}.json`) : pathJoin(homedir(), ".local", "share", "yapa", "scope.json"));
 }
 function get(env, key, fallback = "") {
   const pick = (v) => v === void 0 || v === "" ? void 0 : v;
@@ -90,7 +36,7 @@ function createConfig(env = process.env) {
   return {
     STORAGE: get(env, "STORAGE", "chroma"),
     CHROMA_URL: get(env, "CHROMA_URL", "http://localhost:8000"),
-    LOCAL_STORE_PATH: get(env, "LOCAL_STORE_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "store")),
+    LOCAL_STORE_PATH: get(env, "LOCAL_STORE_PATH", pathJoin(homedir(), ".local", "share", "yapa", "store")),
     EMBEDDING_PROVIDER: get(env, "EMBEDDING_PROVIDER", "chromadb"),
     EMBEDDING_MODEL: get(env, "EMBEDDING_MODEL", ""),
     MODEL_CACHE_DIR: get(env, "MODEL_CACHE_DIR", ""),
@@ -112,9 +58,7 @@ function createConfig(env = process.env) {
     // Bare USERNAME is deliberately not consulted: on Windows it's the OS login
     // already, and elsewhere it's often unset. Default = the OS login name.
     USERNAME: env.YAPA_USERNAME || osUsername(),
-    PROJECT_ROOTS: list(get(env, "PROJECT_ROOTS", "")).map((r) => r.replace(/^~(?=\/|$)/, homedir2()).replace(/\/+$/, "")),
-    CUSTOMERS: list(get(env, "CUSTOMERS", "")),
-    COLLECTION_MAP: normalizeCollectionMap(splitCollectionMap(get(env, "COLLECTION_MAP", ""))),
+    SCOPE_FILE: scopeFile(env),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
@@ -134,7 +78,7 @@ function createConfig(env = process.env) {
     TRAINING_TRAINABLE_MIN: parseFloat(get(env, "TRAINING_TRAINABLE_MIN", "0.7")),
     TRAINING_DURABILITY_MIN: parseFloat(get(env, "TRAINING_DURABILITY_MIN", "0.8")),
     TRAINING_GENERALIZABILITY_MIN: parseFloat(get(env, "TRAINING_GENERALIZABILITY_MIN", "0.7")),
-    ARTIFACTS_DIR: get(env, "ARTIFACTS_DIR", pathJoin(homedir2(), ".yapa", "artifacts")),
+    ARTIFACTS_DIR: get(env, "ARTIFACTS_DIR", pathJoin(homedir(), ".yapa", "artifacts")),
     TRAINING_BACKEND: get(env, "TRAINING_BACKEND", "fireworks"),
     TRAINING_BASE_MODEL: get(env, "TRAINING_BASE_MODEL", "accounts/fireworks/models/qwen3-coder-30b-a3b-instruct"),
     TRAINING_FIRECTL_PATH: get(env, "TRAINING_FIRECTL_PATH", "firectl"),
@@ -151,10 +95,10 @@ function createConfig(env = process.env) {
     SYNC_MCP_URL: get(env, "SYNC_MCP_URL", "").trim(),
     SYNC_MCP_TOKEN_CMD: get(env, "SYNC_MCP_TOKEN_CMD", ""),
     SYNC_MCP_TOOL: get(env, "SYNC_MCP_TOOL", "").trim(),
-    SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir2(), ".local", "share", "yapa", "id-token"))),
+    SYNC_ID_TOKEN_CACHE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_ID_TOKEN_CACHE", pathJoin(homedir(), ".local", "share", "yapa", "id-token"))),
     // Not recorded under vitest unless a test names a file: suites that fail
     // sync on purpose must not paint the developer's own status line red.
-    SYNC_HEALTH_FILE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_HEALTH_FILE", process.env.VITEST ? "" : pathJoin(homedir2(), ".local", "share", "yapa", "sync-health.json"))),
+    SYNC_HEALTH_FILE: /* @__PURE__ */ ((v) => v === "off" ? "" : v)(get(env, "SYNC_HEALTH_FILE", process.env.VITEST ? "" : pathJoin(homedir(), ".local", "share", "yapa", "sync-health.json"))),
     STATUS_LABEL: get(env, "STATUS_LABEL", "yapa").trim().slice(0, 32) || "yapa",
     // The old option replaced the word yapa; any name it set other than yapa is the remote's.
     REMOTE_NAME: (get(env, "REMOTE_NAME", "").trim() || /* @__PURE__ */ ((l) => l && l !== "yapa" ? l : "")(get(env, "STATUS_LABEL", "").trim())).replace(/[\x00-\x1f\x7f]/g, "").slice(0, 32),
@@ -167,10 +111,10 @@ function createConfig(env = process.env) {
     // 5 minutes
     SYNC_SIMILARITY_THRESHOLD: parseFloat(get(env, "SYNC_SIMILARITY_THRESHOLD", "0.95")),
     DEVICE_ID: get(env, "DEVICE_ID", ""),
-    DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir2(), ".local", "share", "yapa", "device-id")),
+    DEVICE_ID_PATH: get(env, "DEVICE_ID_PATH", pathJoin(homedir(), ".local", "share", "yapa", "device-id")),
     // Under vitest, never the developer's real lease markers and claim notices.
-    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "leases")),
-    LOCAL_COORD_DIR: get(env, "LOCAL_COORD_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-coord-${process.pid}`) : pathJoin(homedir2(), ".local", "share", "yapa", "coord")),
+    LEASE_STATE_DIR: get(env, "LEASE_STATE_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-leases-${process.pid}`) : pathJoin(homedir(), ".local", "share", "yapa", "leases")),
+    LOCAL_COORD_DIR: get(env, "LOCAL_COORD_DIR", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-coord-${process.pid}`) : pathJoin(homedir(), ".local", "share", "yapa", "coord")),
     SYNC_PULL_OVERLAP_SECONDS: parseInt(get(env, "SYNC_PULL_OVERLAP_SECONDS", "120"), 10),
     SYNC_PUSH_DEBOUNCE_MS: parseInt(get(env, "SYNC_PUSH_DEBOUNCE_MS", "2000"), 10),
     SYNC_COORDINATE: get(env, "SYNC_COORDINATE", "true") !== "false",
@@ -233,11 +177,10 @@ function getEmbeddingModel(config = getConfig()) {
 function getSynthesisModel(config = getConfig()) {
   return config.TRAINING_SYNTHESIS_MODEL || getCurationModel(config);
 }
-var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, DECAY_INTERVAL_MS, CHUNK_SIZE, CHUNK_OVERLAP, warned, active;
+var SALIENCE_START, SALIENCE_BOOST_ON_ACCESS, SALIENCE_FLOOR, SALIENCE_MAX, DECAY_INTERVAL_MS, CHUNK_SIZE, CHUNK_OVERLAP, active;
 var init_config = __esm({
   "packages/core/src/config.ts"() {
     "use strict";
-    init_syncable();
     SALIENCE_START = 1;
     SALIENCE_BOOST_ON_ACCESS = 0.1;
     SALIENCE_FLOOR = 0.05;
@@ -245,7 +188,6 @@ var init_config = __esm({
     DECAY_INTERVAL_MS = 864e5;
     CHUNK_SIZE = 2e3;
     CHUNK_OVERLAP = 200;
-    warned = /* @__PURE__ */ new Set();
   }
 });
 
@@ -515,8 +457,8 @@ function toCosineDistance(distance, space) {
 function spaceOf(collection) {
   return collection?.configuration_json?.hnsw?.space ?? collection?.metadata?.["hnsw:space"] ?? "l2";
 }
-async function chromaFetch(path3, init) {
-  const response = await fetch(`${apiBase()}${path3}`, {
+async function chromaFetch(path2, init) {
+  const response = await fetch(`${apiBase()}${path2}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers }
   });
@@ -823,9 +765,9 @@ var init_chroma_adapter = __esm({
 });
 
 // packages/core/src/fs-lock.ts
-import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync as readFileSync2, readlinkSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, join as join2 } from "node:path";
+import { basename, dirname, join } from "node:path";
 function pidNamespace() {
   try {
     return readlinkSync("/proc/self/ns/pid");
@@ -842,9 +784,9 @@ function pidAlive(pid) {
     return e.code === "EPERM";
   }
 }
-function writeJsonAtomic(path3, value, mode = 384) {
-  mkdirSync(dirname(path3), { recursive: true, mode: 448 });
-  const tmp = `${path3}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+function writeJsonAtomic(path2, value, mode = 384) {
+  mkdirSync(dirname(path2), { recursive: true, mode: 448 });
+  const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
   try {
     const fd = openSync(tmp, "w", mode);
     try {
@@ -853,7 +795,7 @@ function writeJsonAtomic(path3, value, mode = 384) {
     } finally {
       closeSync(fd);
     }
-    renameSync(tmp, path3);
+    renameSync(tmp, path2);
   } catch (e) {
     rmSync(tmp, { force: true });
     throw e;
@@ -870,7 +812,7 @@ function readState(lock) {
     const st = fstatSync(fd);
     let holder;
     try {
-      const h = JSON.parse(readFileSync2(fd, "utf-8"));
+      const h = JSON.parse(readFileSync(fd, "utf-8"));
       if (h && typeof h.pid === "number" && typeof h.at === "number") holder = { pid: h.pid, host: String(h.host ?? ""), at: h.at };
     } catch {
     }
@@ -922,9 +864,9 @@ function breakStale(lock, judged, rules) {
     releaseIfMine(guard, me);
   }
 }
-function rmIfSame(path3, s) {
-  const now = readState(path3);
-  if (now && sameState(now, s)) rmSync(path3, { force: true });
+function rmIfSame(path2, s) {
+  const now = readState(path2);
+  if (now && sameState(now, s)) rmSync(path2, { force: true });
 }
 function releaseIfMine(lock, me) {
   const h = readState(lock)?.holder;
@@ -983,7 +925,7 @@ function sweepLockDebris(dir, olderThanMs = 36e5, now = Date.now()) {
   try {
     for (const name of readdirSync(dir)) {
       if (!/\.(stale\.\d+\.\w+|\d+\.\w+\.tmp|break)$/.test(name)) continue;
-      const p = join2(dir, name);
+      const p = join(dir, name);
       try {
         if (now - statSync(p).mtimeMs > olderThanMs) rmSync(p, { force: true });
       } catch {
@@ -997,9 +939,9 @@ var init_fs_lock = __esm({
   "packages/core/src/fs-lock.ts"() {
     "use strict";
     LockTimeoutError = class extends Error {
-      constructor(path3, holder) {
-        super(`could not take ${path3} in time${holder ? ` (held by pid ${holder.pid} on ${holder.host} since ${new Date(holder.at).toISOString()})` : ""}`);
-        this.path = path3;
+      constructor(path2, holder) {
+        super(`could not take ${path2} in time${holder ? ` (held by pid ${holder.pid} on ${holder.host} since ${new Date(holder.at).toISOString()})` : ""}`);
+        this.path = path2;
         this.holder = holder;
         this.name = "LockTimeoutError";
       }
@@ -1018,13 +960,13 @@ var init_fs_lock = __esm({
     sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     backoff = (i) => Math.min(100, 5 * 2 ** Math.min(i, 5)) * (0.5 + Math.random());
     waitCell = new Int32Array(new SharedArrayBuffer(4));
-    lockFileFor = (file) => join2(dirname(file), `${basename(file)}.lock`);
+    lockFileFor = (file) => join(dirname(file), `${basename(file)}.lock`);
   }
 });
 
 // packages/core/src/store/local-adapter.ts
 import { mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join as join3 } from "node:path";
+import { join as join2 } from "node:path";
 function embedderId() {
   return `${getConfig().EMBEDDING_PROVIDER}:${getEmbeddingModel() || "default"}`;
 }
@@ -1056,11 +998,11 @@ function matchesFilter(metadata, filter) {
   return true;
 }
 function createLocalStore(rootDir) {
-  const cache2 = /* @__PURE__ */ new Map();
+  const cache3 = /* @__PURE__ */ new Map();
   const cacheMtimes = /* @__PURE__ */ new Map();
   const identity = (st) => `${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
   const writeChains = /* @__PURE__ */ new Map();
-  const fileFor = (name) => join3(rootDir, `${encodeURIComponent(name)}.json`);
+  const fileFor = (name) => join2(rootDir, `${encodeURIComponent(name)}.json`);
   async function readFromDisk(name) {
     try {
       const fh = await open(fileFor(name), "r");
@@ -1074,12 +1016,12 @@ function createLocalStore(rootDir) {
       }
       const parsed = JSON.parse(raw);
       if (parsed.version !== 1) throw new Error(`unsupported version ${parsed.version}`);
-      cache2.set(name, parsed);
+      cache3.set(name, parsed);
       cacheMtimes.set(name, id);
       return parsed;
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache2.delete(name);
+        cache3.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -1087,14 +1029,14 @@ function createLocalStore(rootDir) {
     }
   }
   async function load2(name) {
-    const cached2 = cache2.get(name);
+    const cached2 = cache3.get(name);
     if (!cached2) return readFromDisk(name);
     try {
       const st = await stat(fileFor(name), { bigint: true });
       if (identity(st) !== cacheMtimes.get(name)) return readFromDisk(name);
     } catch (e) {
       if (e?.code === "ENOENT") {
-        cache2.delete(name);
+        cache3.delete(name);
         cacheMtimes.delete(name);
         return void 0;
       }
@@ -1114,7 +1056,7 @@ function createLocalStore(rootDir) {
       await rm(tmp, { force: true });
       throw e;
     }
-    cache2.set(cf.name, cf);
+    cache3.set(cf.name, cf);
     cacheMtimes.set(cf.name, identity(await stat(file, { bigint: true })));
   }
   function mutate(name, apply) {
@@ -1127,7 +1069,7 @@ function createLocalStore(rootDir) {
           const out = apply(cur);
           if (out) await writeAtomic(out);
         } catch (e) {
-          cache2.delete(name);
+          cache3.delete(name);
           cacheMtimes.delete(name);
           throw e;
         }
@@ -1162,7 +1104,7 @@ function createLocalStore(rootDir) {
       await withFileLock(lockFileFor(fileFor(name)), async () => {
         await rm(fileFor(name), { force: true });
       }, { waitMs: 15e3 });
-      cache2.delete(name);
+      cache3.delete(name);
       cacheMtimes.delete(name);
       writeChains.delete(name);
     },
@@ -1447,20 +1389,296 @@ var init_lifecycle = __esm({
   }
 });
 
+// packages/core/src/sync/syncable.ts
+function isSyncableCollection(name) {
+  return name !== "global" && !name.startsWith("private-") && !name.startsWith("local-");
+}
+function looksPrivateButShared(name) {
+  return isSyncableCollection(name) && /^(private|privat|privte|prvate|priv|prv|local|locl|lcoal)[-_]/i.test(name);
+}
+function isDeletedUpstream(metadata) {
+  return metadata?.deleted_upstream_at != null && metadata.deleted_upstream_at !== "";
+}
+function isReadOnlyDoc(metadata) {
+  return metadata?.read_only === true;
+}
+function assertWritable(id, metadata) {
+  if (isReadOnlyDoc(metadata)) throw new Error(`${id} is read-only: owned by the remote service`);
+}
+var init_syncable = __esm({
+  "packages/core/src/sync/syncable.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/scope-file.ts
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, realpathSync, statSync as statSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import path from "node:path";
+function scopePath(dir, base = process.cwd()) {
+  const expanded = dir.trim().replace(/^~(?=[\\/]|$)/, homedir2());
+  return path.resolve(base, expanded);
+}
+function parse(text, file) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new ScopeFileError(`${file} is not valid JSON (${e.message}); fix or remove it`);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ScopeFileError(`${file} must hold a JSON object`);
+  const o = raw;
+  const strings = (key) => {
+    const v = o[key] ?? [];
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new ScopeFileError(`${file}: "${key}" must be a list of strings`);
+    return v;
+  };
+  const map = o.collection_map ?? {};
+  if (!map || typeof map !== "object" || Array.isArray(map) || Object.values(map).some((x) => typeof x !== "string")) {
+    throw new ScopeFileError(`${file}: "collection_map" must map folders to collection names`);
+  }
+  return normalize({ project_roots: strings("project_roots"), customers: strings("customers"), collection_map: map }, file);
+}
+function normalize(s, file) {
+  const abs = (dir, key) => {
+    const d = dir.trim().replace(/^~(?=[\\/]|$)/, homedir2());
+    if (!path.isAbsolute(d)) throw new ScopeFileError(`${file}: "${key}" entry "${dir}" must be an absolute path or start with ~`);
+    return path.resolve(d);
+  };
+  const collection_map = {};
+  for (const [dir, c] of Object.entries(s.collection_map)) {
+    const name = c.trim();
+    if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file}: "${name}" (mapped from ${dir}) is not a valid collection name`);
+    collection_map[abs(dir, "collection_map")] = name;
+  }
+  return {
+    project_roots: [...new Set(s.project_roots.map((r) => abs(r, "project_roots")))].sort(),
+    customers: [...new Set(s.customers.map((c) => c.trim()).filter(Boolean))].sort(),
+    collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b)))
+  };
+}
+function readScopeSettings(opts = {}) {
+  const file = opts.file ?? getConfig().SCOPE_FILE;
+  const key = scopeFileVersion(file);
+  if (key === "missing") return empty();
+  if (cache?.file === file && cache.key === key) return copy(cache.value);
+  try {
+    const value = parse(readFileSync2(file, "utf8"), file);
+    cache = { file, key, value };
+    return copy(value);
+  } catch (e) {
+    if (opts.strict) throw e;
+    const msg = e.message;
+    if (!warned.has(msg)) {
+      warned.add(msg);
+      process.stderr.write(`[yapa] ${msg}. Folder rules are off until then.
+`);
+    }
+    return empty();
+  }
+}
+function importLegacyScope(legacy, file = getConfig().SCOPE_FILE) {
+  const items = (v, split2) => (Array.isArray(v) ? v : (v ?? "").split(split2)).map((x) => String(x).trim()).filter(Boolean);
+  const roots = items(legacy.project_roots, /[,:]/);
+  const customers = items(legacy.customers, /[,:]/);
+  const map = items(legacy.collection_map, /[;\n]/);
+  if (!roots.length && !customers.length && !map.length) return false;
+  if (existsSync(file)) {
+    const msg = `the old project_roots, customers and collection_map options are still set but no longer read: ${file} is the only source (yapa scope list). Remove the old options.`;
+    if (!warned.has(msg)) {
+      warned.add(msg);
+      process.stderr.write(`[yapa] ${msg}
+`);
+    }
+    return false;
+  }
+  const s = empty();
+  const skipped = [];
+  const valid = (what, probe) => {
+    try {
+      normalize({ ...empty(), ...probe }, file);
+      return true;
+    } catch {
+      skipped.push(what);
+      return false;
+    }
+  };
+  for (const r of roots) if (valid(r, { project_roots: [r] })) s.project_roots.push(r);
+  for (const c of customers) if (valid(c, { customers: [c] })) s.customers.push(c);
+  for (const entry of map) {
+    const eq = entry.lastIndexOf("=");
+    const dir = entry.slice(0, Math.max(eq, 0)).trim();
+    const collection = entry.slice(eq + 1).trim();
+    if (eq > 0 && valid(entry, { collection_map: { [dir]: collection } })) s.collection_map[dir] = collection;
+    else if (eq <= 0) skipped.push(entry);
+  }
+  mkdirSync2(path.dirname(file), { recursive: true });
+  const wrote = withFileLockSync(lockFileFor(file), () => {
+    if (existsSync(file)) return false;
+    writeJsonAtomic(file, normalize(s, file), 420);
+    return true;
+  });
+  cache = void 0;
+  if (wrote) {
+    process.stderr.write(`[yapa] Moved your folder rules (project_roots, customers, collection_map) from the old options into ${file}; the options are no longer read.${skipped.length ? ` Skipped: ${skipped.join(", ")}.` : ""}
+`);
+  }
+  return wrote;
+}
+function scopeFileVersion(file = getConfig().SCOPE_FILE) {
+  try {
+    const st = statSync2(file);
+    return `${st.ino}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "missing";
+  }
+}
+function collectionMapEntries(s) {
+  return Object.entries(s.collection_map).map(([dir, c]) => `${dir}=${c}`);
+}
+async function editScopeSettings(edit, opts = {}) {
+  const file = opts.file ?? getConfig().SCOPE_FILE;
+  mkdirSync2(path.dirname(file), { recursive: true });
+  return withFileLock(lockFileFor(file), () => {
+    const before = existsSync(file) ? parse(readFileSync2(file, "utf8"), file) : empty();
+    const s = copy(before);
+    let warning;
+    switch (edit.op) {
+      case "add_root":
+        s.project_roots.push(scopePath(edit.dir, opts.base));
+        break;
+      case "remove_root": {
+        const dir = scopePath(edit.dir, opts.base);
+        s.project_roots = s.project_roots.filter((r) => r !== dir);
+        break;
+      }
+      case "add_customer": {
+        const name = edit.name.trim();
+        if (!name || /[\\/]/.test(name)) throw new ScopeFileError(`"${edit.name}" is not a folder name`);
+        s.customers.push(name);
+        break;
+      }
+      case "remove_customer":
+        s.customers = s.customers.filter((c) => c !== edit.name.trim());
+        break;
+      case "map": {
+        const name = edit.collection.trim();
+        if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`"${name}" is not a valid collection name`);
+        if (looksPrivateButShared(name)) warning = `"${name}" is a shared collection name and syncs; local-only names start with lowercase "private-" or "local-"`;
+        s.collection_map[scopePath(edit.dir, opts.base)] = name;
+        break;
+      }
+      case "unmap":
+        delete s.collection_map[scopePath(edit.dir, opts.base)];
+        break;
+    }
+    const after = normalize(s, file);
+    const changed = JSON.stringify(after) !== JSON.stringify(before);
+    if (changed) writeJsonAtomic(file, after, 420);
+    cache = void 0;
+    return { changed, settings: after, ...warning ? { warning } : {} };
+  });
+}
+function matchCollectionMap(cwd, entries, opts = {}) {
+  const P = opts.path ?? path;
+  const real = opts.realpath ?? realpathOrUndefined;
+  const fold = P.sep === "\\" ? (s) => s.toLowerCase() : (s) => s;
+  const forms = (p) => [...new Set([p, real(p)].filter((x) => !!x).map(fold))];
+  const here = forms(P.resolve(cwd));
+  const holds = (dir, c) => c === dir || c.startsWith(dir.endsWith(P.sep) ? dir : dir + P.sep);
+  let best;
+  for (const entry of entries) {
+    const eq = entry.lastIndexOf("=");
+    if (eq < 0) continue;
+    const dir = entry.slice(0, eq).trim();
+    const collection = entry.slice(eq + 1).trim();
+    if (!dir || !collection || !P.isAbsolute(dir)) continue;
+    const resolved = P.resolve(dir);
+    if (!forms(resolved).some((d) => here.some((c) => holds(d, c)))) continue;
+    if (!best || resolved.length > best.length) best = { length: resolved.length, collection };
+  }
+  return best?.collection;
+}
+function pathWithin(dir, root) {
+  return dir === root || dir.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+}
+function sessionFolder(env = process.env) {
+  return path.resolve(env.CLAUDE_PROJECT_DIR || process.cwd());
+}
+function mayCreateSharedFrom(folder, collection, s = readScopeSettings()) {
+  if (!isSyncableCollection(collection)) return true;
+  const dir = path.resolve(folder);
+  if (s.project_roots.some((r) => pathWithin(dir, r))) return true;
+  return matchCollectionMap(dir, collectionMapEntries(s)) === collection;
+}
+function formatScopeSettings(s, file = getConfig().SCOPE_FILE) {
+  const lines = [`Folder rules (${file}):`];
+  lines.push(`- project_roots: ${s.project_roots.length ? s.project_roots.join(", ") : '(none: every folder is "global", and no new shared collection can be created)'}`);
+  lines.push(`- customers: ${s.customers.length ? s.customers.join(", ") : "(none)"}`);
+  const map = Object.entries(s.collection_map);
+  lines.push(`- collection_map:${map.length ? "" : " (none)"}`);
+  for (const [dir, c] of map) lines.push(`  - ${dir} \u2192 ${c}${isSyncableCollection(c) ? " (shared)" : " (local only)"}`);
+  return lines.join("\n");
+}
+var COLLECTION_NAME_RE, empty, ScopeFileError, cache, warned, copy, realpathOrUndefined, SharedCollectionNotAllowedError;
+var init_scope_file = __esm({
+  "packages/core/src/scope-file.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+    init_syncable();
+    COLLECTION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]$/;
+    empty = () => ({ project_roots: [], customers: [], collection_map: {} });
+    ScopeFileError = class extends Error {
+      constructor(message2) {
+        super(message2);
+        this.name = "ScopeFileError";
+      }
+    };
+    warned = /* @__PURE__ */ new Set();
+    copy = (s) => ({
+      project_roots: [...s.project_roots],
+      customers: [...s.customers],
+      collection_map: { ...s.collection_map }
+    });
+    realpathOrUndefined = (p) => {
+      try {
+        return realpathSync.native(p);
+      } catch {
+        return void 0;
+      }
+    };
+    SharedCollectionNotAllowedError = class extends Error {
+      constructor(collection, folder) {
+        const local2 = `private-${collection.replace(/^(project|customer)-/, "")}`;
+        super(
+          `Refused: "${collection}" does not exist here, and creating it would start a new shared collection that syncs to the team remote. New shared collections are only created from a session under a project root, and the folder YAPA checked for this session, ${folder}, is not under one. Use a local-only collection such as "${local2}" instead. If "${collection}" already exists on the remote, run sync subscribe ${collection} first. Only if the user explicitly asks, allow this folder with the scope tool (add_root for a folder of projects, or map this folder to the collection), then write again.`
+        );
+        this.collection = collection;
+        this.folder = folder;
+        this.name = "SharedCollectionNotAllowedError";
+      }
+      collection;
+      folder;
+      code = "shared_collection_not_allowed";
+    };
+  }
+});
+
 // packages/core/src/doc-lock.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import { join as join4 } from "node:path";
+import { join as join3 } from "node:path";
 function docLockPath(collection, id) {
   const h = createHash("sha256").update(`${collection}\0${id}`).digest("hex").slice(0, 32);
-  return join4(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
+  return join3(getConfig().LOCAL_COORD_DIR, "locks", `${h}.lock`);
 }
 async function withDocLock(collection, id, fn) {
-  const path3 = docLockPath(collection, id);
+  const path2 = docLockPath(collection, id);
   const mine = (held.getStore() ?? []).filter((h) => h.active);
-  if (mine.some((h) => h.paths.has(path3))) return fn();
-  return withFileLock(path3, async () => {
-    const me = { paths: /* @__PURE__ */ new Set([path3]), active: true };
+  if (mine.some((h) => h.paths.has(path2))) return fn();
+  return withFileLock(path2, async () => {
+    const me = { paths: /* @__PURE__ */ new Set([path2]), active: true };
     try {
       return await held.run([...mine, me], fn);
     } finally {
@@ -1617,11 +1835,18 @@ function resolveCollectionRedirect(name, redirects) {
   }
   return current === name ? { collection: name } : { collection: current, redirectedFrom: name };
 }
-async function resolveWriteCollection(name) {
+async function resolveWriteCollection(name, opts = {}) {
   if (name === "global") return { collection: name };
   const w = resolveCollectionRedirect(name, await getCollectionRedirects());
   if ((await getLeftCollections()).includes(w.collection)) throw new CollectionLeftError(w.collection);
+  if (opts.folder !== void 0) await assertMayCreateCollection(w.collection, opts.folder);
   return w;
+}
+async function assertMayCreateCollection(name, folder) {
+  if (!isSyncableCollection(name) || mayCreateSharedFrom(folder, name)) return;
+  const existing = await listCollections2();
+  if (existing.some((c) => c.name === name) || (await getLeftCollections()).includes(name)) return;
+  throw new SharedCollectionNotAllowedError(name, folder);
 }
 async function getPendingBackfills() {
   try {
@@ -1665,6 +1890,8 @@ var init_sentinel = __esm({
   "packages/core/src/sync/sentinel.ts"() {
     "use strict";
     init_store();
+    init_scope_file();
+    init_syncable();
     init_doc_lock();
     SYNC_PULL_SENTINEL_ID = "__sync_pull_sentinel__";
     SYNC_SUBSCRIPTIONS_ID = "__sync_subscriptions__";
@@ -1684,30 +1911,9 @@ var init_sentinel = __esm({
 });
 
 // packages/core/src/scope.ts
-import path2 from "node:path";
-import { realpathSync } from "node:fs";
-function matchCollectionMap(cwd, entries, opts = {}) {
-  const P = opts.path ?? path2;
-  const real = opts.realpath ?? realpathOrUndefined;
-  const fold = P.sep === "\\" ? (s) => s.toLowerCase() : (s) => s;
-  const forms = (p) => [...new Set([p, real(p)].filter((x) => !!x).map(fold))];
-  const here = forms(P.resolve(cwd));
-  const holds = (dir, c) => c === dir || c.startsWith(dir.endsWith(P.sep) ? dir : dir + P.sep);
-  let best;
-  for (const entry of entries) {
-    const eq = entry.lastIndexOf("=");
-    if (eq < 0) continue;
-    const dir = entry.slice(0, eq).trim();
-    const collection = entry.slice(eq + 1).trim();
-    if (!dir || !collection || !P.isAbsolute(dir)) continue;
-    const resolved = P.resolve(dir);
-    if (!forms(resolved).some((d) => here.some((c) => holds(d, c)))) continue;
-    if (!best || resolved.length > best.length) best = { length: resolved.length, collection };
-  }
-  return best?.collection;
-}
-async function detectCollection(cwd, roots = getConfig().PROJECT_ROOTS, customers = getConfig().CUSTOMERS, map = getConfig().COLLECTION_MAP) {
-  const d = await detect(cwd, roots, customers, map);
+async function detectCollection(cwd, roots, customers, map) {
+  const s = roots && customers && map ? void 0 : readScopeSettings();
+  const d = await detect(cwd, roots ?? s.project_roots, customers ?? s.customers, map ?? collectionMapEntries(s));
   if (d.collection !== "global" && (await getLeftCollections()).includes(d.collection)) d.left = true;
   return d;
 }
@@ -1716,8 +1922,8 @@ async function detect(cwd, roots, customers, map) {
   const mapped = matchCollectionMap(cwd, map);
   if (mapped) return follow({ collection: mapped, mapped: true }, await getCollectionRedirects());
   for (const rawRoot of roots) {
-    const root = rawRoot.replace(/\/+$/, "");
-    if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
+    const root = rawRoot.replace(/\/+$/, "") || "/";
+    if (!pathWithin(cwd, root)) continue;
     const relative = cwd.slice(root.length).replace(/^\/+/, "");
     const segment = relative.split("/")[0];
     if (!segment || segment.startsWith(".")) return { collection: "global" };
@@ -1766,21 +1972,42 @@ async function isDetectionStale(d) {
   if (d.redirectedFrom && !Object.hasOwn(redirects, d.redirectedFrom)) return true;
   return !!d.ambiguous?.some((n) => Object.hasOwn(redirects, n));
 }
-var realpathOrUndefined;
+async function runScopeAction(a, folder) {
+  if (a.action === "show") {
+    const s = readScopeSettings({ strict: true });
+    const d = await detectCollection(folder);
+    const shared = s.project_roots.some((r2) => pathWithin(folder, r2)) ? "may create new shared collections (it is under a project root)" : d.mapped && isSyncableCollection(d.collection) && mayCreateSharedFrom(folder, d.collection, s) ? `may create only its mapped shared collection, ${d.collection}` : "may not create new shared collections (not under a project root)";
+    return { ok: true, text: `${formatScopeSettings(s)}
+
+This session's folder, ${folder}: collection ${d.collection}${scopeNotes(d)}; it ${shared}.` };
+  }
+  const need = (v, what) => {
+    if (!v?.trim()) throw new Error(`${a.action} needs ${what}`);
+    return v;
+  };
+  const edit = a.action === "add_customer" || a.action === "remove_customer" ? { op: a.action, name: need(a.name, "a folder name (name)") } : a.action === "map" ? { op: "map", dir: need(a.dir, "a folder (dir)"), collection: need(a.collection, "a collection") } : { op: a.action, dir: need(a.dir, "a folder (dir)") };
+  const r = await editScopeSettings(edit, { base: folder });
+  const target = "dir" in edit ? scopePath(edit.dir, folder) : edit.name;
+  const done = {
+    add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
+    remove_root: [`Removed project root ${target}.`, `${target} was not a project root.`],
+    add_customer: [`Folders named ${target} under a project root now use customer-${target}.`, `${target} was already a customer.`],
+    remove_customer: [`${target} is no longer a customer.`, `${target} was not a customer.`],
+    map: [`Mapped ${target} \u2192 ${edit.op === "map" ? edit.collection.trim() : ""}.`, `${target} was already mapped to ${edit.op === "map" ? edit.collection.trim() : ""}.`],
+    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`]
+  };
+  const lines = [done[a.action][r.changed ? 0 : 1]];
+  if (r.warning) lines.push(`\u26A0 ${r.warning}`);
+  lines.push("", formatScopeSettings(r.settings));
+  return { ok: true, text: lines.join("\n") };
+}
 var init_scope = __esm({
   "packages/core/src/scope.ts"() {
     "use strict";
-    init_config();
+    init_scope_file();
     init_store();
     init_sentinel();
     init_syncable();
-    realpathOrUndefined = (p) => {
-      try {
-        return realpathSync.native(p);
-      } catch {
-        return void 0;
-      }
-    };
   }
 });
 
@@ -1803,7 +2030,7 @@ function normalizeTyped(fields, current = {}) {
   for (const k of TYPED_KEYS) {
     const v = fields[k];
     if (v === void 0) continue;
-    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list2(v) : typeof v === "string" ? v.trim() : v;
+    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list(v) : typeof v === "string" ? v.trim() : v;
   }
   if (!Object.keys(out).length) return out;
   const curKind = isMemoryKind(current.kind) ? current.kind : void 0;
@@ -1829,7 +2056,7 @@ function normalizeTyped(fields, current = {}) {
       throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(", ")}`);
     }
     const merged = { ...current, ...out };
-    if (kind === "decision" && status === "needed" && list2(merged.options).length < 2) {
+    if (kind === "decision" && status === "needed" && list(merged.options).length < 2) {
       throw new TypedMemoryError("a decision that is needed lists at least two options (and ideally a recommendation)");
     }
     if (kind === "finding" && status === "resolved") {
@@ -1840,7 +2067,7 @@ function normalizeTyped(fields, current = {}) {
       if (d === "no-action" && !String(merged.disposition_reason ?? "").trim()) {
         throw new TypedMemoryError("a no-action disposition gives disposition_reason");
       }
-      if (d !== "no-action" && !list2(merged.disposition_ids).length) {
+      if (d !== "no-action" && !list(merged.disposition_ids).length) {
         throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
       }
     }
@@ -1866,7 +2093,7 @@ function typedLabel(meta) {
   if (meta.owner && (meta.kind === "decision" || meta.kind === "question")) parts.push(`for ${meta.owner}`);
   return `[${parts.join(", ")}]`;
 }
-var MEMORY_KINDS, KIND_STATUSES, DEFAULT_STATUS, OPEN_STATUSES, DISPOSITIONS, TYPED_KEYS, KIND_ONLY, TypedMemoryError, list2;
+var MEMORY_KINDS, KIND_STATUSES, DEFAULT_STATUS, OPEN_STATUSES, DISPOSITIONS, TYPED_KEYS, KIND_ONLY, TypedMemoryError, list;
 var init_kinds = __esm({
   "packages/core/src/memory/kinds.ts"() {
     "use strict";
@@ -1921,7 +2148,7 @@ var init_kinds = __esm({
         this.name = "TypedMemoryError";
       }
     };
-    list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -1944,7 +2171,7 @@ async function linkMemoryToTasks(memoryId, taskIds) {
     const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
       if (!fresh) return false;
-      const cur = list3(fresh.metadata.memory_ids);
+      const cur = list2(fresh.metadata.memory_ids);
       if (cur.includes(memoryId)) return true;
       await updateDocument2(t.collection, tid, {
         ...fresh.metadata,
@@ -1958,13 +2185,13 @@ async function linkMemoryToTasks(memoryId, taskIds) {
   }
   return out;
 }
-var list3;
+var list2;
 var init_links = __esm({
   "packages/core/src/memory/links.ts"() {
     "use strict";
     init_doc_lock();
     init_store();
-    list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+    list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
   }
 });
 
@@ -2425,25 +2652,25 @@ var init_list = __esm({
 });
 
 // packages/core/src/sync/health.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 function healthStatusFor(code) {
   if (typeof code === "string" && SIGNED_OUT.has(code)) return "signed_out";
   if (code === "unreachable") return "unreachable";
   return "error";
 }
-function readSyncHealth(path3 = getConfig().SYNC_HEALTH_FILE) {
-  if (!path3) return void 0;
+function readSyncHealth(path2 = getConfig().SYNC_HEALTH_FILE) {
+  if (!path2) return void 0;
   try {
-    const h = JSON.parse(readFileSync3(path3, "utf-8"));
+    const h = JSON.parse(readFileSync3(path2, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
   }
 }
-function recordSyncHealth(update, now = Date.now(), path3 = getConfig().SYNC_HEALTH_FILE) {
-  if (!path3) return void 0;
-  const prev = readSyncHealth(path3);
+function recordSyncHealth(update, now = Date.now(), path2 = getConfig().SYNC_HEALTH_FILE) {
+  if (!path2) return void 0;
+  const prev = readSyncHealth(path2);
   const config = getConfig();
   const next = { status: update.status, at: now, interval_ms: config.SYNC_INTERVAL_MS, label: config.STATUS_LABEL };
   if (config.REMOTE_NAME) next.remote = config.REMOTE_NAME;
@@ -2460,29 +2687,29 @@ function recordSyncHealth(update, now = Date.now(), path3 = getConfig().SYNC_HEA
     if ("message" in update && update.message) next.message = update.message.slice(0, 300);
   }
   try {
-    mkdirSync2(dirname2(path3), { recursive: true, mode: 448 });
-    const tmp = `${path3}.${process.pid}.tmp`;
+    mkdirSync3(dirname2(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync2(tmp, path3);
+    renameSync2(tmp, path2);
   } catch {
   }
   return next;
 }
-function recordUnpushed(unpushed, path3 = getConfig().SYNC_HEALTH_FILE) {
-  const prev = readSyncHealth(path3);
+function recordUnpushed(unpushed, path2 = getConfig().SYNC_HEALTH_FILE) {
+  const prev = readSyncHealth(path2);
   if (!prev || prev.unpushed === unpushed) return;
   try {
-    const tmp = `${path3}.${process.pid}.tmp`;
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({ ...prev, unpushed }) + "\n", { mode: 384 });
-    renameSync2(tmp, path3);
+    renameSync2(tmp, path2);
   } catch {
   }
 }
-function refreshSyncHealthNames(syncConfigured, path3 = getConfig().SYNC_HEALTH_FILE) {
-  if (!path3) return;
-  const prev = readSyncHealth(path3);
+function refreshSyncHealthNames(syncConfigured, path2 = getConfig().SYNC_HEALTH_FILE) {
+  if (!path2) return;
+  const prev = readSyncHealth(path2);
   if (!prev) {
-    if (!syncConfigured) recordSyncHealth({ status: "disabled" }, Date.now(), path3);
+    if (!syncConfigured) recordSyncHealth({ status: "disabled" }, Date.now(), path2);
     return;
   }
   const config = getConfig();
@@ -2492,9 +2719,9 @@ function refreshSyncHealthNames(syncConfigured, path3 = getConfig().SYNC_HEALTH_
   if (remote) next.remote = remote;
   else delete next.remote;
   try {
-    const tmp = `${path3}.${process.pid}.tmp`;
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 384 });
-    renameSync2(tmp, path3);
+    renameSync2(tmp, path2);
   } catch {
   }
 }
@@ -2509,33 +2736,33 @@ var init_health = __esm({
 
 // packages/core/src/sync/device.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname3 } from "node:path";
 function getDeviceId() {
   const config = getConfig();
   if (config.DEVICE_ID) return config.DEVICE_ID;
   if (cached?.path === config.DEVICE_ID_PATH) return cached.id;
-  const path3 = config.DEVICE_ID_PATH;
+  const path2 = config.DEVICE_ID_PATH;
   let id;
   try {
-    id = readFileSync4(path3, "utf-8").trim();
+    id = readFileSync4(path2, "utf-8").trim();
   } catch {
     id = "";
   }
   if (!id) {
     id = randomUUID();
     try {
-      mkdirSync3(dirname3(path3), { recursive: true });
-      writeFileSync2(path3, `${id}
+      mkdirSync4(dirname3(path2), { recursive: true });
+      writeFileSync2(path2, `${id}
 `, { flag: "wx" });
     } catch {
       try {
-        id = readFileSync4(path3, "utf-8").trim() || id;
+        id = readFileSync4(path2, "utf-8").trim() || id;
       } catch {
       }
     }
   }
-  cached = { path: path3, id };
+  cached = { path: path2, id };
   return id;
 }
 function resetDeviceId() {
@@ -2967,7 +3194,7 @@ __export(http_backend_exports, {
   redactTokens: () => redactTokens,
   runCommand: () => runCommand
 });
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, rmSync as rmSync2, renameSync as renameSync3 } from "node:fs";
 import { dirname as dirname4 } from "node:path";
 import { exec, execFile } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -3170,7 +3397,7 @@ var init_http_backend = __esm({
       saveCached(token) {
         if (!this.cachePath) return;
         try {
-          mkdirSync4(dirname4(this.cachePath), { recursive: true, mode: 448 });
+          mkdirSync5(dirname4(this.cachePath), { recursive: true, mode: 448 });
           const tmp = `${this.cachePath}.${process.pid}.tmp`;
           const opaque = this.opaqueTtlMs !== void 0 && !Number.isFinite(Number(decodeJwtPayload(token)?.exp));
           writeFileSync3(tmp, opaque ? `${token}
@@ -3275,7 +3502,7 @@ ${this.validUntil}` : token, { mode: 384 });
         if (!quiet || isSignedOutError(err)) noteSyncError(err);
         throw err;
       }
-      async request(method, path3, opts = {}) {
+      async request(method, path2, opts = {}) {
         const idemKey = opts.idempotent ? randomUUID2() : void 0;
         for (let attempt2 = 0; ; attempt2++) {
           let token;
@@ -3286,7 +3513,7 @@ ${this.validUntil}` : token, { mode: 384 });
           }
           let res;
           try {
-            res = await this.transport.send({ method, path: path3, body: opts.body, token, device: this.device(), idempotencyKey: idemKey }, this.timeoutMs);
+            res = await this.transport.send({ method, path: path2, body: opts.body, token, device: this.device(), idempotencyKey: idemKey }, this.timeoutMs);
           } catch (e) {
             if (e instanceof ServiceError) return this.fail(e, opts.quiet);
             const why = e instanceof TransportError ? e.message : redactTokens(String(e?.message ?? e));
@@ -3375,9 +3602,9 @@ ${this.validUntil}` : token, { mode: 384 });
        * does), and an older service's `404 not_found` becomes an
        * UnsupportedByRemoteError.
        */
-      async softDeleteCall(feature, method, path3, opts = {}) {
+      async softDeleteCall(feature, method, path2, opts = {}) {
         try {
-          return await this.request(method, path3, { ...opts, quiet: true });
+          return await this.request(method, path2, { ...opts, quiet: true });
         } catch (e) {
           if (e instanceof ServiceError && e.status === 404 && e.code === "not_found") throw new UnsupportedByRemoteError(feature);
           throw e;
@@ -3542,11 +3769,11 @@ __export(mcp_transport_exports, {
   pickSyncTool: () => pickSyncTool,
   readSse: () => readSse
 });
-import { join as join5, dirname as dirname5 } from "node:path";
+import { join as join4, dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 function mcpTokenProvider(config) {
   const cmd = config.SYNC_MCP_TOKEN_CMD.trim();
-  const cache2 = config.SYNC_ID_TOKEN_CACHE ? join5(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
+  const cache3 = config.SYNC_ID_TOKEN_CACHE ? join4(dirname5(config.SYNC_ID_TOKEN_CACHE), "mcp-token") : "";
   const fix = "Sign in to the MCP gateway again (or fix YAPA_SYNC_MCP_TOKEN_CMD).";
   return new IdTokenProvider(async () => {
     if (!cmd) throw new Error("sync over MCP needs a token command: set YAPA_SYNC_MCP_TOKEN_CMD (plugin option sync_mcp_token_cmd) to a command that prints your bearer token for the MCP gateway.");
@@ -3555,7 +3782,7 @@ function mcpTokenProvider(config) {
     const token = (lines[lines.length - 1] ?? "").replace(/^Bearer\s+/i, "");
     if (!token || /\s/.test(token)) throw new Error(`the MCP token command (\`${programOf(cmd)}\`) printed no token. ${fix}`);
     return token;
-  }, Date.now, cache2, OPAQUE_TOKEN_TTL_MS2);
+  }, Date.now, cache3, OPAQUE_TOKEN_TTL_MS2);
 }
 function pickSyncTool(names, host, explicit = "") {
   if (explicit) {
@@ -3982,7 +4209,7 @@ var init_backend = __esm({
 
 // packages/core/src/sync/local-coordination.ts
 import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join5 } from "node:path";
 function assertMatch(v, re, what) {
   if (typeof v !== "string" || !re.test(v)) throw bad(`${what} must match ${re.source}`);
   return v;
@@ -4011,7 +4238,7 @@ function localCoordinationDir() {
   return getConfig().LOCAL_COORD_DIR;
 }
 function stateFile(dir, collection) {
-  return join6(dir, `${encodeURIComponent(collection)}.json`);
+  return join5(dir, `${encodeURIComponent(collection)}.json`);
 }
 function readState2(file) {
   try {
@@ -4221,7 +4448,7 @@ var init_local_coordination = __esm({
 
 // packages/core/src/sync/coordination.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync8, rmSync as rmSync3 } from "node:fs";
-import { join as join7 } from "node:path";
+import { join as join6 } from "node:path";
 function currentSession(explicit, env = process.env) {
   for (const v of [explicit, env.YAPA_SESSION, env.CLAUDE_CODE_SESSION_ID]) {
     if (v && SESSION_RE2.test(v)) return v;
@@ -4229,7 +4456,7 @@ function currentSession(explicit, env = process.env) {
   return void 0;
 }
 function markerPath(session) {
-  return join7(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join6(getConfig().LEASE_STATE_DIR, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function readMarker(session) {
   try {
@@ -4303,20 +4530,20 @@ function sessionsHoldingLeases() {
   }
 }
 function noticesPath() {
-  return join7(getConfig().LEASE_STATE_DIR, "notices.state");
+  return join6(getConfig().LEASE_STATE_DIR, "notices.state");
 }
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list10 = [];
+      let list9 = [];
       try {
-        list10 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list10)) list10 = [];
-      if (list10.some((n) => n.text === text)) return;
-      list10.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list10.slice(-20));
+      if (!Array.isArray(list9)) list9 = [];
+      if (list9.some((n) => n.text === text)) return;
+      list9.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list9.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -4324,14 +4551,14 @@ function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
 function takeClaimNotices() {
   try {
     return withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list10 = [];
+      let list9 = [];
       try {
-        list10 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
         return [];
       }
       rmSync3(noticesPath(), { force: true });
-      return Array.isArray(list10) ? list10.map((n) => n.text) : [];
+      return Array.isArray(list9) ? list9.map((n) => n.text) : [];
     }, { waitMs: 2e3 });
   } catch {
     return [];
@@ -4382,7 +4609,7 @@ function localCoordination() {
   if (!local) {
     const dir = getConfig().LOCAL_COORD_DIR;
     sweepLockDebris(dir);
-    sweepLockDebris(join7(dir, "locks"));
+    sweepLockDebris(join6(dir, "locks"));
     sweepLockDebris(getConfig().LEASE_STATE_DIR);
     local = guardLocal(createLocalCoordination());
   }
@@ -5174,6 +5401,9 @@ function validateLearned(items = []) {
     normalizeTyped(typed);
   }
 }
+async function checkFollowUpCollections(followUps, folder) {
+  for (const f of followUps ?? []) if (f.collection) await resolveWriteCollection(f.collection, { folder });
+}
 async function recordForTask(task, input2) {
   const out = { memories: [], follow_ups: [] };
   for (const it of input2.learned ?? []) {
@@ -5207,7 +5437,7 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   });
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
-  const waits = [.../* @__PURE__ */ new Set([...list4(task.metadata.waits_on), decision])];
+  const waits = [.../* @__PURE__ */ new Set([...list3(task.metadata.waits_on), decision])];
   const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
   return { ...u, decision };
 }
@@ -5224,7 +5454,7 @@ async function findMemory(id, prefer) {
 }
 async function openWaits(metadata, collection) {
   const out = [];
-  for (const start of list4(metadata.waits_on)) {
+  for (const start of list3(metadata.waits_on)) {
     let id = start;
     let found = await findMemory(id, collection);
     for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
@@ -5238,19 +5468,20 @@ async function openWaits(metadata, collection) {
   return out;
 }
 function captureNudge(taskId, metadata, recorded) {
-  if (recorded?.memories.length || list4(metadata.memory_ids).length) return void 0;
+  if (recorded?.memories.length || recorded?.follow_ups.length || list3(metadata.memory_ids).length) return void 0;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
 }
-var list4, describeWaits;
+var list3, describeWaits;
 var init_close = __esm({
   "packages/core/src/tasks/close.ts"() {
     "use strict";
     init_store();
     init_kinds();
     init_store2();
+    init_sentinel();
     init_create();
     init_update();
-    list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+    list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
     describeWaits = (w) => `waiting on ${w.map((x) => `${x.kind} ${x.id} (${x.status}${x.owner ? `, for ${x.owner}` : ""})`).join(", ")}`;
   }
 });
@@ -6264,7 +6495,7 @@ async function supersedingIds(collection) {
     const reason = String(m.disposition_reason ?? "");
     const named = /^superseded by (\S+?)[:\s]/.exec(`${reason} `)?.[1];
     if (named) out.add(named);
-    if (named || m.disposition !== "no-action") for (const id of list5(m.disposition_ids)) out.add(id);
+    if (named || m.disposition !== "no-action") for (const id of list4(m.disposition_ids)) out.add(id);
   }
   return out;
 }
@@ -6390,7 +6621,7 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   }
   return items;
 }
-var DAY4, list5, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
+var DAY4, list4, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
@@ -6401,7 +6632,7 @@ var init_sweep = __esm({
     init_provider();
     init_update2();
     DAY4 = 86400;
-    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     author = (m) => String(m.origin_user ?? m.username ?? "");
     isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
     SWEEP_PROMPT_VERSION = "v1";
@@ -6418,7 +6649,7 @@ reason: one short sentence.
 
 OUTPUT: valid JSON only, no commentary, no fences. One entry per finding:
 [{"id": "<finding id>", "verdict": "progress" | "superseded" | "keep", "reason": "<short sentence>"}]`;
-    lasting = (m) => NEIGHBOR_KINDS.includes(m.kind) && m.archived !== true && m.source !== "compaction" && !list5(m.tags).some((t) => t === "journal" || t === "compaction");
+    lasting = (m) => NEIGHBOR_KINDS.includes(m.kind) && m.archived !== true && m.source !== "compaction" && !list4(m.tags).some((t) => t === "journal" || t === "compaction");
   }
 });
 
@@ -6460,7 +6691,7 @@ function usersIn(docs) {
 async function knownUsers() {
   const store = getStore();
   const me = getConfig().USERNAME;
-  if (cache && cache.store === store && cache.user === me && Date.now() - cache.at < CACHE_MS) return cache.users;
+  if (cache2 && cache2.store === store && cache2.user === me && Date.now() - cache2.at < CACHE_MS) return cache2.users;
   const users = new Set([me].filter(Boolean));
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
   await Promise.all(names.map(async (c) => {
@@ -6471,13 +6702,13 @@ async function knownUsers() {
     ])).flat();
     for (const u of usersIn(docs)) users.add(u);
   }));
-  cache = { at: Date.now(), store, user: me, users };
+  cache2 = { at: Date.now(), store, user: me, users };
   return users;
 }
 function resetKnownUsers() {
-  cache = void 0;
+  cache2 = void 0;
 }
-var CACHE_MS, cache;
+var CACHE_MS, cache2;
 var init_known_users = __esm({
   "packages/core/src/memory/known-users.ts"() {
     "use strict";
@@ -6510,7 +6741,7 @@ async function waitingOn(opts = {}) {
   for (const { collection, decisions, questions, tasks } of read) {
     const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open2) for (const m of list6(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -6528,7 +6759,7 @@ async function waitingOn(opts = {}) {
         by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list6(m.options).length ? { options: list6(m.options) } : {},
+        ...list5(m.options).length ? { options: list5(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -6537,7 +6768,7 @@ async function waitingOn(opts = {}) {
     for (const t of open2) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list6(m.tags));
+      const people = taskNeedsPeople(list5(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
@@ -6617,7 +6848,7 @@ function formatWaiting(w, opts = {}) {
 ${items.map((i) => waitingLine(i, opts)).join("\n")}`);
   return parts.length ? parts.join("\n\n") : "Nothing is waiting on anyone.";
 }
-var list6, firstLine, waitingCount, who;
+var list5, firstLine, waitingCount, who;
 var init_waiting = __esm({
   "packages/core/src/tasks/waiting.ts"() {
     "use strict";
@@ -6627,7 +6858,7 @@ var init_waiting = __esm({
     init_owners();
     init_known_users();
     init_config();
-    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     firstLine = (s) => {
       const line = s.split("\n").find((l) => l.trim()) ?? "";
       const t = line.replace(/^#+\s*/, "").trim();
@@ -7872,7 +8103,7 @@ function toItem(collection, d) {
     status: m.status,
     content: d.content.slice(0, 600),
     ...m.owner ? { owner: String(m.owner) } : {},
-    ...list7(m.options).length ? { options: list7(m.options) } : {},
+    ...list6(m.options).length ? { options: list6(m.options) } : {},
     ...m.recommendation ? { recommendation: String(m.recommendation) } : {}
   };
 }
@@ -7883,8 +8114,8 @@ async function findOpenItems(collection, text, taskIds = []) {
   const waits = [];
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds2(collection, [tid]).catch(() => []);
-    waits.push(...list7(t?.metadata.waits_on));
-    linked.push(...list7(t?.metadata.memory_ids));
+    waits.push(...list6(t?.metadata.waits_on));
+    linked.push(...list6(t?.metadata.memory_ids));
   }
   const addById = async (mid) => {
     for (const name of [collection, ...names.filter((n) => n !== collection)]) {
@@ -8020,7 +8251,7 @@ ${turn.assistantText}`, userText: turn.userText, knownUsers: known })) {
   }
   return { judged: items.length, changes };
 }
-var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, WAITS_MAX, NEAR_FETCH, LINKED_TIE, UNLINKED_KEEP, FOLLOW_THROUGH_SYSTEM_PROMPT, list7, flat, excerpt, DISCLAIMS;
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, WAITS_MAX, NEAR_FETCH, LINKED_TIE, UNLINKED_KEEP, FOLLOW_THROUGH_SYSTEM_PROMPT, list6, flat, excerpt, DISCLAIMS;
 var init_follow_through = __esm({
   "packages/core/src/curation/follow-through.ts"() {
     "use strict";
@@ -8053,7 +8284,7 @@ Leave out every item the turn does not talk about. Never list an item to say the
 OUTPUT: valid JSON only, no commentary, no fences. An array:
 [{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "evidence": "<exact words from the turn>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
 Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
-    list7 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     flat = (s) => s.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u2013\u2014]/g, "-").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
     excerpt = (s) => flat(s).replace(/^["']+|["']+$/g, "").replace(/(\.\.\.|\u2026)$/, "").replace(/[.!?,;:]+$/, "").trim();
     DISCLAIMS = [
@@ -8064,20 +8295,20 @@ Omit the disposition fields except for a finding. If nothing is settled, return 
 });
 
 // packages/core/src/curation/health.ts
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync9 } from "node:fs";
-import { dirname as dirname6, join as join8 } from "node:path";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync9 } from "node:fs";
+import { dirname as dirname6, join as join7 } from "node:path";
 function captureHealthFile() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join8(dirname6(health), "capture-health.json") : "";
+  return health ? join7(dirname6(health), "capture-health.json") : "";
 }
 function dayKey(ms) {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
-function readCaptureHealth(path3 = captureHealthFile()) {
-  if (!path3) return void 0;
+function readCaptureHealth(path2 = captureHealthFile()) {
+  if (!path2) return void 0;
   try {
-    const h = JSON.parse(readFileSync9(path3, "utf-8"));
+    const h = JSON.parse(readFileSync9(path2, "utf-8"));
     return h && typeof h.at === "number" && h.days && typeof h.days === "object" ? h : void 0;
   } catch {
     return void 0;
@@ -8125,11 +8356,11 @@ function applyCaptureEvent(h, e, now) {
   for (const k of Object.keys(days).sort().slice(0, -KEEP_DAYS)) delete days[k];
   return next;
 }
-function recordCapture(e, now = Date.now(), path3 = captureHealthFile()) {
-  if (!path3) return;
+function recordCapture(e, now = Date.now(), path2 = captureHealthFile()) {
+  if (!path2) return;
   try {
-    mkdirSync5(dirname6(path3), { recursive: true });
-    withFileLockSync(lockFileFor(path3), () => writeJsonAtomic(path3, applyCaptureEvent(readCaptureHealth(path3), e, now)), { waitMs: 2e3 });
+    mkdirSync6(dirname6(path2), { recursive: true });
+    withFileLockSync(lockFileFor(path2), () => writeJsonAtomic(path2, applyCaptureEvent(readCaptureHealth(path2), e, now)), { waitMs: 2e3 });
   } catch {
   }
 }
@@ -8371,14 +8602,14 @@ var init_capture = __esm({
 });
 
 // packages/core/src/buckets/artifacts.ts
-import { existsSync, mkdirSync as mkdirSync6, readdirSync as readdirSync4, readFileSync as readFileSync10, writeFileSync as writeFileSync4 } from "fs";
-import { join as join9 } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync10, writeFileSync as writeFileSync4 } from "fs";
+import { join as join8 } from "path";
 function artifactDir(kind) {
-  return join9(getConfig().ARTIFACTS_DIR, kind);
+  return join8(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync(dir)) mkdirSync6(dir, { recursive: true });
+  if (!existsSync2(dir)) mkdirSync7(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -8396,7 +8627,7 @@ function nextVersion(kind) {
 }
 function listVersions(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync(dir)) return [];
+  if (!existsSync2(dir)) return [];
   const versions = /* @__PURE__ */ new Set();
   for (const f of readdirSync4(dir)) {
     const m = f.match(/^v(\d+)\./);
@@ -8406,17 +8637,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path3 = join9(dir, filename);
-  writeFileSync4(path3, content);
-  return path3;
+  const path2 = join8(dir, filename);
+  writeFileSync4(path2, content);
+  return path2;
 }
 function readArtifact(kind, filename) {
-  const path3 = join9(artifactDir(kind), filename);
-  if (!existsSync(path3)) return null;
-  return readFileSync10(path3, "utf-8");
+  const path2 = join8(artifactDir(kind), filename);
+  if (!existsSync2(path2)) return null;
+  return readFileSync10(path2, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join9(artifactDir(kind), filename);
+  return join8(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -9098,8 +9329,8 @@ var init_pull = __esm({
 
 // packages/core/src/sync/shared-cycle.ts
 import { createHash as createHash3 } from "node:crypto";
-import { closeSync as closeSync2, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
-import { dirname as dirname7, join as join10 } from "node:path";
+import { closeSync as closeSync2, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
+import { dirname as dirname7, join as join9 } from "node:path";
 function syncTargetKey(config = getConfig()) {
   let remote = "";
   if (config.SYNC_MCP_URL) remote = `mcp:${config.SYNC_MCP_URL}`;
@@ -9125,24 +9356,24 @@ function paths(config = getConfig()) {
   const key = syncTargetKey(config);
   return {
     dir,
-    record: join10(dir, `sync-cycle-${key}.json`),
-    lock: join10(dir, `sync-cycle-${key}.lock`),
-    pulls: join10(dir, `sync-pulls-${key}.json`)
+    record: join9(dir, `sync-cycle-${key}.json`),
+    lock: join9(dir, `sync-cycle-${key}.lock`),
+    pulls: join9(dir, `sync-pulls-${key}.json`)
   };
 }
-function readJson(path3) {
+function readJson(path2) {
   try {
-    return JSON.parse(readFileSync11(path3, "utf-8"));
+    return JSON.parse(readFileSync11(path2, "utf-8"));
   } catch {
     return void 0;
   }
 }
-function writeJson(path3, value) {
+function writeJson(path2, value) {
   try {
-    mkdirSync7(dirname7(path3), { recursive: true, mode: 448 });
-    const tmp = `${path3}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    mkdirSync8(dirname7(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     writeFileSync5(tmp, JSON.stringify(value) + "\n", { mode: 384 });
-    renameSync4(tmp, path3);
+    renameSync4(tmp, path2);
   } catch {
   }
 }
@@ -9167,7 +9398,7 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
   const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
   for (let attempt2 = 0; attempt2 < 2; attempt2++) {
     try {
-      mkdirSync7(p.dir, { recursive: true, mode: 448 });
+      mkdirSync8(p.dir, { recursive: true, mode: 448 });
       const fd = openSync2(p.lock, "wx", 384);
       try {
         writeSync2(fd, JSON.stringify(body));
@@ -9239,8 +9470,8 @@ var init_shared_cycle = __esm({
 });
 
 // packages/core/src/update-check.ts
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync12, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname8, join as join11 } from "node:path";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync12, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname8, join as join10 } from "node:path";
 function compareVersions(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
   const pb = SEMVER.exec(String(b ?? "").trim());
@@ -9255,43 +9486,43 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join11(dirname8(health), "update-check.json") : void 0;
+  return health ? join10(dirname8(health), "update-check.json") : void 0;
 }
-function readUpdateState(path3 = updateStatePath()) {
-  if (!path3) return void 0;
+function readUpdateState(path2 = updateStatePath()) {
+  if (!path2) return void 0;
   try {
-    const s = JSON.parse(readFileSync12(path3, "utf-8"));
+    const s = JSON.parse(readFileSync12(path2, "utf-8"));
     return s && typeof s.current === "string" && typeof s.checked_at === "number" ? s : void 0;
   } catch {
     return void 0;
   }
 }
-function writeUpdateState(s, path3 = updateStatePath()) {
-  if (!path3) return;
+function writeUpdateState(s, path2 = updateStatePath()) {
+  if (!path2) return;
   try {
-    mkdirSync8(dirname8(path3), { recursive: true, mode: 448 });
-    const tmp = `${path3}.${process.pid}.tmp`;
+    mkdirSync9(dirname8(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync6(tmp, JSON.stringify(s) + "\n", { mode: 384 });
-    renameSync5(tmp, path3);
+    renameSync5(tmp, path2);
   } catch {
   }
 }
-function noteInstalledVersion(current, path3 = updateStatePath()) {
-  if (!path3) return void 0;
-  const prev = readUpdateState(path3);
+function noteInstalledVersion(current, path2 = updateStatePath()) {
+  if (!path2) return void 0;
+  const prev = readUpdateState(path2);
   if (prev && prev.current === current) return prev;
   const next = { current, checked_at: prev?.checked_at ?? 0 };
   if (prev?.latest && compareVersions(prev.latest, current) > 0) next.latest = prev.latest;
   if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
-  writeUpdateState(next, path3);
+  writeUpdateState(next, path2);
   return next;
 }
 async function checkForUpdate(current, opts = {}) {
   const config = getConfig();
-  const path3 = opts.path ?? updateStatePath();
-  if (!config.UPDATE_CHECK || !path3 || !config.UPDATE_SOURCE) return void 0;
+  const path2 = opts.path ?? updateStatePath();
+  if (!config.UPDATE_CHECK || !path2 || !config.UPDATE_SOURCE) return void 0;
   const now = opts.now ?? Date.now();
-  const prev = noteInstalledVersion(current, path3);
+  const prev = noteInstalledVersion(current, path2);
   if (!opts.force && prev && prev.checked_at > 0 && now - prev.checked_at < UPDATE_CHECK_INTERVAL_MS) return prev;
   let released;
   try {
@@ -9306,12 +9537,12 @@ async function checkForUpdate(current, opts = {}) {
   const next = { current, checked_at: now };
   if (compareVersions(released, current) > 0) next.latest = released;
   if (next.latest && prev?.notified === next.latest) next.notified = prev.notified;
-  writeUpdateState(next, path3);
+  writeUpdateState(next, path2);
   return next;
 }
-function markUpdateNotified(version, path3 = updateStatePath()) {
-  const s = readUpdateState(path3);
-  if (s && s.latest === version && s.notified !== version) writeUpdateState({ ...s, notified: version }, path3);
+function markUpdateNotified(version, path2 = updateStatePath()) {
+  const s = readUpdateState(path2);
+  if (s && s.latest === version && s.notified !== version) writeUpdateState({ ...s, notified: version }, path2);
 }
 function startUpdateChecks(current) {
   if (timer2 || !getConfig().UPDATE_CHECK) return;
@@ -9735,21 +9966,21 @@ ${jobResult.stdout}`);
 });
 
 // packages/core/src/training/registry.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync9, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "fs";
-import { join as join12 } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync10, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "fs";
+import { join as join11 } from "path";
 function registryPath() {
-  return join12(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join11(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join12(getConfig().ARTIFACTS_DIR, "adapters");
-  if (!existsSync2(dir)) mkdirSync9(dir, { recursive: true });
+  const dir = join11(getConfig().ARTIFACTS_DIR, "adapters");
+  if (!existsSync3(dir)) mkdirSync10(dir, { recursive: true });
 }
 function load() {
   ensureDir();
-  const path3 = registryPath();
-  if (!existsSync2(path3)) return { version: 1, adapters: [] };
+  const path2 = registryPath();
+  if (!existsSync3(path2)) return { version: 1, adapters: [] };
   try {
-    const parsed = JSON.parse(readFileSync13(path3, "utf-8"));
+    const parsed = JSON.parse(readFileSync13(path2, "utf-8"));
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.adapters)) {
       return { version: 1, adapters: [] };
     }
@@ -9873,8 +10104,8 @@ function extractJsonArray3(raw) {
   }
   throw new Error(`Could not extract JSON array from synthesis response: ${raw.slice(0, 200)}`);
 }
-function readManifestSource(path3) {
-  const content = readFileSync14(path3, "utf-8");
+function readManifestSource(path2) {
+  const content = readFileSync14(path2, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -9930,8 +10161,8 @@ RULES
 
 // packages/core/src/training/index.ts
 import { createHash as createHash4 } from "crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync8 } from "fs";
-import { join as join13 } from "path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync11, readFileSync as readFileSync15, writeFileSync as writeFileSync8 } from "fs";
+import { join as join12 } from "path";
 function getBackend() {
   switch (getConfig().TRAINING_BACKEND) {
     case "fireworks":
@@ -9941,8 +10172,8 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join13(getConfig().ARTIFACTS_DIR, "training-runs");
-  if (!existsSync3(dir)) mkdirSync10(dir, { recursive: true });
+  const dir = join12(getConfig().ARTIFACTS_DIR, "training-runs");
+  if (!existsSync4(dir)) mkdirSync11(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
@@ -9951,7 +10182,7 @@ function sha256(content) {
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
   const manifestPath = artifactPath("training-manifests", manifestName);
-  if (!existsSync3(manifestPath)) {
+  if (!existsSync4(manifestPath)) {
     throw new Error(`Training manifest not found: ${manifestPath}. Run bucket_route_now first.`);
   }
   const sourceMemories = readManifestSource(manifestPath);
@@ -9975,7 +10206,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join13(dir, filename);
+  const previewPath = join12(dir, filename);
   writeFileSync8(previewPath, jsonl);
   return {
     manifestVersion,
@@ -9989,7 +10220,7 @@ async function trainingTrigger(args) {
   if (args.confirm !== true) {
     throw new Error("Refusing to submit \u2014 confirm must be true.");
   }
-  if (!existsSync3(args.previewPath)) {
+  if (!existsSync4(args.previewPath)) {
     throw new Error(`Preview file not found: ${args.previewPath}. Run training_dataset_preview first.`);
   }
   const contentOnDisk = readFileSync15(args.previewPath, "utf-8");
@@ -10333,8 +10564,8 @@ function loadManifestSplit(manifestPath, manifestVersion) {
   const memories = readManifestSource(manifestPath);
   return splitManifest(memories, manifestVersion);
 }
-function readHoldoutFile(path3) {
-  const content = readFileSync16(path3, "utf-8");
+function readHoldoutFile(path2) {
+  const content = readFileSync16(path2, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
   return lines.map((l) => {
     const entry = JSON.parse(l);
@@ -10662,14 +10893,14 @@ var init_external = __esm({
 });
 
 // packages/core/src/last-write.ts
-import { mkdirSync as mkdirSync11, readdirSync as readdirSync5, readFileSync as readFileSync17, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname9, join as join14 } from "node:path";
+import { mkdirSync as mkdirSync12, readdirSync as readdirSync5, readFileSync as readFileSync17, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { dirname as dirname9, join as join13 } from "node:path";
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join14(dirname9(health), "last-write") : "";
+  return health ? join13(dirname9(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -10677,7 +10908,7 @@ function recordLastWrite(collection, opts = {}) {
   if (!collection || !session || !dir) return;
   const now = opts.now ?? Date.now();
   try {
-    mkdirSync11(dir, { recursive: true, mode: 448 });
+    mkdirSync12(dir, { recursive: true, mode: 448 });
     const file = lastWriteFile(session, dir);
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync9(tmp, JSON.stringify({ collection, at: now }) + "\n", { mode: 384 });
@@ -10702,9 +10933,9 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync5(dir)) {
-      const p = join14(dir, name);
+      const p = join13(dir, name);
       try {
-        if (now - statSync2(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
+        if (now - statSync3(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
       }
     }
@@ -10723,14 +10954,14 @@ var init_last_write = __esm({
 });
 
 // packages/core/src/session-record.ts
-import { readdirSync as readdirSync6, readFileSync as readFileSync18, rmSync as rmSync6, statSync as statSync3 } from "node:fs";
-import { dirname as dirname10, join as join15 } from "node:path";
+import { readdirSync as readdirSync6, readFileSync as readFileSync18, rmSync as rmSync6, statSync as statSync4 } from "node:fs";
+import { dirname as dirname10, join as join14 } from "node:path";
 function sessionRecordDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join15(dirname10(health), "sessions") : "";
+  return health ? join14(dirname10(health), "sessions") : "";
 }
 function sessionRecordFile(session, dir = sessionRecordDir()) {
-  return join15(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function sessionId(explicit) {
   const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
@@ -10787,10 +11018,10 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      const p = join15(dir, name);
+      const p = join14(dir, name);
       if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
-          if (now - statSync3(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
+          if (now - statSync4(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
         } catch {
         }
         continue;
@@ -10798,7 +11029,7 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
       if (!name.endsWith(".json")) continue;
       try {
         const r = JSON.parse(readFileSync18(p, "utf-8"));
-        if (!pidAlive(r.pid) || now - statSync3(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
+        if (!pidAlive(r.pid) || now - statSync4(p).mtimeMs > PRUNE_AFTER_MS2) rmSync6(p, { force: true });
       } catch {
         rmSync6(p, { force: true });
       }
@@ -10861,7 +11092,9 @@ __export(src_exports, {
   SWEEP_SYSTEM_PROMPT: () => SWEEP_SYSTEM_PROMPT,
   SYNTHESIS_PROMPT_VERSION: () => SYNTHESIS_PROMPT_VERSION,
   SYNTHESIS_SYSTEM_PROMPT: () => SYNTHESIS_SYSTEM_PROMPT,
+  ScopeFileError: () => ScopeFileError,
   ServiceError: () => ServiceError,
+  SharedCollectionNotAllowedError: () => SharedCollectionNotAllowedError,
   TASK_COUNTER_COLLECTION: () => TASK_COUNTER_COLLECTION,
   TYPED_KEYS: () => TYPED_KEYS,
   TaskClaimedError: () => TaskClaimedError,
@@ -10889,6 +11122,7 @@ __export(src_exports, {
   applySweep: () => applySweep,
   artifactDir: () => artifactDir,
   artifactPath: () => artifactPath,
+  assertMayCreateCollection: () => assertMayCreateCollection,
   assertWritable: () => assertWritable,
   bucketRouteNow: () => bucketRouteNow,
   bucketRoutePreview: () => bucketRoutePreview,
@@ -10905,6 +11139,7 @@ __export(src_exports, {
   captureNudge: () => captureNudge,
   captureTurn: () => captureTurn,
   carryTyped: () => carryTyped,
+  checkFollowUpCollections: () => checkFollowUpCollections,
   checkForUpdate: () => checkForUpdate,
   chromaStore: () => chromaStore,
   chunk: () => chunk,
@@ -10925,6 +11160,7 @@ __export(src_exports, {
   clearSelectedForManifest: () => clearSelectedForManifest,
   closeSyncBackend: () => closeSyncBackend,
   collectClassifiedMemories: () => collectClassifiedMemories,
+  collectionMapEntries: () => collectionMapEntries,
   collectionSize: () => collectionSize,
   compareVersions: () => compareVersions,
   completeTask: () => completeTask,
@@ -10956,6 +11192,7 @@ __export(src_exports, {
   detectChromaVersion: () => detectChromaVersion,
   detectCollection: () => detectCollection,
   detectSector: () => detectSector,
+  editScopeSettings: () => editScopeSettings,
   emptyPullStats: () => emptyPullStats,
   emptyPushStats: () => emptyPushStats,
   ensureArtifactDir: () => ensureArtifactDir,
@@ -10972,6 +11209,7 @@ __export(src_exports, {
   followThrough: () => followThrough,
   forgetMemory: () => forgetMemory,
   formatDuration: () => formatDuration,
+  formatScopeSettings: () => formatScopeSettings,
   formatSyncStats: () => formatSyncStats,
   formatTaskDate: () => formatTaskDate,
   formatTrainingJsonl: () => formatTrainingJsonl,
@@ -11010,6 +11248,7 @@ __export(src_exports, {
   healthStatusFor: () => healthStatusFor,
   heartbeatIfDue: () => heartbeatIfDue,
   heldKeys: () => heldKeys,
+  importLegacyScope: () => importLegacyScope,
   includesUser: () => includesUser,
   isCoordinationUnavailable: () => isCoordinationUnavailable,
   isCycleFatal: () => isCycleFatal,
@@ -11052,13 +11291,13 @@ __export(src_exports, {
   markDecayRun: () => markDecayRun,
   markUpdateNotified: () => markUpdateNotified,
   matchCollectionMap: () => matchCollectionMap,
+  mayCreateSharedFrom: () => mayCreateSharedFrom,
   mergeCollections: () => mergeCollections,
   mergeReportLines: () => mergeReportLines,
   metadataDelta: () => metadataDelta,
   moveOwnLeases: () => moveOwnLeases,
   nextTasks: () => nextTasks,
   nextVersion: () => nextVersion,
-  normalizeCollectionMap: () => normalizeCollectionMap,
   normalizeTyped: () => normalizeTyped,
   normalizedSalience: () => normalizedSalience,
   noteInstalledVersion: () => noteInstalledVersion,
@@ -11085,6 +11324,7 @@ __export(src_exports, {
   passesScoreFilters: () => passesScoreFilters,
   patchDocument: () => patchDocument,
   patchDocuments: () => patchDocuments2,
+  pathWithin: () => pathWithin,
   pidAlive: () => pidAlive,
   pruneLastWrites: () => pruneLastWrites,
   pruneSessionRecords: () => pruneSessionRecords,
@@ -11107,6 +11347,7 @@ __export(src_exports, {
   readHoldoutFile: () => readHoldoutFile,
   readLastWrite: () => readLastWrite,
   readManifestSource: () => readManifestSource,
+  readScopeSettings: () => readScopeSettings,
   readSyncHealth: () => readSyncHealth,
   readUpdateState: () => readUpdateState,
   recallMemory: () => recallMemory,
@@ -11147,10 +11388,14 @@ __export(src_exports, {
   retryUnsharedClaims: () => retryUnsharedClaims,
   routeMemory: () => routeMemory,
   runDecaySweep: () => runDecaySweep,
+  runScopeAction: () => runScopeAction,
   scheduleSyncSoon: () => scheduleSyncSoon,
+  scopeFileVersion: () => scopeFileVersion,
   scopeNotes: () => scopeNotes,
+  scopePath: () => scopePath,
   searchTasks: () => searchTasks,
   serviceCoordination: () => serviceCoordination,
+  sessionFolder: () => sessionFolder,
   sessionRecordDir: () => sessionRecordDir,
   sessionRecordFile: () => sessionRecordFile,
   sessionsHoldingLeases: () => sessionsHoldingLeases,
@@ -11163,7 +11408,6 @@ __export(src_exports, {
   shouldPull: () => shouldPull,
   shouldRunCycle: () => shouldRunCycle,
   shouldRunDecay: () => shouldRunDecay,
-  splitCollectionMap: () => splitCollectionMap,
   splitManifest: () => splitManifest,
   staleFindings: () => staleFindings,
   startCuration: () => startCuration,
@@ -11236,6 +11480,7 @@ var init_src = __esm({
     init_chunking();
     init_lifecycle();
     init_scope();
+    init_scope_file();
     init_metadata_adapter();
     init_store2();
     init_recall();
@@ -11324,7 +11569,7 @@ var init_rules = __esm({
 You have YAPA's persistent memory and durable task tools (the yapa MCP server: \`memory_*\`, \`task_*\`, \`journal_*\`, \`collection_*\`, \`compaction_*\`, \`sync\`). Hooks already do the routine work: this block plus open tasks and top memories are injected at session start, and a semantic recall for each prompt is injected as \`# YAPA Recall\` (after pulling teammates' latest writes for the active collection). Do not repeat that recall unless you need a different or more specific query.
 
 ### Scope
-The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). \`private-*\`, \`local-*\` and \`global\` collections never sync (\`global\` is personal; team-wide knowledge goes in a shared collection). To combine or rename collections use \`collection_merge\` (it keeps every document), not \`collection_delete\`. \`collection_delete\` removes a collection from this machine only; pass \`scope: "everyone"\` (with \`confirm\`) only when the user explicitly asks to delete it for the whole team.
+The injected \`**Scope:**\` line names the active collection (\`customer-{name}\`, \`project-{name}\`, or \`global\`). If it is flagged AMBIGUOUS, ask the user which collection to use BEFORE storing anything. Always pass the collection explicitly when storing. Recall searches the active collection plus a few strongly relevant hits from other customers/projects (labeled \`from <collection>\`): when troubleshooting, check whether another account already hit the same issue, and say where an answer came from. Before creating a new collection, confirm the name with the user (\`collection_list\` shows what exists). A new shared collection can only be created from a session under a project root (or a folder mapped to it); elsewhere the write is refused, and you use a \`private-\` name or ask the user. Change the folder rules (the \`scope\` tool) only when the user explicitly asks. \`private-*\`, \`local-*\` and \`global\` collections never sync (\`global\` is personal; team-wide knowledge goes in a shared collection). To combine or rename collections use \`collection_merge\` (it keeps every document), not \`collection_delete\`. \`collection_delete\` removes a collection from this machine only; pass \`scope: "everyone"\` (with \`confirm\`) only when the user explicitly asks to delete it for the whole team.
 
 ### Capture as you go (do not batch to the end)
 Call \`memory_store\` (salience >= 2.0) when: a bug's root cause is identified; a config value, env var, endpoint, or credential location is learned; the user states a preference, decision, or correction; a non-obvious technical fact is discovered; a solution took real effort; a decision or commitment surfaces.
@@ -11398,8 +11643,8 @@ __export(statusline_exports, {
   uninstallStatusLine: () => uninstallStatusLine
 });
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync as mkdirSync12, readFileSync as readFileSync19, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
+import { copyFileSync, mkdirSync as mkdirSync13, readFileSync as readFileSync20, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
 import { dirname as dirname11, join as join16, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
@@ -11489,7 +11734,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -11510,7 +11755,7 @@ function stdinInfo(input2, now = Date.now()) {
   let ageMs = typeof j?.cost?.total_duration_ms === "number" ? j.cost.total_duration_ms : void 0;
   if (ageMs === void 0 && typeof j?.transcript_path === "string") {
     try {
-      const born = statSync4(j.transcript_path).birthtimeMs;
+      const born = statSync5(j.transcript_path).birthtimeMs;
       if (born > 0) ageMs = now - born;
     } catch {
     }
@@ -11531,7 +11776,7 @@ function readSessionRecord(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.version === "string" && typeof r.pid === "number" && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
     } catch {
     }
@@ -11543,7 +11788,7 @@ function readSessionScope(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
+      const r = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
       if (typeof r?.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -11555,7 +11800,7 @@ function readSessionStarting(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const at = JSON.parse(readFileSync19(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
+      const at = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
       if (typeof at === "number" && (best === void 0 || at > best)) best = at;
     } catch {
     }
@@ -11568,18 +11813,18 @@ function sessionInfo(record, ageMs, startedAt, now = Date.now()) {
   if (sinceStart !== void 0 && sinceStart > SESSION_REPORT_GRACE_MS) return { missing: true };
   return void 0;
 }
-function readUpdate(path3) {
+function readUpdate(path2) {
   try {
-    const u = JSON.parse(readFileSync19(path3, "utf-8"));
+    const u = JSON.parse(readFileSync20(path2, "utf-8"));
     return u && typeof u === "object" ? { current: typeof u.current === "string" ? u.current : void 0, latest: typeof u.latest === "string" ? u.latest : void 0 } : void 0;
   } catch {
     return void 0;
   }
 }
-function captureFailingAt(path3, now) {
+function captureFailingAt(path2, now) {
   let h;
   try {
-    h = JSON.parse(readFileSync19(path3, "utf-8"));
+    h = JSON.parse(readFileSync20(path2, "utf-8"));
   } catch {
     return false;
   }
@@ -11594,9 +11839,9 @@ function captureFailingAt(path3, now) {
   const good = clean + n("compactions") - n("compactions_failed");
   return bad2 >= 2 && bad2 > good;
 }
-function readHealth(path3) {
+function readHealth(path2) {
   try {
-    const h = JSON.parse(readFileSync19(path3, "utf-8"));
+    const h = JSON.parse(readFileSync20(path2, "utf-8"));
     return h && typeof h.status === "string" && typeof h.at === "number" ? h : void 0;
   } catch {
     return void 0;
@@ -11644,33 +11889,33 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join16(process.env.CLAUDE_CONFIG_DIR ?? join16(homedir3(), ".claude"), "settings.json");
+  return join16(process.env.CLAUDE_CONFIG_DIR ?? join16(homedir4(), ".claude"), "settings.json");
 }
-function readSettings(path3) {
+function readSettings(path2) {
   try {
-    return JSON.parse(readFileSync19(path3, "utf-8"));
+    return JSON.parse(readFileSync20(path2, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
-    throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
+    throw new Error(`Refusing to edit ${path2}: ${e?.message ?? e}`);
   }
 }
-function writeSettings(path3, settings) {
-  mkdirSync12(dirname11(path3), { recursive: true });
-  const tmp = `${path3}.${process.pid}.tmp`;
+function writeSettings(path2, settings) {
+  mkdirSync13(dirname11(path2), { recursive: true });
+  const tmp = `${path2}.${process.pid}.tmp`;
   writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
-  renameSync7(tmp, path3);
+  renameSync7(tmp, path2);
 }
-function installStatusLine(script, path3 = defaultSettingsPath()) {
-  writeSettings(path3, mergeStatusLine(readSettings(path3), script));
-  return path3;
+function installStatusLine(script, path2 = defaultSettingsPath()) {
+  writeSettings(path2, mergeStatusLine(readSettings(path2), script));
+  return path2;
 }
-function uninstallStatusLine(path3 = defaultSettingsPath(), script) {
-  writeSettings(path3, removeStatusLine(readSettings(path3), script));
-  return path3;
+function uninstallStatusLine(path2 = defaultSettingsPath(), script) {
+  writeSettings(path2, removeStatusLine(readSettings(path2), script));
+  return path2;
 }
-function hasStatusLine(path3 = defaultSettingsPath(), script) {
+function hasStatusLine(path2 = defaultSettingsPath(), script) {
   try {
-    return isYapaStatusLine(JSON.parse(readFileSync19(path3, "utf-8")).statusLine, script);
+    return isYapaStatusLine(JSON.parse(readFileSync20(path2, "utf-8")).statusLine, script);
   } catch {
     return false;
   }
@@ -11678,15 +11923,15 @@ function hasStatusLine(path3 = defaultSettingsPath(), script) {
 function copyScript(from, to) {
   let src;
   try {
-    src = readFileSync19(from);
+    src = readFileSync20(from);
   } catch {
     return false;
   }
   try {
-    if (readFileSync19(to).equals(src)) return false;
+    if (readFileSync20(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync12(dirname11(to), { recursive: true, mode: 448 });
+  mkdirSync13(dirname11(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
   renameSync7(tmp, to);
@@ -11696,7 +11941,7 @@ function setRemovedMarker(dir, removed) {
   const p = join16(dir, REMOVED_MARKER);
   try {
     if (removed) {
-      mkdirSync12(dir, { recursive: true, mode: 448 });
+      mkdirSync13(dir, { recursive: true, mode: 448 });
       writeFileSync10(p, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
     } else {
@@ -11767,7 +12012,7 @@ var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
-    SCRIPT_VERSION = true ? "1.15.0" : void 0;
+    SCRIPT_VERSION = true ? "1.16.0" : void 0;
     SEMVER2 = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
     DEFAULT_INTERVAL_MS = 3e5;
     STALE_INTERVALS = 3;
@@ -11796,7 +12041,7 @@ var YAPA_VERSION;
 var init_version = __esm({
   "packages/mcp/src/version.ts"() {
     "use strict";
-    YAPA_VERSION = true ? "1.15.0" : fromPackage();
+    YAPA_VERSION = true ? "1.16.0" : fromPackage();
   }
 });
 
@@ -11821,7 +12066,7 @@ __export(hooks_exports, {
   userText: () => userText,
   waitingLines: () => waitingLines
 });
-import { existsSync as existsSync4, mkdirSync as mkdirSync13, readFileSync as readFileSync20, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync14, readFileSync as readFileSync21, rmSync as rmSync8, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname12, join as join17 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -11906,7 +12151,7 @@ function statusLineScriptPath() {
 }
 function bundledStatusLineScript() {
   const here = dirname12(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join17(here, f)).find((p) => existsSync4(p));
+  return ["statusline.mjs", "statusline.js"].map((f) => join17(here, f)).find((p) => existsSync5(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -11921,7 +12166,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
     const added = join17(dirname12(to), "statusline-added");
-    if (existsSync4(join17(dirname12(to), REMOVED_MARKER)) || existsSync4(added) || !existsSync4(to)) return void 0;
+    if (existsSync5(join17(dirname12(to), REMOVED_MARKER)) || existsSync5(added) || !existsSync5(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
@@ -11938,7 +12183,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   }
   if (!isSyncConfigured(getConfig())) return void 0;
   const marker = join17(dirname12(to), "statusline-hint");
-  if (existsSync4(marker)) return void 0;
+  if (existsSync5(marker)) return void 0;
   try {
     writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
@@ -11958,7 +12203,7 @@ function updateLine() {
 function stateDir() {
   const base = process.env.CLAUDE_PLUGIN_DATA || join17(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
   const dir = join17(base, "sessions");
-  mkdirSync13(dir, { recursive: true });
+  mkdirSync14(dir, { recursive: true });
   return dir;
 }
 function stateFile2(sessionId2, kind) {
@@ -11966,7 +12211,7 @@ function stateFile2(sessionId2, kind) {
 }
 function readTurn(sessionId2) {
   try {
-    return JSON.parse(readFileSync20(stateFile2(sessionId2, "turn"), "utf-8"));
+    return JSON.parse(readFileSync21(stateFile2(sessionId2, "turn"), "utf-8"));
   } catch {
     return void 0;
   }
@@ -11985,7 +12230,7 @@ function takeNotice(sessionId2) {
   if (!sessionId2) return void 0;
   const file = stateFile2(sessionId2, "notice");
   try {
-    const notice = readFileSync20(file, "utf-8").trim();
+    const notice = readFileSync21(file, "utf-8").trim();
     rmSync8(file, { force: true });
     return notice || void 0;
   } catch {
@@ -12290,8 +12535,8 @@ __export(install_hooks_exports, {
   selfCommand: () => selfCommand,
   uninstallHooks: () => uninstallHooks
 });
-import { mkdirSync as mkdirSync14, readFileSync as readFileSync21, writeFileSync as writeFileSync12 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
+import { mkdirSync as mkdirSync15, readFileSync as readFileSync22, writeFileSync as writeFileSync12 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
 import { dirname as dirname13, join as join18 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
@@ -12319,28 +12564,28 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join18(process.env.CLAUDE_CONFIG_DIR ?? join18(homedir4(), ".claude"), "settings.json");
+  return join18(process.env.CLAUDE_CONFIG_DIR ?? join18(homedir5(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
 }
-function readSettings2(path3) {
+function readSettings2(path2) {
   try {
-    return JSON.parse(readFileSync21(path3, "utf-8"));
+    return JSON.parse(readFileSync22(path2, "utf-8"));
   } catch (e) {
     if (e?.code === "ENOENT") return {};
-    throw new Error(`Refusing to edit ${path3}: ${e?.message ?? e}`);
+    throw new Error(`Refusing to edit ${path2}: ${e?.message ?? e}`);
   }
 }
-function installHooks(path3 = defaultSettingsPath2(), command = selfCommand()) {
-  const merged = mergeHooks(readSettings2(path3), command);
-  mkdirSync14(dirname13(path3), { recursive: true });
-  writeFileSync12(path3, JSON.stringify(merged, null, 2) + "\n");
-  return path3;
+function installHooks(path2 = defaultSettingsPath2(), command = selfCommand()) {
+  const merged = mergeHooks(readSettings2(path2), command);
+  mkdirSync15(dirname13(path2), { recursive: true });
+  writeFileSync12(path2, JSON.stringify(merged, null, 2) + "\n");
+  return path2;
 }
-function uninstallHooks(path3 = defaultSettingsPath2()) {
-  writeFileSync12(path3, JSON.stringify(removeHooks(readSettings2(path3)), null, 2) + "\n");
-  return path3;
+function uninstallHooks(path2 = defaultSettingsPath2()) {
+  writeFileSync12(path2, JSON.stringify(removeHooks(readSettings2(path2)), null, 2) + "\n");
+  return path2;
 }
 var HOOK_EVENTS, MARKER;
 var init_install_hooks = __esm({
@@ -12482,7 +12727,7 @@ __export(task_exports, {
   TASK_USAGE: () => TASK_USAGE,
   runTask: () => runTask
 });
-import { readFileSync as readFileSync22 } from "node:fs";
+import { readFileSync as readFileSync23 } from "node:fs";
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -12544,6 +12789,9 @@ async function runTask(sub, args) {
     if (e instanceof ClaimBusyError) {
       return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
     }
+    if (e instanceof SharedCollectionNotAllowedError) {
+      return { exit: EXIT.refused, json: { ok: false, refused: true, code: e.code, error: e.message }, text: e.message };
+    }
     if (e instanceof TaskClaimedError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, claim: claimJson(e.result) }, text: e.message };
     }
@@ -12557,7 +12805,7 @@ async function dispatch(sub, args) {
   const session = flag(args, "--session");
   const claimOpts = {
     session,
-    scope: list8(flag(args, "--scope")),
+    scope: list7(flag(args, "--scope")),
     ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
     title: flag(args, "--title"),
     reclaim: args.includes("--reclaim") || void 0
@@ -12567,7 +12815,7 @@ async function dispatch(sub, args) {
       const status = flag(args, "--status");
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(", ")}`);
       const collection = flag(args, "--collection");
-      const wantTags = list8(flag(args, "--tag")) ?? [];
+      const wantTags = list7(flag(args, "--tag")) ?? [];
       const tasks = (await listTasks({ collection, status, includeComplete: args.includes("--include-complete") })).filter((t) => {
         if (!wantTags.length) return true;
         const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",");
@@ -12587,8 +12835,8 @@ async function dispatch(sub, args) {
       if (!collection) throw new UsageError("--collection is required");
       const r = await nextTasks({
         collection,
-        tags: list8(flag(args, "--tag")),
-        excludeTags: list8(flag(args, "--exclude-tag")),
+        tags: list7(flag(args, "--tag")),
+        excludeTags: list7(flag(args, "--exclude-tag")),
         claim: args.includes("--claim"),
         autoOnly: args.includes("--auto-only"),
         includeCleanup: args.includes("--include-cleanup"),
@@ -12631,13 +12879,14 @@ async function dispatch(sub, args) {
       const t = await getTask(positional2);
       if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
-      const addTags = list8(flag(args, "--tag")) ?? [];
+      const addTags = list7(flag(args, "--tag")) ?? [];
       const learned = jsonFile(flag(args, "--learned-file"), "array");
       const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
       const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
-      const waitsOn = list8(flag(args, "--waits-on"));
+      const waitsOn = list7(flag(args, "--waits-on"));
       if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
       validateLearned(learned);
+      await checkFollowUpCollections(followUps, sessionFolder());
       const listOf = (v) => Array.isArray(v) ? v : String(v ?? "").split(",").filter(Boolean);
       if (note || addTags.length || waitsOn?.length) {
         await withDocLock(t.collection, t.id, async () => {
@@ -12693,16 +12942,16 @@ ${more.join("\n")}` : text
 ${TASK_USAGE}`);
   }
 }
-function jsonFile(path3, shape) {
-  if (path3 === void 0) return void 0;
+function jsonFile(path2, shape) {
+  if (path2 === void 0) return void 0;
   let v;
   try {
-    v = JSON.parse(readFileSync22(path3 === "-" ? 0 : path3, "utf8"));
+    v = JSON.parse(readFileSync23(path2 === "-" ? 0 : path2, "utf8"));
   } catch (e) {
-    throw new UsageError(`${path3}: ${e instanceof Error ? e.message : e}`);
+    throw new UsageError(`${path2}: ${e instanceof Error ? e.message : e}`);
   }
   if (shape === "array" ? !Array.isArray(v) : !v || typeof v !== "object" || Array.isArray(v)) {
-    throw new UsageError(`${path3}: expected a JSON ${shape}`);
+    throw new UsageError(`${path2}: expected a JSON ${shape}`);
   }
   return v;
 }
@@ -12710,14 +12959,14 @@ function isFlagValue(args, a) {
   const i = args.indexOf(a);
   return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text", "--auto-only", "--include-cleanup"].includes(args[i - 1]);
 }
-var TASK_USAGE, list8, UsageError, STATUSES;
+var TASK_USAGE, list7, UsageError, STATUSES;
 var init_task = __esm({
   "packages/mcp/src/cli/task.ts"() {
     "use strict";
     init_src();
     init_coord();
     TASK_USAGE = 'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n                         [--waits-on MEM,..] [--learned-file F] [--follow-ups-file F] [--decision-needed-file F] [--session S]\n       yapa task release cleanup:KIND --collection C [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\nhold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\non it, pending). "-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
-    list8 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    list7 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
     UsageError = class extends Error {
     };
     STATUSES = ["pending", "in_progress", "blocked", "complete"];
@@ -12731,7 +12980,7 @@ __export(memory_exports, {
   runMemory: () => runMemory,
   runWaiting: () => runWaiting
 });
-import { readFileSync as readFileSync23, writeFileSync as writeFileSync13 } from "node:fs";
+import { readFileSync as readFileSync24, writeFileSync as writeFileSync13 } from "node:fs";
 function flag2(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
@@ -12836,7 +13085,7 @@ async function runMemory(sub, args) {
         if (!collection || !ref) throw new UsageError2("--collection and --ref are required");
         const { content, tags, typed } = split(await input(args));
         if (!content?.trim()) throw new UsageError2('content is required (--content or "content" in --stdin-json)');
-        const target = await resolveWriteCollection(collection);
+        const target = await resolveWriteCollection(collection, { folder: sessionFolder() });
         const r = await putExternal(target.collection, ref, { content, typed, tags });
         recordLastWrite(target.collection);
         return {
@@ -12874,7 +13123,7 @@ async function runMemory(sub, args) {
         if (from) {
           let saved;
           try {
-            saved = JSON.parse(readFileSync23(from, "utf8"));
+            saved = JSON.parse(readFileSync24(from, "utf8"));
           } catch (e) {
             throw new UsageError2(`cannot read ${from}: ${e instanceof Error ? e.message : e}`);
           }
@@ -12919,7 +13168,8 @@ async function runWaiting(args) {
 function fail(what, e) {
   const usage2 = e instanceof UsageError2 || e instanceof TypedMemoryError;
   const message2 = e instanceof Error ? e.message : String(e);
-  const code = e instanceof MemoryNotFoundError ? "not_found" : void 0;
+  const code = e instanceof MemoryNotFoundError ? "not_found" : e instanceof SharedCollectionNotAllowedError ? e.code : void 0;
+  if (e instanceof SharedCollectionNotAllowedError) return { exit: 3, json: { ok: false, refused: true, error: message2, code }, text: `${what}: ${message2}` };
   return { exit: usage2 ? 2 : 1, json: { ok: false, error: message2, ...code ? { code } : {} }, text: `${what}: ${message2}` };
 }
 var MEMORY_USAGE, UsageError2, csv, VALUE_FLAGS;
@@ -12998,11 +13248,31 @@ var init_capture2 = __esm({
 // packages/mcp/src/cli/scope.ts
 var scope_exports = {};
 __export(scope_exports, {
+  SCOPE_USAGE: () => SCOPE_USAGE,
   runScope: () => runScope,
   scopeCwd: () => scopeCwd
 });
 import { resolve as resolve2 } from "node:path";
 async function runScope(args, cwdDefault = process.cwd()) {
+  const [sub, ...rest] = args;
+  if (sub === "help" || sub === "--help") return { json: { ok: true }, text: SCOPE_USAGE.trimEnd(), exit: 0 };
+  if (sub && !sub.startsWith("--")) {
+    const action = ACTIONS[sub];
+    if (!action) return { json: { ok: false, error: `unknown subcommand "${sub}"` }, text: SCOPE_USAGE.trimEnd(), exit: 2 };
+    const positional2 = rest.filter((a, i) => !a.startsWith("--") && rest[i - 1] !== "--cwd");
+    const folder = scopeCwd(rest, cwdDefault);
+    try {
+      const r = await runScopeAction({
+        action,
+        ...action === "add_customer" || action === "remove_customer" ? { name: positional2[0] } : { dir: positional2[0] },
+        ...action === "map" ? { collection: positional2[1] } : {}
+      }, folder);
+      return { json: { ok: true, file: getConfig().SCOPE_FILE, ...readScopeSettings({ strict: true }) }, text: r.text, exit: 0 };
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      return { json: { ok: false, error }, text: error, exit: 1 };
+    }
+  }
   const at = args.indexOf("--cwd");
   const cwd = resolve2(at >= 0 && args[at + 1] ? args[at + 1] : cwdDefault);
   const d = await detectCollection(cwd);
@@ -13024,10 +13294,21 @@ function scopeCwd(args, cwdDefault = process.cwd()) {
   const at = args.indexOf("--cwd");
   return resolve2(at >= 0 && args[at + 1] ? args[at + 1] : cwdDefault);
 }
+var SCOPE_USAGE, ACTIONS;
 var init_scope2 = __esm({
   "packages/mcp/src/cli/scope.ts"() {
     "use strict";
     init_src();
+    SCOPE_USAGE = "Usage: yapa scope [--cwd DIR] [--text]        the collection YAPA uses for a folder\n       yapa scope list [--cwd DIR]             the folder rules (scope file) and what they mean for a folder\n       yapa scope add-root DIR | remove-root DIR\n       yapa scope add-customer NAME | remove-customer NAME\n       yapa scope map DIR COLLECTION | unmap DIR\nSubcommands print text; --json prints the resulting file as JSON.\nProject roots are folders whose subfolders are projects; new shared collections are only created from sessions under one.\n";
+    ACTIONS = {
+      list: "show",
+      "add-root": "add_root",
+      "remove-root": "remove_root",
+      "add-customer": "add_customer",
+      "remove-customer": "remove_customer",
+      map: "map",
+      unmap: "unmap"
+    };
   }
 });
 
@@ -13035,9 +13316,10 @@ var init_scope2 = __esm({
 import { dirname as dirname14, join as join19 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+init_src();
+import { readFileSync as readFileSync19 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join15 } from "node:path";
 var PLUGIN_OPTION_PREFIX = "CLAUDE_PLUGIN_OPTION_";
 function resolveHostEnv(env, claudeConfig, cwd) {
   const add = {};
@@ -13053,7 +13335,7 @@ function resolveHostEnv(env, claudeConfig, cwd) {
   }
   if (env.CLAUDE_PLUGIN_ROOT) {
     offer("YAPA_HOOK_INJECT_RULES", "true");
-    if (env.CLAUDE_PLUGIN_DATA) offer("YAPA_MODEL_CACHE_DIR", join(env.CLAUDE_PLUGIN_DATA, "models"));
+    if (env.CLAUDE_PLUGIN_DATA) offer("YAPA_MODEL_CACHE_DIR", join15(env.CLAUDE_PLUGIN_DATA, "models"));
     return add;
   }
   const projectEnv = cwd ? claudeConfig?.projects?.[cwd]?.mcpServers?.yapa?.env : void 0;
@@ -13077,30 +13359,57 @@ function pluginSettingsEnv(env, settings) {
 }
 function adoptCliEnv(cwd) {
   try {
-    const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-    const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
+    const dir = process.env.CLAUDE_CONFIG_DIR ?? join15(homedir3(), ".claude");
+    const settings = JSON.parse(readFileSync19(join15(dir, "settings.json"), "utf-8"));
     const add = pluginSettingsEnv(process.env, settings);
     if (Object.keys(add).length) {
       Object.assign(process.env, add);
+      adoptLegacyScope();
       return;
     }
   } catch {
   }
   adoptHostEnv(cwd);
 }
+function adoptLegacyScope(env = process.env) {
+  let options;
+  try {
+    const dir = env.CLAUDE_CONFIG_DIR ?? join15(homedir3(), ".claude");
+    options = JSON.parse(readFileSync19(join15(dir, "settings.json"), "utf-8"))?.pluginConfigs?.["yapa@yapa"]?.options;
+  } catch {
+    options = void 0;
+  }
+  const pick = (key) => {
+    for (const v of [env[`YAPA_${key.toUpperCase()}`], env[`${PLUGIN_OPTION_PREFIX}${key.toUpperCase()}`], options?.[key]]) {
+      if (typeof v === "string" && v.trim()) return v;
+    }
+    return void 0;
+  };
+  try {
+    return importLegacyScope(
+      { project_roots: pick("project_roots"), customers: pick("customers"), collection_map: pick("collection_map") },
+      createConfig(env).SCOPE_FILE
+    );
+  } catch (e) {
+    process.stderr.write(`[yapa] could not move the old folder rules into the scope file: ${e instanceof Error ? e.message : e}
+`);
+    return false;
+  }
+}
 function adoptHostEnv(cwd) {
   let claudeConfig;
   try {
-    const dir = process.env.CLAUDE_CONFIG_DIR ?? homedir();
-    claudeConfig = JSON.parse(readFileSync(join(dir, ".claude.json"), "utf-8"));
+    const dir = process.env.CLAUDE_CONFIG_DIR ?? homedir3();
+    claudeConfig = JSON.parse(readFileSync19(join15(dir, ".claude.json"), "utf-8"));
   } catch {
     claudeConfig = void 0;
   }
   Object.assign(process.env, resolveHostEnv(process.env, claudeConfig, cwd));
+  adoptLegacyScope();
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder (collection_map, project_roots)\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder\n       yapa scope <command> [options]            list and change the folder rules: project roots, customers, mappings (yapa scope help)\n";
 var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nShared collections are coordinated by the sync service; private-*, local-* and global (and every collection with sync off) by this machine.\nExit: 0 done, 3 refused (held or overlapping), 4 unavailable (the service for a shared collection; nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
@@ -13146,14 +13455,14 @@ async function runHook(name) {
 async function runHooksCommand(action, args) {
   const { installHooks: installHooks2, uninstallHooks: uninstallHooks2, mergeHooks: mergeHooks2, selfCommand: selfCommand2 } = await Promise.resolve().then(() => (init_install_hooks(), install_hooks_exports));
   const at = args.indexOf("--settings");
-  const path3 = at >= 0 ? args[at + 1] : void 0;
+  const path2 = at >= 0 ? args[at + 1] : void 0;
   switch (action) {
     case "install":
-      process.stdout.write(`YAPA hooks installed in ${installHooks2(path3)}
+      process.stdout.write(`YAPA hooks installed in ${installHooks2(path2)}
 `);
       return;
     case "uninstall":
-      process.stdout.write(`YAPA hooks removed from ${uninstallHooks2(path3)}
+      process.stdout.write(`YAPA hooks removed from ${uninstallHooks2(path2)}
 `);
       return;
     case "print":
@@ -13168,20 +13477,20 @@ async function runStatusLineCommand(action, args) {
   const sl = await Promise.resolve().then(() => (init_statusline(), statusline_exports));
   const { statusLineScriptPath: statusLineScriptPath2, bundledStatusLineScript: bundledStatusLineScript2 } = await Promise.resolve().then(() => (init_hooks(), hooks_exports));
   const { getConfig: getConfig2 } = await Promise.resolve().then(() => (init_src(), src_exports));
-  const path3 = flag3(args, "--settings");
+  const path2 = flag3(args, "--settings");
   const script = statusLineScriptPath2();
   switch (action) {
     case "install": {
       const from = bundledStatusLineScript2();
       if (!script || !from) throw new Error("no status line script (YAPA_SYNC_HEALTH_FILE is off, or this build has none)");
       sl.copyScript(from, script);
-      process.stdout.write(`Status line added to ${sl.installStatusLine(script, path3)} (runs ${script})
+      process.stdout.write(`Status line added to ${sl.installStatusLine(script, path2)} (runs ${script})
 `);
       sl.setRemovedMarker(dirname14(script), false);
       return;
     }
     case "uninstall":
-      process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path3, script)}
+      process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path2, script)}
 `);
       if (script) sl.setRemovedMarker(dirname14(script), true);
       return;
@@ -13206,7 +13515,7 @@ function flag3(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
 }
-function list9(v) {
+function list8(v) {
   return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 function int2(v, name) {
@@ -13239,14 +13548,14 @@ async function runCoord(sub, args) {
           collection: need(collection, "--collection"),
           key: need(flag3(args, "--key"), "--key"),
           session,
-          scope: list9(flag3(args, "--scope")),
+          scope: list8(flag3(args, "--scope")),
           ttlSeconds: int2(flag3(args, "--ttl"), "--ttl"),
           title: flag3(args, "--title"),
           ...args.includes("--reclaim") ? { reclaim: true } : {}
         });
         break;
       case "heartbeat":
-        r = await coord.leaseHeartbeat(collection, session, list9(flag3(args, "--keys")));
+        r = await coord.leaseHeartbeat(collection, session, list8(flag3(args, "--keys")));
         break;
       case "release":
         r = await coord.leaseRelease(need(collection, "--collection"), need(flag3(args, "--key"), "--key"), session, flag3(args, "--outcome"));
@@ -13314,8 +13623,9 @@ async function main2() {
     const { runScope: runScope2, scopeCwd: scopeCwd2 } = await Promise.resolve().then(() => (init_scope2(), scope_exports));
     adoptCliEnv(scopeCwd2(args));
     const r = await runScope2(args);
-    process.stdout.write((args.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
-    await exitAfterFlush(0);
+    const text = args.includes("--text") || args[0] !== void 0 && !args[0].startsWith("--") && !args.includes("--json");
+    (r.exit ? process.stderr : process.stdout).write((text ? r.text : JSON.stringify(r.json)) + "\n");
+    await exitAfterFlush(r.exit ?? 0);
   }
   if (command === "hooks") {
     await runHooksCommand(sub, rest);
