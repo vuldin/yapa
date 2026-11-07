@@ -38,9 +38,14 @@ describe('DSH recall of hits already shown in the session', () => {
     const first = await injected('where is the acme staging config?');
     expect(first).toContain('deploy/staging.yaml');
     const second = await injected('and who owns the acme staging config?');
-    expect(second).not.toContain('deploy/staging.yaml');
-    expect(second).toMatch(/Also matched, shown earlier in this session: mem-/);
+    expect(second).not.toContain('**mem-');
+    expect(second).toMatch(/Also matched, shown earlier in this session: mem-[a-z0-9-]+ \("acme staging config/);
+    handlers['session/event']({ id: 'someone-else' }, { type: 'compaction/summary', data: {} });
+    expect(await injected('who owns acme staging config again?')).not.toContain('**mem-');
     handlers['session/event']({ id: 'agent-r' }, { type: 'compaction/summary', data: {} });
-    expect(await injected('remind me where the acme staging config is')).toContain('deploy/staging.yaml');
+    expect(await injected('remind me where the acme staging config is')).toContain('**mem-');
+    await injected('acme staging config location?');
+    handlers['session/event']({ id: 'agent-r' }, { type: 'compaction/prune', data: {} });
+    expect(await injected('acme staging config, once more')).toContain('**mem-');
   });
 });

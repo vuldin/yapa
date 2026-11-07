@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,8 @@ import {
   setConfig,
   createConfig,
   recallMemory,
+  shownKey,
+  shownEarlierLine,
   listMemories,
   isSessionSummary,
   listTasks,
@@ -326,12 +328,12 @@ function recordPrompt(sessionId: string | undefined, prompt: string): void {
   }
 }
 
-/** Take (and clear) the capture notice the last Stop hook left for this session. */
 /**
- * Memory ids prompt recall already put in this session's context. A hit
- * shown once stays in the conversation, so later prompts name it instead of
- * repeating it. Cleared when the context is rebuilt (startup, clear,
- * compaction) and when the session ends.
+ * Recall hits already put in this session's context (core shownKey: the id
+ * and a content hash). A hit shown once stays in the conversation, so later
+ * prompts name it instead of repeating it. Cleared when the context is
+ * rebuilt (a new session, /clear, compaction); kept for a resume, which
+ * restores the conversation. Files older than a week are swept.
  */
 export function readRecalled(sessionId: string | undefined): Set<string> {
   if (!sessionId) return new Set();
@@ -353,9 +355,30 @@ function recordRecalled(sessionId: string | undefined, ids: Iterable<string>): v
 }
 
 function clearRecalled(sessionId: string | undefined): void {
-  if (sessionId) rmSync(stateFile(sessionId, 'recalled'), { force: true });
+  if (!sessionId) return;
+  try {
+    rmSync(stateFile(sessionId, 'recalled'), { force: true });
+  } catch (e) {
+    process.stderr.write(`[yapa-hook] could not clear recalled ids: ${e}\n`);
+  }
 }
 
+const RECALLED_MAX_AGE_MS = 7 * 86_400_000;
+
+function sweepRecalled(now = Date.now()): void {
+  try {
+    const dir = stateDir();
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.recalled')) continue;
+      const path = join(dir, f);
+      if (now - statSync(path).mtimeMs > RECALLED_MAX_AGE_MS) rmSync(path, { force: true });
+    }
+  } catch {
+    // best effort
+  }
+}
+
+/** Take (and clear) the capture notice the last Stop hook left for this session. */
 function takeNotice(sessionId: string | undefined): string | undefined {
   if (!sessionId) return undefined;
   const file = stateFile(sessionId, 'notice');
@@ -478,6 +501,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   noteSessionStarting(input.session_id);
   // A resumed conversation still holds the hits it was shown; a new, cleared or compacted one doesn't.
   if (input.source !== 'resume') clearRecalled(input.session_id);
+  if (input.source === 'startup') sweepRecalled();
   const detection = await detectCollection(input.cwd);
   const collection = detection.collection;
   recordSessionScope(input.session_id, collection);
@@ -618,8 +642,8 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
       return;
     }
     const shown = readRecalled(input.session_id);
-    const fresh = recall.filter(r => !shown.has(r.id));
-    const repeats = recall.filter(r => shown.has(r.id));
+    const fresh = recall.filter(r => !shown.has(shownKey(r)));
+    const repeats = recall.filter(r => shown.has(shownKey(r)));
     if (fresh.length) lines.push('', '## Top matches');
     for (const r of fresh) {
       const sal = r.metadata.salience?.toFixed(2) ?? '?';
@@ -628,8 +652,8 @@ export async function userPromptSubmit(input: UserPromptSubmitInput): Promise<vo
       const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : '';
       lines.push(`- **${r.id}** (salience ${sal}, distance ${dist}${where}${attribution(r.metadata)}): ${snippet}`);
     }
-    if (repeats.length) lines.push('', `_Also matched, shown earlier in this session: ${repeats.map(r => r.id).join(', ')}._`);
-    recordRecalled(input.session_id, fresh.map(r => r.id));
+    if (repeats.length) lines.push('', shownEarlierLine(repeats, collection));
+    recordRecalled(input.session_id, fresh.map(shownKey));
   } catch (e) {
     process.stderr.write(`[yapa-hook] memory_recall failed: ${e}\n`);
     emit({});
@@ -686,6 +710,7 @@ export async function stop(input: StopInput): Promise<void> {
  */
 export async function postCompact(input: PostCompactInput): Promise<void> {
   emit({});
+  clearRecalled(input.session_id);
   const summary = (input.compact_summary ?? '').trim();
   if (!getConfig().CAPTURE_COMPACTION || !summary) return;
   try {
@@ -712,7 +737,7 @@ export async function sessionEnd(input: SessionEndInput): Promise<void> {
   // own shutdown (it owns the journal session id); here we only drop this
   // session's hook state.
   if (!input.session_id) return;
-  for (const kind of ['turn', 'notice', 'recalled'] as const) {
+  for (const kind of ['turn', 'notice'] as const) {
     try { rmSync(stateFile(input.session_id, kind), { force: true }); } catch { /* ignore */ }
   }
 }

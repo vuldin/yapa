@@ -11,7 +11,7 @@ const { pullCollection, captureTurn, heartbeatIfDue, pushDocsNow } = vi.hoisted(
 }));
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue, pushDocsNow }));
 
-import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
+import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories, updateMemory } from '@yapa/core';
 import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten } from './hooks.js';
 
 let dir: string;
@@ -172,34 +172,67 @@ describe('userPromptSubmit', () => {
     expect(restore()).toEqual({});
   });
   describe('hits already shown in this session', () => {
-    const ask = async (session: string) => {
+    const ask = async (session: string, prompt = 'when is acme prod maintenance?') => {
       capture();
-      await userPromptSubmit({ session_id: session, cwd: join(dir, 'proj', 'acme', 'src'), prompt: 'when is acme prod maintenance?' });
+      await userPromptSubmit({ session_id: session, cwd: join(dir, 'proj', 'acme', 'src'), prompt });
       return restore().hookSpecificOutput.additionalContext as string;
     };
+    const ids = (ctx: string) => [...ctx.matchAll(/\*\*(mem-[a-z0-9-]+)\*\*/g)].map(m => m[1]);
 
-    it('are named, not repeated, on later prompts', async () => {
+    it('are named with a short preview, not repeated, on later prompts', async () => {
       const first = await ask('rep-1');
       expect(first).toMatch(/Thursdays 02:00 UTC/);
-      const id = first.match(/\*\*(mem-[a-z0-9-]+)\*\*/)![1];
+      const shown = ids(first);
       const second = await ask('rep-1');
-      expect(second).not.toMatch(/Thursdays 02:00 UTC/);
-      expect(second).toContain(`Also matched, shown earlier in this session: ${id}`);
+      expect(ids(second)).toEqual([]);
+      for (const id of shown) expect(second).toContain(id);
+      expect(second).toMatch(/Also matched, shown earlier in this session: mem-[a-z0-9-]+ \(.*"/);
+      expect(second).toMatch(/from `customer-globex`: "/);
       expect(second).toContain('**Scope:** `project-acme`');
       expect(await ask('rep-other')).toMatch(/Thursdays 02:00 UTC/);
     });
 
-    it('come back in full after a compaction, a clear or a new session, but not on resume', async () => {
+    it('shows a new hit in full next to named repeats', async () => {
+      await ask('rep-mix');
+      await storeMemory('acme prod maintenance also pauses the nightly acme backups', { collection: 'project-acme', salience: 2 });
+      const next = await ask('rep-mix');
+      expect(next).toContain('nightly acme backups');
+      expect(next).toContain('Also matched, shown earlier in this session:');
+    });
+
+    it('shows an edited memory in full again', async () => {
+      const first = await ask('rep-edit', 'what pauses the acme backups?');
+      const id = ids(first).find(i => first.includes(`**${i}**`) && first.includes('nightly acme backups'))!;
+      await updateMemory(id, { note: 'moved to Fridays from December' });
+      const again = await ask('rep-edit', 'what pauses the acme backups?');
+      expect(ids(again)).toContain(id);
+      expect(again).toContain('moved to Fridays');
+    });
+
+    it('come back in full after a compaction, a /clear or a new session, but not on resume', async () => {
       await ask('rep-2');
       for (const [source, full] of [['resume', false], ['compact', true], ['clear', true]] as const) {
         capture();
         await sessionStart({ session_id: 'rep-2', cwd: join(dir, 'proj', 'acme'), source });
         restore();
         const again = await ask('rep-2');
-        expect(/Thursdays 02:00 UTC/.test(again), source).toBe(full);
+        expect(ids(again).length > 0, source).toBe(full);
       }
       await sessionEnd({ session_id: 'rep-2' });
-      expect(await ask('rep-2')).toMatch(/Thursdays 02:00 UTC/);
+      capture();
+      await sessionStart({ session_id: 'rep-2', cwd: join(dir, 'proj', 'acme'), source: 'resume' });
+      restore();
+      expect(ids(await ask('rep-2'))).toEqual([]);
+      await postCompact({ session_id: 'rep-2', cwd: join(dir, 'proj', 'acme'), compact_summary: '' });
+      expect(ids(await ask('rep-2')).length).toBeGreaterThan(0);
+    });
+
+    it('still recalls in full when the state file is corrupt', async () => {
+      await ask('rep-bad');
+      const file = join(dir, 'plugin-data', 'sessions', 'rep-bad.recalled');
+      expect(existsSync(file)).toBe(true);
+      writeFileSync(file, '{not json');
+      expect(ids(await ask('rep-bad')).length).toBeGreaterThan(0);
     });
   });
 });

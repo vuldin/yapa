@@ -39,6 +39,9 @@ import {
   waitingLine,
   includesUser,
   fenceWaiting,
+  shownKey,
+  shownEarlierLine,
+  type RecallResult,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
@@ -49,7 +52,7 @@ interface AgentState {
   detection?: CollectionDetection;
   /** The scope file version `detection` was made with. */
   scopeVersion?: string;
-  /** Memory ids recall already put in this session's context (until a compaction drops them). */
+  /** Recall hits already put in this session's context (core shownKey), until a compaction drops them. */
   recalled?: Set<string>;
   /** ID of the human message the last recall injection ran for. */
   recalledMessageId?: string;
@@ -84,9 +87,9 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
     states.delete(session.id);
   });
 
-  // A compaction summarizes earlier recall away: show those hits in full again.
+  // A compaction summarizes or prunes earlier recall away: show those hits in full again.
   ctx.on('session/event', (session, event) => {
-    if (event.type === 'compaction/summary') states.get(session.id)?.recalled?.clear();
+    if (event.type === 'compaction/summary' || event.type === 'compaction/prune') states.get(session.id)?.recalled?.clear();
   });
 
   ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {
@@ -140,6 +143,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       if (captureNotice) lines.push('', `## Auto-capture\n${captureNotice}`);
       for (const n of claimNotices) lines.push('', `**YAPA claim:** ${n}`);
 
+      let fresh: RecallResult[] = [];
       if (doRecall && promptMessage) {
         const results = await recallMemory(promptText, {
           collection,
@@ -148,8 +152,8 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
         }).catch(() => []);
         signal.throwIfAborted();
         const recalled = (state.recalled ??= new Set<string>());
-        const fresh = results.filter(r => !recalled.has(r.id));
-        const repeats = results.filter(r => recalled.has(r.id));
+        fresh = results.filter(r => !recalled.has(shownKey(r)));
+        const repeats = results.filter(r => recalled.has(shownKey(r)));
         if (fresh.length) {
           lines.push('', '## Recalled memories (for the current prompt)');
           for (const r of fresh) {
@@ -159,8 +163,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
             lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}${where}): ${snippet}`);
           }
         }
-        if (repeats.length) lines.push('', `_Also matched, shown earlier in this session: ${repeats.map(r => r.id).join(', ')}._`);
-        for (const r of fresh) recalled.add(r.id);
+        if (repeats.length) lines.push('', shownEarlierLine(repeats, collection));
         state.recalledMessageId = promptMessage.id;
       }
 
@@ -227,6 +230,8 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       if (text.length > resolved.maxContextBytes) {
         text = `${text.slice(0, resolved.maxContextBytes)}\n\n_(truncated)_`;
       }
+      // Only hits that made it into the message count as shown.
+      for (const r of fresh) if (text.includes(`**${r.id}**`)) state.recalled?.add(shownKey(r));
 
       const injected = createUserMessage({
         content: [{ type: 'text', text }],

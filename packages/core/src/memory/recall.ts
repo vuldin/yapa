@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { metadataDelta, patchDocuments, queryDocuments, queryAllCollections } from '../store/index.js';
 import { isReadOnlyDoc } from '../sync/syncable.js';
 import { getConfig } from '../config.js';
@@ -169,4 +170,27 @@ function track(p: Promise<void>): void {
 /** Wait for salience boosts still being written (before exiting, or removing a test store). */
 export async function settleRecallBoosts(): Promise<void> {
   while (pendingBoosts.size) await Promise.all([...pendingBoosts]);
+}
+
+/**
+ * What a host remembers about a recall hit it already showed: the id and a
+ * hash of the content, so an edited memory (same id, new text) counts as new.
+ */
+export function shownKey(r: Pick<RecallResult, 'id' | 'content'>): string {
+  return `${r.id}:${createHash('sha1').update(r.content).digest('hex').slice(0, 12)}`;
+}
+
+/**
+ * The line that names hits already shown earlier in the session: each id
+ * with a short preview, and its collection when it isn't the active one, so
+ * the topic stays clear even when the earlier block has scrolled far back.
+ */
+export function shownEarlierLine(repeats: RecallResult[], activeCollection: string): string {
+  const items = repeats.map(r => {
+    const preview = r.content.replace(/\s+/g, ' ').trim();
+    const short = preview.length > 60 ? `${preview.slice(0, 59)}…` : preview;
+    const where = r.collection && r.collection !== activeCollection ? `from \`${r.collection}\`: ` : '';
+    return `${r.id} (${where}"${short}")`;
+  });
+  return `_Also matched, shown earlier in this session: ${items.join('; ')}._`;
 }
