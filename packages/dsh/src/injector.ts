@@ -17,6 +17,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-agent';
+// Loads the compaction event vocabulary into the session event map.
+import type {} from '@deepseek-ai/dsh-compaction';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { UserMessage } from '@deepseek-ai/dsh-session';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -37,6 +39,11 @@ import {
   waitingLine,
   includesUser,
   fenceWaiting,
+  shownKey,
+  shownEarlierLine,
+  splitShown,
+  recallSnippet,
+  type RecallResult,
 } from '@yapa/core';
 import type { ResolvedConfig } from './config.js';
 import { takeCaptureNotice } from './response-capture.js';
@@ -47,6 +54,8 @@ interface AgentState {
   detection?: CollectionDetection;
   /** The scope file version `detection` was made with. */
   scopeVersion?: string;
+  /** Recall hits already put in this session's context (core shownKey), until a compaction drops them. */
+  recalled?: Set<string>;
   /** ID of the human message the last recall injection ran for. */
   recalledMessageId?: string;
   /** Collections whose open tasks were already surfaced this session. */
@@ -78,6 +87,11 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
 
   ctx.on('session/disposed', session => {
     states.delete(session.id);
+  });
+
+  // A compaction summarizes or prunes earlier recall away: show those hits in full again.
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'compaction/summary' || event.type === 'compaction/prune') states.get(session.id)?.recalled?.clear();
   });
 
   ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {
@@ -131,6 +145,7 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       if (captureNotice) lines.push('', `## Auto-capture\n${captureNotice}`);
       for (const n of claimNotices) lines.push('', `**YAPA claim:** ${n}`);
 
+      let fresh: RecallResult[] = [];
       if (doRecall && promptMessage) {
         const results = await recallMemory(promptText, {
           collection,
@@ -138,15 +153,20 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
           crossCollection: resolved.core.CROSS_COLLECTION_RESULTS,
         }).catch(() => []);
         signal.throwIfAborted();
-        if (results.length) {
+        const recalled = (state.recalled ??= new Set<string>());
+        const split = splitShown(results, recalled);
+        fresh = [...split.fresh, ...split.edited];
+        const repeats = split.repeats;
+        if (fresh.length) {
           lines.push('', '## Recalled memories (for the current prompt)');
-          for (const r of results) {
+          for (const r of fresh) {
             const sal = r.metadata.salience?.toFixed(2) ?? '?';
-            const snippet = r.content.length > 240 ? `${r.content.slice(0, 240)}…` : r.content;
+            const snippet = recallSnippet(r, split.edited.includes(r));
             const where = r.collection && r.collection !== collection ? `, from \`${r.collection}\`` : '';
             lines.push(`- **${r.id}** (salience ${sal}, distance ${r.distance.toFixed(3)}${where}): ${snippet}`);
           }
         }
+        if (repeats.length) lines.push('', shownEarlierLine(repeats, collection));
         state.recalledMessageId = promptMessage.id;
       }
 
@@ -213,6 +233,8 @@ export function registerInjector(ctx: Context, getResolved: () => ResolvedConfig
       if (text.length > resolved.maxContextBytes) {
         text = `${text.slice(0, resolved.maxContextBytes)}\n\n_(truncated)_`;
       }
+      // Only hits that made it into the message count as shown.
+      for (const r of fresh) if (text.includes(`**${r.id}**`)) state.recalled?.add(shownKey(r));
 
       const injected = createUserMessage({
         content: [{ type: 'text', text }],

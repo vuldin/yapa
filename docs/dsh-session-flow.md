@@ -128,9 +128,10 @@ requires `confirm: true`.
 
 | Hook (DSH event) | What it does | Surfacing |
 |---|---|---|
-| `agent/pre-step` (injector) | Scope detection, auto-recall per human prompt, open tasks once per scope per session, capture notices, compaction candidates | `# YAPA Context` plugin message spliced after the prompt |
+| `agent/pre-step` (injector) | Scope detection, auto-recall per human prompt (a hit already shown in the session is named with a short preview instead of repeated), open tasks once per scope per session, capture notices, compaction candidates | `# YAPA Context` plugin message spliced after the prompt |
 | `session/event` → `user/message` + `assistant/message` + `turn/end` (response-capture) | Buffers the turn, aux-LLM extractor, resolver decides skip/add/supersede | Auto-stored memories; one-line notice on the next injection |
 | `session/event` → `compaction/summary` (compaction-capture) | Stores the harness's context-compaction summary as an episodic memory | Recalled by future sessions |
+| `session/event` → `compaction/summary` or `compaction/prune` (injector) | Forgets which recall hits this session was shown, so they appear in full again | Next injection |
 | `tools/result` on task create/update (schedule-bridge) | Future due date → `schedule_create` reminder | `schedule_list` shows the bridged wake-up |
 | `tools/pre-execute` (approval-gate) | `ask` verdict for gated tools under ask-policy | GUI approval prompt / fail-closed headless |
 | `session/disposed` (lifecycle) | Consolidates the session's journal drafts into one `journal` memory | Recalled by future sessions |
