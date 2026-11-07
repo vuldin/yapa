@@ -11,9 +11,9 @@ Set at install (`claude plugin install yapa@yapa --config key=value`, repeatable
 | `username` | OS login name | Name on task IDs and on everything you sync (with the sync service it comes from your Google account; this is then informational) |
 | `storage` | `local` | `local` embedded store (no server) or `chroma` |
 | `chroma_url` | `http://localhost:8000` | ChromaDB server when `storage` is `chroma` |
-| `sync_enabled`, `sync_service_url` | off | Team sync through the YAPA sync service, signed in with your Google account (`gcloud auth login`) |
+| `sync_enabled`, `sync_service_url` | off | Team sync with a remote that serves the Sync API over HTTP, such as the YAPA sync service, signed in with a Google ID token (`gcloud auth login`) |
 | `sync_mcp_url`, `sync_mcp_token_cmd`, `sync_mcp_tool` | empty | Team sync with a remote that serves the Sync API as an MCP tool, signed in with the token the command prints ([Connecting to a remote](connecting-to-a-remote.md#a-remote-served-over-mcp)) |
-| `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service URL is set; stored in the system credential store) |
+| `sync_database_url`, `sync_ca_cert` | _(empty)_ | Advanced/self-host: direct PostgreSQL+pgvector URL (ignored when a service or MCP URL is set; stored in the system credential store) |
 | `remote_name` | _(empty)_ | Your team's sync remote's name on the status line: `yapa@v<version> <-> <name>` (see [The status line](sync.md#the-status-line)) |
 | `statusline` | on | Add YAPA's status line to `~/.claude/settings.json` at session start (an existing one is kept; removing YAPA's keeps it removed) |
 | `status_label` | _(empty)_ | Deprecated: use `remote_name` (still read when that is empty) |
@@ -44,7 +44,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_SYNC_MCP_TOKEN_CMD` | Command printing the bearer token for `YAPA_SYNC_MCP_URL` (required with it) | _(none)_ |
 | `YAPA_SYNC_MCP_TOOL` | The sync tool's exact name, when it is neither `yapa_sync` nor one prefixed name like `remote__yapa_sync` | _(found with tools/list)_ |
 | `YAPA_SYNC_HTTP_TIMEOUT_MS` | Per-request timeout for the sync service | `15000` |
-| `YAPA_SYNC_DATABASE_URL` | Advanced/self-host: direct PostgreSQL connection string (ignored when a service URL is set) | _(none)_ |
+| `YAPA_SYNC_DATABASE_URL` | Advanced/self-host: direct PostgreSQL connection string (ignored when a service or MCP URL is set) | _(none)_ |
 | `YAPA_SYNC_INTERVAL_MS` | Background sync interval in ms (one cycle per interval per machine, shared by every session) | `300000` (5 min) |
 | `YAPA_SYNC_COORDINATE` | Share the interval cycle among every YAPA server on this machine; `false`: each server syncs on its own timer | `true` |
 | `YAPA_SYNC_SIMILARITY_THRESHOLD` | Cosine similarity threshold for dedup | `0.95` |

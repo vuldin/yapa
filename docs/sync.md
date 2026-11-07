@@ -45,8 +45,6 @@ yapa@v1.7.0 (v1.8.0 available) <-> acme ● synced 2m ago | project-acme
 - **Recovery:** after `gcloud auth login`, the next request mints a new token; no restart. The segment turns green at the next sync cycle or prompt.
 - While sync is down, the hooks also tell Claude, so it doesn't claim your writes reached teammates.
 
-With the service, your username comes from your Google account (shown in `sync status`); task ids use it, and the `username` option is informational. The service enforces ownership (only the owner deletes a shared row), refuses content that looks like a secret (the doc stays local and unsynced, listed in `sync status`, and is retried only after you edit it), renames a task whose id already belongs to a different task, and sends deletions to teammates' machines (a clean copy is removed; a copy with unpushed edits is kept and reported).
-
 ## How it works
 
 When sync is enabled, YAPA runs a background push/pull cycle every 5 minutes (configurable via `YAPA_SYNC_INTERVAL_MS`), and two faster paths keep teammates current within seconds:
@@ -66,8 +64,8 @@ The cycle itself:
 
 - **Attribution** — documents keep their original author (`origin_user`); injected context marks teammates' items `by <user>`.
 - **`global` is local-only** — like `private-`/`local-` collections it never leaves your machine (not even to your other devices). Put team-wide knowledge in a shared collection such as `project-cs-team`.
-- **Same user, several machines**: sign in with the same Google account (direct database: use the same `YAPA_USERNAME`) everywhere; each install has its own device id.
-- **Access control**: with the sync service, the server checks every request against your Google identity; with a direct database, everyone with the URL can read every shared collection. Either way, use `private-`/`local-` collections for anything that must not leave your machine.
+- **Same user, several machines**: sign in to the remote as the same person everywhere (direct database: use the same `YAPA_USERNAME`); each install has its own device id.
+- **Access control**: a remote checks every request against who you signed in as; with a direct database, everyone with the URL can read every shared collection. Either way, use `private-`/`local-` collections for anything that must not leave your machine.
 
 You can also trigger a sync manually with `sync` (`action: 'now'`), check status with `action: 'status'`, and manage subscriptions with `action: 'subscribe'` / `'unsubscribe'`.
 
@@ -76,7 +74,7 @@ You can also trigger a sync manually with `sync` (`action: 'now'`), check status
 Both push and pull compare document embeddings against existing data using cosine similarity:
 
 - **On push**: each local document's embedding is compared against the remote database. If a match exceeds the similarity threshold (default 0.95), the documents are linked via `related_ids` in both local and remote metadata. The document is still pushed — nothing is discarded.
-- **On pull**: each remote document is compared against local ChromaDB data. Matches above the threshold are linked the same way. The remote document is still inserted locally.
+- **On pull**: each remote document is compared against the local store. Matches above the threshold are linked the same way. The remote document is still inserted locally.
 
 This means near-duplicates coexist but are cross-referenced, so you can trace where related knowledge came from without losing data. Adjust the threshold with `YAPA_SYNC_SIMILARITY_THRESHOLD` — lower values link more aggressively, higher values require near-exact matches.
 

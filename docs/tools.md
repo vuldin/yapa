@@ -2,10 +2,10 @@
 
 ## Tools
 
-The table below lists the **MCP** tool names. The DSH plugin exposes the same
-capabilities with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`),
-plus `yapa_status` and `yapa_storage_import` (30 by default). `setup_instructions` and
-`uninstall` are MCP-only (DSH has nothing to write into config files).
+The table below lists the **MCP** tool names. The DSH plugin has the same
+tools with a `yapa_` prefix (`memory_recall` → `yapa_memory_recall`), 30 by
+default: all but `lease`, `counter_next`, `setup_instructions` and `uninstall`,
+plus `yapa_status` and `yapa_storage_import`.
 
 **Tool surface, kept lean:** the 32 tools below are visible by default. The
 ML-ops subsystem (curation classifier, bucket routing, system-prompt
@@ -38,7 +38,7 @@ walkthrough and its tools.
 | `task_search` | Semantic search across tasks |
 | `task_add_dependency` | Add depends-on/blocks relationship |
 | `task_remove_dependency` | Remove a depends-on/blocks relationship (both sides, dangling edges too) |
-| `lease` | Bare leases on the sync service for non-task resources: `acquire` / `heartbeat` / `release` / `list` (also `yapa coord`) |
+| `lease` | Bare leases for non-task resources (on the sync service in a shared collection, on this machine in a local-only one or with sync off): `acquire` / `heartbeat` / `release` / `list` (also `yapa coord`) |
 | `counter_next` | Next value of a shared counter (ids that must not collide across people) |
 | `collection_list` | List all collections with doc counts |
 | `scope` | This machine's [folder rules](collections.md#folder-rules): `show` them and what they mean for this session's folder, or change one (`add_root`, `remove_root`, `add_customer`, `remove_customer`, `map`, `unmap`), only when the user asks |
@@ -50,11 +50,11 @@ walkthrough and its tools.
 | `sync` | Sync control via `action`: `status` (health, last pull, pending), `now` (push+pull cycle), `collections` (remote list + subscriptions), `subscribe` / `unsubscribe` (local data preserved) |
 | `uninstall` | Remove YAPA from your system |
 
-## Always-on hooks (Claude Code and other MCP hosts)
+## Always-on hooks (Claude Code)
 
 > Under the DSH plugin this section does not apply: recall and task surfacing
 > are built into the turn seam (`agent/pre-step`) with nothing to register —
-> see `packages/dsh/architecture.md`.
+> see `packages/dsh/architecture.md`. Cursor and OpenCode have no hooks.
 
 The `yapa` CLI (`plugin/dist/yapa.mjs`, or `packages/mcp/dist/cli/index.js`)
 implements YAPA's Claude Code hooks. The plugin registers them automatically;
@@ -62,7 +62,7 @@ implements YAPA's Claude Code hooks. The plugin registers them automatically;
 
 | Hook | What it does |
 |------|--------------|
-| `SessionStart` | Detects scope from `cwd` and the [folder rules](collections.md#folder-rules), pulls teammates' latest writes for that collection, injects open tasks + what waits on you (decisions, questions, person-only steps, across collections) + top memories + compaction candidates (plus the standing rules under the plugin). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
+| `SessionStart` | Detects scope from `cwd` and the [folder rules](collections.md#folder-rules), pulls teammates' latest writes for that collection, injects open tasks + what waits on you (decisions, questions, person-only steps, across collections) + top memories + compaction candidates (plus the standing rules under the plugin, or with `YAPA_HOOK_INJECT_RULES=true`). Re-injects after context compaction (`source: compact`). Rolls up journal drafts left by crashed sessions. |
 | `UserPromptSubmit` | Pulls the active collection from the shared DB (bounded by `YAPA_HOOK_PULL_TIMEOUT_MS`, fail-open), then injects the top 3 recall matches for the prompt. Teammates' items are marked `by <user>`; hits from other collections `from <collection>`. |
 | `Stop` (async) | Unless `YAPA_RESPONSE_CAPTURE=false`: judges the finished turn (the buffered prompt + Claude Code's `last_assistant_message`) with an aux model: it stores durable findings as `auto-capture` memories (salience ≤ 2.0, deduplicated, typed when they are a finding, a decision made, a limitation, a question or an idea, and linked to the task the session holds), and it records what the turn settles in the open items it touches (a person's choice on a needed decision, an answer to a question, a finding's disposition), so a task waiting on a decision comes back by itself. Uses `claude -p --model haiku` when no curation API key is configured, so subscription users need no key. The result shows as a one-line notice on the next prompt. |
 | `PostCompact` (async) | Stores Claude Code's compaction summary as an episodic `compaction` memory, so it outlives the context window. Recall and session start's top memories leave these summaries out unless asked (`memory_recall` with `include_sessions: true`), and they don't count toward memory compaction. |

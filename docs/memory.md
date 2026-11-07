@@ -98,4 +98,4 @@ To use a non-default provider, add the relevant env vars to your MCP host config
 
 Note: the embedding provider and the **storage backend** are independent
 choices — the in-process embedder pairs with both the embedded local store
-(default under the DSH plugin) and a ChromaDB server (default under MCP).
+(the default for the Claude Code and DSH plugins) and a ChromaDB server (the default for a server registered by hand without `YAPA_STORAGE`).

@@ -11,7 +11,7 @@ YAPA gives your AI agent memory and tasks that last across sessions. It remember
 YAPA has two frontends over the same core:
 
 - **Claude Code plugin** — the MCP server, the always-on hooks, the status line and skills in one install. The same server also runs under other MCP hosts (Cursor, OpenCode, `claude mcp add`).
-- **DeepSeek Harness (DSH) plugin** — a native cordis plugin: the same tools with a `yapa_` prefix, context injected at the turn seam, capture of every turn, and a daily contradiction janitor. No hooks and no MCP subprocess.
+- **DeepSeek Harness (DSH) plugin** — a native cordis plugin: the tools with a `yapa_` prefix (all but leases and counters, plus status and storage import), context injected at the turn seam, capture of every turn, and a daily contradiction janitor. No hooks and no MCP subprocess.
 
 ## Install
 
@@ -22,7 +22,7 @@ claude plugin marketplace add vuldin/yapa
 claude plugin install yapa@yapa
 ```
 
-That's all: the plugin brings the MCP server, the hooks, YAPA's standing rules (injected at session start), the status line and the `/yapa:standup`, `/yapa:work` and `/yapa:statusline` skills. Storage is the embedded local store, so no database server is needed. Options can be set at install with `--config key=value` (for example `--config remote_name=acme`), or later with `/plugin` → Configure options. See [Configuration](docs/configuration.md).
+That's all: Claude Code installs the runtime dependencies, and the plugin brings the MCP server, the hooks, YAPA's standing rules (injected at session start), the status line and the `/yapa:standup`, `/yapa:work` and `/yapa:statusline` skills. Storage is the embedded local store, so no database server is needed. Options can be set at install with `--config key=value` (for example `--config remote_name=acme`), or later with `/plugin` → Configure options. See [Configuration](docs/configuration.md).
 
 For a whole team, add the marketplace and enable the plugin in managed or repo settings (`extraKnownMarketplaces` and `enabledPlugins: {"yapa@yapa": true}`).
 
@@ -40,8 +40,9 @@ claude mcp add -s user -t stdio -e YAPA_USERNAME=you -e YAPA_STORAGE=local -e YA
 node dist/yapa.mjs hooks install      # Claude Code only: the always-on hooks, in ~/.claude/settings.json
 ```
 
-- The hooks read the same `-e` settings from the `yapa` entry in `~/.claude.json`, so they always agree with the server. With `YAPA_HOOK_INJECT_RULES=true`, session start injects YAPA's standing rules, as the plugin does.
-- **Cursor and OpenCode** have no hooks. Register the same command in their MCP config (`~/.cursor/mcp.json`, or `.opencode/config.json` under `mcpServers`: `"command": "node"`, `"args": ["<clone>/plugin/dist/yapa-mcp.mjs"]`, settings under `"env"`). Then ask the agent to run `setup_instructions`, which writes YAPA's rules into the project's `CLAUDE.md` or `AGENTS.md`.
+- Set `YAPA_STORAGE=local` as shown: outside the plugin, the default storage is a ChromaDB server at `localhost:8000`.
+- The hooks read the same `-e` settings from the `yapa` entry in `~/.claude.json`, so they always agree with the server. With `YAPA_HOOK_INJECT_RULES=true`, session start injects YAPA's standing rules, as the plugin does. `hooks install` replaces YAPA hooks from an older install instead of adding a second set, and `hooks uninstall` removes only YAPA's.
+- **Cursor and OpenCode:** register the same command, `node <clone>/plugin/dist/yapa-mcp.mjs`, as a local (stdio) MCP server in their config, with `YAPA_STORAGE=local` and `YAPA_USERNAME` in its environment. These hosts have no hooks, so the per-prompt recall, the capture after each turn and the session-start context don't run there; the agent uses the tools directly.
 
 ## Getting started
 
@@ -70,7 +71,7 @@ yapa scope map ~/notes/acme private-acme # this folder (and below) uses private-
 yapa scope unmap ~/notes/acme            # also: remove-root, remove-customer
 ```
 
-**New shared collections only come from project roots.** An agent can name any collection on a write. One that would create a new shared collection is refused unless the session's folder is under a project root, or is mapped to exactly that collection, and the refusal suggests a `private-` name. Shared collections that already exist here can be written from anywhere. With no project roots set, nothing new is shared.
+**New shared collections only come from project roots.** An agent can name any collection on a write. One that would create a new shared collection is refused unless the session's folder is under a project root, or is mapped to exactly that collection, and the refusal suggests a `private-` name. Shared collections that already exist here can be written from anywhere. With no project roots and no folder mapped to a shared collection, nothing new is shared.
 
 More, including symlinks, mappings inside roots and merging a shared collection into a private one: [Collections and folder rules](docs/collections.md).
 
@@ -78,8 +79,8 @@ More, including symlinks, mappings inside roots and merging a shared collection 
 
 In Claude Code the hooks do this; in DSH the plugin does it at the turn seam, with its standing rules in the system prompt.
 
-- **Session start** injects the open tasks, what waits on you (decisions to make, questions to answer, steps only a person can take), the top memories and the standing rules.
-- **Every prompt** gets the top recall matches for what you asked, from the active collection plus a few strongly relevant hits from other shared collections, each labeled with where it came from. Hits from private collections never show up in another collection's recall. In Claude Code the hooks first pull the collection from the remote, so a teammate's write from seconds ago is included; DSH gets it from its background sync.
+- **Session start** injects the open tasks, what waits on you (decisions to make, questions to answer, steps only a person can take) and the top memories, plus the standing rules under the plugin (or with `YAPA_HOOK_INJECT_RULES=true`).
+- **Every prompt** gets the top recall matches for what you asked, from the active collection plus a few strongly relevant hits from other collections, each labeled with where it came from. Those extra hits never come from a `private-*` or `local-*` collection. In Claude Code the hooks first pull the collection from the remote, so a teammate's write from seconds ago is included; DSH gets it from its background sync.
 - **After each turn** an aux model judges the turn. It stores durable findings as typed memories (finding, decision, limitation, question, idea), deduplicated and linked to the task the session holds, and it records what the turn settled in open decisions and questions. A task waiting on a decision comes back by itself once it's made. In Claude Code, without a curation API key it uses `claude -p --model haiku`; DSH uses its own model routing. `yapa capture status` shows whether this is working.
 - **Context compaction** stores Claude Code's or DSH's compaction summary as a memory, so it outlives the context window.
 
@@ -106,7 +107,7 @@ Shared collections can sync with a remote that implements [YAPA Sync API v1](doc
 - In Claude Code, the hooks pull the active collection before each prompt, so a teammate's memory from a minute ago shows up on your next one.
 - A background cycle runs every 5 minutes, one per machine.
 
-Teammates' items are labeled `by <user>`. Only the owner can delete a shared row, and deletes are restorable for 30 days.
+Teammates' items are labeled `by <user>`. With the sync service, only the owner can delete a shared row, and deletes are restorable for 30 days.
 
 The status line under the prompt shows the version, the remote and sync health, for example `yapa@v1.16.0 <-> acme ● synced 2m ago | project-api`. When your sign-in lapses it says so, with the command to fix it.
 
@@ -115,9 +116,9 @@ Before connecting, read [Connecting to a remote](docs/connecting-to-a-remote.md)
 ### Privacy
 
 - `private-*`, `local-*` and `global` collections never sync, not even to your other machines.
-- A private collection's notes stay out of other collections' recall and session start.
+- A private collection's notes stay out of the extra hits other collections' recall adds, and session start in a shared collection only counts its open items. A search with no collection, or one that names the private collection, still finds them, and `global` shows up everywhere: keep secrets out of it.
 - Nothing reaches a remote unless you turn sync on, and then only shared collections do.
-- A document that moves into a private collection is retracted from the remote.
+- When one of your documents moves into a private collection, it's retracted from the remote; teammates' documents stay shared.
 
 ## The `yapa` CLI
 
@@ -152,7 +153,7 @@ Folder rules aren't options: they're in the scope file above. Everything else, i
 ## Upgrading and uninstalling
 
 - **Upgrade:** `claude plugin marketplace update yapa && claude plugin update yapa@yapa`, then restart Claude Code. The status line says when a new release is out, and when a session still runs an older one. [CHANGELOG.md](CHANGELOG.md) lists what changed and any upgrade steps.
-- **Uninstall:** `claude plugin uninstall yapa@yapa`, or say "uninstall yapa" in a session of a `claude mcp add` install. Your data stays in `~/.local/share/yapa` unless you delete it.
+- **Uninstall:** first `node ~/.local/share/yapa/statusline.mjs --uninstall`, which removes YAPA's status line (and restores one it wrapped). Then `claude plugin uninstall yapa@yapa`; for a `claude mcp add` install, `node <clone>/plugin/dist/yapa.mjs hooks uninstall`, `claude mcp remove yapa`, then delete the clone. Your data stays in `~/.local/share/yapa` unless you delete it.
 
 ## Documentation
 
