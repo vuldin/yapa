@@ -22,8 +22,8 @@ function scopeFile(env) {
   return get(env, "SCOPE_FILE", process.env.VITEST ? pathJoin(tmpdir(), `yapa-test-scope-${process.pid}.json`) : pathJoin(homedir(), ".local", "share", "yapa", "scope.json"));
 }
 function get(env, key, fallback = "") {
-  const pick = (v) => v === void 0 || v === "" ? void 0 : v;
-  return pick(env[`YAPA_${key}`]) ?? pick(env[key]) ?? fallback;
+  const pick2 = (v) => v === void 0 || v === "" ? void 0 : v;
+  return pick2(env[`YAPA_${key}`]) ?? pick2(env[key]) ?? fallback;
 }
 function osUsername() {
   try {
@@ -1437,7 +1437,12 @@ function parse(text, file) {
   if (!map || typeof map !== "object" || Array.isArray(map) || Object.values(map).some((x) => typeof x !== "string")) {
     throw new ScopeFileError(`${file}: "collection_map" must map folders to collection names`);
   }
-  return normalize({ project_roots: strings("project_roots"), customers: strings("customers"), collection_map: map }, file);
+  return normalize({
+    project_roots: strings("project_roots"),
+    customers: strings("customers"),
+    collection_map: map,
+    records_elsewhere: strings("records_elsewhere")
+  }, file);
 }
 function normalize(s, file) {
   const abs = (dir, key) => {
@@ -1451,10 +1456,15 @@ function normalize(s, file) {
     if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file}: "${name}" (mapped from ${dir}) is not a valid collection name`);
     collection_map[abs(dir, "collection_map")] = name;
   }
+  const records_elsewhere = s.records_elsewhere.map((c) => c.trim());
+  for (const name of records_elsewhere) {
+    if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file}: "${name}" in records_elsewhere is not a valid collection name`);
+  }
   return {
     project_roots: [...new Set(s.project_roots.map((r) => abs(r, "project_roots")))].sort(),
     customers: [...new Set(s.customers.map((c) => c.trim()).filter(Boolean))].sort(),
-    collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b)))
+    collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b))),
+    records_elsewhere: [...new Set(records_elsewhere)].sort()
   };
 }
 function readScopeSettings(opts = {}) {
@@ -1571,6 +1581,15 @@ async function editScopeSettings(edit, opts = {}) {
       case "unmap":
         delete s.collection_map[scopePath(edit.dir, opts.base)];
         break;
+      case "add_records_elsewhere": {
+        const name = edit.collection.trim();
+        if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`"${name}" is not a valid collection name`);
+        s.records_elsewhere.push(name);
+        break;
+      }
+      case "remove_records_elsewhere":
+        s.records_elsewhere = s.records_elsewhere.filter((c) => c !== edit.collection.trim());
+        break;
     }
     const after = normalize(s, file);
     const changed = JSON.stringify(after) !== JSON.stringify(before);
@@ -1618,7 +1637,11 @@ function formatScopeSettings(s, file = getConfig().SCOPE_FILE) {
   const map = Object.entries(s.collection_map);
   lines.push(`- collection_map:${map.length ? "" : " (none)"}`);
   for (const [dir, c] of map) lines.push(`  - ${dir} \u2192 ${c}${isSyncableCollection(c) ? " (shared)" : " (local only)"}`);
+  lines.push(`- records_elsewhere: ${s.records_elsewhere.length ? `${s.records_elsewhere.join(", ")} (only what the project publishes with an external_ref is typed there; the rest is stored as notes)` : "(none)"}`);
   return lines.join("\n");
+}
+function recordsElsewhere(collection, s = readScopeSettings()) {
+  return s.records_elsewhere.includes(collection);
 }
 var COLLECTION_NAME_RE, empty, ScopeFileError, cache, warned, copy, realpathOrUndefined, SharedCollectionNotAllowedError;
 var init_scope_file = __esm({
@@ -1628,7 +1651,7 @@ var init_scope_file = __esm({
     init_fs_lock();
     init_syncable();
     COLLECTION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]$/;
-    empty = () => ({ project_roots: [], customers: [], collection_map: {} });
+    empty = () => ({ project_roots: [], customers: [], collection_map: {}, records_elsewhere: [] });
     ScopeFileError = class extends Error {
       constructor(message2) {
         super(message2);
@@ -1639,7 +1662,8 @@ var init_scope_file = __esm({
     copy = (s) => ({
       project_roots: [...s.project_roots],
       customers: [...s.customers],
-      collection_map: { ...s.collection_map }
+      collection_map: { ...s.collection_map },
+      records_elsewhere: [...s.records_elsewhere]
     });
     realpathOrUndefined = (p) => {
       try {
@@ -1985,18 +2009,33 @@ This session's folder, ${folder}: collection ${d.collection}${scopeNotes(d)}; it
     if (!v?.trim()) throw new Error(`${a.action} needs ${what}`);
     return v;
   };
-  const edit = a.action === "add_customer" || a.action === "remove_customer" ? { op: a.action, name: need(a.name, "a folder name (name)") } : a.action === "map" ? { op: "map", dir: need(a.dir, "a folder (dir)"), collection: need(a.collection, "a collection") } : { op: a.action, dir: need(a.dir, "a folder (dir)") };
-  const r = await editScopeSettings(edit, { base: folder });
-  const target = "dir" in edit ? scopePath(edit.dir, folder) : edit.name;
+  let merged;
+  const edit = a.action === "add_customer" || a.action === "remove_customer" ? { op: a.action, name: need(a.name, "a folder name (name)") } : a.action === "add_records_elsewhere" || a.action === "remove_records_elsewhere" ? { op: a.action, collection: a.action === "add_records_elsewhere" ? (merged = resolveCollectionRedirect(need(a.collection, "a collection").trim(), await getCollectionRedirects())).collection : need(a.collection, "a collection") } : a.action === "map" ? { op: "map", dir: need(a.dir, "a folder (dir)"), collection: need(a.collection, "a collection") } : { op: a.action, dir: need(a.dir, "a folder (dir)") };
+  let r = await editScopeSettings(edit, { base: folder });
+  if (edit.op === "remove_records_elsewhere") {
+    const redirects = await getCollectionRedirects();
+    const name = edit.collection.trim();
+    for (const old of r.settings.records_elsewhere.filter((c) => resolveCollectionRedirect(c, redirects).collection === name)) {
+      const more = await editScopeSettings({ op: "remove_records_elsewhere", collection: old }, { base: folder });
+      r = { ...more, changed: r.changed || more.changed };
+    }
+  }
+  const target = "dir" in edit ? scopePath(edit.dir, folder) : "name" in edit ? edit.name : edit.collection.trim();
   const done = {
     add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
     remove_root: [`Removed project root ${target}.`, `${target} was not a project root.`],
     add_customer: [`Folders named ${target} under a project root now use customer-${target}.`, `${target} was already a customer.`],
     remove_customer: [`${target} is no longer a customer.`, `${target} was not a customer.`],
     map: [`Mapped ${target} \u2192 ${edit.op === "map" ? edit.collection.trim() : ""}.`, `${target} was already mapped to ${edit.op === "map" ? edit.collection.trim() : ""}.`],
-    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`]
+    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`],
+    add_records_elsewhere: [
+      `${target} now keeps its records elsewhere: only memories its project publishes with an external ref (yapa memory put --ref) are typed there, and everything else is stored as a note. Typed copies made before now stay typed until \`yapa memory untype --collection ${target}\` (try --dry-run first).`,
+      `${target} already keeps its records elsewhere.`
+    ],
+    remove_records_elsewhere: [`${target} no longer keeps its records elsewhere: typed memories are stored there as usual.`, `${target} was not marked as keeping its records elsewhere.`]
   };
   const lines = [done[a.action][r.changed ? 0 : 1]];
+  if (merged?.redirectedFrom) lines.unshift(`${merged.redirectedFrom} was merged into ${merged.collection} on this machine, so ${merged.collection} is the one marked.`);
   if (r.warning) lines.push(`\u26A0 ${r.warning}`);
   lines.push("", formatScopeSettings(r.settings));
   return { ok: true, text: lines.join("\n") };
@@ -2195,6 +2234,89 @@ var init_links = __esm({
   }
 });
 
+// packages/core/src/memory/records-elsewhere.ts
+async function keepsRecordsElsewhere(collection) {
+  const listed = readScopeSettings().records_elsewhere;
+  if (!listed.length) return false;
+  if (listed.includes(collection)) return true;
+  const redirects = await getCollectionRedirects();
+  return listed.some((c) => resolveCollectionRedirect(c, redirects).collection === collection);
+}
+function typedForCollection(marked, typed) {
+  if (!marked || !isMemoryKind(typed.kind) || typed.external_ref) return { typed, keptAsNote: false };
+  return { typed: typed.task_ids?.length ? { task_ids: typed.task_ids } : {}, keptAsNote: true };
+}
+async function assertMayType(collection, current, typed) {
+  if (!isMemoryKind(typed.kind) || isMemoryKind(current.kind)) return;
+  if (typed.external_ref || current.external_ref || !await keepsRecordsElsewhere(collection)) return;
+  throw new RecordsElsewhereError(collection, `giving ${current.parent_id ?? "this memory"} a kind`);
+}
+async function untypeCollection(requested, opts = {}) {
+  const collection = resolveCollectionRedirect(requested, await getCollectionRedirects()).collection;
+  if (!await keepsRecordsElsewhere(collection)) {
+    throw new Error(`${collection} is not marked as keeping its records elsewhere: mark it first (yapa scope records-elsewhere add ${collection})`);
+  }
+  const me = getConfig().USERNAME;
+  const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e5);
+  const groups = /* @__PURE__ */ new Map();
+  for (const d of docs) {
+    if (!isMemoryKind(d.metadata.kind) || d.metadata.external_ref || d.metadata.archived === true) continue;
+    const id = d.metadata.parent_id ?? d.id;
+    groups.set(id, [...groups.get(id) ?? [], d]);
+  }
+  const result = { collection, dry_run: !!opts.dryRun, items: [], by_kind: {}, others: 0 };
+  for (const [id, parts] of groups) {
+    const meta = parts[0].metadata;
+    if (meta.username && meta.username !== me) {
+      result.others++;
+      continue;
+    }
+    parts.sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0));
+    result.items.push({ id, kind: meta.kind, ...meta.status ? { status: meta.status } : {}, content: parts.map((p) => p.content).join("") });
+    result.by_kind[meta.kind] = (result.by_kind[meta.kind] ?? 0) + 1;
+    if (opts.dryRun) continue;
+    await withDocLock(collection, id, async () => {
+      const now = Math.floor(Date.now() / 1e3);
+      const day = new Date(now * 1e3).toISOString().slice(0, 10);
+      const fresh = meta.parent_id ? (await getDocumentsByFilter2(collection, { parent_id: id }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : await getDocumentsByIds2(collection, [id]);
+      for (const [i, d] of fresh.entries()) {
+        const next = { ...d.metadata, updated_at: now, is_synced: false };
+        for (const k of UNTYPED_KEYS) delete next[k];
+        if (i === fresh.length - 1) {
+          const note = `${day} ${me}: typed fields removed (was a ${d.metadata.kind}${d.metadata.status ? `, ${d.metadata.status}` : ""}): this collection keeps its records in the project's own files.`;
+          await addDocument2(collection, d.id, `${d.content}
+
+${note}`, next);
+        }
+        await patchDocument(collection, d.id, metadataDelta(i === fresh.length - 1 ? { ...next, ...pick(d.metadata, UNTYPED_KEYS) } : d.metadata, next));
+      }
+    });
+  }
+  return result;
+}
+var KEPT_AS_NOTE_REASON, RecordsElsewhereError, UNTYPED_KEYS, pick;
+var init_records_elsewhere = __esm({
+  "packages/core/src/memory/records-elsewhere.ts"() {
+    "use strict";
+    init_store();
+    init_config();
+    init_doc_lock();
+    init_scope_file();
+    init_sentinel();
+    init_kinds();
+    KEPT_AS_NOTE_REASON = "this collection keeps its records in the project's own files, so only what the project publishes there (yapa memory put --ref) is typed";
+    RecordsElsewhereError = class extends Error {
+      code = "records_elsewhere";
+      constructor(collection, what, next = "") {
+        super(`Refused: ${what} in ${collection}: ${KEPT_AS_NOTE_REASON}. Record it in the project's own records instead, the way its instructions say${next ? `, then ${next}` : ""}.`);
+        this.name = "RecordsElsewhereError";
+      }
+    };
+    UNTYPED_KEYS = TYPED_KEYS.filter((k) => k !== "task_ids" && k !== "external_ref");
+    pick = (m, keys) => Object.fromEntries(keys.filter((k) => m[k] !== void 0).map((k) => [k, m[k]]));
+  }
+});
+
 // packages/core/src/memory/store.ts
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
@@ -2233,7 +2355,10 @@ async function archiveSuperseded(collection, oldId, newId) {
 }
 async function storeMemory(content, options = {}) {
   const { collection } = await resolveWriteCollection(options.collection ?? "global");
-  const typed = options.typed ? normalizeTyped(options.typed) : {};
+  const normalized = options.typed ? normalizeTyped(options.typed) : {};
+  const gated = typedForCollection(!!normalized.kind && await keepsRecordsElsewhere(collection), normalized);
+  const typed = gated.typed;
+  const note = gated.keptAsNote ? { kept_as_note: true } : {};
   await getOrCreateCollection2(collection);
   if (options.supersedes) {
     const [old] = await getDocumentsByIds2(collection, [options.supersedes]).catch(() => []);
@@ -2266,7 +2391,7 @@ async function storeMemory(content, options = {}) {
     await addDocument2(collection, id, content, metadata);
     if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
     if (typed.task_ids?.length) await linkMemoryToTasks(id, typed.task_ids);
-    return { ids: [id], potential_conflicts };
+    return { ids: [id], potential_conflicts, ...note };
   }
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
   const docs = chunks.map((chunk2) => {
@@ -2295,7 +2420,7 @@ async function storeMemory(content, options = {}) {
   await addDocumentsBatch2(collection, docs);
   if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
   if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
-  return { ids: docs.map((d) => d.id), potential_conflicts };
+  return { ids: docs.map((d) => d.id), potential_conflicts, ...note };
 }
 var init_store2 = __esm({
   "packages/core/src/memory/store.ts"() {
@@ -2309,6 +2434,7 @@ var init_store2 = __esm({
     init_kinds();
     init_links();
     init_sentinel();
+    init_records_elsewhere();
   }
 });
 
@@ -4649,11 +4775,11 @@ function coordinatedLocally(collection) {
   return !isSyncableCollection(collection) || !isSyncConfigured();
 }
 async function requireCoordination() {
-  const pick = async (collection) => coordinatedLocally(collection) ? localCoordination() : serviceCoordination();
+  const pick2 = async (collection) => coordinatedLocally(collection) ? localCoordination() : serviceCoordination();
   return {
-    leaseAcquire: async (req) => (await pick(req.collection)).leaseAcquire(req),
+    leaseAcquire: async (req) => (await pick2(req.collection)).leaseAcquire(req),
     leaseHeartbeat: async (collection, session, keys) => {
-      if (collection !== void 0) return (await pick(collection)).leaseHeartbeat(collection, session, keys);
+      if (collection !== void 0) return (await pick2(collection)).leaseHeartbeat(collection, session, keys);
       const mine = await localCoordination().leaseHeartbeat(void 0, session);
       if (!isSyncConfigured()) return mine;
       try {
@@ -4664,9 +4790,9 @@ async function requireCoordination() {
         throw e;
       }
     },
-    leaseRelease: async (collection, key, session, outcome) => (await pick(collection)).leaseRelease(collection, key, session, outcome),
-    leaseList: async (collection, includeExpired) => (await pick(collection)).leaseList(collection, includeExpired),
-    counterNext: async (collection, name, floor) => (await pick(collection)).counterNext(collection, name, floor),
+    leaseRelease: async (collection, key, session, outcome) => (await pick2(collection)).leaseRelease(collection, key, session, outcome),
+    leaseList: async (collection, includeExpired) => (await pick2(collection)).leaseList(collection, includeExpired),
+    counterNext: async (collection, name, floor) => (await pick2(collection)).counterNext(collection, name, floor),
     nextTaskId: async (floor) => (isSyncConfigured() ? serviceCoordination() : Promise.resolve(localCoordination())).then((c) => c.nextTaskId(floor))
   };
 }
@@ -5421,6 +5547,10 @@ var init_list2 = __esm({
 });
 
 // packages/core/src/tasks/close.ts
+function keptAsNotesLine(r) {
+  const ids = r?.kept_as_notes ?? [];
+  return ids.length ? `Kept ${ids.join(", ")} as ${ids.length === 1 ? "a note" : "notes"}, without a kind: ${KEPT_AS_NOTE_REASON}.` : "";
+}
 function validateLearned(items = []) {
   for (const it of items) {
     if (!it.content?.trim()) throw new Error("each learned item needs content");
@@ -5440,7 +5570,9 @@ async function recordForTask(task, input2) {
       tags,
       typed: { ...typed, task_ids: [.../* @__PURE__ */ new Set([task.id, ...typed.task_ids ?? []])] }
     });
-    out.memories.push(r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0]);
+    const id = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
+    out.memories.push(id);
+    if (r.kept_as_note) (out.kept_as_notes ??= []).push(id);
   }
   for (const f of input2.follow_ups ?? []) {
     if (!f.title?.trim()) continue;
@@ -5453,6 +5585,7 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   const task = await getTask(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error("decision_needed needs a question");
+  if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, "decision_needed (a YAPA decision the task waits on)", "set the task to blocked with a blocked_reason that names the record");
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join("\n\n");
   const typed = normalizeTyped({
     kind: "decision",
@@ -5506,6 +5639,7 @@ var init_close = __esm({
     init_kinds();
     init_store2();
     init_sentinel();
+    init_records_elsewhere();
     init_create();
     init_update();
     list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
@@ -6401,6 +6535,7 @@ async function updateMemory(id, patch, collection) {
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
   const typed = normalizeTyped(typedPatch, found.doc.metadata);
+  await assertMayType(found.collection, found.doc.metadata, typed);
   const now = Math.floor(Date.now() / 1e3);
   const baseId = found.doc.metadata.parent_id ?? found.doc.id;
   const metadata = await withDocLock(found.collection, baseId, async () => {
@@ -6436,6 +6571,7 @@ var init_update2 = __esm({
     init_sentinel();
     init_kinds();
     init_links();
+    init_records_elsewhere();
     MemoryNotFoundError = class extends Error {
       constructor(id) {
         super(`memory ${id} not found`);
@@ -11099,6 +11235,7 @@ __export(src_exports, {
   HOOK_CHILD_ENV: () => HOOK_CHILD_ENV,
   HttpBackend: () => HttpBackend,
   IdTokenProvider: () => IdTokenProvider,
+  KEPT_AS_NOTE_REASON: () => KEPT_AS_NOTE_REASON,
   KIND_STATUSES: () => KIND_STATUSES,
   LocalCoordinationError: () => LocalCoordinationError,
   LockTimeoutError: () => LockTimeoutError,
@@ -11110,6 +11247,7 @@ __export(src_exports, {
   REFERENCE_DATA_RULES: () => REFERENCE_DATA_RULES,
   RESOLVER_PROMPT_VERSION: () => RESOLVER_PROMPT_VERSION,
   RESOLVER_SYSTEM_PROMPT: () => RESOLVER_SYSTEM_PROMPT,
+  RecordsElsewhereError: () => RecordsElsewhereError,
   SALIENCE_BOOST_ON_ACCESS: () => SALIENCE_BOOST_ON_ACCESS,
   SALIENCE_FLOOR: () => SALIENCE_FLOOR,
   SALIENCE_MAX: () => SALIENCE_MAX,
@@ -11150,6 +11288,7 @@ __export(src_exports, {
   artifactDir: () => artifactDir,
   artifactPath: () => artifactPath,
   assertMayCreateCollection: () => assertMayCreateCollection,
+  assertMayType: () => assertMayType,
   assertWritable: () => assertWritable,
   bucketRouteNow: () => bucketRouteNow,
   bucketRoutePreview: () => bucketRoutePreview,
@@ -11296,6 +11435,8 @@ __export(src_exports, {
   judgeAggregate: () => judgeAggregate,
   judgeVerification: () => judgeVerification,
   keepDeletedUpstream: () => keepDeletedUpstream,
+  keepsRecordsElsewhere: () => keepsRecordsElsewhere,
+  keptAsNotesLine: () => keptAsNotesLine,
   knownUsers: () => knownUsers,
   lastSyncError: () => lastSyncError,
   lastWriteDir: () => lastWriteDir,
@@ -11388,6 +11529,7 @@ __export(src_exports, {
   recordSessionStart: () => recordSessionStart,
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
+  recordsElsewhere: () => recordsElsewhere,
   redirectNote: () => redirectNote,
   refreshSyncHealthNames: () => refreshSyncHealthNames,
   rejoinCollection: () => rejoinCollection,
@@ -11477,7 +11619,9 @@ __export(src_exports, {
   trainingThresholds: () => trainingThresholds,
   trainingTrigger: () => trainingTrigger,
   tryAcquireCycle: () => tryAcquireCycle,
+  typedForCollection: () => typedForCollection,
   typedLabel: () => typedLabel,
+  untypeCollection: () => untypeCollection,
   updateAdapter: () => updateAdapter,
   updateDocument: () => updateDocument2,
   updateDocumentsBatch: () => updateDocumentsBatch2,
@@ -11577,6 +11721,7 @@ var init_src = __esm({
     init_known_users();
     init_update2();
     init_external();
+    init_records_elsewhere();
     init_links();
     init_waiting();
     init_close();
@@ -11994,7 +12139,7 @@ var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
-    SCRIPT_VERSION = true ? "1.17.0" : void 0;
+    SCRIPT_VERSION = true ? "1.18.0" : void 0;
     SEMVER2 = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
     DEFAULT_INTERVAL_MS = 3e5;
     STALE_INTERVALS = 3;
@@ -12023,7 +12168,7 @@ var YAPA_VERSION;
 var init_version = __esm({
   "packages/mcp/src/version.ts"() {
     "use strict";
-    YAPA_VERSION = true ? "1.17.0" : fromPackage();
+    YAPA_VERSION = true ? "1.18.0" : fromPackage();
   }
 });
 
@@ -12334,14 +12479,14 @@ function fitContext(sections, max) {
   const render = () => sections.flatMap((s, i) => level[i] < 0 ? s.lines : s.shrink[level[i]]).join("\n");
   let text = render();
   while (text.length > max) {
-    let pick = -1;
+    let pick2 = -1;
     const cost = (i) => (sections[i].priority ?? 0) + 10 * (level[i] + 1);
     for (let i = 0; i < sections.length; i++) {
       if (level[i] + 1 >= (sections[i].shrink?.length ?? 0)) continue;
-      if (pick < 0 || cost(i) < cost(pick)) pick = i;
+      if (pick2 < 0 || cost(i) < cost(pick2)) pick2 = i;
     }
-    if (pick < 0) break;
-    level[pick]++;
+    if (pick2 < 0) break;
+    level[pick2]++;
     text = render();
   }
   if (text.length <= max) return text;
@@ -12860,7 +13005,7 @@ async function runTask(sub, args) {
     if (e instanceof ClaimBusyError) {
       return { exit: EXIT.unavailable, json: { ok: false, busy: true, error: e.message }, text: e.message };
     }
-    if (e instanceof SharedCollectionNotAllowedError) {
+    if (e instanceof SharedCollectionNotAllowedError || e instanceof RecordsElsewhereError) {
       return { exit: EXIT.refused, json: { ok: false, refused: true, code: e.code, error: e.message }, text: e.message };
     }
     if (e instanceof TaskClaimedError) {
@@ -12999,6 +13144,7 @@ ${note}` : note;
         decision ? `decision ${decision} recorded; the task waits on it` : "",
         recorded?.memories.length ? `recorded ${recorded.memories.join(", ")}` : "",
         recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(", ")}` : "",
+        keptAsNotesLine(recorded),
         nudge ?? ""
       ].filter(Boolean);
       return {
@@ -13218,6 +13364,17 @@ async function runMemory(sub, args) {
         const failed = r.items.filter((i) => i.error).length;
         return { exit: failed && failed === r.items.length ? 1 : 0, json: { ok: true, ...r }, text: lines.join("\n") };
       }
+      case "untype": {
+        const collection = flag2(args, "--collection");
+        if (!collection) throw new UsageError2("--collection is required");
+        const dryRun = args.includes("--dry-run");
+        const r = await untypeCollection(collection, { dryRun });
+        if (!dryRun && r.items.length) recordLastWrite(collection);
+        const kinds = Object.entries(r.by_kind).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`).join(", ");
+        const head = `${r.items.length} typed memor${r.items.length === 1 ? "y" : "ies"} without an external ref in ${collection}${kinds ? ` (${kinds})` : ""}` + (dryRun ? ": dry run, nothing changed; run again without --dry-run to keep them as notes" : r.items.length ? ": kept as notes now" : "") + (r.others ? `. ${r.others} of someone else's left as they are` : "");
+        const lines = [head, ...dryRun ? r.items.map((i) => `- ${i.id} [${i.kind}${i.status ? `, ${i.status}` : ""}] ${i.content.replace(/\s+/g, " ").slice(0, 120)}`) : []];
+        return { exit: 0, json: { ok: true, ...r }, text: lines.join("\n") };
+      }
       default:
         throw new UsageError2(`unknown command
 ${MEMORY_USAGE}`);
@@ -13240,6 +13397,7 @@ function fail(what, e) {
   const usage2 = e instanceof UsageError2 || e instanceof TypedMemoryError;
   const message2 = e instanceof Error ? e.message : String(e);
   const code = e instanceof MemoryNotFoundError ? "not_found" : e instanceof SharedCollectionNotAllowedError ? e.code : void 0;
+  if (e instanceof RecordsElsewhereError) return { exit: 3, json: { ok: false, refused: true, error: message2, code: e.code }, text: `${what}: ${message2}` };
   if (e instanceof SharedCollectionNotAllowedError) return { exit: 3, json: { ok: false, refused: true, error: message2, code }, text: `${what}: ${message2}` };
   return { exit: usage2 ? 2 : 1, json: { ok: false, error: message2, ...code ? { code } : {} }, text: `${what}: ${message2}` };
 }
@@ -13248,7 +13406,7 @@ var init_memory = __esm({
   "packages/mcp/src/cli/memory.ts"() {
     "use strict";
     init_src();
-    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which of your open findings older than --min-age-days (default 2) are\n  only progress notes or superseded by a newer note, and lists them (--save FILE keeps the list). --apply --from FILE\n  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
+    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n       yapa memory untype --collection C [--dry-run]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which of your open findings older than --min-age-days (default 2) are\n  only progress notes or superseded by a newer note, and lists them (--save FILE keeps the list). --apply --from FILE\n  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\nuntype turns your typed memories without an external ref (--ref) into notes, in a collection marked as keeping its\n  records elsewhere (yapa scope records-elsewhere add C): copies made before it was marked. --dry-run lists them.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
     UsageError2 = class extends Error {
     };
     csv = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
@@ -13328,14 +13486,19 @@ async function runScope(args, cwdDefault = process.cwd()) {
   const [sub, ...rest] = args;
   if (sub === "help" || sub === "--help") return { json: { ok: true }, text: SCOPE_USAGE.trimEnd(), exit: 0 };
   if (sub && !sub.startsWith("--")) {
-    const action = ACTIONS[sub];
+    let action = ACTIONS[sub];
+    if (sub === "records-elsewhere") {
+      const verb = rest.shift();
+      action = verb === "add" ? "add_records_elsewhere" : verb === "remove" ? "remove_records_elsewhere" : void 0;
+      if (!action) return { json: { ok: false, error: "records-elsewhere takes add or remove, then a collection" }, text: SCOPE_USAGE.trimEnd(), exit: 2 };
+    }
     if (!action) return { json: { ok: false, error: `unknown subcommand "${sub}"` }, text: SCOPE_USAGE.trimEnd(), exit: 2 };
     const positional2 = rest.filter((a, i) => !a.startsWith("--") && rest[i - 1] !== "--cwd");
     const folder = scopeCwd(rest, cwdDefault);
     try {
       const r = await runScopeAction({
         action,
-        ...action === "add_customer" || action === "remove_customer" ? { name: positional2[0] } : { dir: positional2[0] },
+        ...action === "add_customer" || action === "remove_customer" ? { name: positional2[0] } : action === "add_records_elsewhere" || action === "remove_records_elsewhere" ? { collection: positional2[0] } : { dir: positional2[0] },
         ...action === "map" ? { collection: positional2[1] } : {}
       }, folder);
       return { json: { ok: true, file: getConfig().SCOPE_FILE, ...readScopeSettings({ strict: true }) }, text: r.text, exit: 0 };
@@ -13370,7 +13533,7 @@ var init_scope2 = __esm({
   "packages/mcp/src/cli/scope.ts"() {
     "use strict";
     init_src();
-    SCOPE_USAGE = "Usage: yapa scope [--cwd DIR] [--text]        the collection YAPA uses for a folder\n       yapa scope list [--cwd DIR]             the folder rules (scope file) and what they mean for a folder\n       yapa scope add-root DIR | remove-root DIR\n       yapa scope add-customer NAME | remove-customer NAME\n       yapa scope map DIR COLLECTION | unmap DIR\nSubcommands print text; --json prints the resulting file as JSON.\nProject roots are folders whose subfolders are projects; new shared collections are only created from sessions under one.\n";
+    SCOPE_USAGE = "Usage: yapa scope [--cwd DIR] [--text]        the collection YAPA uses for a folder\n       yapa scope list [--cwd DIR]             the folder rules (scope file) and what they mean for a folder\n       yapa scope add-root DIR | remove-root DIR\n       yapa scope add-customer NAME | remove-customer NAME\n       yapa scope map DIR COLLECTION | unmap DIR\n       yapa scope records-elsewhere add COLLECTION | records-elsewhere remove COLLECTION\nSubcommands print text; --json prints the resulting file as JSON.\nProject roots are folders whose subfolders are projects; new shared collections are only created from sessions under one.\nA collection that keeps its records elsewhere has its findings, decisions and questions in the project's own files:\n  there only what the project publishes (yapa memory put --ref) is typed, and the rest is stored as notes.\n";
     ACTIONS = {
       list: "show",
       "add-root": "add_root",
@@ -13449,7 +13612,7 @@ function adoptLegacyScope(env = process.env) {
   } catch {
     options = void 0;
   }
-  const pick = (key) => {
+  const pick2 = (key) => {
     for (const v of [env[`YAPA_${key.toUpperCase()}`], env[`${PLUGIN_OPTION_PREFIX}${key.toUpperCase()}`], options?.[key]]) {
       if (typeof v === "string" && v.trim()) return v;
     }
@@ -13457,7 +13620,7 @@ function adoptLegacyScope(env = process.env) {
   };
   try {
     return importLegacyScope(
-      { project_roots: pick("project_roots"), customers: pick("customers"), collection_map: pick("collection_map") },
+      { project_roots: pick2("project_roots"), customers: pick2("customers"), collection_map: pick2("collection_map") },
       createConfig(env).SCOPE_FILE
     );
   } catch (e) {

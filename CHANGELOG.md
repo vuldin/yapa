@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.18.0 (2026-11-07)
+
+A project that keeps its findings, decisions and questions in its own files can now stop YAPA from making typed copies of them.
+
+**Upgrading:** update the plugin and restart Claude Code. There's no schema change, and nothing changes until you mark a collection. To mark one, run `yapa scope records-elsewhere add C`, then `yapa memory untype --collection C --dry-run` to review the typed copies made before, and the same command without `--dry-run` to turn them into notes.
+
+### Features
+- **Collections that keep their records elsewhere.** `yapa scope records-elsewhere add C` (or the `scope` tool, `yapa_scope` in DSH) marks a collection whose project keeps its findings, decisions and questions in its own files. There, only memories the project publishes with `yapa memory put --ref` are typed. Capture, `learned` items and other writes are stored as plain notes, with task links kept, and the replies say so. "Waiting on you" and the findings backlog then show the project's items, not copies of them. Answers to published items are still recorded, by hand or by the follow-through after each turn. `memory_update` won't give a note a kind there, and `decision_needed` is refused (record the decision in the project's files and set the task to blocked). The mark follows merges, and it applies only on this machine, like the other folder rules. See [Projects with their own records](docs/collections.md#projects-with-their-own-records).
+- **`yapa memory untype --collection C [--dry-run]`** turns your typed memories in a marked collection that have no external ref into notes, each with a dated line saying why. Published memories, archived ones and teammates' are left alone.
+
 ## 1.17.0 (2026-11-07)
 
 YAPA's context costs fewer repeated tokens and now reaches the model in full. Both changes came from measuring YAPA's token cost on real sessions, now written up in [Token cost](docs/cost.md).

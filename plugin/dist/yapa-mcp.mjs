@@ -8616,7 +8616,12 @@ function parse3(text, file2) {
   if (!map2 || typeof map2 !== "object" || Array.isArray(map2) || Object.values(map2).some((x) => typeof x !== "string")) {
     throw new ScopeFileError(`${file2}: "collection_map" must map folders to collection names`);
   }
-  return normalize({ project_roots: strings("project_roots"), customers: strings("customers"), collection_map: map2 }, file2);
+  return normalize({
+    project_roots: strings("project_roots"),
+    customers: strings("customers"),
+    collection_map: map2,
+    records_elsewhere: strings("records_elsewhere")
+  }, file2);
 }
 function normalize(s, file2) {
   const abs = (dir, key) => {
@@ -8630,10 +8635,15 @@ function normalize(s, file2) {
     if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file2}: "${name}" (mapped from ${dir}) is not a valid collection name`);
     collection_map[abs(dir, "collection_map")] = name;
   }
+  const records_elsewhere = s.records_elsewhere.map((c) => c.trim());
+  for (const name of records_elsewhere) {
+    if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`${file2}: "${name}" in records_elsewhere is not a valid collection name`);
+  }
   return {
     project_roots: [...new Set(s.project_roots.map((r) => abs(r, "project_roots")))].sort(),
     customers: [...new Set(s.customers.map((c) => c.trim()).filter(Boolean))].sort(),
-    collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b)))
+    collection_map: Object.fromEntries(Object.entries(collection_map).sort(([a], [b]) => a.localeCompare(b))),
+    records_elsewhere: [...new Set(records_elsewhere)].sort()
   };
 }
 function readScopeSettings(opts = {}) {
@@ -8750,6 +8760,15 @@ async function editScopeSettings(edit, opts = {}) {
       case "unmap":
         delete s.collection_map[scopePath(edit.dir, opts.base)];
         break;
+      case "add_records_elsewhere": {
+        const name = edit.collection.trim();
+        if (!COLLECTION_NAME_RE.test(name)) throw new ScopeFileError(`"${name}" is not a valid collection name`);
+        s.records_elsewhere.push(name);
+        break;
+      }
+      case "remove_records_elsewhere":
+        s.records_elsewhere = s.records_elsewhere.filter((c) => c !== edit.collection.trim());
+        break;
     }
     const after = normalize(s, file2);
     const changed = JSON.stringify(after) !== JSON.stringify(before);
@@ -8797,6 +8816,7 @@ function formatScopeSettings(s, file2 = getConfig().SCOPE_FILE) {
   const map2 = Object.entries(s.collection_map);
   lines.push(`- collection_map:${map2.length ? "" : " (none)"}`);
   for (const [dir, c] of map2) lines.push(`  - ${dir} \u2192 ${c}${isSyncableCollection(c) ? " (shared)" : " (local only)"}`);
+  lines.push(`- records_elsewhere: ${s.records_elsewhere.length ? `${s.records_elsewhere.join(", ")} (only what the project publishes with an external_ref is typed there; the rest is stored as notes)` : "(none)"}`);
   return lines.join("\n");
 }
 var COLLECTION_NAME_RE, empty, ScopeFileError, cache, warned, copy, realpathOrUndefined, SharedCollectionNotAllowedError;
@@ -8807,7 +8827,7 @@ var init_scope_file = __esm({
     init_fs_lock();
     init_syncable();
     COLLECTION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]$/;
-    empty = () => ({ project_roots: [], customers: [], collection_map: {} });
+    empty = () => ({ project_roots: [], customers: [], collection_map: {}, records_elsewhere: [] });
     ScopeFileError = class extends Error {
       constructor(message) {
         super(message);
@@ -8818,7 +8838,8 @@ var init_scope_file = __esm({
     copy = (s) => ({
       project_roots: [...s.project_roots],
       customers: [...s.customers],
-      collection_map: { ...s.collection_map }
+      collection_map: { ...s.collection_map },
+      records_elsewhere: [...s.records_elsewhere]
     });
     realpathOrUndefined = (p) => {
       try {
@@ -11878,7 +11899,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.17.0" : fromPackage();
+var YAPA_VERSION = true ? "1.18.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -41615,18 +41636,33 @@ This session's folder, ${folder}: collection ${d.collection}${scopeNotes(d)}; it
     if (!v?.trim()) throw new Error(`${a.action} needs ${what}`);
     return v;
   };
-  const edit = a.action === "add_customer" || a.action === "remove_customer" ? { op: a.action, name: need(a.name, "a folder name (name)") } : a.action === "map" ? { op: "map", dir: need(a.dir, "a folder (dir)"), collection: need(a.collection, "a collection") } : { op: a.action, dir: need(a.dir, "a folder (dir)") };
-  const r = await editScopeSettings(edit, { base: folder });
-  const target = "dir" in edit ? scopePath(edit.dir, folder) : edit.name;
+  let merged;
+  const edit = a.action === "add_customer" || a.action === "remove_customer" ? { op: a.action, name: need(a.name, "a folder name (name)") } : a.action === "add_records_elsewhere" || a.action === "remove_records_elsewhere" ? { op: a.action, collection: a.action === "add_records_elsewhere" ? (merged = resolveCollectionRedirect(need(a.collection, "a collection").trim(), await getCollectionRedirects())).collection : need(a.collection, "a collection") } : a.action === "map" ? { op: "map", dir: need(a.dir, "a folder (dir)"), collection: need(a.collection, "a collection") } : { op: a.action, dir: need(a.dir, "a folder (dir)") };
+  let r = await editScopeSettings(edit, { base: folder });
+  if (edit.op === "remove_records_elsewhere") {
+    const redirects = await getCollectionRedirects();
+    const name = edit.collection.trim();
+    for (const old of r.settings.records_elsewhere.filter((c) => resolveCollectionRedirect(c, redirects).collection === name)) {
+      const more = await editScopeSettings({ op: "remove_records_elsewhere", collection: old }, { base: folder });
+      r = { ...more, changed: r.changed || more.changed };
+    }
+  }
+  const target = "dir" in edit ? scopePath(edit.dir, folder) : "name" in edit ? edit.name : edit.collection.trim();
   const done = {
     add_root: [`Added project root ${target}: its subfolders now use project-<folder> collections, and sessions under it may create new shared collections.`, `${target} was already a project root.`],
     remove_root: [`Removed project root ${target}.`, `${target} was not a project root.`],
     add_customer: [`Folders named ${target} under a project root now use customer-${target}.`, `${target} was already a customer.`],
     remove_customer: [`${target} is no longer a customer.`, `${target} was not a customer.`],
     map: [`Mapped ${target} \u2192 ${edit.op === "map" ? edit.collection.trim() : ""}.`, `${target} was already mapped to ${edit.op === "map" ? edit.collection.trim() : ""}.`],
-    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`]
+    unmap: [`Removed the mapping for ${target}.`, `${target} was not mapped.`],
+    add_records_elsewhere: [
+      `${target} now keeps its records elsewhere: only memories its project publishes with an external ref (yapa memory put --ref) are typed there, and everything else is stored as a note. Typed copies made before now stay typed until \`yapa memory untype --collection ${target}\` (try --dry-run first).`,
+      `${target} already keeps its records elsewhere.`
+    ],
+    remove_records_elsewhere: [`${target} no longer keeps its records elsewhere: typed memories are stored there as usual.`, `${target} was not marked as keeping its records elsewhere.`]
   };
   const lines = [done[a.action][r.changed ? 0 : 1]];
+  if (merged?.redirectedFrom) lines.unshift(`${merged.redirectedFrom} was merged into ${merged.collection} on this machine, so ${merged.collection} is the one marked.`);
   if (r.warning) lines.push(`\u26A0 ${r.warning}`);
   lines.push("", formatScopeSettings(r.settings));
   return { ok: true, text: lines.join("\n") };
@@ -41803,6 +41839,40 @@ async function linkMemoryToTasks(memoryId, taskIds) {
 
 // packages/core/src/memory/store.ts
 init_sentinel();
+
+// packages/core/src/memory/records-elsewhere.ts
+init_store();
+init_config();
+init_doc_lock();
+init_scope_file();
+init_sentinel();
+var KEPT_AS_NOTE_REASON = "this collection keeps its records in the project's own files, so only what the project publishes there (yapa memory put --ref) is typed";
+var RecordsElsewhereError = class extends Error {
+  code = "records_elsewhere";
+  constructor(collection, what, next = "") {
+    super(`Refused: ${what} in ${collection}: ${KEPT_AS_NOTE_REASON}. Record it in the project's own records instead, the way its instructions say${next ? `, then ${next}` : ""}.`);
+    this.name = "RecordsElsewhereError";
+  }
+};
+async function keepsRecordsElsewhere(collection) {
+  const listed = readScopeSettings().records_elsewhere;
+  if (!listed.length) return false;
+  if (listed.includes(collection)) return true;
+  const redirects = await getCollectionRedirects();
+  return listed.some((c) => resolveCollectionRedirect(c, redirects).collection === collection);
+}
+function typedForCollection(marked, typed) {
+  if (!marked || !isMemoryKind(typed.kind) || typed.external_ref) return { typed, keptAsNote: false };
+  return { typed: typed.task_ids?.length ? { task_ids: typed.task_ids } : {}, keptAsNote: true };
+}
+async function assertMayType(collection, current, typed) {
+  if (!isMemoryKind(typed.kind) || isMemoryKind(current.kind)) return;
+  if (typed.external_ref || current.external_ref || !await keepsRecordsElsewhere(collection)) return;
+  throw new RecordsElsewhereError(collection, `giving ${current.parent_id ?? "this memory"} a kind`);
+}
+var UNTYPED_KEYS = TYPED_KEYS.filter((k) => k !== "task_ids" && k !== "external_ref");
+
+// packages/core/src/memory/store.ts
 function findConflicts(candidates, threshold = getConfig().CONTRADICTION_DISTANCE_THRESHOLD, maxResults = getConfig().CONTRADICTION_MAX_RESULTS) {
   return candidates.filter((c) => c.distance < threshold).sort((a, b) => a.distance - b.distance).slice(0, maxResults).map((c) => ({
     id: c.id,
@@ -41840,7 +41910,10 @@ async function archiveSuperseded(collection, oldId, newId) {
 }
 async function storeMemory(content, options = {}) {
   const { collection } = await resolveWriteCollection(options.collection ?? "global");
-  const typed = options.typed ? normalizeTyped(options.typed) : {};
+  const normalized = options.typed ? normalizeTyped(options.typed) : {};
+  const gated = typedForCollection(!!normalized.kind && await keepsRecordsElsewhere(collection), normalized);
+  const typed = gated.typed;
+  const note = gated.keptAsNote ? { kept_as_note: true } : {};
   await getOrCreateCollection2(collection);
   if (options.supersedes) {
     const [old] = await getDocumentsByIds2(collection, [options.supersedes]).catch(() => []);
@@ -41873,7 +41946,7 @@ async function storeMemory(content, options = {}) {
     await addDocument2(collection, id, content, metadata);
     if (options.supersedes) await archiveSuperseded(collection, options.supersedes, id);
     if (typed.task_ids?.length) await linkMemoryToTasks(id, typed.task_ids);
-    return { ids: [id], potential_conflicts };
+    return { ids: [id], potential_conflicts, ...note };
   }
   const baseId = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
   const docs = chunks.map((chunk2) => {
@@ -41902,7 +41975,7 @@ async function storeMemory(content, options = {}) {
   await addDocumentsBatch2(collection, docs);
   if (options.supersedes) await archiveSuperseded(collection, options.supersedes, baseId);
   if (typed.task_ids?.length) await linkMemoryToTasks(baseId, typed.task_ids);
-  return { ids: docs.map((d) => d.id), potential_conflicts };
+  return { ids: docs.map((d) => d.id), potential_conflicts, ...note };
 }
 
 // packages/core/src/memory/recall.ts
@@ -42559,6 +42632,10 @@ init_config();
 init_store();
 init_sentinel();
 init_create();
+function keptAsNotesLine(r) {
+  const ids = r?.kept_as_notes ?? [];
+  return ids.length ? `Kept ${ids.join(", ")} as ${ids.length === 1 ? "a note" : "notes"}, without a kind: ${KEPT_AS_NOTE_REASON}.` : "";
+}
 var list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
 function validateLearned(items = []) {
   for (const it of items) {
@@ -42579,7 +42656,9 @@ async function recordForTask(task, input2) {
       tags,
       typed: { ...typed, task_ids: [.../* @__PURE__ */ new Set([task.id, ...typed.task_ids ?? []])] }
     });
-    out.memories.push(r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0]);
+    const id = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
+    out.memories.push(id);
+    if (r.kept_as_note) (out.kept_as_notes ??= []).push(id);
   }
   for (const f of input2.follow_ups ?? []) {
     if (!f.title?.trim()) continue;
@@ -42592,6 +42671,7 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   const task = await getTask(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error("decision_needed needs a question");
+  if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, "decision_needed (a YAPA decision the task waits on)", "set the task to blocked with a blocked_reason that names the record");
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join("\n\n");
   const typed = normalizeTyped({
     kind: "decision",
@@ -42961,6 +43041,7 @@ async function updateMemory(id, patch, collection) {
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
   const typed = normalizeTyped(typedPatch, found.doc.metadata);
+  await assertMayType(found.collection, found.doc.metadata, typed);
   const now = Math.floor(Date.now() / 1e3);
   const baseId = found.doc.metadata.parent_id ?? found.doc.id;
   const metadata = await withDocLock(found.collection, baseId, async () => {
@@ -46554,13 +46635,14 @@ function closeText(r) {
   const parts = [];
   if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(", ")}.`);
   if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(", ")}.`);
+  if (keptAsNotesLine(r.recorded)) parts.push(keptAsNotesLine(r.recorded));
   if (r.nudge) parts.push(r.nudge);
   return parts.join("\n");
 }
 var writeTarget = (name) => resolveWriteCollection(name, { folder: sessionFolder() });
 var checkFollowUps = (followUps) => checkFollowUpCollections(followUps, sessionFolder());
 function typedError(e) {
-  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError) {
+  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError) {
     return { content: [{ type: "text", text: e.message }], isError: true };
   }
   throw e;
@@ -46609,8 +46691,9 @@ ${result.instructions}`
       } catch (e) {
         return typedError(e);
       }
-      const label = typed.kind ? ` ${typedLabel({ status: void 0, ...typed })}` : "";
+      const label = typed.kind && !result.kept_as_note ? ` ${typedLabel({ status: void 0, ...typed })}` : "";
       const lines = [`Stored memory: ${result.ids.join(", ")}${label}`];
+      if (result.kept_as_note) lines.push(`Kept as a note, without the kind ${typed.kind}: ${KEPT_AS_NOTE_REASON}. Record it in the project's own records if it matters there.`);
       if (target.redirectedFrom) lines.push(redirectNote(target));
       if (supersedes) lines.push(`Archived superseded memory: ${supersedes}`);
       if (result.potential_conflicts.length) {
@@ -47740,12 +47823,12 @@ ${rec}`;
   );
   server2.tool(
     "scope",
-    "This machine's folder rules, kept in one file in YAPA's state folder: project roots (folders whose subfolders are projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), customer folder names, and folder \u2192 collection mappings (checked first; how a folder gets a private-* collection). `show` lists them and what they mean for this session's folder. Change them ONLY when the user explicitly asks (for example \"allow ~/work to hold shared projects\"); never to get past a refused write. Changes apply right away.",
+    "This machine's folder rules, kept in one file in YAPA's state folder: project roots (folders whose subfolders are projects, with project-/customer- collections, and the only folders a session may create a NEW shared collection from), customer folder names, folder \u2192 collection mappings (checked first; how a folder gets a private-* collection), and collections that keep their records elsewhere (the project's own files hold its findings, decisions and questions: there only what it publishes with an external ref is typed, and the rest is stored as notes). `show` lists them and what they mean for this session's folder. Change them ONLY when the user explicitly asks (for example \"allow ~/work to hold shared projects\"); never to get past a refused write. Changes apply right away.",
     {
-      action: external_exports.enum(["show", "add_root", "remove_root", "add_customer", "remove_customer", "map", "unmap"]),
+      action: external_exports.enum(["show", "add_root", "remove_root", "add_customer", "remove_customer", "map", "unmap", "add_records_elsewhere", "remove_records_elsewhere"]),
       dir: external_exports.string().optional().describe("Folder for add_root/remove_root/map/unmap (absolute, ~, or relative to this session's folder)"),
       name: external_exports.string().optional().describe("Customer folder name for add_customer/remove_customer"),
-      collection: external_exports.string().optional().describe("Collection for map")
+      collection: external_exports.string().optional().describe("Collection for map, add_records_elsewhere and remove_records_elsewhere")
     },
     async (args) => {
       const r = await runScopeAction(args, sessionFolder());
@@ -48075,7 +48158,7 @@ Context: when a "# YAPA Context" or "# YAPA Recall" block is injected (Claude Co
 
 Scope: the "**Scope:**" line names the active collection. If it says AMBIGUOUS, ask the user which collection to use before storing anything. Always pass the collection explicitly. Before creating a new collection, confirm its name with the user (collection_list shows what exists). Hits marked "from <collection>" come from another project or customer: check them when troubleshooting, and say where an answer came from. private-*, local-* and global never sync (global is personal; team knowledge goes in a shared collection). A new shared collection can only be created from a session under a project root; if a write is refused, use a private- name or ask the user. Change the folder rules (scope tool) only when the user asks. Combine or rename collections with collection_merge, never collection_delete.
 
-Capture as you go, not at the end: memory_store (salience >= 2) when a root cause is found, a config value, endpoint or credential location is learned, the user states a preference, decision or correction, a non-obvious fact turns up, a fix took real effort, or a decision or commitment surfaces. Give it a kind: finding (a result, root cause or trap), decision (accepted; or needed, with options, a recommendation and the owner, when only a person can choose: never leave that only in chat), limitation (with exit_criteria), question (with the owner who must answer), or idea. Settle potential_conflicts before moving on: supersede (supersedes) or coexist. Don't store conversation state, or what git or an existing memory already holds. Record a person's answer with memory_update. Tell the user about items waiting on them (waiting). A project's own instructions win where they keep these records elsewhere.
+Capture as you go, not at the end: memory_store (salience >= 2) when a root cause is found, a config value, endpoint or credential location is learned, the user states a preference, decision or correction, a non-obvious fact turns up, a fix took real effort, or a decision or commitment surfaces. Give it a kind: finding (a result, root cause or trap), decision (accepted; or needed, with options, a recommendation and the owner, when only a person can choose: never leave that only in chat), limitation (with exit_criteria), question (with the owner who must answer), or idea. Settle potential_conflicts before moving on: supersede (supersedes) or coexist. Don't store conversation state, or what git or an existing memory already holds. Record a person's answer with memory_update. Tell the user about items waiting on them (waiting). Where a project keeps these records in its own files, follow its instructions; in a collection marked that way, YAPA stores a kind only on what the project publishes (memory put --ref) and keeps the rest as notes.
 
 Tasks: task_create before multi-step or long-lived work, for a follow-up, or when something can't finish this turn. Set in_progress when you start: it claims the task. Before starting a task someone else has claimed, tell the user. If refused, say who holds it and offer other work; reclaim only your own other session, after the user confirms; if the claim is not shared, say others may start it too. Finish with task_complete, recording learned and follow_ups in the same call. When blocked, task_update with status blocked and a reason, or decision_needed when a person must choose. When the scope changes, amend the task instead of creating a duplicate. Tags: auto (an unattended session may do it), needs-human, needs:<user>. "by <user>" marks a teammate's item: coordinate before changing their tasks. Pass on any "**YAPA claim:**" line to the user.
 
