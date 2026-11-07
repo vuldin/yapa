@@ -16,7 +16,7 @@ Your numbers will differ with the model, how long your context grows, and how mu
 | The session itself | ~5.7M input-token equivalents (~$16 at Opus 5.5 list prices) | 100% |
 | What YAPA adds to the session's context | ~190k equivalents (~$0.55) | **~3.4%** (median session 2.6%, range 0.7–6.5%) |
 | The capture after each turn (a separate Haiku call) | ~0.2M Haiku equivalents (~$0.02) | ~0.1% |
-| Embeddings (MiniLM, in-process) | 0 tokens, $0 | 0% |
+| Finding relevant memories (semantic search, MiniLM in-process) | 0 tokens, $0 | 0% (an LLM reading the store instead would cost far more; see [Semantic search](#semantic-search-and-minilm)) |
 
 **Input-token equivalents** put every kind of token on one scale, the base input price:
 - a token written to the prompt cache counts 2 (1-hour cache) or 1.25 (5-minute cache);
@@ -51,15 +51,26 @@ That's about 7k Haiku tokens a turn.
 - At about 13 turns an hour, the capture costs about $0.02 an hour.
 - On a Claude subscription it counts against your plan's usage instead of dollars.
 
-## MiniLM
+## Semantic search and MiniLM
 
-Embeddings run in-process with MiniLM, so they use no API tokens at all. What that saves is small in money terms. Roughly 2k tokens are embedded per turn (an estimate: recall queries, capture candidates, their neighbor lookups); through a paid embedding API that would cost a fraction of a cent an hour. The real benefits are different:
+No LLM reads an embedding. YAPA turns each memory and each prompt into a vector, and picks the closest memories with arithmetic (cosine distance) on the CPU. Only the few memories it picks enter the session.
+
+**What semantic search saves.** Without it, the relevant memories would have to be found by an LLM reading them. The store measured here held 4,209 live memories, about 1.57M tokens of text (~370 tokens each on average); one active collection alone held 250k to 530k tokens. Compare, per prompt:
+
+| How relevant memories are found | Tokens per prompt |
+|---|---|
+| Semantic search (today): find in-process, inject the top 3 | ~1.1k injected, 0 to search |
+| A small model reads the active collection and picks | ~250k–530k (estimate: about $0.02–0.05 a prompt on Haiku) |
+| A small model reads every collection, which cross-collection recall needs | ~1.6M (about $0.16 a prompt) |
+| The session's model reads the collection in its own context | 250k+ more on every later request (not workable at the ~390k average context here) |
+
+Caching would cut the small-model rows to about a tenth, but only while the memories don't change, and they change every turn. So semantic search saves nearly all of the cost of finding what's relevant, at 13 prompts an hour. Keyword search would cost no tokens either, but it misses anything phrased differently.
+
+**What MiniLM adds.** MiniLM is the embedding model that makes this search free and local. Compared with a paid embedding API, which gives the same search, it saves only cents: roughly 2k tokens are embedded per turn (an estimate covering recall queries, capture candidates and their neighbor lookups), well under $0.001 an hour. It also brings:
 - no API key;
 - it works offline;
 - no text leaves the machine to be embedded;
 - no network round trip on every prompt.
-
-MiniLM doesn't save LLM tokens.
 
 ## What it can save
 
