@@ -11,8 +11,8 @@ const { pullCollection, captureTurn, heartbeatIfDue, pushDocsNow } = vi.hoisted(
 }));
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue, pushDocsNow }));
 
-import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten } from './hooks.js';
+import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories, createTask, deleteCollection } from '@yapa/core';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten, fitContext, SESSION_START_MAX_CHARS } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -228,17 +228,63 @@ describe('background-task notifications', () => {
 });
 
 describe('sessionStart', () => {
-  it('injects the standing rules only when asked to (plugin installs)', async () => {
+  it('carries the context only: the standing rules come from the MCP server\'s instructions', async () => {
     capture();
     await sessionStart({ session_id: 's1', cwd: join(dir, 'proj', 'acme'), source: 'startup' });
-    expect(restore().hookSpecificOutput.additionalContext).not.toContain('standing rules');
-
-    configure({ YAPA_HOOK_INJECT_RULES: 'true' });
-    capture();
-    await sessionStart({ session_id: 's1', cwd: join(dir, 'proj', 'acme'), source: 'compact' });
     const ctx = restore().hookSpecificOutput.additionalContext as string;
-    expect(ctx).toContain('standing rules');
-    expect(ctx).toContain('# YAPA Context');
+    expect(ctx.startsWith('# YAPA Context')).toBe(true);
+    expect(ctx).not.toContain('standing rules');
+  });
+
+  it('stays under the budget with a crowded collection, shrinking the least useful sections first', async () => {
+    const crowded = 'private-crowded';
+    const cwd = join(dir, 'crowded');
+    configure({}, { [cwd]: crowded });
+    for (let i = 0; i < 14; i++) await createTask(`Task ${i}: ${'a long title that keeps going '.repeat(12)}`, { priority: 'high' }, crowded);
+    for (let i = 0; i < 6; i++) await storeMemory(`Crowded fact ${i}: ${'detail '.repeat(80)}`, { collection: crowded, salience: 3 });
+    for (let i = 0; i < 8; i++) {
+      await storeMemory(`Which option for ${i}? ${'context '.repeat(60)}`, { collection: crowded, typed: { kind: 'decision', status: 'needed', options: ['a', 'b'], owner: 'josh' } });
+    }
+    capture();
+    await sessionStart({ session_id: 's-crowded', cwd, source: 'startup' });
+    const ctx = restore().hookSpecificOutput.additionalContext as string;
+    expect(ctx.length).toBeLessThanOrEqual(SESSION_START_MAX_CHARS);
+    expect(ctx).toContain('**Scope:** `private-crowded`');
+    expect(ctx).toMatch(/task_list/);
+    expect(ctx).toContain('## Waiting on you');
+    await deleteCollection(crowded);
+    configure();
+  });
+});
+
+describe('fitContext', () => {
+  const big = (label: string, n: number) => ['', `## ${label}`, ...Array.from({ length: n }, (_, i) => `- ${label} ${i} ${'x'.repeat(80)}`)];
+
+  it('keeps everything when it fits', () => {
+    expect(fitContext([{ lines: ['# Head'] }, { lines: ['tail'] }], 100)).toBe('# Head\ntail');
+  });
+
+  it('shrinks the lowest priority first, one step at a time', () => {
+    const text = fitContext([
+      { lines: ['# Head'] },
+      { lines: big('Tasks', 10), shrink: [big('Tasks', 3), ['tasks: call task_list']], priority: 5 },
+      { lines: big('Memories', 10), shrink: [[]], priority: 2 },
+    ], 1200);
+    expect(text).toContain('Tasks 9');
+    expect(text).not.toContain('Memories');
+    const tighter = fitContext([
+      { lines: ['# Head'] },
+      { lines: big('Tasks', 10), shrink: [big('Tasks', 3), ['tasks: call task_list']], priority: 5 },
+      { lines: big('Memories', 10), shrink: [[]], priority: 2 },
+    ], 400);
+    expect(tighter).toContain('Tasks 2');
+    expect(tighter).not.toContain('Tasks 3');
+  });
+
+  it('cuts at a line boundary, with a note, when nothing is left to shrink', () => {
+    const text = fitContext([{ lines: big('Head', 50) }], 500);
+    expect(text.length).toBeLessThanOrEqual(500);
+    expect(text).toMatch(/context cut to fit/);
   });
 });
 

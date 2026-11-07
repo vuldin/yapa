@@ -22,7 +22,7 @@ claude plugin marketplace add vuldin/yapa
 claude plugin install yapa@yapa
 ```
 
-That's all: Claude Code installs the runtime dependencies, and the plugin brings the MCP server, the hooks, YAPA's standing rules (injected at session start), the status line and the `/yapa:standup`, `/yapa:work` and `/yapa:statusline` skills. Storage is the embedded local store, so no database server is needed. Options can be set at install with `--config key=value` (for example `--config remote_name=acme`), or later with `/plugin` → Configure options. See [Configuration](docs/configuration.md).
+That's all: Claude Code installs the runtime dependencies, and the plugin brings the MCP server (with YAPA's standing rules as its instructions), the hooks, the status line and the `/yapa:standup`, `/yapa:work` and `/yapa:statusline` skills. Storage is the embedded local store, so no database server is needed. Options can be set at install with `--config key=value` (for example `--config remote_name=acme`), or later with `/plugin` → Configure options. See [Configuration](docs/configuration.md).
 
 For a whole team, add the marketplace and enable the plugin in managed or repo settings (`extraKnownMarketplaces` and `enabledPlugins: {"yapa@yapa": true}`).
 
@@ -36,13 +36,13 @@ Run the prebuilt server from a clone:
 
 ```
 git clone https://github.com/vuldin/yapa && cd yapa/plugin && npm install --omit=dev
-claude mcp add -s user -t stdio -e YAPA_USERNAME=you -e YAPA_STORAGE=local -e YAPA_HOOK_INJECT_RULES=true yapa -- node "$PWD/dist/yapa-mcp.mjs"
+claude mcp add -s user -t stdio -e YAPA_USERNAME=you -e YAPA_STORAGE=local yapa -- node "$PWD/dist/yapa-mcp.mjs"
 node dist/yapa.mjs hooks install      # Claude Code only: the always-on hooks, in ~/.claude/settings.json
 ```
 
 - Set `YAPA_STORAGE=local` as shown: outside the plugin, the default storage is a ChromaDB server at `localhost:8000`.
-- The hooks read the same `-e` settings from the `yapa` entry in `~/.claude.json`, so they always agree with the server. With `YAPA_HOOK_INJECT_RULES=true`, session start injects YAPA's standing rules, as the plugin does. `hooks install` replaces YAPA hooks from an older install instead of adding a second set, and `hooks uninstall` removes only YAPA's.
-- **Cursor and OpenCode:** register the same command, `node <clone>/plugin/dist/yapa-mcp.mjs`, as a local (stdio) MCP server in their config, with `YAPA_STORAGE=local` and `YAPA_USERNAME` in its environment. These hosts have no hooks, so the per-prompt recall, the capture after each turn, the session-start context and the standing rules don't reach the agent there; it works from the tools and their descriptions. YAPA takes the session's folder from the server's working directory, so if the host starts the server somewhere else, every folder is `global` and new shared collections are refused.
+- The hooks read the same `-e` settings from the `yapa` entry in `~/.claude.json`, so they always agree with the server. YAPA's standing rules come with the server, as its MCP instructions, so every host that loads them gets them. `hooks install` replaces YAPA hooks from an older install instead of adding a second set, and `hooks uninstall` removes only YAPA's.
+- **Cursor and OpenCode:** register the same command, `node <clone>/plugin/dist/yapa-mcp.mjs`, as a local (stdio) MCP server in their config, with `YAPA_STORAGE=local` and `YAPA_USERNAME` in its environment. These hosts have no hooks, so the per-prompt recall, the capture after each turn and the session-start context don't run there. The agent works from the standing rules (the server's instructions, where the host loads them) and the tools. YAPA takes the session's folder from the server's working directory, so if the host starts the server somewhere else, every folder is `global` and new shared collections are refused.
 
 ## Getting started
 
@@ -79,7 +79,7 @@ More, including symlinks, mappings inside roots and merging a shared collection 
 
 In Claude Code the hooks do this; in DSH the plugin does it at the turn seam, with its standing rules in the system prompt.
 
-- **Session start** injects the open tasks, what waits on you (decisions to make, questions to answer, steps only a person can take) and the top memories, plus the standing rules under the plugin (or with `YAPA_HOOK_INJECT_RULES=true`).
+- **Session start** injects the open tasks, what waits on you (decisions to make, questions to answer, steps only a person can take) and the top memories. It's kept under Claude Code's 10,000-character limit for hook context (longer, and the model would see only a 2,000-character preview): when a store is crowded, the least useful sections shrink to a pointer to the tool that lists them. The standing rules aren't part of it: they're the MCP server's instructions, loaded once with the tools.
 - **Every prompt** gets the top recall matches for what you asked, from the active collection plus a few strongly relevant hits from other collections, each labeled with where it came from. Those extra hits never come from a `private-*` or `local-*` collection. In Claude Code the hooks first pull the collection from the remote, so a teammate's write from seconds ago is included; DSH gets it from its background sync.
 - **After each turn** an aux model judges the turn. It stores durable findings as typed memories (finding, decision, limitation, question, idea), deduplicated and linked to the task the session holds, and it records what the turn settled in open decisions and questions. A task waiting on a decision comes back by itself once it's made. In Claude Code, without a curation API key it uses `claude -p --model haiku`; DSH uses its own model routing. `yapa capture status` shows whether this is working.
 - **Context compaction** stores Claude Code's or DSH's compaction summary as a memory, so it outlives the context window.

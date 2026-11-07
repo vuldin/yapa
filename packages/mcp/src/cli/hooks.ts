@@ -58,7 +58,6 @@ import {
   recordPull,
 } from '@yapa/core';
 
-import { CLAUDE_CODE_RULES } from '../rules.js';
 import { copyScript, defaultSettingsPath, hasStatusLine, installStatusLine, REMOVED_MARKER } from './statusline.js';
 import { YAPA_VERSION } from '../version.js';
 
@@ -444,6 +443,48 @@ export async function waitingLines(user: string, budgetMs = 2000, collection = '
   }
 }
 
+/**
+ * Claude Code gives the model a hook's additionalContext only up to 10,000
+ * characters; past that it sees a 2,000-character preview of a saved file.
+ * Session start stays under this, with room to spare.
+ */
+export const SESSION_START_MAX_CHARS = 9_000;
+
+/** A block of context, with smaller versions to fall back to (the last is usually a one-line pointer). */
+export interface ContextSection {
+  lines: string[];
+  shrink?: string[][];
+  /** Lower shrinks first. */
+  priority?: number;
+}
+
+/**
+ * Join the sections, replacing the lowest-priority ones by their smaller
+ * versions, one step at a time, until the text fits `max` characters. If it
+ * still doesn't fit, the text is cut at a line boundary with a note.
+ */
+export function fitContext(sections: ContextSection[], max: number): string {
+  const level = sections.map(() => -1);
+  const render = () => sections.flatMap((s, i) => (level[i] < 0 ? s.lines : s.shrink![level[i]])).join('\n');
+  let text = render();
+  while (text.length > max) {
+    let pick = -1;
+    for (let i = 0; i < sections.length; i++) {
+      if (level[i] + 1 >= (sections[i].shrink?.length ?? 0)) continue;
+      if (pick < 0 || (sections[i].priority ?? 0) < (sections[pick].priority ?? 0)) pick = i;
+    }
+    if (pick < 0) break;
+    level[pick]++;
+    text = render();
+  }
+  if (text.length <= max) return text;
+  const note = '\n_(YAPA context cut to fit; call `task_list`, `waiting` or `memory_list` for the rest.)_';
+  const cut = text.lastIndexOf('\n', max - note.length);
+  return text.slice(0, cut > 0 ? cut : max - note.length) + note;
+}
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
 export async function sessionStart(input: SessionStartInput): Promise<void> {
   // First: the status line waits for this session's server to report from now (also on resume).
   noteSessionStarting(input.session_id);
@@ -452,52 +493,64 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   recordSessionScope(input.session_id, collection);
   const pulled = await freshenFromRemote(collection);
 
-  const lines: string[] = [];
-  if (getConfig().HOOK_INJECT_RULES) lines.push(CLAUDE_CODE_RULES, '');
-  lines.push('# YAPA Context', '', scopeLine(detection));
-  if (pulled) lines.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
+  const head: string[] = ['# YAPA Context', '', scopeLine(detection)];
+  if (pulled) head.push(`_Pulled ${pulled} new or updated item(s) from the team sync._`);
   const down = syncDownLine();
-  if (down) lines.push(down);
+  if (down) head.push(down);
   const captureDown = captureDownLine();
-  if (captureDown) lines.push(captureDown);
+  if (captureDown) head.push(captureDown);
   const hint = prepareStatusLine();
-  if (hint) lines.push(hint);
+  if (hint) head.push(hint);
   const update = updateLine();
-  if (update) lines.push(update);
+  if (update) head.push(update);
   const notice = takeNotice(input.session_id);
-  if (notice) lines.push(`_${notice}_`);
+  if (notice) head.push(`_${notice}_`);
   const [held] = await Promise.all([presence(collection, input), keepLeasesAlive(input)]);
-  lines.push(...claimNoticeLines());
+  head.push(...claimNoticeLines());
+  const sections: ContextSection[] = [{ lines: head }];
 
   try {
     const tasks = await listTasks({ collection, includeComplete: false });
     if (tasks.length) {
-      lines.push('', '## Open tasks');
-      for (const t of tasks.slice(0, 10)) {
+      const line = (t: (typeof tasks)[number]) => {
         const status = t.metadata.status ?? 'open';
         const prio = t.metadata.priority ? `, ${t.metadata.priority}` : '';
         const claim = claimNote(t, held.claims, leaseSessions(input));
-        lines.push(`- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ''}] ${t.title}`);
-      }
-      if (tasks.length > 10) lines.push(`- _…${tasks.length - 10} more (call \`task_list\` for the full list)_`);
+        return `- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ''}] ${clip(t.title, 200)}`;
+      };
+      const list = (n: number) => [
+        '', '## Open tasks', ...tasks.slice(0, n).map(line),
+        ...(tasks.length > n ? [`- _…${tasks.length - n} more (call \`task_list\` for the full list)_`] : []),
+      ];
+      sections.push({ lines: list(10), shrink: [list(5), ['', `_${tasks.length} open task(s) in ${collection}: call \`task_list\`._`]], priority: 5 });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}\n`);
   }
 
-  lines.push(...await waitingLines(getConfig().USERNAME, undefined, collection));
+  const waiting = await waitingLines(getConfig().USERNAME, undefined, collection);
+  if (waiting.length) {
+    const items = waiting.filter(l => l.startsWith('- '));
+    sections.push({
+      lines: waiting,
+      shrink: [
+        [...waiting.slice(0, 2), ...items.slice(0, 3), `- _call \`waiting\` for the rest_`],
+        ['', '_Items are waiting on you: call `waiting`._'],
+      ],
+      priority: 6,
+    });
+  }
 
-  lines.push(...held.lines);
+  if (held.lines.length) {
+    sections.push({ lines: held.lines, shrink: [['', '_Work is in progress in this collection: `lease` with action `list` shows who holds what._']], priority: 4 });
+  }
 
   try {
     const memories = (await listMemories({ collection, limit: 25 })).filter(r => !isSessionSummary(r.metadata)).slice(0, 5);
     if (memories.length) {
-      lines.push('', '## Top memories (by salience)');
-      for (const r of memories) {
-        const sal = r.metadata.salience?.toFixed(2) ?? '?';
-        const snippet = r.content.length > 200 ? r.content.slice(0, 200) + '…' : r.content;
-        lines.push(`- **${r.id}** (salience ${sal}${attribution(r.metadata)}): ${snippet}`);
-      }
+      const list = (n: number, chars: number) => ['', '## Top memories (by salience)', ...memories.slice(0, n).map(r =>
+        `- **${r.id}** (salience ${r.metadata.salience?.toFixed(2) ?? '?'}${attribution(r.metadata)}): ${clip(r.content, chars)}`)];
+      sections.push({ lines: list(5, 200), shrink: [list(3, 120), []], priority: 2 });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] memory list failed: ${e}\n`);
@@ -506,9 +559,13 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   try {
     const candidates = await findCompactionCandidates();
     if (candidates.length) {
-      lines.push('', '## Compaction candidates');
-      lines.push('These collections are above the size threshold. Consider calling `compaction_suggest` then `compaction_apply`:');
-      for (const c of candidates) lines.push(`- ${c}`);
+      const named = candidates.includes(collection) ? [collection, ...candidates.filter(c => c !== collection)] : candidates;
+      const shown = named.slice(0, 3).join(', ') + (named.length > 3 ? `, and ${named.length - 3} more` : '');
+      sections.push({
+        lines: ['', '## Compaction candidates', `Above the size threshold: ${shown}. Consider \`compaction_suggest\` then \`compaction_apply\`.`],
+        shrink: [[]],
+        priority: 1,
+      });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] compaction check failed: ${e}\n`);
@@ -517,7 +574,11 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   try {
     const stale = (await staleFindings(collection)).length;
     if (stale >= getConfig().FINDINGS_CLEANUP_THRESHOLD) {
-      lines.push('', '## Findings backlog', `${stale} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`);
+      sections.push({
+        lines: ['', '## Findings backlog', `${stale} of your open findings in ${collection} have had no disposition for over two days. \`yapa memory sweep-findings --collection ${collection} --save FILE\` lists the ones that are only progress notes or superseded (\`--apply --from FILE\` closes them once checked); give the rest a disposition with \`memory_update\`.`],
+        shrink: [['', `_${stale} open findings in ${collection} need a disposition (\`yapa memory sweep-findings\`)._`]],
+        priority: 3,
+      });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] findings check failed: ${e}\n`);
@@ -529,11 +590,8 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
     await withTimeout(consolidateStaleDrafts().catch(() => []), STALE_JOURNAL_BUDGET_MS);
   }
 
-  lines.push(
-    '',
-    '_Hooks ran recall + task_list automatically. You do not need to repeat these unless you need a more specific query._',
-  );
-  context('SessionStart', lines);
+  sections.push({ lines: ['', '_Hooks ran recall + task_list automatically. You do not need to repeat these unless you need a more specific query._'], priority: 9 });
+  emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: fitContext(sections, SESSION_START_MAX_CHARS) } });
 }
 
 /**

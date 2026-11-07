@@ -197,8 +197,6 @@ export interface YapaConfig {
   HOOK_PULL_TIMEOUT_MS: number;
   /** The prompt hook skips its pull when any session pulled that collection this recently (0: always pull). */
   HOOK_PULL_WINDOW_MS: number;
-  /** Prepend YAPA's standing rules to the SessionStart context (plugin installs). */
-  HOOK_INJECT_RULES: boolean;
 
   // Response capture (per-turn aux-LLM extraction of durable findings)
   RESPONSE_CAPTURE: boolean;
@@ -343,7 +341,6 @@ export function createConfig(env: Record<string, string | undefined> = process.e
 
     HOOK_PULL_TIMEOUT_MS: parseInt(get(env, 'HOOK_PULL_TIMEOUT_MS', '4000'), 10),
     HOOK_PULL_WINDOW_MS: parseInt(get(env, 'HOOK_PULL_WINDOW_MS', '30000'), 10),
-    HOOK_INJECT_RULES: get(env, 'HOOK_INJECT_RULES', 'false') === 'true',
 
     RESPONSE_CAPTURE: get(env, 'RESPONSE_CAPTURE', 'true') !== 'false',
     CAPTURE_MIN_CHARS: parseInt(get(env, 'CAPTURE_MIN_CHARS', '280'), 10),
