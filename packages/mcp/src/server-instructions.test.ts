@@ -36,7 +36,7 @@ describe('the MCP server', () => {
         const r = await reply;
         expect(r.result.instructions).toBe(SERVER_INSTRUCTIONS);
       } finally {
-        const exited = child.exitCode !== null ? Promise.resolve() : new Promise(res => child.once('exit', res));
+        const exited = child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise(res => child.once('exit', res));
         child.kill();
         await exited;
       }
