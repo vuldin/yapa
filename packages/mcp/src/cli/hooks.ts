@@ -443,13 +443,6 @@ export async function waitingLines(user: string, budgetMs = 2000, collection = '
   }
 }
 
-/**
- * Claude Code gives the model a hook's additionalContext only up to 10,000
- * characters; past that it sees a 2,000-character preview of a saved file.
- * Session start stays under this, with room to spare.
- */
-export const SESSION_START_MAX_CHARS = 9_000;
-
 /** A block of context, with smaller versions to fall back to (the last is usually a one-line pointer). */
 export interface ContextSection {
   lines: string[];
@@ -459,8 +452,10 @@ export interface ContextSection {
 }
 
 /**
- * Join the sections, replacing the lowest-priority ones by their smaller
- * versions, one step at a time, until the text fits `max` characters. If it
+ * Join the sections, replacing them by their smaller versions one step at a
+ * time until the text fits `max` characters. The next step taken is the one
+ * with the lowest priority, where each step a section already took adds 10:
+ * every section gives up some detail before any is cut to a pointer. If it
  * still doesn't fit, the text is cut at a line boundary with a note.
  */
 export function fitContext(sections: ContextSection[], max: number): string {
@@ -469,9 +464,10 @@ export function fitContext(sections: ContextSection[], max: number): string {
   let text = render();
   while (text.length > max) {
     let pick = -1;
+    const cost = (i: number) => (sections[i].priority ?? 0) + 10 * (level[i] + 1);
     for (let i = 0; i < sections.length; i++) {
       if (level[i] + 1 >= (sections[i].shrink?.length ?? 0)) continue;
-      if (pick < 0 || (sections[i].priority ?? 0) < (sections[pick].priority ?? 0)) pick = i;
+      if (pick < 0 || cost(i) < cost(pick)) pick = i;
     }
     if (pick < 0) break;
     level[pick]++;
@@ -479,6 +475,7 @@ export function fitContext(sections: ContextSection[], max: number): string {
   }
   if (text.length <= max) return text;
   const note = '\n_(YAPA context cut to fit; call `task_list`, `waiting` or `memory_list` for the rest.)_';
+  if (max < note.length) return text.slice(0, Math.max(0, max));
   const cut = text.lastIndexOf('\n', max - note.length);
   return text.slice(0, cut > 0 ? cut : max - note.length) + note;
 }
@@ -528,14 +525,16 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}\n`);
   }
 
-  const waiting = await waitingLines(getConfig().USERNAME, undefined, collection);
+  // Items come whole (options, recommendation, reason after a line break): clip each.
+  const waiting = (await waitingLines(getConfig().USERNAME, undefined, collection)).map(l => clip(l, 500));
   if (waiting.length) {
-    const items = waiting.filter(l => l.startsWith('- '));
+    const items = waiting.filter(l => l.startsWith('- **'));
+    const tail = waiting.filter(l => !l.startsWith('- ') && l !== '' && !l.startsWith('## '));
     sections.push({
       lines: waiting,
       shrink: [
-        [...waiting.slice(0, 2), ...items.slice(0, 3), `- _call \`waiting\` for the rest_`],
-        ['', '_Items are waiting on you: call `waiting`._'],
+        [...waiting.slice(0, 2), ...items.slice(0, 3), ...(items.length > 3 ? ['- _…more: call `waiting`_'] : []), ...tail],
+        ['', '_Items are waiting on you or anyone: call `waiting`._'],
       ],
       priority: 6,
     });
@@ -591,7 +590,7 @@ export async function sessionStart(input: SessionStartInput): Promise<void> {
   }
 
   sections.push({ lines: ['', '_Hooks ran recall + task_list automatically. You do not need to repeat these unless you need a more specific query._'], priority: 9 });
-  emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: fitContext(sections, SESSION_START_MAX_CHARS) } });
+  emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: fitContext(sections, getConfig().SESSION_START_MAX_CHARS) } });
 }
 
 /**

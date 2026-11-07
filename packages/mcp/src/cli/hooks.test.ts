@@ -12,7 +12,7 @@ const { pullCollection, captureTurn, heartbeatIfDue, pushDocsNow } = vi.hoisted(
 vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()), pullCollection, captureTurn, heartbeatIfDue, pushDocsNow }));
 
 import { setConfig, createConfig, resetConfig, setStore, resetStore, createLocalStore, storeMemory, listMemories, createTask, deleteCollection } from '@yapa/core';
-import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten, fitContext, SESSION_START_MAX_CHARS } from './hooks.js';
+import { userPromptSubmit, userText, sessionStart, stop, postCompact, sessionEnd, freshenFromRemote, attribution, presenceLines, syncDownLine, prepareStatusLine, waitingLines, pushWritten, fitContext } from './hooks.js';
 
 let dir: string;
 let out = '';
@@ -243,15 +243,27 @@ describe('sessionStart', () => {
     for (let i = 0; i < 14; i++) await createTask(`Task ${i}: ${'a long title that keeps going '.repeat(12)}`, { priority: 'high' }, crowded);
     for (let i = 0; i < 6; i++) await storeMemory(`Crowded fact ${i}: ${'detail '.repeat(80)}`, { collection: crowded, salience: 3 });
     for (let i = 0; i < 8; i++) {
-      await storeMemory(`Which option for ${i}? ${'context '.repeat(60)}`, { collection: crowded, typed: { kind: 'decision', status: 'needed', options: ['a', 'b'], owner: 'josh' } });
+      await storeMemory(`Which option for ${i}?`, { collection: crowded, typed: { kind: 'decision', status: 'needed', options: ['a', 'b'], owner: 'josh', recommendation: `b, because ${'reasons '.repeat(120)}` } });
     }
-    capture();
-    await sessionStart({ session_id: 's-crowded', cwd, source: 'startup' });
-    const ctx = restore().hookSpecificOutput.additionalContext as string;
-    expect(ctx.length).toBeLessThanOrEqual(SESSION_START_MAX_CHARS);
-    expect(ctx).toContain('**Scope:** `private-crowded`');
-    expect(ctx).toMatch(/task_list/);
-    expect(ctx).toContain('## Waiting on you');
+    const start = async () => {
+      capture();
+      await sessionStart({ session_id: 's-crowded', cwd, source: 'startup' });
+      return restore().hookSpecificOutput.additionalContext as string;
+    };
+
+    const roomy = await start();
+    expect(roomy.length).toBeLessThanOrEqual(9000);
+    expect(roomy).toContain('## Top memories');
+    expect(roomy).toMatch(/b, because (reasons ){20}/);
+    expect(roomy).not.toMatch(/(reasons ){120}/);
+
+    configure({ YAPA_SESSION_START_MAX_CHARS: '3000' }, { [cwd]: crowded });
+    const tight = await start();
+    expect(tight.length).toBeLessThanOrEqual(3000);
+    expect(tight).toContain('**Scope:** `private-crowded`');
+    expect(tight).not.toContain('## Top memories');
+    expect(tight).toMatch(/## Waiting on you|waiting on you or anyone/);
+    expect(tight).toMatch(/## Open tasks|open task\(s\) in private-crowded: call `task_list`/);
     await deleteCollection(crowded);
     configure();
   });
@@ -279,6 +291,21 @@ describe('fitContext', () => {
     ], 400);
     expect(tighter).toContain('Tasks 2');
     expect(tighter).not.toContain('Tasks 3');
+  });
+
+  it('takes one step from every section before cutting any to its last step', () => {
+    const text = fitContext([
+      { lines: ['# Head'] },
+      { lines: big('Tasks', 10), shrink: [big('Tasks', 3), ['tasks: call task_list']], priority: 5 },
+      { lines: big('Waiting', 10), shrink: [big('Waiting', 3), ['waiting: call waiting']], priority: 6 },
+    ], 900);
+    expect(text).toContain('Tasks 2');
+    expect(text).toContain('Waiting 2');
+    expect(text).not.toContain('call task_list');
+  });
+
+  it('never returns more than max, even below the note\'s length', () => {
+    for (const max of [0, 10, 50, 120]) expect(fitContext([{ lines: big('Head', 50) }], max).length).toBeLessThanOrEqual(max);
   });
 
   it('cuts at a line boundary, with a note, when nothing is left to shrink', () => {
