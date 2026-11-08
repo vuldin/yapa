@@ -89,7 +89,7 @@ export function opensAt(due: number, lead: number): number {
  */
 export function storedOpensAt(m: Record<string, any>): number | undefined {
   const stored = Number(m.opens_at), due = Number(m.due_date);
-  if (!(stored > 0) || !(due > 0)) return undefined;
+  if (!(stored > 0) || !(due > 0) || !Number.isFinite(stored) || !Number.isFinite(due)) return undefined;
   const lead = leadDays(m);
   return stored <= due - lead * 86400 + 3600 && stored > due - (lead + 1) * 86400 - 3600 ? stored : undefined;
 }
@@ -104,7 +104,8 @@ export function opensAtOf(m: Record<string, any>, fallback: OpeningRule = opensA
 
 /** Upcoming: a pending occurrence of a recurring task that hasn't opened yet. */
 export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000), fallback: OpeningRule = opensAt): boolean {
-  return isRecurring(m) && Number(m.due_date) > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m, fallback);
+  const due = Number(m.due_date);
+  return isRecurring(m) && Number.isFinite(due) && due > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m, fallback);
 }
 
 /** "weekly", "every 2 months". */
