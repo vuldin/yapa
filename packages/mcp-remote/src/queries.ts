@@ -185,8 +185,21 @@ export interface TaskFilters {
   status?: string;
   priority?: string;
   includeComplete: boolean;
+  /** Also recurring occurrences that haven't opened yet. */
+  includeUpcoming?: boolean;
+  /** Unix seconds that decide what is upcoming (default: now). */
+  now?: number;
   limit: number;
 }
+
+// format.ts isUpcoming, in SQL (lead_days defaults as in core's tasks/recurrence.ts).
+const LEAD_DAYS_SQL = `CASE WHEN jsonb_typeof(metadata->'lead_days') = 'number' THEN (metadata->>'lead_days')::float8
+  ELSE CASE metadata->>'recurrence_pattern' WHEN 'weekly' THEN 2 WHEN 'monthly' THEN 7 WHEN 'quarterly' THEN 14 WHEN 'yearly' THEN 30 ELSE 0 END END`;
+const upcomingSql = (now: string) => `COALESCE(CASE WHEN metadata->>'is_recurring' = 'true'
+  AND metadata->>'recurrence_pattern' IN ('daily', 'weekly', 'monthly', 'quarterly', 'yearly')
+  AND COALESCE(metadata->>'status', 'pending') = 'pending'
+  AND jsonb_typeof(metadata->'due_date') = 'number'
+  THEN (metadata->>'due_date')::float8 > 0 AND ${now} < (metadata->>'due_date')::float8 - 86399 - 86400 * ${LEAD_DAYS_SQL} END, false)`;
 
 const PRIORITY_RANK = "CASE metadata->>'priority' WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END";
 
@@ -200,6 +213,7 @@ export async function listTasks(pool: pg.Pool, username: string, f: TaskFilters)
     if (f.status !== undefined) where += ` AND metadata->>'status' = ${param(f.status)}`;
     if (f.priority !== undefined) where += ` AND metadata->>'priority' = ${param(f.priority)}`;
     if (!f.includeComplete && f.status !== 'complete') where += " AND COALESCE(metadata->>'status', '') <> 'complete'";
+    if (!f.includeUpcoming) where += ` AND NOT ${upcomingSql(param(Math.floor(f.now ?? Date.now() / 1000)))}`;
     const r = await c.query(
       `SELECT ${COLUMNS} FROM documents WHERE ${where}
         ORDER BY ${PRIORITY_RANK} DESC,

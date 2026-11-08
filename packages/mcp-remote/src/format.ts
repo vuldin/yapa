@@ -5,6 +5,7 @@
  * per tool result.
  */
 import { includesUser, ownerWaitsOn } from '@yapa/core/owners';
+import { isRecurring, leadDays } from '@yapa/core/recurrence';
 import type { DocRow } from './queries.js';
 
 export const MAX_ITEM_CONTENT_BYTES = 4 * 1024;
@@ -79,6 +80,23 @@ export function salience(m: Record<string, any>): string {
 export function dueDate(m: Record<string, any>): string | undefined {
   const d = Number(m.due_date);
   return Number.isFinite(d) && d > 0 ? isoDate(d) : undefined;
+}
+
+/**
+ * When a recurring occurrence opens. Core opens it at the start of its due
+ * day, lead_days earlier, in the client's time zone, which the server doesn't
+ * know: for an end-of-day due (the default) that is due - 86399 s, the rule
+ * used here and in queries.ts (UPCOMING_SQL).
+ */
+export function opensAt(m: Record<string, any>): number | undefined {
+  const due = Number(m.due_date);
+  return isRecurring(m) && due > 0 ? due - 86399 - leadDays(m) * 86400 : undefined;
+}
+
+/** A pending recurring occurrence that hasn't opened yet: left out of task lists. */
+export function isUpcoming(m: Record<string, any>, now: number): boolean {
+  const opens = opensAt(m);
+  return opens !== undefined && (m.status ?? 'pending') === 'pending' && now < opens;
 }
 
 // ------------------------------------------------------- typed memories
