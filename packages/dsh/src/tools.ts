@@ -209,6 +209,8 @@ function upcomingFields(m: Record<string, any>) {
 /** Completion fields, shared by yapa_task_complete and yapa_task_update (status complete); `summary` is core's reply text. */
 const completionProps = {
   regenerated_id: { type: 'string' },
+  /** An open next occurrence that already existed (reopened and completed again). */
+  existing_next: { type: 'string' },
   next_due: { type: 'number' },
   opens_at: { type: 'number' },
   summary: { type: 'string' },
@@ -217,6 +219,7 @@ const completionProps = {
 function completion(id: string, result: CompleteResult, seriesChanged = false) {
   return {
     ...(result.regeneratedId && { regenerated_id: result.regeneratedId }),
+    ...(result.existingNext && { existing_next: result.existingNext }),
     ...(result.next && { next_due: result.next.due_date, opens_at: result.next.opens_at }),
     summary: completedText(id, result, { seriesChanged }),
   };
