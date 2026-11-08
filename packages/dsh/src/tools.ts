@@ -22,6 +22,13 @@ import {
   detectChromaVersion,
   forgetMemory,
   formatTaskDate,
+  formatTaskDay,
+  type RecurrencePattern,
+  isRecurring,
+  isUpcoming,
+  leadDays,
+  opensAt,
+  recurrenceNote,
   getTask,
   journalAppend,
   journalConsolidate,
@@ -154,6 +161,11 @@ const taskItem = {
     tags: { type: 'array', items: { type: 'string' } },
     depends_on: { type: 'array', items: { type: 'string' } },
     blocks: { type: 'array', items: { type: 'string' } },
+    repeats: { type: 'string' },
+    opens_at: { type: 'number' },
+    series: { type: 'string' },
+    previous_occurrence: { type: 'string' },
+    series_notes: { type: 'string' },
   },
 } as const;
 
@@ -167,6 +179,9 @@ function toTaskDetail(t: { id: string; title: string; collection: string; metada
     ...(normList(t.metadata.tags).length && { tags: normList(t.metadata.tags) }),
     ...(normList(t.metadata.depends_on).length && { depends_on: normList(t.metadata.depends_on) }),
     ...(normList(t.metadata.blocks).length && { blocks: normList(t.metadata.blocks) }),
+    ...(isRecurring(t.metadata) && { series: t.metadata.recurrence_series || t.id }),
+    ...(isRecurring(t.metadata) && t.metadata.previous_occurrence && { previous_occurrence: t.metadata.previous_occurrence }),
+    ...(isRecurring(t.metadata) && t.metadata.recurrence_notes !== undefined && { series_notes: String(t.metadata.recurrence_notes) }),
   };
 }
 
@@ -179,7 +194,19 @@ function toTaskItem(t: { id: string; title: string; collection: string; metadata
     ...(t.metadata.priority !== undefined && { priority: t.metadata.priority }),
     ...(t.metadata.due_date !== undefined && { due_date: t.metadata.due_date }),
     collection: t.collection,
+    ...(isRecurring(t.metadata) && { repeats: recurrenceNote(t.metadata) }),
+    ...(isUpcoming(t.metadata) && { opens_at: opensAt(Number(t.metadata.due_date), leadDays(t.metadata)) }),
   };
+}
+
+const RECURRENCE = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
+
+/** "Repeats weekly, ...; this occurrence is due Fri, Nov 14, open now." */
+function recurrenceLine(m: Record<string, any>): string {
+  const repeats = recurrenceNote(m);
+  if (!repeats) return 'Not recurring: completing it creates no next occurrence.';
+  const when = isUpcoming(m) ? `opens ${formatTaskDay(opensAt(m.due_date, leadDays(m)))} (hidden from task lists until then)` : 'open now';
+  return `${repeats[0].toUpperCase()}${repeats.slice(1)}; this occurrence is due ${formatTaskDate(m.due_date)}, ${when}.`;
 }
 
 export function registerTools(ctx: Context): void {
@@ -770,8 +797,10 @@ export function registerTools(ctx: Context): void {
       customer: { type: 'string' },
       project: { type: 'string' },
       collection: { type: 'string', description: 'Collection (default: global)' },
-      is_recurring: { type: 'boolean' },
-      recurrence_pattern: { type: 'string', enum: ['daily', 'weekly', 'monthly'] },
+      is_recurring: { type: 'boolean', description: 'Whether the task recurs (implied by recurrence_pattern)' },
+      recurrence_pattern: { type: 'string', enum: RECURRENCE, description: 'Repeat on this period: completing an occurrence creates the next one in its calendar slot. Due defaults to today' },
+      recurrence_interval: { type: 'integer', description: 'Every N periods, e.g. 2 with weekly for every two weeks (default 1)' },
+      lead_days: { type: 'integer', description: 'Days before its due day an occurrence opens; until then task lists hide it (default: daily 0, weekly 2, monthly 7, quarterly 14, yearly 30)' },
     },
     output: {
       schema: {
@@ -781,11 +810,12 @@ export function registerTools(ctx: Context): void {
           id: { type: 'string', required: true },
           title: { type: 'string', required: true },
           due_date: { type: 'number' },
+          recurrence: { type: 'string' },
           redirect: { type: 'string' },
         },
       },
       render: (_args, v) => text(
-        `Created task ${v.id}: "${v.title}"${v.due_date ? ` (due: ${formatTaskDate(v.due_date)})` : ''}${v.redirect ? `\n${v.redirect}` : ''}`,
+        `Created task ${v.id}: "${v.title}"${v.due_date ? ` (due: ${formatTaskDate(v.due_date)})` : ''}${v.recurrence ? `\n${v.recurrence}` : ''}${v.redirect ? `\n${v.redirect}` : ''}`,
       ),
     },
     async execute(args, exec) {
@@ -799,9 +829,16 @@ export function registerTools(ctx: Context): void {
         customer: args.customer,
         project: args.project,
         is_recurring: args.is_recurring,
-        recurrence_pattern: args.recurrence_pattern,
+        recurrence_pattern: args.recurrence_pattern as RecurrencePattern | undefined,
+        recurrence_interval: args.recurrence_interval,
+        lead_days: args.lead_days,
       }, target.collection);
-      return { id, title: args.title, ...(due_date !== undefined && { due_date }), ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}) };
+      const m = (await getTask(id))?.metadata ?? {};
+      const due = m.due_date ?? due_date;
+      return {
+        id, title: args.title, ...(due !== undefined && { due_date: due }), ...(isRecurring(m) && { recurrence: recurrenceLine(m) }),
+        ...(target.redirectedFrom ? { redirect: redirectNote(target) } : {}),
+      };
     },
     presentCall: args => ({ card: 'generic', title: `Create task: ${args.title}`, kind: 'other' }),
   }));
@@ -817,12 +854,13 @@ export function registerTools(ctx: Context): void {
       project: { type: 'string' },
       collection: { type: 'string' },
       include_complete: { type: 'boolean', description: 'Include completed tasks (default: false)' },
+      include_upcoming: { type: 'boolean', description: 'Include recurring occurrences that have not opened yet (default: false)' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { tasks: { type: 'array', required: true, items: taskItem } },
+        properties: { tasks: { type: 'array', required: true, items: taskItem }, upcoming_hidden: { type: 'integer' } },
       },
       render: (args, v) => {
         if (args.id) {
@@ -834,18 +872,23 @@ export function registerTools(ctx: Context): void {
             `Collection: ${t.collection}`,
           ];
           if (t.due_date) lines.push(`Due: ${formatTaskDate(t.due_date)}`);
+          if (t.repeats) lines.push(`Recurrence: ${t.repeats}${t.opens_at ? `; upcoming, opens ${formatTaskDay(t.opens_at)}` : ''}`);
+          if (t.series) lines.push(`Series: series ${t.series}${t.previous_occurrence ? `, previous ${t.previous_occurrence}` : ''}`);
           if (t.notes) lines.push(`Notes: ${t.notes}`);
+          if (t.series_notes !== undefined && t.series_notes !== t.notes) lines.push(`Series notes: ${t.series_notes || '(none)'}`);
           if (t.tags?.length) lines.push(`Tags: ${t.tags.join(', ')}`);
           if (t.depends_on?.length) lines.push(`Depends on: ${t.depends_on.join(', ')}`);
           if (t.blocks?.length) lines.push(`Blocks: ${t.blocks.join(', ')}`);
           return text(lines.join('\n'));
         }
-        if (v.tasks.length === 0) return text('No tasks found.');
-        return text(v.tasks.map(t => {
+        const hidden = v.upcoming_hidden ? `_${v.upcoming_hidden} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
+        if (v.tasks.length === 0) return text(hidden ? `No open tasks found.\n${hidden}` : 'No tasks found.');
+        return text([...v.tasks.map(t => {
           let line = `- **${t.id}** [${t.status}] ${t.priority ?? 'medium'} | ${t.title}`;
-          if (t.due_date) line += ` (due: ${formatTaskDate(t.due_date)})`;
+          if (t.opens_at && t.due_date) line += ` (upcoming: due ${formatTaskDate(t.due_date)}, opens ${formatTaskDay(t.opens_at)})`;
+          else if (t.due_date) line += ` (due: ${formatTaskDate(t.due_date)})`;
           return `${line} [${t.collection}]`;
-        }).join('\n'));
+        }), ...(hidden ? [hidden] : [])].join('\n'));
       },
     },
     isConcurrencySafe: () => true,
@@ -854,15 +897,18 @@ export function registerTools(ctx: Context): void {
         const task = await getTask(args.id);
         return { tasks: task ? [toTaskDetail(task)] : [] };
       }
-      const tasks = await listTasks({
+      const listed = await listTasks({
         status: args.status,
         priority: args.priority,
         customer: args.customer,
         project: args.project,
         collection: args.collection,
         includeComplete: args.include_complete,
+        includeUpcoming: true,
       });
-      return { tasks: tasks.map(toTaskItem) };
+      const tasks = args.include_upcoming ? listed : listed.filter(t => !isUpcoming(t.metadata));
+      const hidden = listed.length - tasks.length;
+      return { tasks: tasks.map(toTaskItem), ...(hidden && { upcoming_hidden: hidden }) };
     },
     presentCall: args => ({
       card: 'generic',
@@ -874,16 +920,20 @@ export function registerTools(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'yapa_task_update',
-    description: 'Update durable task fields (title, status, priority, notes, due, tags, blocked reason).',
+    description: 'Update durable task fields (title, status, priority, notes, due, tags, blocked reason), or set, change or stop recurrence.',
     parameters: {
       id: { type: 'string', required: true },
       title: { type: 'string', description: 'New task title (rename)' },
       status: { type: 'string', enum: ['pending', 'in_progress', 'blocked', 'complete'] },
       priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
-      notes: { type: 'string' },
+      notes: { type: 'string', description: 'Notes (on a recurring task, this occurrence only)' },
       due: { type: 'string', description: 'Due date phrase' },
       tags: { type: 'array', items: { type: 'string' } },
       blocked_reason: { type: 'string' },
+      recurrence_pattern: { type: 'string', enum: [...RECURRENCE, 'none'], description: 'Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series' },
+      recurrence_interval: { type: 'integer', description: 'Every N periods (re-anchors the series at the due date)' },
+      lead_days: { type: 'integer', description: 'Days before its due day an occurrence opens' },
+      series_notes: { type: 'string', description: 'Replace the notes each new occurrence starts with' },
       decision_needed: {
         type: 'object',
         additionalProperties: false,
@@ -902,9 +952,9 @@ export function registerTools(ctx: Context): void {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { id: { type: 'string', required: true }, claim: { type: 'string' }, decision: { type: 'string' }, recorded: { type: 'string' } },
+        properties: { id: { type: 'string', required: true }, recurrence: { type: 'string' }, claim: { type: 'string' }, decision: { type: 'string' }, recorded: { type: 'string' } },
       },
-      render: (_args, v) => text(`Updated task ${v.id}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
+      render: (_args, v) => text(`Updated task ${v.id}${v.recurrence ? `\n${v.recurrence}` : ''}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
     },
     async execute(args) {
       const updates: Record<string, any> = {};
@@ -914,6 +964,10 @@ export function registerTools(ctx: Context): void {
       if (args.notes !== undefined) updates.notes = args.notes;
       if (args.tags) updates.tags = args.tags;
       if (args.blocked_reason) updates.blockedReason = args.blocked_reason;
+      if (args.recurrence_pattern) updates.recurrence_pattern = args.recurrence_pattern;
+      if (args.recurrence_interval !== undefined) updates.recurrence_interval = args.recurrence_interval;
+      if (args.lead_days !== undefined) updates.lead_days = args.lead_days;
+      if (args.series_notes !== undefined) updates.series_notes = args.series_notes;
       if (args.due) {
         const ts = parseRelativeDate(args.due);
         if (ts) updates.due_date = ts;
@@ -934,12 +988,14 @@ export function registerTools(ctx: Context): void {
       } else {
         r = await updateTask(args.id, updates);
       }
+      const updated = (await getTask(r.id))!;
       const recorded = args.learned?.length || args.follow_ups?.length
-        ? await recordForTask({ id: r.id, collection: (await getTask(r.id))!.collection }, { learned: args.learned, follow_ups: args.follow_ups })
+        ? await recordForTask({ id: r.id, collection: updated.collection }, { learned: args.learned, follow_ups: args.follow_ups })
         : undefined;
       const claim = r.claim ? describeClaim(r.claim) : '';
       const rec = closeSummary({ recorded });
-      return { id: r.id, ...(claim && { claim }), ...(decision && { decision }), ...(rec && { recorded: rec }) };
+      const recurrence = args.recurrence_pattern || args.recurrence_interval !== undefined || args.lead_days !== undefined ? recurrenceLine(updated.metadata) : '';
+      return { id: r.id, ...(recurrence && { recurrence }), ...(claim && { claim }), ...(decision && { decision }), ...(rec && { recorded: rec }) };
     },
     presentCall: args => ({ card: 'generic', title: `Update task ${args.id}`, kind: 'edit' }),
   }));
@@ -958,17 +1014,23 @@ export function registerTools(ctx: Context): void {
         properties: {
           id: { type: 'string', required: true },
           regenerated_id: { type: 'string' },
+          next_due: { type: 'number' },
+          opens_at: { type: 'number' },
           recorded: { type: 'string' },
         },
       },
       render: (_args, v) => text(
-        `Completed task ${v.id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}${v.recorded ? `\n${v.recorded}` : ''}`,
+        `Completed task ${v.id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}`
+        + `${v.next_due && v.opens_at ? `, due ${formatTaskDate(v.next_due)}, opens ${formatTaskDay(v.opens_at)}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`,
       ),
     },
     async execute(args) {
       const result = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups });
       const rec = closeSummary(result);
-      return { id: args.id, ...(result.regeneratedId && { regenerated_id: result.regeneratedId }), ...(rec && { recorded: rec }) };
+      return {
+        id: args.id, ...(result.regeneratedId && { regenerated_id: result.regeneratedId }),
+        ...(result.next && { next_due: result.next.due_date, opens_at: result.next.opens_at }), ...(rec && { recorded: rec }),
+      };
     },
     presentCall: args => ({ card: 'generic', title: `Complete task ${args.id}`, kind: 'edit' }),
   }));
