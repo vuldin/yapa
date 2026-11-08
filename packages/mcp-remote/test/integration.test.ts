@@ -361,11 +361,14 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     // Too small for float8: 0, as JSON.parse reads it (lead 0: open on its due day, 3 days ahead, so upcoming).
     await insert('alice-413', C, 'Flip the mattress', 53, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'yearly', due_date: NOW + 3 * D });
     await db.adminPool.query(`UPDATE documents SET metadata = metadata || '{"lead_days": 1e-400, "opens_at": 1e-400}'::jsonb WHERE id = 'alice-413'`);
+    // Not numbers, as in core: a boolean lead (true is not 1: open) and a hex one ("0x10" is not 16: still upcoming).
+    await insert('alice-414', C, 'Oil the bike chain', 54, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 2 * D + 40000, lead_days: true });
+    await insert('alice-415', C, 'Clean the oven', 55, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 10 * D, lead_days: '0x10' });
 
     const ids = (text: string) => [...text.matchAll(/\*\*(alice-\d+)\*\*/g)].map(m => m[1]).sort();
     const open = await call('task_list', { collection: C });
-    expect(ids(open.text)).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407', 'alice-410', 'alice-411']);
-    expect(open.text.split('\n').at(-1)).toBe('_8 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
+    expect(ids(open.text)).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407', 'alice-410', 'alice-411', 'alice-414']);
+    expect(open.text.split('\n').at(-1)).toBe('_9 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
     expect(open.text).not.toMatch(/\(upcoming:/);
     const blocked = await call('task_list', { collection: C, status: 'blocked' });
     expect(ids(blocked.text)).toEqual(['alice-403']);
@@ -373,11 +376,11 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     const allHidden = await call('task_list', { collection: C, priority: 'high' });
     expect(allHidden.text).toBe('No open tasks found.\n_1 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
     const all = await call('task_list', { collection: C, include_upcoming: true });
-    expect(ids(all.text)).toEqual(['alice-400', 'alice-401', 'alice-402', 'alice-403', 'alice-404', 'alice-405', 'alice-406', 'alice-407', 'alice-408', 'alice-409', 'alice-410', 'alice-411', 'alice-412', 'alice-413']);
+    expect(ids(all.text)).toEqual(['alice-400', 'alice-401', 'alice-402', 'alice-403', 'alice-404', 'alice-405', 'alice-406', 'alice-407', 'alice-408', 'alice-409', 'alice-410', 'alice-411', 'alice-412', 'alice-413', 'alice-414', 'alice-415']);
     expect(all.text).toMatch(/\*\*alice-408\*\* .*\(upcoming: due/);
     expect(all.text).not.toMatch(/hidden/);
     expect(all.text).toMatch(/\*\*alice-400\*\* .*\(upcoming: due \d{4}-\d\d-\d\d, opens \d{4}-\d\d-\d\d\)/);
-    expect(ids((await call('memory_recall', { query: 'seed:40 chores', collection: C })).text).filter(id => id >= 'alice-400')).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407', 'alice-410', 'alice-411']);
+    expect(ids((await call('memory_recall', { query: 'seed:40 chores', collection: C })).text).filter(id => id >= 'alice-400')).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407', 'alice-410', 'alice-411', 'alice-414']);
     expect((await call('waiting', { collection: C, user: '*' })).text).not.toContain('alice-404');
   });
 });
