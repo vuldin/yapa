@@ -8,6 +8,7 @@
  * @module @yapa/core/memory/sweep
  */
 import { getDocumentsByFilter, getDocumentsByIds, queryDocuments, type DocumentResult } from '../store/index.js';
+import { metadataList } from '../metadata-adapter.js';
 import { CHUNK_OVERLAP } from '../config.js';
 import { isReadOnlyDoc } from '../sync/syncable.js';
 import { isOwnAuthor } from '../sync/backend.js';
@@ -15,9 +16,6 @@ import { callCurationLLM } from '../curation/provider.js';
 import { updateMemory } from './update.js';
 
 const DAY = 86400;
-
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
 
 const author = (m: Record<string, any>) => String(m.origin_user ?? m.username ?? '');
 
@@ -93,7 +91,7 @@ async function wholeText(collection: string, f: DocumentResult): Promise<string>
 }
 
 const lasting = (m: Record<string, any>) => NEIGHBOR_KINDS.includes(m.kind) && m.archived !== true
-  && m.source !== 'compaction' && !list(m.tags).some(t => t === 'journal' || t === 'compaction');
+  && m.source !== 'compaction' && !metadataList(m.tags).some(t => t === 'journal' || t === 'compaction');
 
 async function newerNeighbor(collection: string, f: DocumentResult, text: string, q: typeof queryDocuments): Promise<Candidate['newer']> {
   const created = Number(f.metadata.created_at ?? 0);
@@ -164,7 +162,7 @@ async function supersedingIds(collection: string): Promise<Set<string>> {
     const reason = String(m.disposition_reason ?? '');
     const named = /^superseded by (\S+?)[:\s]/.exec(`${reason} `)?.[1];
     if (named) out.add(named);
-    if (named || m.disposition !== 'no-action') for (const id of list(m.disposition_ids)) out.add(id);
+    if (named || m.disposition !== 'no-action') for (const id of metadataList(m.disposition_ids)) out.add(id);
   }
   return out;
 }

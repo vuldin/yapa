@@ -12,13 +12,20 @@
  *
  * @module @yapa/core/tasks/close
  */
-import { getDocumentsByIds, listCollections } from '../store/index.js';
+import { getDocumentsByIds, listCollections, patchDocument } from '../store/index.js';
+import { withDocLock } from '../doc-lock.js';
 import { isOpenTyped, normalizeTyped, type TypedFields } from '../memory/kinds.js';
 import { storeMemory } from '../memory/store.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
-import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
+import { checkSeriesUpdate, getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
+import { isRecurring, recurrenceChanges, recurrenceSentence, seriesZone } from './recurrence.js';
+import { forgetMemory } from '../memory/forget.js';
+import { metadataList } from '../metadata-adapter.js';
+import { formatDuration, formatTaskDate, formatTaskDay } from './dates.js';
+import type { CompleteResult } from './update.js';
+import type { ReleaseResult } from './claim.js';
 
 export interface LearnedItem extends TypedFields {
   content: string;
@@ -58,8 +65,6 @@ export function keptAsNotesLine(r: Recorded | undefined): string {
   return ids.length ? `Kept ${ids.join(', ')} as ${ids.length === 1 ? 'a note' : 'notes'}, without a kind: ${KEPT_AS_NOTE_REASON}.` : '';
 }
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).filter(Boolean);
 
 /**
  * Validate everything first, then store: a bad item refuses the whole call
@@ -120,6 +125,9 @@ export async function requestDecision(
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error('decision_needed needs a question');
   if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, 'decision_needed (a YAPA decision the task waits on)', 'set the task to blocked with a blocked_reason that names the record');
+  // An update that would be refused is refused before the decision is stored.
+  recurrenceChanges(task.id, task.metadata, extra);
+  await checkSeriesUpdate(task, { ...extra, status: 'pending' });
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join('\n\n');
   const typed = normalizeTyped({
     kind: 'decision', status: 'needed', options: d.options, task_ids: [task.id],
@@ -128,9 +136,21 @@ export async function requestDecision(
   });
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, '') : r.ids[0];
-  const waits = [...new Set([...list(task.metadata.waits_on), decision])];
-  const u = await updateTask(task.id, { ...extra, status: 'pending', waits_on: waits }, ctx);
-  return { ...u, decision };
+  const waits = [...new Set([...metadataList(task.metadata.waits_on), decision])];
+  try {
+    const u = await updateTask(task.id, { ...extra, status: 'pending', waits_on: waits }, ctx);
+    return { ...u, decision };
+  } catch (e) {
+    // Refused after all (the task changed since the check above): no decision without a task waiting on it,
+    // and no link to it left on the task.
+    await forgetMemory(decision).catch(() => undefined);
+    await withDocLock(task.collection, task.id, async () => {
+      const [cur] = await getDocumentsByIds(task.collection, [task.id]);
+      const ids = metadataList(cur?.metadata.memory_ids);
+      if (ids.includes(decision)) await patchDocument(task.collection, task.id, { memory_ids: ids.filter(x => x !== decision) });
+    }).catch(() => undefined);
+    throw e;
+  }
 }
 
 // ------------------------------------------------- what a task waits on
@@ -161,7 +181,7 @@ export interface OpenWait {
  */
 export async function openWaits(metadata: Record<string, any>, collection?: string): Promise<OpenWait[]> {
   const out: OpenWait[] = [];
-  for (const start of list(metadata.waits_on)) {
+  for (const start of metadataList(metadata.waits_on)) {
     let id = start;
     let found = await findMemory(id, collection);
     for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
@@ -180,6 +200,62 @@ export const describeWaits = (w: OpenWait[]) =>
 
 /** The reply line when a task closes with nothing recorded for it. */
 export function captureNudge(taskId: string, metadata: Record<string, any>, recorded?: Recorded): string | undefined {
-  if (recorded?.memories.length || recorded?.follow_ups.length || list(metadata.memory_ids).length) return undefined;
+  if (recorded?.memories.length || recorded?.follow_ups.length || metadataList(metadata.memory_ids).length) return undefined;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
+}
+
+// ------------------------------------------------- reply text
+// Shared by the MCP tools, the DSH tools and the CLI.
+
+/** What happened to a claim when its task left in_progress (`fullSession`: the holder's whole session id, for scripts). */
+export function releaseText(r: ReleaseResult | undefined, opts: { fullSession?: boolean } = {}): string {
+  if (!r) return '';
+  if (r.kind === 'released') return 'Claim released.';
+  if (r.kind === 'held_by_other') {
+    const s = r.lease.holder.session;
+    return `Note: ${r.lease.holder.user} (session ${opts.fullSession ? s : s.slice(0, 8)}) still holds a claim on it.`;
+  }
+  if (r.kind === 'unshared') return `Release not shared (${r.reason}); the claim lapses on its own.`;
+  return '';
+}
+
+/** What closing a task recorded, and the nudge when it recorded nothing. */
+export function closeText(r: { recorded?: Recorded; nudge?: string }): string {
+  return [
+    r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(', ')}.` : '',
+    r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(', ')}.` : '',
+    keptAsNotesLine(r.recorded),
+    r.nudge ?? '',
+  ].filter(Boolean).join('\n');
+}
+
+/**
+ * "regenerated as X (recurring), due …, opens …" for a next occurrence the
+ * completion created, "next occurrence X (already created)" for an open one
+ * it found, or ''.
+ */
+export function nextOccurrenceText(result: CompleteResult): string {
+  if (result.regeneratedId) {
+    const tz = seriesZone(result.metadata ?? {});
+    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date, tz)}, opens ${formatTaskDay(result.next.opens_at, tz)}` : ''}`;
+  }
+  return result.existingNext ? `next occurrence ${result.existingNext} (already created)` : '';
+}
+
+/**
+ * The reply to a completion: the next occurrence of a recurring task, the
+ * claim release, what was recorded. With `seriesChanged` (recurrence fields
+ * changed in the same call), what the series does now.
+ */
+export function completedText(id: string, result: CompleteResult, opts: { durationMinutes?: number; seriesChanged?: boolean } = {}): string {
+  let text = `Completed task ${id}`;
+  if (opts.durationMinutes != null) text += ` (effort: ${formatDuration(opts.durationMinutes)})`;
+  const next = nextOccurrenceText(result);
+  if (next) text += ` → ${next}`;
+  const lines = [text];
+  if (opts.seriesChanged && result.metadata) {
+    lines.push(isRecurring(result.metadata) ? `${recurrenceSentence(result.metadata)}.` : 'Series stopped: no next occurrence.');
+  }
+  lines.push(releaseText(result.release), closeText(result));
+  return lines.filter(Boolean).join('\n');
 }

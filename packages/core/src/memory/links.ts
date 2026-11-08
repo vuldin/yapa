@@ -9,9 +9,8 @@
  */
 import { withDocLock } from '../doc-lock.js';
 import { getDocumentsByIds, listCollections, updateDocument } from '../store/index.js';
+import { metadataList } from '../metadata-adapter.js';
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).filter(Boolean);
 
 async function findDoc(id: string): Promise<{ collection: string; metadata: Record<string, any> } | null> {
   for (const c of await listCollections().catch(() => [])) {
@@ -39,7 +38,7 @@ export async function linkMemoryToTasks(memoryId: string, taskIds: string[]): Pr
     const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds(t.collection, [tid]))[0];
       if (!fresh) return false;
-      const cur = list(fresh.metadata.memory_ids);
+      const cur = metadataList(fresh.metadata.memory_ids);
       if (cur.includes(memoryId)) return true;
       await updateDocument(t.collection, tid, {
         ...fresh.metadata,

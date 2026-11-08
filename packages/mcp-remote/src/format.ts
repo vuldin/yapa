@@ -5,6 +5,7 @@
  * per tool result.
  */
 import { includesUser, ownerWaitsOn } from '@yapa/core/owners';
+import { isUpcoming as coreIsUpcoming, openingOf, type OpeningRule } from '@yapa/core/recurrence';
 import type { DocRow } from './queries.js';
 
 export const MAX_ITEM_CONTENT_BYTES = 4 * 1024;
@@ -81,10 +82,33 @@ export function dueDate(m: Record<string, any>): string | undefined {
   return Number.isFinite(d) && d > 0 ? isoDate(d) : undefined;
 }
 
+/**
+ * Core's rule (tasks/recurrence.ts) for an occurrence with no stored
+ * opens_at (one written before 1.19): the server doesn't know the writer's
+ * time zone, so it assumes an end-of-day due (the default) and opens it
+ * 86399 s before, lead_days earlier. queries.ts (upcomingLaterals) is the
+ * same rule in SQL.
+ */
+export const endOfDayOpening: OpeningRule = (due, lead) => due - 86399 - lead * 86400;
+
+/** When a recurring occurrence opens, as core works it out with that fallback. */
+export function opensAt(m: Record<string, any>): number | undefined {
+  return openingOf(m, undefined, endOfDayOpening)?.opens_at;
+}
+
+/** The date an occurrence opens on. Midday after the writer's midnight is that date in UTC for offsets from -12 to +12. */
+export function opensDay(m: Record<string, any>): string | undefined {
+  const opens = opensAt(m);
+  return opens === undefined ? undefined : isoDate(opens + 43200);
+}
+
+/** A pending recurring occurrence that hasn't opened yet: left out of task lists. */
+export const isUpcoming = (m: Record<string, any>, now: number): boolean => coreIsUpcoming(m, now, endOfDayOpening);
+
 // ------------------------------------------------------- typed memories
-// Same rules and text as @yapa/core's memory/kinds.ts and tasks/waiting.ts
-// (kept local: those modules are newer than the @yapa/core this package
-// builds against). Keep them in step.
+// Same rules and text as @yapa/core's memory/kinds.ts and tasks/waiting.ts,
+// kept here because @yapa/core exports them only from its main entry, which
+// loads the store. Keep them in step.
 
 export const MEMORY_KINDS = ['finding', 'decision', 'limitation', 'question', 'idea'] as const;
 export type MemoryKind = (typeof MEMORY_KINDS)[number];

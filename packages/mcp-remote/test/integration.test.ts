@@ -337,4 +337,50 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     expect((await call('waiting', { collection: C })).text).not.toContain('td-1');
     expect((await call('waiting', { collection: 'private-alice' })).isError).toBe(true);
   });
+
+  it('recurring occurrences that have not opened yet are left out of task_list (unless include_upcoming), recall and waiting', async () => {
+    const C = 'project-chores';
+    const D = 86400;
+    await insert('alice-400', C, 'Renew the domain', 40, { type: 'task', status: 'pending', priority: 'high', is_recurring: true, recurrence_pattern: 'yearly', due_date: NOW + 200 * D });
+    await insert('alice-401', C, 'Send the weekly digest', 41, { type: 'task', status: 'pending', priority: 'medium', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + D });
+    await insert('alice-402', C, 'Water the plants', 42, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'monthly', lead_days: 0, due_date: NOW + 3 * D });
+    await insert('alice-403', C, 'Rotate the shared key', 43, { type: 'task', status: 'blocked', priority: 'low', is_recurring: true, recurrence_pattern: 'monthly', due_date: NOW + 200 * D });
+    await insert('alice-404', C, 'Approve the budget', 44, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 30 * D, tags: ['needs-human'] });
+    await insert('alice-405', C, 'Plan the offsite', 45, { type: 'task', status: 'pending', priority: 'low', due_date: NOW + 300 * D });
+    // opens_at as core stored it wins over the end-of-day assumption (open 4 h ago); a stale one doesn't.
+    await insert('alice-406', C, 'Check the smoke alarms', 46, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 2 * D + 20 * 3600, opens_at: NOW + 3600 });
+    await insert('alice-407', C, 'Empty the dehumidifier', 47, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + D, opens_at: NOW + 100 * D });
+    // Numbers held as strings count as core's Number() reads them; a non-number is no due date (and no SQL error).
+    await insert('alice-408', C, 'Renew the parking permit', 48, { type: 'task', status: 'pending', priority: 'low', is_recurring: 'true', recurrence_pattern: 'yearly', due_date: String(NOW + 200 * D), lead_days: '2' });
+    await insert('alice-409', C, 'Defrost the freezer', 49, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 2 * D + 20 * 3600, opens_at: ` ${NOW + 3600} ` });
+    await insert('alice-410', C, 'Wind the clock', 50, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: 'soon', lead_days: 'two' });
+    // Values past float8's range count as missing instead of failing the query: a string, and a JSON number.
+    await insert('alice-411', C, 'Descale the kettle', 51, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: '1e999', lead_days: '1e999' });
+    await insert('alice-412', C, 'Test the sump pump', 52, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'yearly', due_date: NOW + 200 * D });
+    await db.adminPool.query(`UPDATE documents SET metadata = metadata || '{"opens_at": 1e999, "lead_days": 1e999}'::jsonb WHERE id = 'alice-412'`);
+    // Too small for float8: 0, as JSON.parse reads it (lead 0: open on its due day, 3 days ahead, so upcoming).
+    await insert('alice-413', C, 'Flip the mattress', 53, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'yearly', due_date: NOW + 3 * D });
+    await db.adminPool.query(`UPDATE documents SET metadata = metadata || '{"lead_days": 1e-400, "opens_at": 1e-400}'::jsonb WHERE id = 'alice-413'`);
+    // Not numbers, as in core: a boolean lead (true is not 1: open) and a hex one ("0x10" is not 16: still upcoming).
+    await insert('alice-414', C, 'Oil the bike chain', 54, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 2 * D + 40000, lead_days: true });
+    await insert('alice-415', C, 'Clean the oven', 55, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 10 * D, lead_days: '0x10' });
+
+    const ids = (text: string) => [...text.matchAll(/\*\*(alice-\d+)\*\*/g)].map(m => m[1]).sort();
+    const open = await call('task_list', { collection: C });
+    expect(ids(open.text)).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407', 'alice-410', 'alice-411', 'alice-414']);
+    expect(open.text.split('\n').at(-1)).toBe('_9 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
+    expect(open.text).not.toMatch(/\(upcoming:/);
+    const blocked = await call('task_list', { collection: C, status: 'blocked' });
+    expect(ids(blocked.text)).toEqual(['alice-403']);
+    expect(blocked.text).not.toMatch(/hidden/);
+    const allHidden = await call('task_list', { collection: C, priority: 'high' });
+    expect(allHidden.text).toBe('No open tasks found.\n_1 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
+    const all = await call('task_list', { collection: C, include_upcoming: true });
+    expect(ids(all.text)).toEqual(['alice-400', 'alice-401', 'alice-402', 'alice-403', 'alice-404', 'alice-405', 'alice-406', 'alice-407', 'alice-408', 'alice-409', 'alice-410', 'alice-411', 'alice-412', 'alice-413', 'alice-414', 'alice-415']);
+    expect(all.text).toMatch(/\*\*alice-408\*\* .*\(upcoming: due/);
+    expect(all.text).not.toMatch(/hidden/);
+    expect(all.text).toMatch(/\*\*alice-400\*\* .*\(upcoming: due \d{4}-\d\d-\d\d, opens \d{4}-\d\d-\d\d\)/);
+    expect(ids((await call('memory_recall', { query: 'seed:40 chores', collection: C })).text).filter(id => id >= 'alice-400')).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407', 'alice-410', 'alice-411', 'alice-414']);
+    expect((await call('waiting', { collection: C, user: '*' })).text).not.toContain('alice-404');
+  });
 });

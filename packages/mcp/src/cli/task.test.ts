@@ -57,6 +57,35 @@ describe('yapa task', () => {
     expect((list.json.tasks as any[]).map(x => x.id).sort()).toEqual([a, b].sort());
   });
 
+  it('list hides upcoming recurring occurrences unless --include-upcoming; release complete reports the next one', async () => {
+    const C = 'project-cli-recurring';
+    const soon = await createTask('send the weekly digest', { recurrence_pattern: 'weekly' }, C);
+    const later = await createTask('renew the certificate', { recurrence_pattern: 'yearly', due_date: Math.floor(Date.now() / 1000) + 200 * 86400 }, C);
+    const open = await runTask('list', ['--collection', C]);
+    expect((open.json.tasks as any[]).map(t => t.id)).toEqual([soon]);
+    expect(open.json.upcoming_hidden).toBe(1);
+    expect((await runTask('list', ['--collection', C, '--tag', 'nothing-has-this'])).json.upcoming_hidden).toBe(0);
+    const all = (await runTask('list', ['--collection', C, '--include-upcoming'])).json.tasks as any[];
+    expect(all.map(t => t.id).sort()).toEqual([soon, later].sort());
+    expect(all.find(t => t.id === later).recurrence).toMatchObject({ pattern: 'yearly', interval: 1, lead_days: 30, series: later, previous: null, upcoming: true });
+    expect(all.find(t => t.id === soon).recurrence.upcoming).toBe(false);
+
+    const done = await runTask('release', [soon, '--status', 'complete']);
+    const next = (done.json.regenerated as any);
+    expect(next).toMatchObject({ id: expect.stringMatching(/^josh-\d+$/) });
+    expect(next.due_date - (await getTask(soon))!.metadata.due_date).toBeGreaterThanOrEqual(7 * 86400 - 3600);
+    expect(done.text.split('\n')[0]).toBe(`${soon} -> complete`);
+    expect(done.text.split('\n')[1]).toMatch(new RegExp(`^regenerated as ${next.id} \\(recurring\\), due .*, opens `));
+    expect((all.find(t => t.id === soon).recurrence)).toMatchObject({ series: soon, next: null });
+    const after = ((await runTask('show', [soon])).json.task as any).recurrence;
+    expect(after).toMatchObject({ series: soon, next: next.id });
+    expect(done.json.existing_next).toBeNull();
+    await runTask('release', [soon, '--status', 'pending']);
+    const again = await runTask('release', [soon, '--status', 'complete']);
+    expect(again.json).toMatchObject({ regenerated: null, existing_next: next.id });
+    expect(again.text.split('\n')[1]).toBe(`next occurrence ${next.id} (already created)`);
+  });
+
   it('bad arguments exit 2', async () => {
     expect((await runTask('release', ['josh-1'])).exit).toBe(2);
     expect((await runTask('next', [])).exit).toBe(2);

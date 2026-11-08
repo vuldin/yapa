@@ -9,6 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type pg from 'pg';
 import { z } from 'zod';
 import { rankScore } from '@yapa/core/ranking';
+import { hiddenUpcomingLine } from '@yapa/core/recurrence';
 import {
   ApiError, assertCollection, decodeCursor, isUnavailableError, listCollections, log, MAX_FUTURE_SECONDS,
   posFromSince, pull, type RequestCtx,
@@ -16,11 +17,11 @@ import {
 import type { Caller } from './auth.js';
 import type { QueryEmbedder } from './embedder.js';
 import {
-  author, buildWaiting, dueDate, formatWaiting, isoDate, isoMinute, itemContent, joinBounded, list, MAX_RESULT_BYTES,
+  author, buildWaiting, dueDate, formatWaiting, isoDate, isoMinute, isUpcoming, itemContent, joinBounded, list, MAX_RESULT_BYTES, opensDay,
   needsPersonText, salience, truncateBytes, typedSuffix, waitingCount, waitsOnText,
 } from './format.js';
 import {
-  getTask, listMemories, listTasks, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
+  getTask, listMemories, listTasks, listTasksCounted, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
   type DocRow,
 } from './queries.js';
 import { inferCollection, resolveCollection } from './resolve.js';
@@ -211,11 +212,13 @@ function taskFlags(m: Record<string, any>): string {
   return [needsPersonText(m), waitsOnText(m)].filter(Boolean).map(f => ` | ${f}`).join('');
 }
 
-function taskLine(t: DocRow): string {
+/** `now`: the clock the query that read the task judged upcoming by. */
+function taskLine(t: DocRow, now: number): string {
   const m = t.metadata;
   let line = `- **${t.id}** [${m.status ?? '?'}] ${m.priority ?? '?'} | ${truncateBytes(t.content, 512)}${taskFlags(m)}`;
   const due = dueDate(m);
-  if (due) line += ` (due: ${due})`;
+  if (due && isUpcoming(m, now)) line += ` (upcoming: due ${due}, opens ${opensDay(m)})`;
+  else if (due) line += ` (due: ${due})`;
   line += ` (${author(t)}, updated ${isoDate(t.updated_at)}) [${t.collection}]`;
   return line;
 }
@@ -304,12 +307,12 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       let tasks: DocRow[] = [];
       if (include_tasks ?? true) {
         if (focusColl) {
-          const open = await listTasks(pool, me, { collection: focusColl, includeComplete: false, limit: 200 });
+          const open = await listTasks(pool, me, { collection: focusColl, includeComplete: false, now, limit: 200 });
           const fresh = open.filter(t => now - t.updated_at <= RECALL_TASKS_FRESH_SECS).sort((a, b) => b.updated_at - a.updated_at);
           tasks = uniqueById([...fresh, ...open]).slice(0, RECALL_TASKS_FOCUSED);
         } else {
           tasks = (await vectorSearch(pool, me, { embedding, type: 'task', limit: RECALL_TASKS_UNFOCUSED * 4, maxDistance: CROSS_COLLECTION_MAX_DISTANCE }))
-            .filter(t => t.metadata.status !== 'complete').slice(0, RECALL_TASKS_UNFOCUSED);
+            .filter(t => t.metadata.status !== 'complete' && !isUpcoming(t.metadata, now)).slice(0, RECALL_TASKS_UNFOCUSED);
         }
       }
 
@@ -323,7 +326,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       ];
       if (tasks.length) {
         const head = focusColl ? `Open follow-ups for ${focusColl} (recently updated first, then by priority):` : 'Related open follow-ups:';
-        blocks.push([head, ...tasks.map(taskLine)].join('\n'));
+        blocks.push([head, ...tasks.map(t => taskLine(t, now))].join('\n'));
       }
       return { text: joinBounded(blocks, '\n\n---\n\n'), count: main.length + extras.length + tasks.length, collections };
     }),
@@ -363,10 +366,11 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         status: optString(z.enum(['pending', 'in_progress', 'blocked', 'complete'])),
         priority: optString(z.enum(['critical', 'high', 'medium', 'low'])),
         include_complete: optBoolean().describe('Include completed tasks (default: false)'),
+        include_upcoming: optBoolean().describe('Include recurring occurrences that have not opened yet (default: false)'),
       },
       annotations: { title: 'List tasks', ...READ_ONLY },
     },
-    instrument(ctx, 'task_list', async ({ id, collection, status, priority, include_complete }) => {
+    instrument(ctx, 'task_list', async ({ id, collection, status, priority, include_complete, include_upcoming }) => {
       if (id) {
         const t = await getTask(pool, me, id);
         if (!t) return { text: `Task ${id} not found.`, count: 0, collections: [] };
@@ -398,10 +402,14 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         return { text: truncateBytes(lines.join('\n'), 16 * 1024), count: 1, collections: [t.collection] };
       }
       const coll = await pickCollection(collection);
-      const tasks = await listTasks(pool, me, { collection: coll, status, priority, includeComplete: include_complete ?? false, limit: 200 });
-      if (tasks.length === 0) return { text: 'No tasks found.', count: 0, collections: coll ? [coll] : [] };
+      const now = Math.floor(ctx.nowSecs?.() ?? Date.now() / 1000);
+      const { rows: tasks, hiddenUpcoming: hidden } = await listTasksCounted(pool, me, {
+        collection: coll, status, priority, includeComplete: include_complete ?? false, includeUpcoming: include_upcoming ?? false, now, limit: 200,
+      });
+      const hiddenLine = hiddenUpcomingLine(hidden);
+      if (tasks.length === 0) return { text: hidden ? `No open tasks found.\n${hiddenLine}` : 'No tasks found.', count: 0, collections: coll ? [coll] : [] };
       return {
-        text: joinBounded(tasks.map(taskLine), '\n'),
+        text: joinBounded(tasks.map(t => taskLine(t, now)), '\n', hiddenLine ? [hiddenLine] : []),
         count: tasks.length,
         collections: [...new Set(tasks.map(t => t.collection))],
       };
@@ -514,7 +522,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       const who = user === '*' ? undefined : (user?.trim() || me);
       const [memories, tasks] = await Promise.all([
         typedMemoriesForWaiting(pool, me, coll),
-        listTasks(pool, me, { collection: coll, includeComplete: false, limit: WAITING_MAX_ROWS }),
+        listTasks(pool, me, { collection: coll, includeComplete: false, now: ctx.nowSecs?.(), limit: WAITING_MAX_ROWS }),
       ]);
       const w = buildWaiting(memories, tasks, who, me);
       const now = ctx.nowSecs?.() ?? Date.now() / 1000;

@@ -19,6 +19,8 @@ import { isSyncableCollection } from '../sync/syncable.js';
 import { includesUser, ownerWaitsOn } from '../memory/owners.js';
 import { knownUsers, usersIn } from '../memory/known-users.js';
 import { getConfig } from '../config.js';
+import { isUpcoming } from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 export interface WaitingItem {
   id: string;
@@ -56,8 +58,6 @@ export interface WaitingOptions {
   user?: string;
 }
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
 
 const firstLine = (s: string) => {
   const line = s.split('\n').find(l => l.trim()) ?? '';
@@ -88,9 +88,10 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
   for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
 
   for (const { collection, decisions, questions, tasks } of read) {
-    const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true);
+    const now = Math.floor(Date.now() / 1000);
+    const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true && !isUpcoming(t.metadata, now));
     const waitingOnIt = new Map<string, string[]>();
-    for (const t of open) for (const m of list(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
+    for (const t of open) for (const m of metadataList(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
 
     const seen = new Set<string>();
     for (const d of [...decisions, ...questions]) {
@@ -103,7 +104,7 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
       const item: WaitingItem = {
         id, collection, what: m.kind as 'decision' | 'question', title: firstLine(d.content), ...ownerWaitsOn(m.owner, by, known),
         by, since: Number(m.updated_at ?? m.created_at ?? 0), status: m.status ?? DEFAULT_STATUS[m.kind as MemoryKind],
-        ...(list(m.options).length ? { options: list(m.options) } : {}),
+        ...(metadataList(m.options).length ? { options: metadataList(m.options) } : {}),
         ...(m.recommendation ? { recommendation: String(m.recommendation) } : {}),
         ...(waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}),
       };
@@ -113,7 +114,7 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
     for (const t of open) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? '';
-      const people = taskNeedsPeople(list(m.tags));
+      const people = taskNeedsPeople(metadataList(m.tags));
       if (people) {
         out.actions.push({
           id: t.id, collection, what: 'action', title: t.content, for: people, by: owner,

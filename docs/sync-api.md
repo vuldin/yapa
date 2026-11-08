@@ -669,7 +669,24 @@ writes (all optional unless noted):
 - Tasks: `id`, `title` (also the content), `notes`, `status` (`pending` |
   `in_progress` | `blocked` | `complete`), `priority` (`critical` | `high` |
   `medium` | `low`), `due_date` (0 = none), `customer`, `project`,
-  `depends_on`, `blocks`, `is_recurring`, `recurrence_pattern`,
+  `depends_on`, `blocks`, `is_recurring`, `recurrence_pattern` (`daily` |
+  `weekly` | `monthly` | `quarterly` | `yearly`; `''` once stopped),
+  `recurrence_interval` (integer >= 1), `recurrence_anchor` (Unix seconds:
+  the first occurrence's due date), `recurrence_slot` (Unix seconds: the
+  slot this occurrence was scheduled for; a due-date move leaves it),
+  `lead_days` (integer >= 0), `opens_at` (Unix seconds: when the
+  occurrence stops being upcoming, the start of its due day `lead_days`
+  earlier in the writer's time zone; 0 once the series is stopped),
+  `recurrence_notes` (the series' notes template), `recurrence_series` (id
+  of the series' first task), `previous_occurrence` (id of the occurrence
+  completed before this one; this link is what makes a task the successor),
+  `next_occurrence` (informational: the successor's id). When sync
+  re-keys a task, `previous_occurrence`, `next_occurrence` and
+  `recurrence_series` naming the old id are rewritten on the writer's own
+  tasks in that collection; others' copies aren't rewritten,
+  `recurrence_tz` (IANA
+  time zone the series' slots and opening days are counted in; absent:
+  the completing machine's local time),
   `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from`,
   `claim_scope` (array), `memory_ids` (array: typed memories recorded for the
   task), `waits_on` (array: memory ids the task waits on; it is not ready

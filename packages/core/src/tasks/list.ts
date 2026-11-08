@@ -1,5 +1,7 @@
 import { getDocumentsByFilter, listCollections, type Collection } from '../store/index.js';
 import type { TaskStatus, TaskPriority } from './create.js';
+import { isUpcoming } from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 const PRIORITY_ORDER: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
 
@@ -19,6 +21,10 @@ export interface TaskListFilters {
   includeComplete?: boolean;
   /** Also tasks archived here after their owner deleted them on the sync service. */
   includeArchived?: boolean;
+  /** Also recurring occurrences that haven't opened yet (see tasks/recurrence.ts). */
+  includeUpcoming?: boolean;
+  /** Only tasks carrying every one of these tags (applied before upcoming ones are counted). */
+  tags?: string[];
   /** Return at most this many (after sorting). Default: all of them. */
   limit?: number;
 }
@@ -28,11 +34,18 @@ const READ_LIMIT = 10_000;
 
 /** List tasks with optional filtering. Sorted by priority desc, then salience desc. */
 export async function listTasks(filters: TaskListFilters = {}): Promise<TaskListResult[]> {
+  return (await listTasksCounted(filters)).tasks;
+}
+
+/** listTasks, plus how many upcoming occurrences it left out (0 with includeUpcoming). */
+export async function listTasksCounted(filters: TaskListFilters = {}): Promise<{ tasks: TaskListResult[]; upcomingHidden: number }> {
   const collectionNames = filters.collection
     ? [filters.collection]
     : (await listCollections()).map((c: Collection) => c.name);
 
   const allTasks: TaskListResult[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  let upcomingHidden = 0;
 
   for (const name of collectionNames) {
     const where: Record<string, any> = { type: 'task' };
@@ -49,6 +62,14 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
         if (!filters.includeComplete && task.metadata.status === 'complete') continue;
         // Deleted on the sync service by its owner, kept here archived.
         if (task.metadata.archived === true && !filters.includeArchived) continue;
+        if (filters.tags?.length) {
+          const tags = metadataList(task.metadata.tags);
+          if (!filters.tags.every(t => tags.includes(t))) continue;
+        }
+        if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) {
+          upcomingHidden++;
+          continue;
+        }
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -67,13 +88,17 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
-  return filters.limit !== undefined ? sorted.slice(0, filters.limit) : sorted;
+  return { tasks: filters.limit !== undefined ? sorted.slice(0, filters.limit) : sorted, upcomingHidden };
 }
 
-/** Get tasks that are due today or overdue. */
+/**
+ * Open tasks with a due date, soonest first (overdue ones too, unless not
+ * `includeOverdue`). Recurring occurrences that haven't opened yet are
+ * included: they are what is coming.
+ */
 export async function getDueTasks(includeOverdue: boolean = true): Promise<Array<TaskListResult & { daysUntil: number }>> {
   const now = Math.floor(Date.now() / 1000);
-  const tasks = await listTasks({ includeComplete: false });
+  const tasks = await listTasks({ includeComplete: false, includeUpcoming: true });
 
   return tasks
     .filter(t => t.metadata.due_date)

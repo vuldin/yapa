@@ -3,6 +3,8 @@ import { addDocument, getOrCreateCollection, getDocumentsByFilter, getDocumentsB
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { localCoordination } from '../sync/coordination.js';
+import { withDocLock } from '../doc-lock.js';
+import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, localZone, opensAt, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -18,8 +20,23 @@ export interface TaskOptions {
   project?: string;
   depends_on?: string[];
   blocks?: string[];
+  /** Implied by recurrence_pattern. */
   is_recurring?: boolean;
-  recurrence_pattern?: 'daily' | 'weekly' | 'monthly';
+  recurrence_pattern?: RecurrencePattern;
+  /** Every N periods (default 1). */
+  recurrence_interval?: number;
+  /** Due date of the series' first occurrence (default: this task's due date). */
+  recurrence_anchor?: number;
+  /** Days before the due day the occurrence opens (default by pattern). */
+  lead_days?: number;
+  /** The notes each new occurrence starts with (default: notes). */
+  recurrence_notes?: string;
+  /** Id of the series' first task (default: this task). */
+  recurrence_series?: string;
+  /** Id of the occurrence this one follows. */
+  previous_occurrence?: string;
+  /** IANA zone the series' slots are counted in (default: this machine's). */
+  recurrence_tz?: string;
   salience?: number;
   duration_minutes?: number;
   completed_at?: number;
@@ -127,7 +144,7 @@ async function idTaken(id: string): Promise<boolean> {
 const ID_ATTEMPTS = 5;
 
 /** A task id no document uses yet: getNextTaskId, skipping any number found taken. */
-async function freshTaskId(): Promise<string> {
+export async function freshTaskId(): Promise<string> {
   let floor = 0;
   let id = await getNextTaskId();
   for (let i = 1; i < ID_ATTEMPTS && (await idTaken(id)); i++) {
@@ -143,10 +160,67 @@ export async function createTask(
   options: TaskOptions = {},
   requested: string = 'global',
 ): Promise<string> {
-  // A collection merged away here is followed, never recreated.
-  const { collection } = await resolveWriteCollection(requested);
+  return (await createTaskWithMetadata(title, options, requested)).id;
+}
+
+/**
+ * createTask, returning the collection it was written to and the metadata it
+ * wrote. It never writes over a document: an id found taken (checked and
+ * written under the id's lock) moves on to the next free one, so `opts.id`
+ * is where it starts.
+ */
+export async function createTaskWithMetadata(
+  title: string,
+  options: TaskOptions = {},
+  requested: string = 'global',
+  opts: { id?: string; exactCollection?: boolean } = {},
+): Promise<{ id: string; collection: string; metadata: Record<string, any> }> {
+  if (options.is_recurring === false && options.recurrence_pattern !== undefined) {
+    throw new RecurrenceError('is_recurring false contradicts recurrence_pattern: leave one of them out');
+  }
+  const recurring = options.is_recurring ?? options.recurrence_pattern !== undefined;
+  if (!recurring && (options.recurrence_interval !== undefined || options.lead_days !== undefined)) {
+    throw new RecurrenceError('recurrence_interval and lead_days need a recurrence_pattern');
+  }
+  if (recurring && !isRecurrencePattern(options.recurrence_pattern)) {
+    throw new RecurrenceError(`A recurring task needs recurrence_pattern: one of ${RECURRENCE_PATTERNS.join(', ')}`);
+  }
+  if (recurring && options.recurrence_interval !== undefined) checkInterval(options.recurrence_interval);
+  if (recurring && options.lead_days !== undefined) checkLeadDays(options.lead_days);
+  // A collection merged away here is followed, never recreated (exactCollection: written where asked, as a successor is).
+  const { collection } = opts.exactCollection ? { collection: requested } : await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
-  const id = await freshTaskId();
+  // The first id may ask the sync service; a retry for a taken one stays local (this may run under a caller's lock).
+  let id = opts.id ?? await freshTaskId();
+  for (let attempt = 1; ; attempt++) {
+    const at = id;
+    const made = await withDocLock(collection, at, async () =>
+      (await getDocumentsByIds(collection, [at])).length ? undefined : writeTask(collection, at, title, options, recurring));
+    if (made) return made;
+    if (attempt >= ID_ATTEMPTS) throw new TaskIdTakenError(at);
+    id = await localFreeTaskId(Number(at.slice(at.lastIndexOf('-') + 1)) || 0);
+  }
+}
+
+/**
+ * The next task id above `floor` that no local collection uses, without
+ * asking the sync service (for use under a lock). The id is checked under
+ * its own lock again when written.
+ */
+export async function localFreeTaskId(floor = 0): Promise<string> {
+  let id = await getNextTaskId(floor, true);
+  for (let i = 1; i < ID_ATTEMPTS && (await idTaken(id)); i++) id = await getNextTaskId(Number(id.slice(id.lastIndexOf('-') + 1)) || 0, true);
+  return id;
+}
+
+/** No free id was found after ID_ATTEMPTS tries. */
+export class TaskIdTakenError extends Error {
+  constructor(readonly id: string) {
+    super(`task id ${id} is already taken`);
+  }
+}
+
+async function writeTask(collection: string, id: string, title: string, options: TaskOptions, recurring: boolean) {
   const now = Math.floor(Date.now() / 1000);
 
   const metadata: Record<string, any> = {
@@ -164,8 +238,7 @@ export async function createTask(
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
     ...(options.claim_scope?.length ? { claim_scope: options.claim_scope } : {}),
-    is_recurring: options.is_recurring ?? false,
-    recurrence_pattern: options.recurrence_pattern,
+    is_recurring: recurring,
     created_at: now,
     updated_at: now,
     accessed_at: now,
@@ -174,8 +247,27 @@ export async function createTask(
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? 'medium'],
     sector: 'semantic',
   };
+  if (recurring) {
+    const pattern = options.recurrence_pattern!;
+    const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue(options.recurrence_tz);
+    const lead = options.lead_days ?? DEFAULT_LEAD_DAYS[pattern];
+    const tz = options.recurrence_tz ?? localZone();
+    Object.assign(metadata, {
+      due_date: due,
+      recurrence_pattern: pattern,
+      recurrence_interval: options.recurrence_interval ?? 1,
+      recurrence_anchor: options.recurrence_anchor ?? due,
+      recurrence_slot: due,
+      recurrence_tz: tz,
+      lead_days: lead,
+      opens_at: opensAt(due, lead, tz),
+      recurrence_notes: options.recurrence_notes ?? options.notes ?? '',
+      recurrence_series: options.recurrence_series ?? id,
+      previous_occurrence: options.previous_occurrence,
+    });
+  }
   metadata.is_synced = false;
 
   await addDocument(collection, id, title, metadata);
-  return id;
+  return { id, collection, metadata };
 }

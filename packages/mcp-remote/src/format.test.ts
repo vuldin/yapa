@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  author, buildWaiting, dueDate, formatWaiting, isOpenTyped, itemContent, joinBounded, MAX_ITEM_CONTENT_BYTES, MAX_RESULT_BYTES,
-  needsPersonText, truncateBytes, typedLabel, waitingCount, waitsOnText,
+  author, buildWaiting, dueDate, formatWaiting, isOpenTyped, isUpcoming, itemContent, joinBounded, MAX_ITEM_CONTENT_BYTES, MAX_RESULT_BYTES,
+  needsPersonText, opensAt, opensDay, truncateBytes, typedLabel, waitingCount, waitsOnText,
 } from './format.js';
 import type { DocRow } from './queries.js';
 
@@ -156,5 +156,52 @@ describe('waiting', () => {
     const sam = buildWaiting(mems, tasks, 'sam', 'sam');
     expect(sam.questions.map(i => [i.id, i.for, i.ask])).toEqual([['q-e', ['sam'], 'Vendor support']]);
     expect(formatWaiting(sam, { now: NOW })).toContain('- **q-e** [question, for sam, ask Vendor support, 3d] Can the vendor raise the limit?');
+  });
+});
+
+describe('upcoming recurring tasks', () => {
+  const due = 2_000_000_000;
+  const rec = (extra: Record<string, unknown> = {}) => ({ type: 'task', status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: due, ...extra });
+
+  it('open at the start of the due day, lead_days earlier (default by pattern)', () => {
+    expect(opensAt(rec())).toBe(due - 86399 - 2 * 86400);
+    expect(opensAt(rec({ lead_days: 0 }))).toBe(due - 86399);
+    expect(opensAt(rec({ recurrence_pattern: 'yearly' }))).toBe(due - 86399 - 30 * 86400);
+    expect(opensAt({ type: 'task', due_date: due })).toBeUndefined();
+    // A stored opens_at that fits the due date is used; a stale one isn't.
+    expect(opensAt(rec({ opens_at: due - 2 * 86400 - 5 * 3600 }))).toBe(due - 2 * 86400 - 5 * 3600);
+    expect(opensAt(rec({ opens_at: due - 20 * 86400 }))).toBe(due - 86399 - 2 * 86400);
+    // Numbers held as strings, as core reads them.
+    expect(opensAt(rec({ due_date: String(due), lead_days: '0' }))).toBe(due - 86399);
+    expect(opensAt(rec({ opens_at: ` ${due - 2 * 86400 - 5 * 3600} ` }))).toBe(due - 2 * 86400 - 5 * 3600);
+    // Not numbers: a boolean, hex.
+    expect(opensAt(rec({ due_date: '0x10' }))).toBeUndefined();
+    expect(opensAt(rec({ lead_days: true }))).toBe(due - 86399 - 2 * 86400);
+    expect(opensAt(rec({ lead_days: '0x10' }))).toBe(due - 86399 - 2 * 86400);
+    // A value core reads as non-finite counts as missing.
+    expect(opensAt(rec({ due_date: '1e999' }))).toBeUndefined();
+    expect(opensAt(rec({ lead_days: '1e999' }))).toBe(due - 86399 - 2 * 86400);
+    expect(opensAt(rec({ opens_at: '1e999' }))).toBe(due - 86399 - 2 * 86400);
+    expect(isUpcoming(rec({ due_date: '1e999' }), 0)).toBe(false);
+  });
+
+  it('names the day an occurrence opens on, west and east of UTC', () => {
+    // Stored as local midnight on 2027-03-10: in Los Angeles (UTC-8) and Tokyo (UTC+9).
+    const pst = Date.UTC(2027, 2, 10, 8) / 1000, jst = Date.UTC(2027, 2, 9, 15) / 1000;
+    expect(opensDay(rec({ due_date: pst + 2 * 86400 + 86399, opens_at: pst }))).toBe('2027-03-10');
+    expect(opensDay(rec({ due_date: jst + 2 * 86400 + 86399, opens_at: jst }))).toBe('2027-03-10');
+    // Without a stored opens_at: an end-of-day due, two days ahead.
+    expect(opensDay(rec({ due_date: pst + 2 * 86400 + 86399 }))).toBe('2027-03-10');
+    expect(opensDay(rec({ due_date: jst + 2 * 86400 + 86399 }))).toBe('2027-03-10');
+  });
+
+  it('only a pending recurring occurrence with a due date is upcoming', () => {
+    const before = due - 86399 - 2 * 86400 - 1;
+    expect(isUpcoming(rec(), before)).toBe(true);
+    expect(isUpcoming(rec(), before + 1)).toBe(false);
+    expect(isUpcoming(rec({ status: 'blocked' }), before)).toBe(false);
+    expect(isUpcoming(rec({ is_recurring: false }), before)).toBe(false);
+    expect(isUpcoming(rec({ due_date: 0 }), before)).toBe(false);
+    expect(isUpcoming(rec({ recurrence_pattern: 'hourly' }), before)).toBe(false);
   });
 });

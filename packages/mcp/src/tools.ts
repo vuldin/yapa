@@ -37,7 +37,7 @@ import {
   classifyMemories,
   completeTask,
   createNewCollection,
-  createTask,
+  createTaskWithMetadata,
   curationCycle,
   deleteTask,
   evalCompare,
@@ -67,7 +67,6 @@ import {
   listCollectionsWithCounts,
   listMemories,
   listSessionDrafts,
-  listTasks,
   parseDuration,
   parseRelativeDate,
   pullCollection,
@@ -91,9 +90,21 @@ import {
   checkFollowUpCollections,
   sessionFolder,
   runScopeAction,
-  keptAsNotesLine,
   KEPT_AS_NOTE_REASON,
   RecordsElsewhereError,
+  RecurrenceError,
+  RECURRENCE_PATTERNS,
+  closeText,
+  completedText,
+  hiddenUpcomingLine,
+  listTasksCounted,
+  releaseText,
+  recurrenceLine,
+  recurrenceNote,
+  seriesChanged,
+  seriesInfo,
+  metadataList,
+  upcomingNote,
   redirectNote,
   removeCollection,
   removeDependency,
@@ -151,15 +162,6 @@ async function claimsByCollection(collections: string[]): Promise<Map<string, Ma
   return out;
 }
 
-/** What a release reported, when worth telling the agent. */
-function releaseNote(r: Awaited<ReturnType<typeof completeTask>>['release']): string {
-  if (!r) return '';
-  if (r.kind === 'released') return 'Claim released.';
-  if (r.kind === 'held_by_other') return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
-  if (r.kind === 'unshared') return `Claim release not shared (${r.reason}); it lapses on its own.`;
-  return '';
-}
-
 /** Typed-memory fields (core memory/kinds.ts), shared by memory_store and memory_update. */
 const TYPED_PARAMS = {
   kind: z.enum(MEMORY_KINDS).optional().describe('What kind of knowledge this is: finding (a result, root cause, retraction or trap), decision (a choice made, or one a person must make), limitation (something that cannot be done yet), question (for a person or another team), idea. Omit for an ordinary note.'),
@@ -191,22 +193,13 @@ const CLOSE_PARAMS = {
   })).optional().describe('Follow-up work, created as new tasks that say where they came from'),
 };
 
-function closeText(r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }): string {
-  const parts: string[] = [];
-  if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(', ')}.`);
-  if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(', ')}.`);
-  if (keptAsNotesLine(r.recorded)) parts.push(keptAsNotesLine(r.recorded));
-  if (r.nudge) parts.push(r.nudge);
-  return parts.join('\n');
-}
-
 /** Where a write from this session lands; a new shared collection only from a folder that may create one. */
 const writeTarget = (name: string) => resolveWriteCollection(name, { folder: sessionFolder() });
 
 const checkFollowUps = (followUps: Array<{ title: string; collection?: string }> | undefined) => checkFollowUpCollections(followUps, sessionFolder());
 
 function typedError(e: unknown) {
-  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError) {
+  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError || e instanceof RecurrenceError) {
     return { content: [{ type: 'text' as const, text: e.message }], isError: true };
   }
   throw e;
@@ -1071,20 +1064,29 @@ export function registerTools(server: McpServer): void {
       customer: z.string().optional().describe('Customer name'),
       project: z.string().optional().describe('Project name'),
       collection: z.string().optional().describe('Collection (default: global)'),
-      is_recurring: z.boolean().optional().describe('Whether task recurs'),
-      recurrence_pattern: z.enum(['daily', 'weekly', 'monthly']).optional().describe('Recurrence pattern'),
+      is_recurring: z.boolean().optional().describe('Whether task recurs (implied by recurrence_pattern)'),
+      recurrence_pattern: z.enum(RECURRENCE_PATTERNS).optional().describe('Repeat on this period: completing an occurrence creates the next one in its calendar slot. Due defaults to today'),
+      recurrence_interval: z.number().int().min(1).optional().describe('Every N periods, e.g. 2 with weekly for every two weeks (default 1)'),
+      lead_days: z.number().int().min(0).optional().describe('Days before its due day an occurrence opens; until then task lists hide it (default: daily 0, weekly 2, monthly 7, quarterly 14, yearly 30)'),
       claim_scope: z.array(z.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra"); task_next ranks tasks near live claims last'),
     },
-    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
+    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, recurrence_interval, lead_days, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? undefined : undefined;
       const target = await writeTarget(collection ?? 'global');
-      const id = await createTask(title, {
-        priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, claim_scope,
-      }, target.collection);
-      recordLastWrite(target.collection);
+      let made;
+      try {
+        made = await createTaskWithMetadata(title, {
+          priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, recurrence_interval, lead_days, claim_scope,
+        }, target.collection);
+      } catch (e) {
+        return typedError(e);
+      }
+      recordLastWrite(made.collection);
+      const { id, metadata: m } = made;
 
       let text = `Created task ${id}: "${title}"`;
-      if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
+      if (m.due_date) text += ` (due: ${formatTaskDate(m.due_date)})`;
+      if (recurrenceNote(m)) text += `\n${recurrenceLine(m)}`;
       if (target.redirectedFrom) text += `\n${redirectNote(target)}`;
       return { content: [{ type: 'text' as const, text }] };
     },
@@ -1101,40 +1103,51 @@ export function registerTools(server: McpServer): void {
       project: z.string().optional(),
       collection: z.string().optional(),
       include_complete: z.boolean().optional().describe('Include completed tasks (default: false)'),
+      include_upcoming: z.boolean().optional().describe('Include recurring occurrences that have not opened yet (default: false)'),
     },
-    async ({ id, status, priority, customer, project, collection, include_complete }) => {
+    async ({ id, status, priority, customer, project, collection, include_complete, include_upcoming }) => {
       if (id) {
         const task = await getTask(id);
         if (!task) {
           return { content: [{ type: 'text' as const, text: `Task ${id} not found.` }] };
         }
-        const norm = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toString().split(',').filter(Boolean);
         const lines = [
           `**${task.id}**: ${task.title}`,
           `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
           `Collection: ${task.collection}`,
         ];
         if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
+        const series = seriesInfo(task.metadata, task.id);
+        if (series) {
+          const upcoming = upcomingNote(task.metadata);
+          lines.push(`Recurrence: ${recurrenceNote(task.metadata)}${upcoming ? `; ${upcoming}` : ''}`);
+          const links = [`series ${series.series}`, series.previous && `previous ${series.previous}`, series.next && `next ${series.next}`];
+          lines.push(`Series: ${links.filter(Boolean).join(', ')}`);
+        }
         if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
         if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
         if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines.push(`Owner: ${task.metadata.origin_user}`);
         const held = claimNote(task, await claimsFor(task.collection));
         if (held) lines.push(`Claim: ${held}`);
         if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
-        const tags = norm(task.metadata.tags);
+        if (series && series.series_notes !== null && series.series_notes !== (task.metadata.notes ?? '')) {
+          lines.push(`Series notes: ${series.series_notes || '(none)'}`);
+        }
+        const tags = metadataList(task.metadata.tags);
         if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
-        const deps = norm(task.metadata.depends_on);
+        const deps = metadataList(task.metadata.depends_on);
         if (deps.length) lines.push(`Depends on: ${deps.join(', ')}`);
-        const blocks = norm(task.metadata.blocks);
+        const blocks = metadataList(task.metadata.blocks);
         if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
         return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
       }
-      const tasks = await listTasks({
+      const { tasks, upcomingHidden: hidden } = await listTasksCounted({
         status, priority, customer, project, collection,
-        includeComplete: include_complete,
+        includeComplete: include_complete, includeUpcoming: include_upcoming,
       });
+      const hiddenLine = hiddenUpcomingLine(hidden);
       if (tasks.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No tasks found.' }] };
+        return { content: [{ type: 'text' as const, text: hidden ? `No open tasks found.\n${hiddenLine}` : 'No tasks found.' }] };
       }
       const SHOWN = 100;
       const shown = tasks.slice(0, SHOWN);
@@ -1143,13 +1156,16 @@ export function registerTools(server: McpServer): void {
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
         const held = t.metadata.status === 'complete' ? '' : claimNote(t, claims.get(t.collection));
         if (held) line += ` (${held})`;
-        if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
+        const upcoming = upcomingNote(t.metadata);
+        if (upcoming) line += ` (${upcoming})`;
+        else if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
         if (t.metadata.duration_minutes != null) line += ` (effort: ${formatDuration(t.metadata.duration_minutes)})`;
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
         line += ` [${t.collection}]`;
         return line;
       });
       if (tasks.length > SHOWN) lines.push(`- _…${tasks.length - SHOWN} more: narrow with status, priority or collection, or use task_next_`);
+      if (hiddenLine) lines.push(hiddenLine);
       return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
     },
   );
@@ -1157,14 +1173,18 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'task_update',
-    'Update task fields (title, status, priority, notes, due, tags)',
+    'Update task fields (title, status, priority, notes, due, tags), or set, change or stop recurrence. status complete completes the task as task_complete does (a recurring one gets its next occurrence)',
     {
       id: z.string().describe('Task ID'),
       title: z.string().trim().min(1).optional().describe('New task title (rename)'),
       status: z.enum(['pending', 'in_progress', 'blocked', 'complete']).optional(),
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
-      notes: z.string().optional(),
-      due: z.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date'),
+      notes: z.string().optional().describe('Notes (on a recurring task, this occurrence only)'),
+      due: z.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date (refused on a recurring task: stop the series first)'),
+      recurrence_pattern: z.enum([...RECURRENCE_PATTERNS, 'none']).optional().describe('Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series'),
+      recurrence_interval: z.number().int().min(1).optional().describe('Every N periods (re-anchors the series at the due date)'),
+      lead_days: z.number().int().min(0).optional().describe('Days before its due day an occurrence opens'),
+      series_notes: z.string().optional().describe('Replace the notes each new occurrence starts with'),
       tags: z.array(z.string()).optional(),
       blocked_reason: z.string().optional(),
       duration: z.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
@@ -1179,7 +1199,8 @@ export function registerTools(server: McpServer): void {
       }).optional().describe('A choice only a person can make: records it as a decision that is needed, and the task waits on it (pending; task_next skips it until the decision is recorded with memory_update). Then take other work. Do not combine with a status other than pending.'),
       ...CLOSE_PARAMS,
     },
-    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+    async ({ id, title, status, priority, notes, due, recurrence_pattern, recurrence_interval, lead_days, series_notes, tags, blocked_reason, duration, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+      const changesSeries = seriesChanged({ recurrence_pattern, recurrence_interval, lead_days, series_notes });
       if (decision_needed && status && status !== 'pending') {
         return { content: [{ type: 'text' as const, text: 'decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending.' }], isError: true };
       }
@@ -1192,6 +1213,10 @@ export function registerTools(server: McpServer): void {
       if (notes !== undefined) updates.notes = notes;
       if (tags) updates.tags = tags;
       if (blocked_reason) updates.blockedReason = blocked_reason;
+      if (recurrence_pattern) updates.recurrence_pattern = recurrence_pattern;
+      if (recurrence_interval !== undefined) updates.recurrence_interval = recurrence_interval;
+      if (lead_days !== undefined) updates.lead_days = lead_days;
+      if (series_notes !== undefined) updates.series_notes = series_notes;
       if (due !== undefined) {
         const low = due.trim().toLowerCase();
         if (low === 'none' || low === 'clear' || low === '') {
@@ -1218,19 +1243,26 @@ export function registerTools(server: McpServer): void {
           const d = await requestDecision(id, decision_needed, { reclaim }, rest);
           decision = d.decision;
           r = d;
+        } else if (status === 'complete') {
+          // A completion, the other fields written with it: a recurring task's series goes on.
+          const { status: _s, duration_minutes: minutes, ...rest } = updates;
+          const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
+          recordLastWrite(c.collection);
+          return { content: [{ type: 'text' as const, text: completedText(id, c, { durationMinutes: minutes, seriesChanged: changesSeries }) }] };
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
-        const taskCollection = (await getTask(r.id))?.collection;
+        const taskCollection = r.collection;
         recordLastWrite(taskCollection);
         const recorded = learned?.length || follow_ups?.length
           ? await recordForTask({ id: r.id, collection: taskCollection! }, { learned, follow_ups })
           : undefined;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
+        if (r.metadata && changesSeries) text += `\n${recurrenceLine(r.metadata)}`;
         if (decision) text += `\nRecorded decision ${decision} (needed${decision_needed!.owner ? `, for ${decision_needed!.owner}` : ''}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim = r.claim ? describeClaim(r.claim) : '';
         if (claim) text += `\n${claim}`;
-        const release = releaseNote(r.release);
+        const release = releaseText(r.release);
         if (release) text += `\n${release}`;
         const rec = closeText({ recorded });
         if (rec) text += `\n${rec}`;
@@ -1263,20 +1295,11 @@ export function registerTools(server: McpServer): void {
       let result;
       try {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
-        recordLastWrite((await getTask(id))?.collection);
+        recordLastWrite(result.collection);
       } catch (e) {
         return typedError(e);
       }
-      let text = `Completed task ${id}`;
-      if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
-      const release = releaseNote(result.release);
-      if (release) text += `\n${release}`;
-      if (result.regeneratedId) {
-        text += ` → regenerated as ${result.regeneratedId} (recurring)`;
-      }
-      const rec = closeText(result);
-      if (rec) text += `\n${rec}`;
-      return { content: [{ type: 'text' as const, text }] };
+      return { content: [{ type: 'text' as const, text: completedText(id, result, { durationMinutes }) }] };
     },
   );
 

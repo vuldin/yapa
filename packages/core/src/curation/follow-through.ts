@@ -28,6 +28,7 @@
  * @module @yapa/core/curation/follow-through
  */
 import { getDocumentsByIds, listCollections, queryDocuments, type DocumentResult } from '../store/index.js';
+import { metadataList } from '../metadata-adapter.js';
 import { getConfig } from '../config.js';
 import { isOpenTyped, normalizeTyped, type MemoryKind } from '../memory/kinds.js';
 import { updateMemory } from '../memory/update.js';
@@ -81,15 +82,12 @@ export interface ItemChange {
   disposition_reason?: string;
 }
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
-
 function toItem(collection: string, d: { id: string; content: string; metadata: Record<string, any> }): OpenItem {
   const m = d.metadata;
   return {
     id: m.parent_id ?? d.id, collection, kind: m.kind, status: m.status, content: d.content.slice(0, 600),
     ...(m.owner ? { owner: String(m.owner) } : {}),
-    ...(list(m.options).length ? { options: list(m.options) } : {}),
+    ...(metadataList(m.options).length ? { options: metadataList(m.options) } : {}),
     ...(m.recommendation ? { recommendation: String(m.recommendation) } : {}),
   };
 }
@@ -110,8 +108,8 @@ export async function findOpenItems(collection: string, text: string, taskIds: s
   const waits: string[] = [];
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds(collection, [tid]).catch(() => []);
-    waits.push(...list(t?.metadata.waits_on));
-    linked.push(...list(t?.metadata.memory_ids));
+    waits.push(...metadataList(t?.metadata.waits_on));
+    linked.push(...metadataList(t?.metadata.memory_ids));
   }
   const addById = async (mid: string) => {
     for (const name of [collection, ...names.filter(n => n !== collection)]) {

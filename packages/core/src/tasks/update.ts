@@ -1,14 +1,20 @@
 import { getConfig } from '../config.js';
 import { captureNudge, recordForTask, validateLearned, type FollowUp, type LearnedItem, type Recorded } from './close.js';
-import { getDocumentsByIds, listCollections, addDocument, metadataDelta, patchDocument } from '../store/index.js';
+import { getDocumentsByFilter, getDocumentsByIds, listCollections, addDocument, metadataDelta, patchDocument } from '../store/index.js';
 import { fromChroma } from '../metadata-adapter.js';
 import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
-import { createTask } from './create.js';
+import { createTaskWithMetadata, freshTaskId, localFreeTaskId } from './create.js';
+import { resolveWriteCollection } from '../sync/sentinel.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
+import {
+  isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, RecurrenceError, recurrenceChanges, recurrenceInterval,
+  isRecurrencePattern, metaTime, opensAtOf, SERIES_PARAMS, seriesChanged, seriesZone, storedZone, todayDue, type RecurrencePattern, type RecurrenceUpdate,
+} from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 export interface TaskResult {
   id: string;
@@ -48,6 +54,10 @@ export interface TaskUpdateResult {
   release?: ReleaseResult;
   /** The status the task had just before this update was written (read under the lock). */
   previousStatus?: string;
+  /** The task's metadata as this update wrote it. */
+  metadata?: Record<string, any>;
+  /** The collection the task is in. */
+  collection?: string;
 }
 
 /** Caller context for an update: who is acting, and claim options for a move to in_progress. */
@@ -61,18 +71,48 @@ const RELEASE_OUTCOME: Record<string, string> = { complete: 'done', blocked: 'bl
  * holds it (TaskClaimedError, nothing written). Moving it out of
  * `in_progress` releases this session's claim.
  */
+export type TaskUpdates = Omit<Partial<TaskOptions>, (typeof RECURRENCE_KEYS)[number]> & {
+  title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[];
+  /** false stops the series (as recurrence_pattern "none"). */
+  is_recurring?: boolean;
+  recurrence_interval?: number;
+  lead_days?: number;
+  /** A pattern sets or changes recurrence (re-anchored at the due date); "none" stops it. */
+  recurrence_pattern?: RecurrencePattern | 'none';
+  /** Replaces the series template; `notes` changes only this occurrence. */
+  series_notes?: string;
+};
+
+/**
+ * For completeTask: runs under the lock with the task as it is (`current`)
+ * and as this update will write it; what it returns is written too, and
+ * null writes nothing.
+ */
+interface UpdateHooks {
+  beforeWrite?: (task: { current: Record<string, any>; content: string; metadata: Record<string, any> }) => Promise<Record<string, any> | null>;
+}
+
 export async function updateTask(
   id: string,
-  updates: Partial<TaskOptions> & { title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[] },
+  updates: TaskUpdates,
   ctx: TaskUpdateContext = {},
+  hooks: UpdateHooks = {},
 ): Promise<TaskUpdateResult> {
   let task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
-  const result: TaskUpdateResult = { id };
+  const result: TaskUpdateResult = { id, collection: task.collection };
+  // is_recurring false stops the series, as recurrence_pattern "none" does; true sets the task's own pattern again.
+  if (updates.is_recurring === false && updates.recurrence_pattern === undefined) updates = { ...updates, recurrence_pattern: 'none' };
+  if (updates.is_recurring === true && updates.recurrence_pattern === undefined && !isRecurring(task.metadata)) {
+    if (!isRecurrencePattern(task.metadata.recurrence_pattern)) throw new RecurrenceError(`${task.id} has no recurrence_pattern to repeat on: pass one`);
+    updates = { ...updates, recurrence_pattern: task.metadata.recurrence_pattern };
+  }
 
   if (updates.status === 'in_progress') {
+    // Refused before the claim is taken, so there is nothing to give back (checked again under the lock).
+    recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
     const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
     if (claim.kind === 'refused') throw new TaskClaimedError(claim);
     result.claim = claim;
@@ -85,18 +125,23 @@ export async function updateTask(
   }
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', ...SERIES_PARAMS, 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   // The write itself, under the task's lock and over the task as it is now:
   // another session's change since the read above is kept, not reverted.
   const t = task;
+  const fields: Record<string, any> = { ...updates };
+  for (const k of RECURRENCE_KEYS) delete fields[k];
   const prev = await withDocLock(t.collection, t.id, async () => {
     const cur = (await getDocumentsByIds(t.collection, [t.id]))[0];
     if (!cur) throw new Error(`Task ${t.id} not found`);
+    // Again on the task as it is now: a series change refused before the lock is refused here too.
+    await checkSeriesUpdate({ id: t.id, collection: t.collection, metadata: cur.metadata }, updates);
     const updatedMetadata: Record<string, any> = {
       ...cur.metadata,
-      ...updates,
+      ...fields,
+      ...recurrenceChanges(t.id, cur.metadata, updates as RecurrenceUpdate),
       updated_at: Math.floor(Date.now() / 1000),
     };
     // First completion wins, judged on the task as it is now (two sessions
@@ -112,6 +157,12 @@ export async function updateTask(
     // Cleared with '' rather than deleted: a store update merges metadata keys.
     else if (updates.status !== undefined && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = '';
 
+    if (hooks.beforeWrite) {
+      const extra = await hooks.beforeWrite({ current: cur.metadata, content: updates.title ?? cur.content, metadata: updatedMetadata });
+      if (extra === null) return { status: cur.metadata.status as string | undefined, metadata: cur.metadata };
+      Object.assign(updatedMetadata, extra);
+    }
+
     // The title is the document content (what search embeds): rewrite the doc
     // so the embedding follows, instead of only the metadata copy.
     if (updates.title !== undefined && updates.title !== cur.content) {
@@ -121,9 +172,14 @@ export async function updateTask(
       // without this lock (a boost, a push marker) is kept too.
       await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
-    return cur.metadata.status as string | undefined;
+    return { status: cur.metadata.status as string | undefined, metadata: updatedMetadata };
+  }).catch(async e => {
+    // The task changed meanwhile and the update no longer applies: give back a claim just taken for it.
+    if (result.claim?.kind === 'granted' && !result.claim.renewed) await releaseTaskClaim(t.id, t.collection, 'pending', ctx.session).catch(() => undefined);
+    throw e;
   });
-  result.previousStatus = prev;
+  result.previousStatus = prev.status;
+  result.metadata = prev.metadata;
 
   // A granted claim is visible to teammates at once, not after the debounce.
   if (result.claim?.kind === 'granted') {
@@ -137,77 +193,142 @@ export async function updateTask(
   return result;
 }
 
-/** Mark task as complete. Handles recurring regeneration. */
+export interface CompleteResult {
+  /** The next occurrence this completion created. */
+  regeneratedId?: string;
+  next?: { due_date: number; opens_at: number };
+  /** The open next occurrence that already existed (the task was reopened and completed again). */
+  existingNext?: string;
+  release?: ReleaseResult;
+  recorded?: Recorded;
+  nudge?: string;
+  /** The completed task's metadata as written. */
+  metadata?: Record<string, any>;
+  /** The collection the task is in. */
+  collection?: string;
+}
+
+interface Successor { id: string; due_date: number; opens_at: number; status: string; created: boolean }
+
+/**
+ * Mark task as complete. Handles recurring regeneration. `fields` are other
+ * task_update fields, written in the same write (a refused one stops the
+ * completion); the next occurrence follows the task as written. Whether the
+ * task is being closed or was already complete is judged under its lock.
+ */
 export async function completeTask(
   id: string,
   durationMinutes?: number,
   ctx: TaskUpdateContext = {},
   record: { learned?: LearnedItem[]; follow_ups?: FollowUp[] } = {},
-): Promise<{ regeneratedId?: string; release?: ReleaseResult; recorded?: Recorded; nudge?: string }> {
+  fields: TaskUpdates = {},
+): Promise<CompleteResult> {
+  validateLearned(record.learned);
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
-  validateLearned(record.learned);
+  // The series lives where the task is. A collection removed from this machine refuses the completion before anything is written.
+  const collection = task.collection;
+  await resolveWriteCollection(collection);
+  const { status: _s, ...rest } = fields;
+  const given = { ...rest, ...(durationMinutes != null ? { duration_minutes: durationMinutes } : {}) };
 
-  const completionUpdates: Partial<TaskOptions> = {
-    status: 'complete',
-    salience: (task.metadata.salience ?? 2.0) * 0.5,
-  };
-  // Set completed_at exactly once (first-completion-wins). A later reopen -> re-complete
-  // preserves the original close time, and editing duration later never moves it.
-  if (task.metadata.completed_at == null) {
-    completionUpdates.completed_at = Math.floor(Date.now() / 1000);
-  }
-  if (durationMinutes != null) {
-    completionUpdates.duration_minutes = durationMinutes;
-  }
+  // The next occurrence's id, allocated before the lock (allocation may ask the sync service), and only if one may be needed.
+  const willRecur = rest.recurrence_pattern !== undefined ? rest.recurrence_pattern !== 'none' : isRecurring(task.metadata);
+  const nextId = task.metadata.status !== 'complete' && willRecur && !(await successorOf(collection, task.id)) ? await freshTaskId() : undefined;
 
-  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
+  let closing = false;
+  let successor: Successor | undefined;
+  const u = await updateTask(id, { ...given, status: 'complete' }, ctx, {
+    beforeWrite: async ({ current, content, metadata }) => {
+      // Already complete: only the fields passed (nothing at all without any), and no next occurrence.
+      if (current.status === 'complete') return Object.keys(given).length ? {} : null;
+      closing = true;
+      // completed_at is set once: a reopened task completed again keeps its first close time.
+      const close = { salience: (current.salience ?? 2.0) * 0.5, completed_at: current.completed_at ?? Math.floor(Date.now() / 1000) };
+      if (!isRecurring(metadata)) return close;
+      successor = await successorOf(collection, task.id)
+        ?? await createSuccessor(collection, task.id, content, { ...metadata, ...close }, nextId ?? await localFreeTaskId());
+      return { ...close, next_occurrence: successor.id };
+    },
+  });
   const recorded = record.learned?.length || record.follow_ups?.length
-    ? await recordForTask({ id: task.id, collection: task.collection }, record)
+    ? await recordForTask({ id: task.id, collection }, record)
     : undefined;
-  const nudge = captureNudge(task.id, task.metadata, recorded);
-  const extras = { ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
-
-  // Handle recurring tasks: once, by whichever completion found it still open
-  // (two sessions completing it at once must not create two next occurrences).
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== 'complete') {
-    const nextDue = computeNextDue(
-      task.metadata.due_date ?? Math.floor(Date.now() / 1000),
-      task.metadata.recurrence_pattern,
-    );
-
-    // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
-    const newId = await createTask(task.title, {
-      priority: task.metadata.priority,
-      tags: Array.isArray(task.metadata.tags)
-        ? task.metadata.tags
-        : (task.metadata.tags ?? '').split(',').filter(Boolean),
-      notes: task.metadata.notes,
-      customer: task.metadata.customer,
-      project: task.metadata.project,
-      due_date: nextDue,
-      is_recurring: true,
-      recurrence_pattern: task.metadata.recurrence_pattern,
-    }, task.collection);
-
-    return { regeneratedId: newId, ...extras };
-  }
-
-  return extras;
+  const nudge = closing ? captureNudge(task.id, task.metadata, recorded) : undefined;
+  return {
+    metadata: u.metadata, collection,
+    ...(u.release ? { release: u.release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}),
+    ...(successor?.created ? { regeneratedId: successor.id, next: { due_date: successor.due_date, opens_at: successor.opens_at } } : {}),
+    ...(successor && !successor.created && successor.status !== 'complete' ? { existingNext: successor.id } : {}),
+  };
 }
 
-function computeNextDue(currentDue: number, pattern: string): number {
-  const d = new Date(currentDue * 1000);
-  switch (pattern) {
-    case 'daily':
-      d.setDate(d.getDate() + 1);
-      break;
-    case 'weekly':
-      d.setDate(d.getDate() + 7);
-      break;
-    case 'monthly':
-      d.setMonth(d.getMonth() + 1);
-      break;
-  }
-  return Math.floor(d.getTime() / 1000);
+/**
+ * The occurrence that follows `id` in its collection: the task whose
+ * previous_occurrence is `id` (next_occurrence on `id` is only a pointer to
+ * it). A store error propagates: "no successor" must mean none.
+ */
+async function successorOf(collection: string, id: string): Promise<Successor | undefined> {
+  const d = (await getDocumentsByFilter(collection, { type: 'task', previous_occurrence: id }, 5)).find(x => x.metadata.archived !== true);
+  return d && { id: d.id, due_date: metaTime(d.metadata.due_date), opens_at: opensAtOf(d.metadata), status: String(d.metadata.status ?? 'pending'), created: false };
 }
+
+/** Create the next occurrence of `id` under `newId` (or the next free one), from the task as the completion is about to write it. */
+async function createSuccessor(collection: string, id: string, title: string, m: Record<string, any>, newId: string): Promise<Successor> {
+  const pattern = m.recurrence_pattern as RecurrencePattern;
+  const interval = recurrenceInterval(m);
+  const lead = leadDays(m);
+  const tz = seriesZone(m);
+  const slot = occurrenceSlot(m);
+  const anchor = metaTime(m.recurrence_anchor) || slot || todayDue(storedZone(m));
+  // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this
+  // occurrence's slot (where it was scheduled, even if its due date was moved).
+  const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)), tz);
+  // Series created before templates start from their last notes.
+  const template = m.recurrence_notes !== undefined ? String(m.recurrence_notes) : String(m.notes ?? '');
+  // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
+  const made = await createTaskWithMetadata(title, {
+    priority: m.priority,
+    tags: metadataList(m.tags),
+    notes: template,
+    customer: m.customer,
+    project: m.project,
+    due_date: nextDue,
+    is_recurring: true,
+    recurrence_pattern: pattern,
+    recurrence_interval: interval,
+    recurrence_anchor: anchor,
+    // The stored zone as it is, even one this machine doesn't know.
+    recurrence_tz: storedZone(m),
+    lead_days: lead,
+    recurrence_notes: template,
+    recurrence_series: m.recurrence_series || id,
+    previous_occurrence: id,
+  }, collection, { id: newId, exactCollection: true });
+  return { id: made.id, due_date: nextDue, opens_at: opensAt(nextDue, lead, tz), status: 'pending', created: true };
+}
+
+/**
+ * A series change belongs on the series' open occurrence: refused, naming
+ * it, on a task with an open successor (even one reopened) and on a
+ * completed one, also when the same call reopens it. With nothing open,
+ * reopening makes this the open one; otherwise there is no series to change.
+ */
+export async function checkSeriesUpdate(task: { id: string; collection: string; metadata: Record<string, any> }, updates: TaskUpdates): Promise<void> {
+  if (!seriesChanged(updates)) return;
+  // The series' open occurrence is its latest one not complete, by slot (a reopened older one doesn't hold it).
+  const series = task.metadata.recurrence_series || task.id;
+  let open: { id: string; at: [number, number] } | undefined;
+  for (const status of ['pending', 'in_progress', 'blocked']) {
+    for (const d of await getDocumentsByFilter(task.collection, { type: 'task', recurrence_series: series, status }, 5)) {
+      const at: [number, number] = [occurrenceSlot(d.metadata), metaTime(d.metadata.created_at)];
+      if (d.metadata.archived !== true && (!open || at[0] > open.at[0] || (at[0] === open.at[0] && at[1] > open.at[1]))) open = { id: d.id, at };
+    }
+  }
+  if (open && open.id !== task.id) throw notOpen(task.id, open.id);
+  if (open || task.metadata.status !== 'complete') return;
+  if (updates.status !== undefined && updates.status !== 'complete') return;
+  throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
+}
+
+const notOpen = (id: string, open: string) => new RecurrenceError(`${id} isn't the open occurrence of its series: change the series on ${open}`);
