@@ -253,9 +253,17 @@ describe('registered tools over the local store', () => {
     expect((await getTask(next))?.metadata).toMatchObject({ notes: 'v2', previous_occurrence: id });
     expect((await getTask(id))?.metadata).toMatchObject({ status: 'complete', duration_minutes: 30 });
 
-    const refused = await call('task_update', { id: next, status: 'complete', recurrence_pattern: 'none', lead_days: 3 });
+    const lead = await call('task_update', { id: next, status: 'complete', lead_days: 3 });
+    expect(lead.content[0].text.split('\n')[1]).toBe('Repeats monthly, opens 3 day(s) before it is due.');
+    const third = lead.content[0].text.match(/regenerated as (tester-\d+)/)[1];
+    expect((await getTask(third))?.metadata.lead_days).toBe(3);
+    const stopped = await call('task_update', { id: third, status: 'complete', recurrence_pattern: 'none' });
+    expect(stopped.content[0].text.split('\n').slice(0, 2)).toEqual([`Completed task ${third}`, 'Series stopped: no next occurrence.']);
+
+    const another = (await call('task_create', { title: 'send the monthly summary again', collection: C, recurrence_pattern: 'monthly' })).content[0].text.match(/(tester-\d+)/)[1];
+    const refused = await call('task_update', { id: another, status: 'complete', recurrence_pattern: 'none', lead_days: 3 });
     expect(refused.isError).toBe(true);
-    expect((await getTask(next))?.metadata.status).toBe('pending');
+    expect((await getTask(another))?.metadata.status).toBe('pending');
   });
 
   it('a refused recurrence change on task_update in_progress leaves no claim', async () => {

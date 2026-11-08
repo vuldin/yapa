@@ -61,7 +61,9 @@ describe('yapa task', () => {
     const C = 'project-cli-recurring';
     const soon = await createTask('send the weekly digest', { recurrence_pattern: 'weekly' }, C);
     const later = await createTask('renew the certificate', { recurrence_pattern: 'yearly', due_date: Math.floor(Date.now() / 1000) + 200 * 86400 }, C);
-    expect(((await runTask('list', ['--collection', C])).json.tasks as any[]).map(t => t.id)).toEqual([soon]);
+    const open = await runTask('list', ['--collection', C]);
+    expect((open.json.tasks as any[]).map(t => t.id)).toEqual([soon]);
+    expect(open.json.upcoming_hidden).toBe(1);
     const all = (await runTask('list', ['--collection', C, '--include-upcoming'])).json.tasks as any[];
     expect(all.map(t => t.id).sort()).toEqual([soon, later].sort());
     expect(all.find(t => t.id === later).recurrence).toMatchObject({ pattern: 'yearly', interval: 1, lead_days: 30, series: later, previous: null, upcoming: true });

@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
-  formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, opensAtOf, recurrenceInterval,
+  formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, listTasksCounted, opensAtOf, recurrenceInterval,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -135,14 +135,18 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(', ')}`);
       const collection = flag(args, '--collection');
       const wantTags = list(flag(args, '--tag')) ?? [];
-      const tasks = (await listTasks({ collection, status: status as TaskStatus | undefined, includeComplete: args.includes('--include-complete'), includeUpcoming: args.includes('--include-upcoming') }))
+      const listed = await listTasksCounted({ collection, status: status as TaskStatus | undefined, includeComplete: args.includes('--include-complete'), includeUpcoming: args.includes('--include-upcoming') });
+      const tasks = listed.tasks
         .filter(t => {
           if (!wantTags.length) return true;
           const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? '').split(',');
           return wantTags.every(x => tags.includes(x));
         });
       const claims = collection ? await claimsFor(collection) : undefined;
-      return { exit: EXIT.ok, json: { ok: true, tasks: tasks.map(t => taskJson(t, claims)) }, text: `${tasks.length} task(s)` };
+      return {
+        exit: EXIT.ok, json: { ok: true, tasks: tasks.map(t => taskJson(t, claims)), upcoming_hidden: listed.upcomingHidden },
+        text: `${tasks.length} task(s)${listed.upcomingHidden ? ` (${listed.upcomingHidden} upcoming hidden: --include-upcoming)` : ''}`,
+      };
     }
     case 'show': {
       if (!positional) throw new UsageError('task id required');

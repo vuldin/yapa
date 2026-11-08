@@ -98,7 +98,11 @@ import {
   RecurrenceError,
   RECURRENCE_PATTERNS,
   formatTaskDay,
-  isUpcoming,
+  closeText,
+  completedText,
+  hiddenUpcomingLine,
+  listTasksCounted,
+  releaseText,
   recurrenceLine,
   recurrenceNote,
   upcomingNote,
@@ -159,15 +163,6 @@ async function claimsByCollection(collections: string[]): Promise<Map<string, Ma
   return out;
 }
 
-/** What a release reported, when worth telling the agent. */
-function releaseNote(r: Awaited<ReturnType<typeof completeTask>>['release']): string {
-  if (!r) return '';
-  if (r.kind === 'released') return 'Claim released.';
-  if (r.kind === 'held_by_other') return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
-  if (r.kind === 'unshared') return `Claim release not shared (${r.reason}); it lapses on its own.`;
-  return '';
-}
-
 /** Typed-memory fields (core memory/kinds.ts), shared by memory_store and memory_update. */
 const TYPED_PARAMS = {
   kind: z.enum(MEMORY_KINDS).optional().describe('What kind of knowledge this is: finding (a result, root cause, retraction or trap), decision (a choice made, or one a person must make), limitation (something that cannot be done yet), question (for a person or another team), idea. Omit for an ordinary note.'),
@@ -199,34 +194,10 @@ const CLOSE_PARAMS = {
   })).optional().describe('Follow-up work, created as new tasks that say where they came from'),
 };
 
-function closeText(r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }): string {
-  const parts: string[] = [];
-  if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(', ')}.`);
-  if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(', ')}.`);
-  if (keptAsNotesLine(r.recorded)) parts.push(keptAsNotesLine(r.recorded));
-  if (r.nudge) parts.push(r.nudge);
-  return parts.join('\n');
-}
-
 /** Where a write from this session lands; a new shared collection only from a folder that may create one. */
 const writeTarget = (name: string) => resolveWriteCollection(name, { folder: sessionFolder() });
 
 const checkFollowUps = (followUps: Array<{ title: string; collection?: string }> | undefined) => checkFollowUpCollections(followUps, sessionFolder());
-
-/** The reply to a completion (task_complete, or task_update with status complete). */
-function completedText(id: string, durationMinutes: number | undefined, result: Awaited<ReturnType<typeof completeTask>>): string {
-  let text = `Completed task ${id}`;
-  if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
-  if (result.regeneratedId) {
-    text += ` → regenerated as ${result.regeneratedId} (recurring)`;
-    if (result.next) text += `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}`;
-  }
-  const release = releaseNote(result.release);
-  if (release) text += `\n${release}`;
-  const rec = closeText(result);
-  if (rec) text += `\n${rec}`;
-  return text;
-}
 
 function typedError(e: unknown) {
   if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError || e instanceof RecurrenceError) {
@@ -1173,13 +1144,11 @@ export function registerTools(server: McpServer): void {
         if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
         return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
       }
-      const listed = await listTasks({
+      const { tasks, upcomingHidden: hidden } = await listTasksCounted({
         status, priority, customer, project, collection,
-        includeComplete: include_complete, includeUpcoming: true,
+        includeComplete: include_complete, includeUpcoming: include_upcoming,
       });
-      const tasks = include_upcoming ? listed : listed.filter(t => !isUpcoming(t.metadata));
-      const hidden = listed.length - tasks.length;
-      const hiddenLine = hidden ? `_${hidden} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
+      const hiddenLine = hiddenUpcomingLine(hidden);
       if (tasks.length === 0) {
         return { content: [{ type: 'text' as const, text: hidden ? `No open tasks found.\n${hiddenLine}` : 'No tasks found.' }] };
       }
@@ -1281,7 +1250,8 @@ export function registerTools(server: McpServer): void {
           const { status: _s, duration_minutes: minutes, ...rest } = updates;
           const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
           recordLastWrite((await getTask(id))?.collection);
-          return { content: [{ type: 'text' as const, text: completedText(id, minutes, c) }] };
+          const seriesChanged = recurrence_pattern !== undefined || recurrence_interval !== undefined || lead_days !== undefined || series_notes !== undefined;
+          return { content: [{ type: 'text' as const, text: completedText(id, c, { durationMinutes: minutes, seriesChanged }) }] };
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
@@ -1296,7 +1266,7 @@ export function registerTools(server: McpServer): void {
         if (decision) text += `\nRecorded decision ${decision} (needed${decision_needed!.owner ? `, for ${decision_needed!.owner}` : ''}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim = r.claim ? describeClaim(r.claim) : '';
         if (claim) text += `\n${claim}`;
-        const release = releaseNote(r.release);
+        const release = releaseText(r.release);
         if (release) text += `\n${release}`;
         const rec = closeText({ recorded });
         if (rec) text += `\n${rec}`;
@@ -1333,7 +1303,7 @@ export function registerTools(server: McpServer): void {
       } catch (e) {
         return typedError(e);
       }
-      return { content: [{ type: 'text' as const, text: completedText(id, durationMinutes, result) }] };
+      return { content: [{ type: 'text' as const, text: completedText(id, result, { durationMinutes }) }] };
     },
   );
 
