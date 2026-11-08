@@ -26,9 +26,12 @@ import {
   type RecurrencePattern,
   isRecurring,
   isUpcoming,
-  leadDays,
-  opensAt,
+  opensAtOf,
+  RECURRENCE_PATTERNS,
+  recurrenceLine,
   recurrenceNote,
+  upcomingNote,
+  getDocumentsByIds,
   getTask,
   journalAppend,
   journalConsolidate,
@@ -162,6 +165,7 @@ const taskItem = {
     depends_on: { type: 'array', items: { type: 'string' } },
     blocks: { type: 'array', items: { type: 'string' } },
     repeats: { type: 'string' },
+    upcoming: { type: 'string' },
     opens_at: { type: 'number' },
     series: { type: 'string' },
     previous_occurrence: { type: 'string' },
@@ -195,19 +199,27 @@ function toTaskItem(t: { id: string; title: string; collection: string; metadata
     ...(t.metadata.due_date !== undefined && { due_date: t.metadata.due_date }),
     collection: t.collection,
     ...(isRecurring(t.metadata) && { repeats: recurrenceNote(t.metadata) }),
-    ...(isUpcoming(t.metadata) && { opens_at: opensAt(Number(t.metadata.due_date), leadDays(t.metadata)) }),
+    ...(isUpcoming(t.metadata) && { upcoming: upcomingNote(t.metadata), opens_at: opensAtOf(t.metadata) }),
   };
 }
 
-const RECURRENCE = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
+/** Structured completion fields, shared by yapa_task_complete and yapa_task_update (status complete). */
+const completionProps = {
+  regenerated_id: { type: 'string' },
+  next_due: { type: 'number' },
+  opens_at: { type: 'number' },
+} as const;
 
-/** "Repeats weekly, ...; this occurrence is due Fri, Nov 14, open now." */
-function recurrenceLine(m: Record<string, any>): string {
-  const repeats = recurrenceNote(m);
-  if (!repeats) return 'Not recurring: completing it creates no next occurrence.';
-  const when = isUpcoming(m) ? `opens ${formatTaskDay(opensAt(m.due_date, leadDays(m)))} (hidden from task lists until then)` : 'open now';
-  return `${repeats[0].toUpperCase()}${repeats.slice(1)}; this occurrence is due ${formatTaskDate(m.due_date)}, ${when}.`;
+function completion(result: Awaited<ReturnType<typeof completeTask>>) {
+  return {
+    ...(result.regeneratedId && { regenerated_id: result.regeneratedId }),
+    ...(result.next && { next_due: result.next.due_date, opens_at: result.next.opens_at }),
+  };
 }
+
+const completedText = (id: string, v: { regenerated_id?: string; next_due?: number; opens_at?: number }) =>
+  `Completed task ${id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}`
+  + `${v.next_due && v.opens_at ? `, due ${formatTaskDate(v.next_due)}, opens ${formatTaskDay(v.opens_at)}` : ''}`;
 
 export function registerTools(ctx: Context): void {
   // --- Status -------------------------------------------------------------
@@ -798,9 +810,9 @@ export function registerTools(ctx: Context): void {
       project: { type: 'string' },
       collection: { type: 'string', description: 'Collection (default: global)' },
       is_recurring: { type: 'boolean', description: 'Whether the task recurs (implied by recurrence_pattern)' },
-      recurrence_pattern: { type: 'string', enum: RECURRENCE, description: 'Repeat on this period: completing an occurrence creates the next one in its calendar slot. Due defaults to today' },
-      recurrence_interval: { type: 'integer', description: 'Every N periods, e.g. 2 with weekly for every two weeks (default 1)' },
-      lead_days: { type: 'integer', description: 'Days before its due day an occurrence opens; until then task lists hide it (default: daily 0, weekly 2, monthly 7, quarterly 14, yearly 30)' },
+      recurrence_pattern: { type: 'string', enum: RECURRENCE_PATTERNS, description: 'Repeat on this period: completing an occurrence creates the next one in its calendar slot. Due defaults to today' },
+      recurrence_interval: { type: 'integer', description: 'Every N periods (at least 1), e.g. 2 with weekly for every two weeks (default 1)' },
+      lead_days: { type: 'integer', description: 'Days (0 or more) before its due day an occurrence opens; until then task lists hide it (default: daily 0, weekly 2, monthly 7, quarterly 14, yearly 30)' },
     },
     output: {
       schema: {
@@ -833,7 +845,8 @@ export function registerTools(ctx: Context): void {
         recurrence_interval: args.recurrence_interval,
         lead_days: args.lead_days,
       }, target.collection);
-      const m = (await getTask(id))?.metadata ?? {};
+      // A recurring task's due date and series are set by createTask: read them back from where it was written.
+      const m = args.is_recurring || args.recurrence_pattern ? (await getDocumentsByIds(target.collection, [id]))[0]?.metadata ?? {} : {};
       const due = m.due_date ?? due_date;
       return {
         id, title: args.title, ...(due !== undefined && { due_date: due }), ...(isRecurring(m) && { recurrence: recurrenceLine(m) }),
@@ -872,7 +885,7 @@ export function registerTools(ctx: Context): void {
             `Collection: ${t.collection}`,
           ];
           if (t.due_date) lines.push(`Due: ${formatTaskDate(t.due_date)}`);
-          if (t.repeats) lines.push(`Recurrence: ${t.repeats}${t.opens_at ? `; upcoming, opens ${formatTaskDay(t.opens_at)}` : ''}`);
+          if (t.repeats) lines.push(`Recurrence: ${t.repeats}${t.upcoming ? `; ${t.upcoming}` : ''}`);
           if (t.series) lines.push(`Series: series ${t.series}${t.previous_occurrence ? `, previous ${t.previous_occurrence}` : ''}`);
           if (t.notes) lines.push(`Notes: ${t.notes}`);
           if (t.series_notes !== undefined && t.series_notes !== t.notes) lines.push(`Series notes: ${t.series_notes || '(none)'}`);
@@ -885,7 +898,7 @@ export function registerTools(ctx: Context): void {
         if (v.tasks.length === 0) return text(hidden ? `No open tasks found.\n${hidden}` : 'No tasks found.');
         return text([...v.tasks.map(t => {
           let line = `- **${t.id}** [${t.status}] ${t.priority ?? 'medium'} | ${t.title}`;
-          if (t.opens_at && t.due_date) line += ` (upcoming: due ${formatTaskDate(t.due_date)}, opens ${formatTaskDay(t.opens_at)})`;
+          if (t.upcoming) line += ` (${t.upcoming})`;
           else if (t.due_date) line += ` (due: ${formatTaskDate(t.due_date)})`;
           return `${line} [${t.collection}]`;
         }), ...(hidden ? [hidden] : [])].join('\n'));
@@ -920,7 +933,8 @@ export function registerTools(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'yapa_task_update',
-    description: 'Update durable task fields (title, status, priority, notes, due, tags, blocked reason), or set, change or stop recurrence.',
+    description: 'Update durable task fields (title, status, priority, notes, due, tags, blocked reason), or set, change or stop recurrence. '
+      + 'status complete completes the task as yapa_task_complete does (a recurring one gets its next occurrence).',
     parameters: {
       id: { type: 'string', required: true },
       title: { type: 'string', description: 'New task title (rename)' },
@@ -930,9 +944,9 @@ export function registerTools(ctx: Context): void {
       due: { type: 'string', description: 'Due date phrase' },
       tags: { type: 'array', items: { type: 'string' } },
       blocked_reason: { type: 'string' },
-      recurrence_pattern: { type: 'string', enum: [...RECURRENCE, 'none'], description: 'Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series' },
-      recurrence_interval: { type: 'integer', description: 'Every N periods (re-anchors the series at the due date)' },
-      lead_days: { type: 'integer', description: 'Days before its due day an occurrence opens' },
+      recurrence_pattern: { type: 'string', enum: [...RECURRENCE_PATTERNS, 'none'], description: 'Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series' },
+      recurrence_interval: { type: 'integer', description: 'Every N periods, at least 1 (re-anchors the series at the due date)' },
+      lead_days: { type: 'integer', description: 'Days (0 or more) before its due day an occurrence opens' },
       series_notes: { type: 'string', description: 'Replace the notes each new occurrence starts with' },
       decision_needed: {
         type: 'object',
@@ -952,9 +966,12 @@ export function registerTools(ctx: Context): void {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { id: { type: 'string', required: true }, recurrence: { type: 'string' }, claim: { type: 'string' }, decision: { type: 'string' }, recorded: { type: 'string' } },
+        properties: {
+          id: { type: 'string', required: true }, completed: { type: 'boolean' }, ...completionProps,
+          recurrence: { type: 'string' }, claim: { type: 'string' }, decision: { type: 'string' }, recorded: { type: 'string' },
+        },
       },
-      render: (_args, v) => text(`Updated task ${v.id}${v.recurrence ? `\n${v.recurrence}` : ''}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
+      render: (_args, v) => text(`${v.completed ? completedText(v.id, v) : `Updated task ${v.id}`}${v.recurrence ? `\n${v.recurrence}` : ''}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
     },
     async execute(args) {
       const updates: Record<string, any> = {};
@@ -985,6 +1002,12 @@ export function registerTools(ctx: Context): void {
         const d = await requestDecision(args.id, args.decision_needed, {}, rest);
         decision = d.decision;
         r = d;
+      } else if (args.status === 'complete') {
+        // A completion, with the other fields written first: a recurring task's series goes on.
+        const { status: _s, ...rest } = updates;
+        const c = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups }, rest);
+        const rec = closeSummary(c);
+        return { id: args.id, completed: true, ...completion(c), ...(rec && { recorded: rec }) };
       } else {
         r = await updateTask(args.id, updates);
       }
@@ -1013,24 +1036,16 @@ export function registerTools(ctx: Context): void {
         additionalProperties: false,
         properties: {
           id: { type: 'string', required: true },
-          regenerated_id: { type: 'string' },
-          next_due: { type: 'number' },
-          opens_at: { type: 'number' },
+          ...completionProps,
           recorded: { type: 'string' },
         },
       },
-      render: (_args, v) => text(
-        `Completed task ${v.id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}`
-        + `${v.next_due && v.opens_at ? `, due ${formatTaskDate(v.next_due)}, opens ${formatTaskDay(v.opens_at)}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`,
-      ),
+      render: (_args, v) => text(`${completedText(v.id, v)}${v.recorded ? `\n${v.recorded}` : ''}`),
     },
     async execute(args) {
       const result = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups });
       const rec = closeSummary(result);
-      return {
-        id: args.id, ...(result.regeneratedId && { regenerated_id: result.regeneratedId }),
-        ...(result.next && { next_due: result.next.due_date, opens_at: result.next.opens_at }), ...(rec && { recorded: rec }),
-      };
+      return { id: args.id, ...completion(result), ...(rec && { recorded: rec }) };
     },
     presentCall: args => ({ card: 'generic', title: `Complete task ${args.id}`, kind: 'edit' }),
   }));

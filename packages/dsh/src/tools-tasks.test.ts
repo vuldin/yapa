@@ -53,7 +53,7 @@ describe('DSH recurring tasks', () => {
     const all = await run('yapa_task_list', { collection: C, include_upcoming: true });
     expect(all.value.upcoming_hidden).toBeUndefined();
     expect(all.text).toMatch(new RegExp(`\\*\\*${later.value.id}\\*\\* .*\\(upcoming: due .*, opens \\w{3}, \\w{3} \\d+\\)`));
-    expect((await run('yapa_task_list', { id: later.value.id })).text).toMatch(/Recurrence: repeats yearly, opens 30 day\(s\) before it is due; upcoming, opens/);
+    expect((await run('yapa_task_list', { id: later.value.id })).text).toMatch(/Recurrence: repeats yearly, opens 30 day\(s\) before it is due; upcoming: due .*, opens /);
 
     const upd = await run('yapa_task_update', { id: later.value.id, lead_days: 120, series_notes: 'one-year term' });
     expect(upd.text).toMatch(/\nRepeats yearly, opens 120 day\(s\) before it is due; .*, open now\.$/);
@@ -65,5 +65,15 @@ describe('DSH recurring tasks', () => {
     const stop = await run('yapa_task_update', { id: done.value.regenerated_id, recurrence_pattern: 'none' });
     expect(stop.text).toBe(`Updated task ${done.value.regenerated_id}\nNot recurring: completing it creates no next occurrence.`);
     expect((await run('yapa_task_complete', { id: done.value.regenerated_id })).value.regenerated_id).toBeUndefined();
+  });
+
+  it('task_update status complete continues a series, with the other fields written first', async () => {
+    const id = (await run('yapa_task_create', { title: 'clean the filters', collection: C, recurrence_pattern: 'monthly', notes: 'v1' })).value.id;
+    const r = await run('yapa_task_update', { id, status: 'complete', series_notes: 'v2' });
+    expect(r.value).toMatchObject({ id, completed: true, regenerated_id: expect.stringMatching(/^tester-\d+$/) });
+    expect(r.text.split('\n')[0]).toMatch(new RegExp(`^Completed task ${id} → regenerated as tester-\\d+ \\(recurring\\), due .*, opens `));
+    expect((await getTask(r.value.regenerated_id))?.metadata).toMatchObject({ notes: 'v2', previous_occurrence: id });
+    await expect(run('yapa_task_update', { id: r.value.regenerated_id, status: 'complete', recurrence_pattern: 'none', lead_days: 2 })).rejects.toThrow(/stops the series/);
+    expect((await getTask(r.value.regenerated_id))?.metadata.status).toBe('pending');
   });
 });
