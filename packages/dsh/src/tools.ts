@@ -29,6 +29,8 @@ import {
   RECURRENCE_PATTERNS,
   recurrenceLine,
   recurrenceNote,
+  seriesChanged,
+  seriesInfo,
   upcomingNote,
   closeText,
   completedText,
@@ -164,6 +166,7 @@ const taskItem = {
     opens_at: { type: 'number' },
     series: { type: 'string' },
     previous_occurrence: { type: 'string' },
+    next_occurrence: { type: 'string' },
     series_notes: { type: 'string' },
   },
 } as const;
@@ -172,15 +175,17 @@ const normList = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toSt
 
 /** Full-detail projection (notes/dependencies) for single-task fetches. */
 function toTaskDetail(t: { id: string; title: string; collection: string; metadata: Record<string, any> }) {
+  const series = seriesInfo(t.metadata, t.id);
   return {
     ...toTaskItem(t),
     ...(t.metadata.notes !== undefined && { notes: t.metadata.notes }),
     ...(normList(t.metadata.tags).length && { tags: normList(t.metadata.tags) }),
     ...(normList(t.metadata.depends_on).length && { depends_on: normList(t.metadata.depends_on) }),
     ...(normList(t.metadata.blocks).length && { blocks: normList(t.metadata.blocks) }),
-    ...(isRecurring(t.metadata) && { series: t.metadata.recurrence_series || t.id }),
-    ...(isRecurring(t.metadata) && t.metadata.previous_occurrence && { previous_occurrence: t.metadata.previous_occurrence }),
-    ...(isRecurring(t.metadata) && t.metadata.recurrence_notes !== undefined && { series_notes: String(t.metadata.recurrence_notes) }),
+    ...(series && { series: series.series }),
+    ...(series?.previous && { previous_occurrence: series.previous }),
+    ...(series?.next && { next_occurrence: series.next }),
+    ...(series && series.series_notes !== null && { series_notes: series.series_notes }),
   };
 }
 
@@ -877,7 +882,7 @@ export function registerTools(ctx: Context): void {
           ];
           if (t.due_date) lines.push(`Due: ${formatTaskDate(t.due_date)}`);
           if (t.repeats) lines.push(`Recurrence: ${t.repeats}${t.upcoming ? `; ${t.upcoming}` : ''}`);
-          if (t.series) lines.push(`Series: series ${t.series}${t.previous_occurrence ? `, previous ${t.previous_occurrence}` : ''}`);
+          if (t.series) lines.push(`Series: ${[`series ${t.series}`, t.previous_occurrence && `previous ${t.previous_occurrence}`, t.next_occurrence && `next ${t.next_occurrence}`].filter(Boolean).join(', ')}`);
           if (t.notes) lines.push(`Notes: ${t.notes}`);
           if (t.series_notes !== undefined && t.series_notes !== t.notes) lines.push(`Series notes: ${t.series_notes || '(none)'}`);
           if (t.tags?.length) lines.push(`Tags: ${t.tags.join(', ')}`);
@@ -985,7 +990,7 @@ export function registerTools(ctx: Context): void {
       }
       // A move to in_progress claims the task; someone else's claim throws
       // TaskClaimedError, whose message names the holder.
-      const seriesChanged = ['recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes'].some(k => args[k as keyof typeof args] !== undefined);
+      const changesSeries = seriesChanged(args);
       let decision: string | undefined;
       let r;
       if (args.decision_needed) {
@@ -997,7 +1002,7 @@ export function registerTools(ctx: Context): void {
         // A completion, with the other fields written first: a recurring task's series goes on.
         const { status: _s, ...rest } = updates;
         const c = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups }, rest);
-        return { id: args.id, completed: true, ...completion(args.id, c, seriesChanged) };
+        return { id: args.id, completed: true, ...completion(args.id, c, changesSeries) };
       } else {
         r = await updateTask(args.id, updates);
       }
@@ -1006,7 +1011,7 @@ export function registerTools(ctx: Context): void {
         : undefined;
       const claim = r.claim ? describeClaim(r.claim) : '';
       const rec = closeText({ recorded });
-      const recurrence = seriesChanged && r.metadata ? recurrenceLine(r.metadata) : '';
+      const recurrence = changesSeries && r.metadata ? recurrenceLine(r.metadata) : '';
       return { id: r.id, ...(recurrence && { recurrence }), ...(claim && { claim }), ...(decision && { decision }), ...(rec && { recorded: rec }) };
     },
     presentCall: args => ({ card: 'generic', title: `Update task ${args.id}`, kind: 'edit' }),

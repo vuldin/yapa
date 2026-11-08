@@ -63,6 +63,7 @@ describe('DSH recurring tasks', () => {
     const done = await run('yapa_task_complete', { id: later.value.id });
     expect(done.text.split('\n')[0]).toMatch(/→ regenerated as tester-\d+ \(recurring\), due \w{3}, \w{3} \d+, opens \w{3}, \w{3} \d+$/);
     expect((await getTask(done.value.regenerated_id))?.metadata).toMatchObject({ notes: 'one-year term', previous_occurrence: later.value.id, lead_days: 120 });
+    expect((await run('yapa_task_list', { id: later.value.id })).text).toContain(`Series: series ${later.value.id}, next ${done.value.regenerated_id}`);
 
     const stop = await run('yapa_task_update', { id: done.value.regenerated_id, recurrence_pattern: 'none' });
     expect(stop.text).toBe(`Updated task ${done.value.regenerated_id}\nNot recurring: completing it creates no next occurrence.`);
