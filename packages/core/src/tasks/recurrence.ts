@@ -3,9 +3,10 @@
  * is due at recurrence_anchor + k * interval periods, counted in local time
  * from the anchor (month, quarter and year steps keep the anchor's day of
  * month, clamped to the target month's last day). Completing an occurrence
- * creates the next one at the first slot strictly after max(its due date,
- * now). An occurrence is upcoming, and hidden from task lists, until
- * lead_days before the day it is due.
+ * creates the next one at the first slot strictly after max(its own slot
+ * (recurrence_slot; moving its due date doesn't change it), now). An
+ * occurrence is upcoming, and hidden from task lists, until lead_days before
+ * the day it is due (opens_at).
  */
 import { formatTaskDate, formatTaskDay, parseRelativeDate } from './dates.js';
 
@@ -68,16 +69,39 @@ export function leadDays(m: Record<string, any>): number {
   return nonNegInt(m.lead_days) ?? DEFAULT_LEAD_DAYS[m.recurrence_pattern as RecurrencePattern] ?? 0;
 }
 
+/** The slot this occurrence holds in its series: recurrence_slot, else (before slots were stored) its due date. */
+export function occurrenceSlot(m: Record<string, any>): number {
+  const slot = Number(m.recurrence_slot);
+  return slot > 0 ? slot : Number(m.due_date) > 0 ? Number(m.due_date) : 0;
+}
+
 /** When an occurrence due at `due` opens: the start of its due day, `lead` days earlier (local time). */
 export function opensAt(due: number, lead: number): number {
   const d = new Date(due * 1000);
   return Math.floor(new Date(d.getFullYear(), d.getMonth(), d.getDate() - lead).getTime() / 1000);
 }
 
-/** Upcoming: a pending occurrence of a recurring task that hasn't opened yet. Computed on read, never stored. */
+/**
+ * The opening time stored when the task was written (`opens_at`, in its
+ * writer's time zone), if it still fits the due date and lead time: within
+ * the day before the due date, lead_days earlier. Undefined when absent or
+ * stale (a due date moved by a client that doesn't store it).
+ */
+export function storedOpensAt(m: Record<string, any>): number | undefined {
+  const stored = Number(m.opens_at), due = Number(m.due_date);
+  if (!(stored > 0) || !(due > 0)) return undefined;
+  const lead = leadDays(m);
+  return stored <= due - lead * 86400 + 3600 && stored > due - (lead + 1) * 86400 - 3600 ? stored : undefined;
+}
+
+/** When this occurrence opens: as stored, else worked out from its due date here. */
+export function opensAtOf(m: Record<string, any>): number {
+  return storedOpensAt(m) ?? opensAt(Number(m.due_date), leadDays(m));
+}
+
+/** Upcoming: a pending occurrence of a recurring task that hasn't opened yet. */
 export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): boolean {
-  const due = Number(m.due_date);
-  return isRecurring(m) && due > 0 && (m.status ?? 'pending') === 'pending' && now < opensAt(due, leadDays(m));
+  return isRecurring(m) && Number(m.due_date) > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m);
 }
 
 /** "weekly", "every 2 months". */
@@ -91,8 +115,7 @@ export function describeRecurrence(m: Record<string, any>): string {
 /** For a listing: "upcoming: due Fri, Nov 14, opens Wed, Nov 12", or '' when the task is open. */
 export function upcomingNote(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): string {
   if (!isUpcoming(m, now)) return '';
-  const due = Number(m.due_date);
-  return `upcoming: due ${formatTaskDate(due)}, opens ${formatTaskDay(opensAt(due, leadDays(m)))}`;
+  return `upcoming: due ${formatTaskDate(Number(m.due_date))}, opens ${formatTaskDay(opensAtOf(m))}`;
 }
 
 /** "repeats weekly, opens 2 day(s) before it is due", or '' when not recurring. */
@@ -100,6 +123,17 @@ export function recurrenceNote(m: Record<string, any>): string {
   if (!isRecurring(m)) return '';
   const lead = leadDays(m);
   return `repeats ${describeRecurrence(m)}, ${lead ? `opens ${lead} day(s) before it is due` : 'opens on the day it is due'}`;
+}
+
+/** What a series does now, for a reply after creating or changing it. */
+export function recurrenceLine(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): string {
+  const repeats = recurrenceNote(m);
+  if (!repeats) return 'Not recurring: completing it creates no next occurrence.';
+  const head = `${repeats[0].toUpperCase()}${repeats.slice(1)}`;
+  const due = Number(m.due_date);
+  if (!(due > 0)) return `${head}.`;
+  const when = isUpcoming(m, now) ? `opens ${formatTaskDay(opensAtOf(m))} (hidden from task lists until then)` : 'open now';
+  return `${head}; this occurrence is due ${formatTaskDate(due)}, ${when}.`;
 }
 
 /** Today, as a `due: "today"` phrase gives it (end of day). */
@@ -115,6 +149,12 @@ export function checkLeadDays(v: unknown): number {
   return v as number;
 }
 
+/** Series fields only recurrenceChanges writes on an update. */
+export const RECURRENCE_KEYS = [
+  'is_recurring', 'recurrence_pattern', 'recurrence_interval', 'recurrence_anchor', 'recurrence_slot', 'lead_days',
+  'recurrence_notes', 'recurrence_series', 'previous_occurrence', 'opens_at', 'series_notes',
+] as const;
+
 export interface RecurrenceUpdate {
   recurrence_pattern?: RecurrencePattern | 'none';
   recurrence_interval?: number;
@@ -125,35 +165,48 @@ export interface RecurrenceUpdate {
   notes?: string;
 }
 
+const needsDue = (id: string) => new RecurrenceError(`${id} is recurring and needs a due date: pass recurrence_pattern "none" to stop the series first`);
+
 /**
- * The metadata an update writes for recurrence, judged on the task as it is
- * now (`cur`). Setting or changing the pattern (or the interval) re-anchors
- * the series at the task's due date, today when it has none; "none" stops it.
+ * The series metadata an update writes, judged on the task as it is now
+ * (`cur`). Throws RecurrenceError for an update that makes no sense, so call
+ * it before writing anything. Setting or changing the pattern (or the
+ * interval) re-anchors the series at the task's due date, today when it has
+ * none (as any series change on a recurring task with no due date does);
+ * "none" stops it. A plain due-date move keeps the occurrence's slot.
+ * opens_at follows the due date and lead time.
  */
 export function recurrenceChanges(id: string, cur: Record<string, any>, u: RecurrenceUpdate): Record<string, any> {
   const { recurrence_pattern: p, recurrence_interval: iv, lead_days: ld, series_notes: sn } = u;
-  const recurring = isRecurring(cur);
-  if (p === undefined && iv === undefined && ld === undefined && sn === undefined) {
-    if (u.due_date === 0 && recurring) throw new RecurrenceError(`${id} is recurring and needs a due date: pass recurrence_pattern "none" to stop the series first`);
-    return {};
-  }
-  if (p === 'none') return { is_recurring: false, recurrence_pattern: '' };
-  if (p !== undefined && !isRecurrencePattern(p)) throw new RecurrenceError(`recurrence_pattern must be one of ${RECURRENCE_PATTERNS.join(', ')} or none`);
-  if (p === undefined && !recurring) throw new RecurrenceError(`${id} is not recurring: set recurrence_pattern first`);
+  if (p !== undefined && p !== 'none' && !isRecurrencePattern(p)) throw new RecurrenceError(`recurrence_pattern must be one of ${RECURRENCE_PATTERNS.join(', ')} or none`);
   if (iv !== undefined) checkInterval(iv);
   if (ld !== undefined) checkLeadDays(ld);
+  if (sn !== undefined && typeof sn !== 'string') throw new RecurrenceError('series_notes must be a string');
+  const series = iv !== undefined || ld !== undefined || sn !== undefined;
+  const recurring = isRecurring(cur);
+  if (p === 'none') {
+    if (series) throw new RecurrenceError('recurrence_pattern "none" stops the series: leave out recurrence_interval, lead_days and series_notes');
+    return truthy(cur.is_recurring) || cur.recurrence_pattern ? { is_recurring: false, recurrence_pattern: '', opens_at: 0 } : {};
+  }
+  if (p === undefined && !recurring) {
+    if (series) throw new RecurrenceError(`${id} is not recurring: set recurrence_pattern first`);
+    return {};
+  }
+  if (p === undefined && u.due_date === 0) throw needsDue(id);
 
+  const curDue = Number(cur.due_date) > 0 ? Number(cur.due_date) : 0;
+  const due = u.due_date !== undefined ? u.due_date : curDue;
   const pattern = (p ?? cur.recurrence_pattern) as RecurrencePattern;
   const same = recurring && pattern === cur.recurrence_pattern;
   const out: Record<string, any> = {};
-  if (p !== undefined || (iv !== undefined && iv !== recurrenceInterval(cur))) {
-    const given = u.due_date !== undefined ? u.due_date : Number(cur.due_date) || 0;
-    const due = given > 0 ? given : todayDue();
+  if (p !== undefined || (iv !== undefined && iv !== recurrenceInterval(cur)) || (series && !(due > 0))) {
+    const d = due > 0 ? due : todayDue();
     Object.assign(out, {
       is_recurring: true,
       recurrence_pattern: pattern,
-      due_date: due,
-      recurrence_anchor: due,
+      due_date: d,
+      recurrence_anchor: d,
+      recurrence_slot: d,
       recurrence_interval: iv ?? (same ? recurrenceInterval(cur) : 1),
       lead_days: ld ?? (same ? leadDays(cur) : DEFAULT_LEAD_DAYS[pattern]),
     });
@@ -162,9 +215,14 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
       out.recurrence_series = cur.recurrence_series || id;
     }
   } else {
-    if (u.due_date === 0) throw new RecurrenceError(`${id} is recurring and needs a due date: pass recurrence_pattern "none" to stop the series first`);
     if (ld !== undefined) out.lead_days = ld;
+    // An occurrence from before slots were stored keeps its slot when its due date moves.
+    if (u.due_date !== undefined && curDue && !(Number(cur.recurrence_slot) > 0)) out.recurrence_slot = curDue;
   }
   if (sn !== undefined) out.recurrence_notes = sn;
+  const finalDue = out.due_date ?? due;
+  if (finalDue > 0 && (out.due_date !== undefined || out.lead_days !== undefined || u.due_date !== undefined || !(Number(cur.opens_at) > 0))) {
+    out.opens_at = opensAt(finalDue, out.lead_days ?? leadDays(cur));
+  }
   return out;
 }

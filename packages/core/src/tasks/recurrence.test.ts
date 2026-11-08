@@ -9,8 +9,12 @@ import { completeTask, getTask, updateTask } from './update.js';
 import { listTasks } from './list.js';
 import { nextTasks } from './next.js';
 import { waitingOn } from './waiting.js';
+import { requestDecision } from './close.js';
+import { claimsFor } from './claim.js';
+import { addDocument, getDocumentsByFilter, patchDocument } from '../store/index.js';
 import {
-  DEFAULT_LEAD_DAYS, isUpcoming, nextRecurrenceDue, opensAt, RECURRENCE_PATTERNS, recurrenceSlot, todayDue, upcomingNote, type RecurrencePattern,
+  DEFAULT_LEAD_DAYS, isUpcoming, nextRecurrenceDue, opensAt, opensAtOf, RECURRENCE_PATTERNS, recurrenceLine, recurrenceSlot, todayDue, upcomingNote,
+  type RecurrencePattern,
 } from './recurrence.js';
 
 const at = (y: number, m: number, d: number, h = 23, mi = 59, s = 59) => Math.floor(new Date(y, m - 1, d, h, mi, s).getTime() / 1000);
@@ -287,6 +291,99 @@ describe('recurring tasks over the store', () => {
       await expect(updateTask(rec, { recurrence_pattern: 'hourly' as any })).rejects.toThrow(/recurrence_pattern/);
       await expect(updateTask(rec, { due_date: 0 })).rejects.toThrow(/needs a due date/);
       expect((await getTask(rec))!.metadata.due_date).toBe(at(2030, 1, 1));
+    });
+  });
+
+  describe('review fixes', () => {
+    const R = 'private-review';
+
+    it('an occurrence moved earlier and completed keeps its slot: the next one is the slot after it', async () => {
+      now(at(2027, 11, 1, 9));
+      const first = await createTask('publish the weekly notes', { recurrence_pattern: 'weekly', due_date: at(2027, 11, 1) }, R);
+      const second = (await completeTask(first)).regeneratedId!;
+      expect((await getTask(second))!.metadata).toMatchObject({ due_date: at(2027, 11, 8), recurrence_slot: at(2027, 11, 8) });
+
+      await updateTask(second, { due_date: at(2027, 11, 6) });
+      const moved = (await getTask(second))!.metadata;
+      expect(moved).toMatchObject({ due_date: at(2027, 11, 6), recurrence_slot: at(2027, 11, 8), opens_at: at(2027, 11, 4, 0, 0, 0) });
+      now(at(2027, 11, 6, 10));
+      expect(day((await completeTask(second)).next!.due_date)).toEqual([2027, 11, 15]);
+    });
+
+    it('an occurrence from before slots were stored keeps its due date as its slot when moved', async () => {
+      now(at(2027, 11, 1, 9));
+      await addDocument(R, 'tester-950', 'sweep the porch', {
+        type: 'task', id: 'tester-950', status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: at(2027, 11, 8), created_at: 1, updated_at: 1,
+      });
+      await updateTask('tester-950', { due_date: at(2027, 11, 6) });
+      expect((await getTask('tester-950'))!.metadata.recurrence_slot).toBe(at(2027, 11, 8));
+      now(at(2027, 11, 6, 10));
+      expect(day((await completeTask('tester-950')).next!.due_date)).toEqual([2027, 11, 15]);
+    });
+
+    it('stores opens_at on create, on lead and due changes and at regeneration; clears it on stop; ignores a stale one', async () => {
+      now(at(2027, 11, 1, 9));
+      const id = await createTask('review the budget', { recurrence_pattern: 'monthly', due_date: at(2027, 11, 30) }, R);
+      expect((await getTask(id))!.metadata.opens_at).toBe(at(2027, 11, 23, 0, 0, 0));
+      await updateTask(id, { lead_days: 3 });
+      expect((await getTask(id))!.metadata.opens_at).toBe(at(2027, 11, 27, 0, 0, 0));
+      await updateTask(id, { due_date: at(2027, 11, 20) });
+      expect((await getTask(id))!.metadata.opens_at).toBe(at(2027, 11, 17, 0, 0, 0));
+
+      // A client that doesn't store opens_at moves the due date: the stale value is ignored.
+      await patchDocument(R, id, { due_date: at(2027, 11, 28) });
+      expect(opensAtOf((await getTask(id))!.metadata)).toBe(at(2027, 11, 25, 0, 0, 0));
+      // One written in another time zone (a few hours off) is kept.
+      expect(opensAtOf({ ...(await getTask(id))!.metadata, opens_at: at(2027, 11, 25, 5, 0, 0) })).toBe(at(2027, 11, 25, 5, 0, 0));
+
+      const r = await completeTask(id);
+      expect((await getTask(r.regeneratedId!))!.metadata.opens_at).toBe(r.next!.opens_at);
+      await updateTask(r.regeneratedId!, { recurrence_pattern: 'none' });
+      expect((await getTask(r.regeneratedId!))!.metadata).toMatchObject({ is_recurring: false, opens_at: 0 });
+    });
+
+    it('validates every recurrence field on every path, and refuses stopping while setting series fields', async () => {
+      const id = await createTask('archive the logs', { recurrence_pattern: 'weekly', due_date: at(2030, 3, 4) }, R);
+      await expect(updateTask(id, { recurrence_pattern: 'none', lead_days: 3 })).rejects.toThrow(/stops the series/);
+      await expect(updateTask(id, { recurrence_pattern: 'none', series_notes: 'x' })).rejects.toThrow(/stops the series/);
+      await expect(updateTask(id, { recurrence_pattern: 'none', recurrence_interval: 0 })).rejects.toThrow(/recurrence_interval/);
+      await expect(updateTask(id, { lead_days: 1.5 })).rejects.toThrow(/lead_days/);
+      expect((await getTask(id))!.metadata).toMatchObject({ is_recurring: true, lead_days: 2 });
+      await updateTask(id, { recurrence_pattern: 'none' });
+      expect((await getTask(id))!.metadata.lead_days).toBe(2);
+    });
+
+    it('a refused recurrence change takes no claim', async () => {
+      const id = await createTask('a one-off', {}, R);
+      await expect(updateTask(id, { status: 'in_progress', lead_days: 3 }, { session: 's-review' })).rejects.toThrow(/not recurring/);
+      expect((await claimsFor(R))?.get(id)).toBeUndefined();
+      expect((await getTask(id))!.metadata.status).toBe('pending');
+    });
+
+    it('decision_needed with an update that would be refused stores no decision', async () => {
+      const id = await createTask('choose the vendor review cadence', { recurrence_pattern: 'quarterly', due_date: at(2030, 3, 31) }, R);
+      await expect(requestDecision(id, { question: 'Keep it quarterly?', options: ['yes', 'no'] }, {}, { due_date: 0 })).rejects.toThrow(/needs a due date/);
+      expect(await getDocumentsByFilter(R, { type: 'memory', kind: 'decision' }, 100)).toHaveLength(0);
+    });
+
+    it('completeTask applies other fields first, so a series_notes change reaches the next occurrence', async () => {
+      now(at(2027, 11, 1, 9));
+      const id = await createTask('update the checklist', { recurrence_pattern: 'weekly', notes: 'v1' }, R);
+      const r = await completeTask(id, undefined, {}, {}, { series_notes: 'v2', status: 'complete' });
+      expect((await getTask(r.regeneratedId!))!.metadata.notes).toBe('v2');
+      const stop = await createTask('update it once more', { recurrence_pattern: 'weekly' }, R);
+      expect((await completeTask(stop, undefined, {}, {}, { recurrence_pattern: 'none' })).regeneratedId).toBeUndefined();
+    });
+
+    it('a series change on a recurring task with no due date gives it today; the reply line never shows an invalid date', async () => {
+      now(at(2027, 11, 3, 9));
+      await addDocument(R, 'tester-960', 'oil the hinges', {
+        type: 'task', id: 'tester-960', status: 'pending', is_recurring: true, recurrence_pattern: 'monthly', created_at: 1, updated_at: 1,
+      });
+      expect(recurrenceLine((await getTask('tester-960'))!.metadata)).toBe('Repeats monthly, opens 7 day(s) before it is due.');
+      await updateTask('tester-960', { lead_days: 1 });
+      expect((await getTask('tester-960'))!.metadata).toMatchObject({ due_date: at(2027, 11, 3), recurrence_anchor: at(2027, 11, 3), recurrence_slot: at(2027, 11, 3), lead_days: 1 });
+      expect(recurrenceLine((await getTask('tester-960'))!.metadata)).not.toMatch(/Invalid/);
     });
   });
 });

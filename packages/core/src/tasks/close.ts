@@ -19,6 +19,7 @@ import { resolveWriteCollection } from '../sync/sentinel.js';
 import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
 import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
+import { recurrenceChanges } from './recurrence.js';
 
 export interface LearnedItem extends TypedFields {
   content: string;
@@ -120,6 +121,8 @@ export async function requestDecision(
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error('decision_needed needs a question');
   if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, 'decision_needed (a YAPA decision the task waits on)', 'set the task to blocked with a blocked_reason that names the record');
+  // An update that would be refused is refused before the decision is stored.
+  recurrenceChanges(task.id, task.metadata, extra);
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join('\n\n');
   const typed = normalizeTyped({
     kind: 'decision', status: 'needed', options: d.options, task_ids: [task.id],

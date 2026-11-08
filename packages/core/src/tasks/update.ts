@@ -9,7 +9,10 @@ import type { TaskOptions } from './create.js';
 import { createTask } from './create.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
-import { isRecurring, leadDays, nextRecurrenceDue, opensAt, recurrenceChanges, recurrenceInterval, todayDue, type RecurrencePattern, type RecurrenceUpdate } from './recurrence.js';
+import {
+  isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, recurrenceChanges, recurrenceInterval, todayDue,
+  type RecurrencePattern, type RecurrenceUpdate,
+} from './recurrence.js';
 
 export interface TaskResult {
   id: string;
@@ -62,8 +65,10 @@ const RELEASE_OUTCOME: Record<string, string> = { complete: 'done', blocked: 'bl
  * holds it (TaskClaimedError, nothing written). Moving it out of
  * `in_progress` releases this session's claim.
  */
-export type TaskUpdates = Omit<Partial<TaskOptions>, 'recurrence_pattern'> & {
+export type TaskUpdates = Omit<Partial<TaskOptions>, (typeof RECURRENCE_KEYS)[number]> & {
   title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[];
+  recurrence_interval?: number;
+  lead_days?: number;
   /** A pattern sets or changes recurrence (re-anchored at the due date); "none" stops it. */
   recurrence_pattern?: RecurrencePattern | 'none';
   /** Replaces the series template; `notes` changes only this occurrence. */
@@ -80,6 +85,8 @@ export async function updateTask(
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
   const result: TaskUpdateResult = { id };
+  // Refused before a claim is taken: nothing to undo.
+  recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
 
   if (updates.status === 'in_progress') {
     const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
@@ -100,10 +107,11 @@ export async function updateTask(
   // The write itself, under the task's lock and over the task as it is now:
   // another session's change since the read above is kept, not reverted.
   const t = task;
+  const fields: Record<string, any> = { ...updates };
+  for (const k of RECURRENCE_KEYS) delete fields[k];
   const prev = await withDocLock(t.collection, t.id, async () => {
     const cur = (await getDocumentsByIds(t.collection, [t.id]))[0];
     if (!cur) throw new Error(`Task ${t.id} not found`);
-    const { series_notes: _sn, ...fields } = updates;
     const updatedMetadata: Record<string, any> = {
       ...cur.metadata,
       ...fields,
@@ -133,6 +141,10 @@ export async function updateTask(
       await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
     return cur.metadata.status as string | undefined;
+  }).catch(async e => {
+    // The task changed meanwhile and the update no longer applies: give back a claim just taken for it.
+    if (result.claim?.kind === 'granted' && !result.claim.renewed) await releaseTaskClaim(t.id, t.collection, 'pending', ctx.session).catch(() => undefined);
+    throw e;
   });
   result.previousStatus = prev;
 
@@ -148,16 +160,22 @@ export async function updateTask(
   return result;
 }
 
-/** Mark task as complete. Handles recurring regeneration. */
+/**
+ * Mark task as complete. Handles recurring regeneration. `fields` are other
+ * task_update fields, written first (a refused one stops the completion).
+ */
 export async function completeTask(
   id: string,
   durationMinutes?: number,
   ctx: TaskUpdateContext = {},
   record: { learned?: LearnedItem[]; follow_ups?: FollowUp[] } = {},
+  fields: TaskUpdates = {},
 ): Promise<{ regeneratedId?: string; next?: { due_date: number; opens_at: number }; release?: ReleaseResult; recorded?: Recorded; nudge?: string }> {
+  validateLearned(record.learned);
+  const { status: _s, ...rest } = fields;
+  if (Object.keys(rest).length) await updateTask(id, rest, ctx);
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
-  validateLearned(record.learned);
 
   const completionUpdates: Partial<TaskOptions> = {
     status: 'complete',
@@ -186,10 +204,11 @@ export async function completeTask(
     const pattern = m.recurrence_pattern as RecurrencePattern;
     const interval = recurrenceInterval(m);
     const lead = leadDays(m);
-    const due = Number(m.due_date) > 0 ? Number(m.due_date) : 0;
-    const anchor = Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : due || todayDue();
-    // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this due date.
-    const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(due, Math.floor(Date.now() / 1000)));
+    const slot = occurrenceSlot(m);
+    const anchor = Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : slot || todayDue();
+    // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this
+    // occurrence's slot (where it was scheduled, even if its due date was moved).
+    const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)));
     // Series created before templates start from their last notes.
     const template = m.recurrence_notes !== undefined ? String(m.recurrence_notes) : (m.notes ?? '');
 

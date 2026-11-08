@@ -3,7 +3,7 @@ import { addDocument, getOrCreateCollection, getDocumentsByFilter, getDocumentsB
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { localCoordination } from '../sync/coordination.js';
-import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
+import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, opensAt, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -196,12 +196,15 @@ export async function createTask(
   if (recurring) {
     const pattern = options.recurrence_pattern!;
     const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue();
+    const lead = options.lead_days ?? DEFAULT_LEAD_DAYS[pattern];
     Object.assign(metadata, {
       due_date: due,
       recurrence_pattern: pattern,
       recurrence_interval: options.recurrence_interval ?? 1,
       recurrence_anchor: options.recurrence_anchor ?? due,
-      lead_days: options.lead_days ?? DEFAULT_LEAD_DAYS[pattern],
+      recurrence_slot: due,
+      lead_days: lead,
+      opens_at: opensAt(due, lead),
       recurrence_notes: options.recurrence_notes ?? options.notes ?? '',
       recurrence_series: options.recurrence_series ?? id,
       previous_occurrence: options.previous_occurrence,
