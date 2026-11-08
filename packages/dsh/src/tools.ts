@@ -24,15 +24,13 @@ import {
   formatTaskDate,
   type RecurrencePattern,
   isRecurring,
-  isUpcoming,
-  opensAtOf,
   RECURRENCE_PATTERNS,
   recurrenceLine,
   recurrenceNote,
   seriesChanged,
   seriesInfo,
   metadataList,
-  upcomingNote,
+  upcomingInfo,
   closeText,
   completedText,
   hiddenUpcomingLine,
@@ -172,7 +170,6 @@ const taskItem = {
   },
 } as const;
 
-const normList = metadataList;
 
 /** Full-detail projection (notes/dependencies) for single-task fetches. */
 function toTaskDetail(t: { id: string; title: string; collection: string; metadata: Record<string, any> }) {
@@ -180,9 +177,9 @@ function toTaskDetail(t: { id: string; title: string; collection: string; metada
   return {
     ...toTaskItem(t),
     ...(t.metadata.notes !== undefined && { notes: t.metadata.notes }),
-    ...(normList(t.metadata.tags).length && { tags: normList(t.metadata.tags) }),
-    ...(normList(t.metadata.depends_on).length && { depends_on: normList(t.metadata.depends_on) }),
-    ...(normList(t.metadata.blocks).length && { blocks: normList(t.metadata.blocks) }),
+    ...(metadataList(t.metadata.tags).length && { tags: metadataList(t.metadata.tags) }),
+    ...(metadataList(t.metadata.depends_on).length && { depends_on: metadataList(t.metadata.depends_on) }),
+    ...(metadataList(t.metadata.blocks).length && { blocks: metadataList(t.metadata.blocks) }),
     ...(series && { series: series.series }),
     ...(series?.previous && { previous_occurrence: series.previous }),
     ...(series?.next && { next_occurrence: series.next }),
@@ -200,8 +197,13 @@ function toTaskItem(t: { id: string; title: string; collection: string; metadata
     ...(t.metadata.due_date !== undefined && { due_date: t.metadata.due_date }),
     collection: t.collection,
     ...(isRecurring(t.metadata) && { repeats: recurrenceNote(t.metadata) }),
-    ...(isUpcoming(t.metadata) && { upcoming: upcomingNote(t.metadata), opens_at: opensAtOf(t.metadata) }),
+    ...upcomingFields(t.metadata),
   };
+}
+
+function upcomingFields(m: Record<string, any>) {
+  const up = upcomingInfo(m);
+  return up ? { upcoming: up.note, opens_at: up.opens_at } : {};
 }
 
 /** Completion fields, shared by yapa_task_complete and yapa_task_update (status complete); `summary` is core's reply text. */
@@ -1000,7 +1002,7 @@ export function registerTools(ctx: Context): void {
         decision = d.decision;
         r = d;
       } else if (args.status === 'complete') {
-        // A completion, with the other fields written first: a recurring task's series goes on.
+        // A completion, the other fields written with it: a recurring task's series goes on.
         const { status: _s, ...rest } = updates;
         const c = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups }, rest);
         return { id: args.id, completed: true, ...completion(args.id, c, changesSeries) };

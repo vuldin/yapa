@@ -70,7 +70,7 @@ describe('DSH recurring tasks', () => {
     expect((await run('yapa_task_complete', { id: done.value.regenerated_id })).value.regenerated_id).toBeUndefined();
   });
 
-  it('task_update status complete continues a series, with the other fields written first', async () => {
+  it('task_update status complete continues a series, with the other fields written with it', async () => {
     const id = (await run('yapa_task_create', { title: 'clean the filters', collection: C, recurrence_pattern: 'monthly', notes: 'v1' })).value.id;
     const r = await run('yapa_task_update', { id, status: 'complete', series_notes: 'v2' });
     expect(r.value).toMatchObject({ id, completed: true, regenerated_id: expect.stringMatching(/^tester-\d+$/) });
