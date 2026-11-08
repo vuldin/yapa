@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
-  completedText, listTasksCounted, metadataList, seriesInfo,
+  nextOccurrenceText, listTasksCounted, metadataList, seriesInfo,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -213,7 +213,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       let nudge: string | undefined;
       let decision: string | undefined;
       let regenerated: { id: string; due_date: number; opens_at: number } | undefined;
-      let completed: string | undefined;
+      let nextLine = '';
       if (status === 'complete') {
         const durationMinutes = int(flag(args, '--duration'), '--duration');
         const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
@@ -221,7 +221,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         recorded = c.recorded;
         nudge = c.nudge;
         if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
-        completed = completedText(t.id, c, { durationMinutes });
+        nextLine = nextOccurrenceText(c);
       } else {
         const reason = flag(args, '--reason');
         const fields = { ...(reason ? { blockedReason: reason } : {}) };
@@ -242,12 +242,13 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         : release?.kind === 'held_by_other' ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it`
           : release?.kind === 'unshared' ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own`
             : `${t.id} -> ${status}`;
-      const more = [decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
+      // The first line keeps its format for scripts; the next occurrence follows it.
+      const more = [nextLine, decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
         recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
       return {
         exit,
         json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null },
-        text: completed ?? (more.length ? `${text}\n${more.join('\n')}` : text),
+        text: more.length ? `${text}\n${more.join('\n')}` : text,
       };
     }
     default:
