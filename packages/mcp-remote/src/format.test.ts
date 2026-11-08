@@ -171,6 +171,9 @@ describe('upcoming recurring tasks', () => {
     // A stored opens_at that fits the due date is used; a stale one isn't.
     expect(opensAt(rec({ opens_at: due - 2 * 86400 - 5 * 3600 }))).toBe(due - 2 * 86400 - 5 * 3600);
     expect(opensAt(rec({ opens_at: due - 20 * 86400 }))).toBe(due - 86399 - 2 * 86400);
+    // Numbers held as strings, as core reads them.
+    expect(opensAt(rec({ due_date: String(due), lead_days: '0' }))).toBe(due - 86399);
+    expect(opensAt(rec({ opens_at: ` ${due - 2 * 86400 - 5 * 3600} ` }))).toBe(due - 2 * 86400 - 5 * 3600);
   });
 
   it('only a pending recurring occurrence with a due date is upcoming', () => {

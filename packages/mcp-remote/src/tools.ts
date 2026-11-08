@@ -9,6 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type pg from 'pg';
 import { z } from 'zod';
 import { rankScore } from '@yapa/core/ranking';
+import { hiddenUpcomingLine } from '@yapa/core/recurrence';
 import {
   ApiError, assertCollection, decodeCursor, isUnavailableError, listCollections, log, MAX_FUTURE_SECONDS,
   posFromSince, pull, type RequestCtx,
@@ -20,7 +21,7 @@ import {
   needsPersonText, salience, truncateBytes, typedSuffix, waitingCount, waitsOnText,
 } from './format.js';
 import {
-  countUpcomingTasks, getTask, listMemories, listTasks, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
+  getTask, listMemories, listTasks, listTasksCounted, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
   type DocRow,
 } from './queries.js';
 import { inferCollection, resolveCollection } from './resolve.js';
@@ -211,11 +212,12 @@ function taskFlags(m: Record<string, any>): string {
   return [needsPersonText(m), waitsOnText(m)].filter(Boolean).map(f => ` | ${f}`).join('');
 }
 
-function taskLine(t: DocRow): string {
+/** `now`: the clock the query that read the task judged upcoming by. */
+function taskLine(t: DocRow, now: number): string {
   const m = t.metadata;
   let line = `- **${t.id}** [${m.status ?? '?'}] ${m.priority ?? '?'} | ${truncateBytes(t.content, 512)}${taskFlags(m)}`;
   const due = dueDate(m);
-  if (due && isUpcoming(m, Date.now() / 1000)) line += ` (upcoming: due ${due}, opens ${isoDate(opensAt(m)! + 86399)})`;
+  if (due && isUpcoming(m, now)) line += ` (upcoming: due ${due}, opens ${isoDate(opensAt(m)! + 86399)})`;
   else if (due) line += ` (due: ${due})`;
   line += ` (${author(t)}, updated ${isoDate(t.updated_at)}) [${t.collection}]`;
   return line;
@@ -324,7 +326,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
       ];
       if (tasks.length) {
         const head = focusColl ? `Open follow-ups for ${focusColl} (recently updated first, then by priority):` : 'Related open follow-ups:';
-        blocks.push([head, ...tasks.map(taskLine)].join('\n'));
+        blocks.push([head, ...tasks.map(t => taskLine(t, now))].join('\n'));
       }
       return { text: joinBounded(blocks, '\n\n---\n\n'), count: main.length + extras.length + tasks.length, collections };
     }),
@@ -400,15 +402,14 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         return { text: truncateBytes(lines.join('\n'), 16 * 1024), count: 1, collections: [t.collection] };
       }
       const coll = await pickCollection(collection);
-      const filters = { collection: coll, status, priority, includeComplete: include_complete ?? false, now: ctx.nowSecs?.() };
-      const [tasks, hidden] = await Promise.all([
-        listTasks(pool, me, { ...filters, includeUpcoming: include_upcoming ?? false, limit: 200 }),
-        include_upcoming ? 0 : countUpcomingTasks(pool, me, filters),
-      ]);
-      const hiddenLine = hidden ? `_${hidden} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
+      const now = Math.floor(ctx.nowSecs?.() ?? Date.now() / 1000);
+      const { rows: tasks, hiddenUpcoming: hidden } = await listTasksCounted(pool, me, {
+        collection: coll, status, priority, includeComplete: include_complete ?? false, includeUpcoming: include_upcoming ?? false, now, limit: 200,
+      });
+      const hiddenLine = hiddenUpcomingLine(hidden);
       if (tasks.length === 0) return { text: hidden ? `No open tasks found.\n${hiddenLine}` : 'No tasks found.', count: 0, collections: coll ? [coll] : [] };
       return {
-        text: joinBounded(tasks.map(taskLine), '\n', hiddenLine ? [hiddenLine] : []),
+        text: joinBounded(tasks.map(t => taskLine(t, now)), '\n', hiddenLine ? [hiddenLine] : []),
         count: tasks.length,
         collections: [...new Set(tasks.map(t => t.collection))],
       };

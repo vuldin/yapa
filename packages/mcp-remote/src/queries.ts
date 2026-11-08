@@ -197,62 +197,74 @@ export interface TaskFilters {
 const sqlWord = (w: string) => { if (!/^[a-z]+$/.test(w)) throw new Error(`unexpected recurrence pattern ${w}`); return `'${w}'`; };
 const sqlInt = (n: number) => { if (!Number.isInteger(n)) throw new Error(`unexpected lead time ${n}`); return String(n); };
 const DEFAULT_LEAD_SQL = `CASE metadata->>'recurrence_pattern' ${Object.entries(DEFAULT_LEAD_DAYS).map(([p, n]) => `WHEN ${sqlWord(p)} THEN ${sqlInt(n)}`).join(' ')} ELSE 0 END`;
-const LEAD = "(metadata->>'lead_days')::float8";
-const LEAD_DAYS_SQL = `(CASE WHEN jsonb_typeof(metadata->'lead_days') = 'number'
-  THEN CASE WHEN ${LEAD} >= 0 AND ${LEAD} = floor(${LEAD}) THEN ${LEAD} ELSE ${DEFAULT_LEAD_SQL} END
-  ELSE ${DEFAULT_LEAD_SQL} END)`;
-const DUE = "(metadata->>'due_date')::float8";
-const OPENS = "(metadata->>'opens_at')::float8";
-// core's storedOpensAt, else the end-of-day assumption; only reached once due_date is a number.
-const OPENS_SQL = `(CASE WHEN jsonb_typeof(metadata->'opens_at') = 'number'
-  THEN CASE WHEN ${OPENS} > 0 AND ${OPENS} <= ${DUE} - 86400 * ${LEAD_DAYS_SQL} + 3600 AND ${OPENS} > ${DUE} - 86400 * (${LEAD_DAYS_SQL} + 1) - 3600
-    THEN ${OPENS} ELSE ${DUE} - 86399 - 86400 * ${LEAD_DAYS_SQL} END
-  ELSE ${DUE} - 86399 - 86400 * ${LEAD_DAYS_SQL} END)`;
-const upcomingSql = (now: string) => `COALESCE(CASE WHEN metadata->>'is_recurring' = 'true'
-  AND metadata->>'recurrence_pattern' IN (${RECURRENCE_PATTERNS.map(sqlWord).join(', ')})
-  AND COALESCE(metadata->>'status', 'pending') = 'pending'
-  AND jsonb_typeof(metadata->'due_date') = 'number'
-  THEN ${DUE} > 0 AND ${now} < ${OPENS_SQL} END, false)`;
-
-/** The WHERE clause for a task listing; `upcoming` keeps only (true) or leaves out (false) upcoming occurrences. */
-function taskWhere(f: TaskFilters, param: (v: unknown) => string, upcoming?: boolean): string {
-  let where = `metadata->>'type' = 'task' AND ${LOCAL_ONLY_SQL}`;
-  if (f.collection !== undefined) where += ` AND collection = ${param(f.collection)}`;
-  if (f.status !== undefined) where += ` AND metadata->>'status' = ${param(f.status)}`;
-  if (f.priority !== undefined) where += ` AND metadata->>'priority' = ${param(f.priority)}`;
-  if (!f.includeComplete && f.status !== 'complete') where += " AND COALESCE(metadata->>'status', '') <> 'complete'";
-  if (upcoming !== undefined) where += ` AND ${upcoming ? '' : 'NOT '}${upcomingSql(param(Math.floor(f.now ?? Date.now() / 1000)))}`;
-  return where;
-}
+/** A metadata number as core's Number() reads it: a JSON number, or a string holding a decimal number; else NULL (and no cast is tried). */
+const NUMERIC_RE = '^\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*$';
+const metaNumber = (key: 'due_date' | 'lead_days' | 'opens_at') => `CASE jsonb_typeof(metadata->'${key}')
+    WHEN 'number' THEN (metadata->>'${key}')::float8
+    WHEN 'string' THEN CASE WHEN metadata->>'${key}' ~ '${NUMERIC_RE}' THEN (metadata->>'${key}')::float8 END END`;
+/**
+ * Per row, once: the due date, the lead time (core's leadDays), the opening
+ * time (core's storedOpensAt, else the end-of-day assumption) and whether the
+ * task is upcoming. `now` is a query parameter.
+ */
+const upcomingLaterals = (now: string) => `
+  CROSS JOIN LATERAL (SELECT ${metaNumber('due_date')} AS due, ${metaNumber('lead_days')} AS lead_raw, ${metaNumber('opens_at')} AS opens_raw) n
+  CROSS JOIN LATERAL (SELECT CASE WHEN n.lead_raw >= 0 AND n.lead_raw = floor(n.lead_raw) THEN n.lead_raw ELSE ${DEFAULT_LEAD_SQL} END AS lead) l
+  CROSS JOIN LATERAL (SELECT CASE WHEN n.opens_raw > 0 AND n.opens_raw <= n.due - 86400 * l.lead + 3600 AND n.opens_raw > n.due - 86400 * (l.lead + 1) - 3600
+    THEN n.opens_raw ELSE n.due - 86399 - 86400 * l.lead END AS opens) o
+  CROSS JOIN LATERAL (SELECT COALESCE(metadata->>'is_recurring' = 'true'
+    AND metadata->>'recurrence_pattern' IN (${RECURRENCE_PATTERNS.map(sqlWord).join(', ')})
+    AND COALESCE(metadata->>'status', 'pending') = 'pending'
+    AND n.due > 0 AND ${now} < o.opens, false) AS upcoming) u`;
 
 const PRIORITY_RANK = "CASE metadata->>'priority' WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END";
+const SALIENCE_RANK = "CASE WHEN jsonb_typeof(metadata->'salience') = 'number' THEN (metadata->>'salience')::float8 ELSE 0 END";
 
-/** Sorted like core's listTasks: priority desc, then salience desc. */
-export async function listTasks(pool: pg.Pool, username: string, f: TaskFilters): Promise<DocRow[]> {
+/**
+ * Tasks sorted like core's listTasks (priority desc, then salience desc),
+ * upcoming occurrences left out unless includeUpcoming, and with `count`
+ * how many were left out, in the same query. Nothing is computed for
+ * upcoming when it can't apply (includeUpcoming, or a status other than pending).
+ */
+async function queryTasks(pool: pg.Pool, username: string, f: TaskFilters, count: boolean): Promise<{ rows: DocRow[]; hiddenUpcoming: number }> {
   return withUserTx(pool, username, async c => {
     const values: unknown[] = [];
     const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
-    const where = taskWhere(f, param, f.includeUpcoming ? undefined : false);
+    let where = `metadata->>'type' = 'task' AND ${LOCAL_ONLY_SQL}`;
+    if (f.collection !== undefined) where += ` AND collection = ${param(f.collection)}`;
+    if (f.status !== undefined) where += ` AND metadata->>'status' = ${param(f.status)}`;
+    if (f.priority !== undefined) where += ` AND metadata->>'priority' = ${param(f.priority)}`;
+    if (!f.includeComplete && f.status !== 'complete') where += " AND COALESCE(metadata->>'status', '') <> 'complete'";
+    const order = 'ORDER BY rank_p DESC, rank_s DESC, id';
+    const ranked = `${COLUMNS}, ${PRIORITY_RANK} AS rank_p, ${SALIENCE_RANK} AS rank_s`;
+    if (f.includeUpcoming || (f.status !== undefined && f.status !== 'pending')) {
+      const r = await c.query(`SELECT ${ranked} FROM documents WHERE ${where} ${order} LIMIT ${param(f.limit)}`, values);
+      return { rows: r.rows.map(toRow), hiddenUpcoming: 0 };
+    }
+    const from = `documents ${upcomingLaterals(param(Math.floor(f.now ?? Date.now() / 1000)))}`;
+    if (!count) {
+      const r = await c.query(`SELECT ${ranked} FROM ${from} WHERE ${where} AND NOT u.upcoming ${order} LIMIT ${param(f.limit)}`, values);
+      return { rows: r.rows.map(toRow), hiddenUpcoming: 0 };
+    }
+    // One row even when every task is upcoming: the page joins onto the count.
     const r = await c.query(
-      `SELECT ${COLUMNS} FROM documents WHERE ${where}
-        ORDER BY ${PRIORITY_RANK} DESC,
-                 CASE WHEN jsonb_typeof(metadata->'salience') = 'number' THEN (metadata->>'salience')::float8 ELSE 0 END DESC,
-                 id
-        LIMIT ${param(f.limit)}`,
+      `WITH base AS (SELECT ${ranked}, u.upcoming FROM ${from} WHERE ${where}),
+            page AS (SELECT * FROM base WHERE NOT upcoming ${order} LIMIT ${param(f.limit)})
+       SELECT page.*, h.hidden FROM (SELECT count(*) FILTER (WHERE upcoming)::int AS hidden FROM base) h
+       LEFT JOIN page ON true ORDER BY page.rank_p DESC, page.rank_s DESC, page.id`,
       values,
     );
-    return r.rows.map(toRow);
+    return { rows: r.rows.filter(row => row.id != null).map(toRow), hiddenUpcoming: r.rows[0]?.hidden ?? 0 };
   });
 }
 
-/** How many tasks matching `f` a listing leaves out as upcoming. */
-export async function countUpcomingTasks(pool: pg.Pool, username: string, f: Omit<TaskFilters, 'limit'>): Promise<number> {
-  return withUserTx(pool, username, async c => {
-    const values: unknown[] = [];
-    const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
-    const r = await c.query(`SELECT count(*)::int AS n FROM documents WHERE ${taskWhere({ ...f, limit: 0 }, param, true)}`, values);
-    return r.rows[0]?.n ?? 0;
-  });
+export async function listTasks(pool: pg.Pool, username: string, f: TaskFilters): Promise<DocRow[]> {
+  return (await queryTasks(pool, username, f, false)).rows;
+}
+
+/** listTasks, plus how many upcoming occurrences it left out. */
+export async function listTasksCounted(pool: pg.Pool, username: string, f: TaskFilters): Promise<{ rows: DocRow[]; hiddenUpcoming: number }> {
+  return queryTasks(pool, username, f, true);
 }
 
 export async function getTask(pool: pg.Pool, username: string, id: string): Promise<DocRow | undefined> {
