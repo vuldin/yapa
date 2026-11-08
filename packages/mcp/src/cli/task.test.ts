@@ -74,7 +74,10 @@ describe('yapa task', () => {
     const next = (done.json.regenerated as any);
     expect(next).toMatchObject({ id: expect.stringMatching(/^josh-\d+$/) });
     expect(next.due_date - (await getTask(soon))!.metadata.due_date).toBeGreaterThanOrEqual(7 * 86400 - 3600);
-    expect(done.text).toMatch(new RegExp(`\\nnext occurrence ${next.id}, due .*, opens `));
+    expect(done.text.split('\n')[0]).toMatch(new RegExp(`^Completed task ${soon} → regenerated as ${next.id} \\(recurring\\), due .*, opens `));
+    expect((all.find(t => t.id === soon).recurrence)).toMatchObject({ series: soon, next: null });
+    const after = ((await runTask('show', [soon])).json.task as any).recurrence;
+    expect(after).toMatchObject({ series: soon, next: next.id });
   });
 
   it('bad arguments exit 2', async () => {

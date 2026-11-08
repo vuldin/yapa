@@ -101,6 +101,8 @@ import {
   releaseText,
   recurrenceLine,
   recurrenceNote,
+  seriesChanged,
+  seriesInfo,
   upcomingNote,
   redirectNote,
   removeCollection,
@@ -1115,12 +1117,12 @@ export function registerTools(server: McpServer): void {
           `Collection: ${task.collection}`,
         ];
         if (task.metadata.due_date) lines.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
-        const repeats = recurrenceNote(task.metadata);
-        if (repeats) {
+        const series = seriesInfo(task.metadata, task.id);
+        if (series) {
           const upcoming = upcomingNote(task.metadata);
-          lines.push(`Recurrence: ${repeats}${upcoming ? `; ${upcoming}` : ''}`);
-          const links = [`series ${task.metadata.recurrence_series || task.id}`, ...(task.metadata.previous_occurrence ? [`previous ${task.metadata.previous_occurrence}`] : [])];
-          lines.push(`Series: ${links.join(', ')}`);
+          lines.push(`Recurrence: ${recurrenceNote(task.metadata)}${upcoming ? `; ${upcoming}` : ''}`);
+          const links = [`series ${series.series}`, series.previous && `previous ${series.previous}`, series.next && `next ${series.next}`];
+          lines.push(`Series: ${links.filter(Boolean).join(', ')}`);
         }
         if (task.metadata.completed_at) lines.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
         if (task.metadata.duration_minutes != null) lines.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
@@ -1128,8 +1130,8 @@ export function registerTools(server: McpServer): void {
         const held = claimNote(task, await claimsFor(task.collection));
         if (held) lines.push(`Claim: ${held}`);
         if (task.metadata.notes) lines.push(`Notes: ${task.metadata.notes}`);
-        if (repeats && task.metadata.recurrence_notes !== undefined && task.metadata.recurrence_notes !== task.metadata.notes) {
-          lines.push(`Series notes: ${task.metadata.recurrence_notes || '(none)'}`);
+        if (series && series.series_notes !== null && series.series_notes !== (task.metadata.notes ?? '')) {
+          lines.push(`Series notes: ${series.series_notes || '(none)'}`);
         }
         const tags = norm(task.metadata.tags);
         if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
@@ -1198,6 +1200,7 @@ export function registerTools(server: McpServer): void {
       ...CLOSE_PARAMS,
     },
     async ({ id, title, status, priority, notes, due, recurrence_pattern, recurrence_interval, lead_days, series_notes, tags, blocked_reason, duration, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+      const changesSeries = seriesChanged({ recurrence_pattern, recurrence_interval, lead_days, series_notes });
       if (decision_needed && status && status !== 'pending') {
         return { content: [{ type: 'text' as const, text: 'decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending.' }], isError: true };
       }
@@ -1245,8 +1248,7 @@ export function registerTools(server: McpServer): void {
           const { status: _s, duration_minutes: minutes, ...rest } = updates;
           const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
           recordLastWrite(c.collection);
-          const seriesChanged = recurrence_pattern !== undefined || recurrence_interval !== undefined || lead_days !== undefined || series_notes !== undefined;
-          return { content: [{ type: 'text' as const, text: completedText(id, c, { durationMinutes: minutes, seriesChanged }) }] };
+          return { content: [{ type: 'text' as const, text: completedText(id, c, { durationMinutes: minutes, seriesChanged: changesSeries }) }] };
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
@@ -1256,8 +1258,7 @@ export function registerTools(server: McpServer): void {
           ? await recordForTask({ id: r.id, collection: taskCollection! }, { learned, follow_ups })
           : undefined;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
-        const seriesChanged = recurrence_pattern !== undefined || recurrence_interval !== undefined || lead_days !== undefined || series_notes !== undefined;
-        if (r.metadata && seriesChanged) text += `\n${recurrenceLine(r.metadata)}`;
+        if (r.metadata && changesSeries) text += `\n${recurrenceLine(r.metadata)}`;
         if (decision) text += `\nRecorded decision ${decision} (needed${decision_needed!.owner ? `, for ${decision_needed!.owner}` : ''}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim = r.claim ? describeClaim(r.claim) : '';
         if (claim) text += `\n${claim}`;

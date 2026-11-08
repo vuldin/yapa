@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
-  formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, listTasksCounted, opensAtOf, recurrenceInterval,
+  completedText, listTasksCounted, seriesInfo,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -72,11 +72,7 @@ function taskJson(t: { id: string; title: string; collection: string; metadata: 
     memory_ids: Array.isArray(m.memory_ids) ? m.memory_ids : String(m.memory_ids ?? '').split(',').filter(Boolean),
     blocked_reason: m.blockedReason || m.blocked_reason || null,
     notes: m.notes ?? '', due_date: m.due_date || null, owner: m.origin_user ?? null,
-    recurrence: isRecurring(m) ? {
-      pattern: m.recurrence_pattern, interval: recurrenceInterval(m), lead_days: leadDays(m), anchor: m.recurrence_anchor ?? null,
-      series: m.recurrence_series || t.id, previous: m.previous_occurrence ?? null, series_notes: m.recurrence_notes ?? null,
-      upcoming: isUpcoming(m), opens_at: Number(m.due_date) > 0 ? opensAtOf(m) : null,
-    } : null,
+    recurrence: seriesInfo(m, t.id),
     created_at: m.created_at ?? null, updated_at: m.updated_at ?? null,
     claim: lease ? { user: lease.holder.user, session: lease.holder.session, since: lease.acquired_at, expires_at: lease.expires_at } : null,
     claim_note: claimNote(t, claims) || null,
@@ -222,12 +218,15 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       let nudge: string | undefined;
       let decision: string | undefined;
       let regenerated: { id: string; due_date: number; opens_at: number } | undefined;
+      let completed: string | undefined;
       if (status === 'complete') {
-        const c = await completeTask(t.id, int(flag(args, '--duration'), '--duration'), { session }, { learned, follow_ups: followUps });
+        const durationMinutes = int(flag(args, '--duration'), '--duration');
+        const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
         release = c.release;
         recorded = c.recorded;
         nudge = c.nudge;
         if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
+        completed = completedText(t.id, c, { durationMinutes });
       } else {
         const reason = flag(args, '--reason');
         const fields = { ...(reason ? { blockedReason: reason } : {}) };
@@ -248,13 +247,12 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         : release?.kind === 'held_by_other' ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it`
           : release?.kind === 'unshared' ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own`
             : `${t.id} -> ${status}`;
-      const more = [regenerated ? `next occurrence ${regenerated.id}, due ${formatTaskDate(regenerated.due_date)}, opens ${formatTaskDay(regenerated.opens_at)}` : '',
-        decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
+      const more = [decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
         recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
       return {
         exit,
         json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null },
-        text: more.length ? `${text}\n${more.join('\n')}` : text,
+        text: completed ?? (more.length ? `${text}\n${more.join('\n')}` : text),
       };
     }
     default:
