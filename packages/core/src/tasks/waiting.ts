@@ -19,6 +19,7 @@ import { isSyncableCollection } from '../sync/syncable.js';
 import { includesUser, ownerWaitsOn } from '../memory/owners.js';
 import { knownUsers, usersIn } from '../memory/known-users.js';
 import { getConfig } from '../config.js';
+import { isUpcoming } from './recurrence.js';
 
 export interface WaitingItem {
   id: string;
@@ -88,7 +89,8 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
   for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
 
   for (const { collection, decisions, questions, tasks } of read) {
-    const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true);
+    const now = Math.floor(Date.now() / 1000);
+    const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true && !isUpcoming(t.metadata, now));
     const waitingOnIt = new Map<string, string[]>();
     for (const t of open) for (const m of list(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
 

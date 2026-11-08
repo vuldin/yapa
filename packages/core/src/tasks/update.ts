@@ -9,6 +9,7 @@ import type { TaskOptions } from './create.js';
 import { createTask } from './create.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
+import { isRecurring, leadDays, nextRecurrenceDue, opensAt, recurrenceChanges, recurrenceInterval, todayDue, type RecurrencePattern, type RecurrenceUpdate } from './recurrence.js';
 
 export interface TaskResult {
   id: string;
@@ -61,9 +62,17 @@ const RELEASE_OUTCOME: Record<string, string> = { complete: 'done', blocked: 'bl
  * holds it (TaskClaimedError, nothing written). Moving it out of
  * `in_progress` releases this session's claim.
  */
+export type TaskUpdates = Omit<Partial<TaskOptions>, 'recurrence_pattern'> & {
+  title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[];
+  /** A pattern sets or changes recurrence (re-anchored at the due date); "none" stops it. */
+  recurrence_pattern?: RecurrencePattern | 'none';
+  /** Replaces the series template; `notes` changes only this occurrence. */
+  series_notes?: string;
+};
+
 export async function updateTask(
   id: string,
-  updates: Partial<TaskOptions> & { title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[] },
+  updates: TaskUpdates,
   ctx: TaskUpdateContext = {},
 ): Promise<TaskUpdateResult> {
   let task = await getTask(id);
@@ -85,7 +94,7 @@ export async function updateTask(
   }
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes', 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   // The write itself, under the task's lock and over the task as it is now:
@@ -94,9 +103,11 @@ export async function updateTask(
   const prev = await withDocLock(t.collection, t.id, async () => {
     const cur = (await getDocumentsByIds(t.collection, [t.id]))[0];
     if (!cur) throw new Error(`Task ${t.id} not found`);
+    const { series_notes: _sn, ...fields } = updates;
     const updatedMetadata: Record<string, any> = {
       ...cur.metadata,
-      ...updates,
+      ...fields,
+      ...recurrenceChanges(t.id, cur.metadata, updates as RecurrenceUpdate),
       updated_at: Math.floor(Date.now() / 1000),
     };
     // First completion wins, judged on the task as it is now (two sessions
@@ -143,7 +154,7 @@ export async function completeTask(
   durationMinutes?: number,
   ctx: TaskUpdateContext = {},
   record: { learned?: LearnedItem[]; follow_ups?: FollowUp[] } = {},
-): Promise<{ regeneratedId?: string; release?: ReleaseResult; recorded?: Recorded; nudge?: string }> {
+): Promise<{ regeneratedId?: string; next?: { due_date: number; opens_at: number }; release?: ReleaseResult; recorded?: Recorded; nudge?: string }> {
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   validateLearned(record.learned);
@@ -170,44 +181,38 @@ export async function completeTask(
 
   // Handle recurring tasks: once, by whichever completion found it still open
   // (two sessions completing it at once must not create two next occurrences).
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== 'complete') {
-    const nextDue = computeNextDue(
-      task.metadata.due_date ?? Math.floor(Date.now() / 1000),
-      task.metadata.recurrence_pattern,
-    );
+  const m = task.metadata;
+  if (isRecurring(m) && previousStatus !== 'complete') {
+    const pattern = m.recurrence_pattern as RecurrencePattern;
+    const interval = recurrenceInterval(m);
+    const lead = leadDays(m);
+    const due = Number(m.due_date) > 0 ? Number(m.due_date) : 0;
+    const anchor = Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : due || todayDue();
+    // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this due date.
+    const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(due, Math.floor(Date.now() / 1000)));
+    // Series created before templates start from their last notes.
+    const template = m.recurrence_notes !== undefined ? String(m.recurrence_notes) : (m.notes ?? '');
 
     // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
     const newId = await createTask(task.title, {
-      priority: task.metadata.priority,
-      tags: Array.isArray(task.metadata.tags)
-        ? task.metadata.tags
-        : (task.metadata.tags ?? '').split(',').filter(Boolean),
-      notes: task.metadata.notes,
-      customer: task.metadata.customer,
-      project: task.metadata.project,
+      priority: m.priority,
+      tags: Array.isArray(m.tags) ? m.tags : (m.tags ?? '').split(',').filter(Boolean),
+      notes: template,
+      customer: m.customer,
+      project: m.project,
       due_date: nextDue,
       is_recurring: true,
-      recurrence_pattern: task.metadata.recurrence_pattern,
+      recurrence_pattern: pattern,
+      recurrence_interval: interval,
+      recurrence_anchor: anchor,
+      lead_days: lead,
+      recurrence_notes: template,
+      recurrence_series: m.recurrence_series || task.id,
+      previous_occurrence: task.id,
     }, task.collection);
 
-    return { regeneratedId: newId, ...extras };
+    return { regeneratedId: newId, next: { due_date: nextDue, opens_at: opensAt(nextDue, lead) }, ...extras };
   }
 
   return extras;
-}
-
-function computeNextDue(currentDue: number, pattern: string): number {
-  const d = new Date(currentDue * 1000);
-  switch (pattern) {
-    case 'daily':
-      d.setDate(d.getDate() + 1);
-      break;
-    case 'weekly':
-      d.setDate(d.getDate() + 7);
-      break;
-    case 'monthly':
-      d.setMonth(d.getMonth() + 1);
-      break;
-  }
-  return Math.floor(d.getTime() / 1000);
 }

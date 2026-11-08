@@ -22,6 +22,10 @@
       "types": "./dist/memory/owners.d.ts",
       "default": "./dist/memory/owners.js"
     },
+    "./recurrence": {
+      "types": "./dist/tasks/recurrence.d.ts",
+      "default": "./dist/tasks/recurrence.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

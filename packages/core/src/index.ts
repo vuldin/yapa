@@ -41,6 +41,7 @@ export * from './tasks/search.js';
 export * from './tasks/delete.js';
 export * from './tasks/dependencies.js';
 export * from './tasks/dates.js';
+export * from './tasks/recurrence.js';
 
 // Collections.
 export * from './collections/manage.js';

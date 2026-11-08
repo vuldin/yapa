@@ -84,6 +84,11 @@ export function formatTaskDate(timestamp: number): string {
   });
 }
 
+/** Format a timestamp as a day, with no time. */
+export function formatTaskDay(timestamp: number): string {
+  return new Date(timestamp * 1000).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
 function endOfDay(d: Date): number {
   d.setHours(23, 59, 59, 999);
   return Math.floor(d.getTime() / 1000);

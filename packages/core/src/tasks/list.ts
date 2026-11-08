@@ -1,5 +1,6 @@
 import { getDocumentsByFilter, listCollections, type Collection } from '../store/index.js';
 import type { TaskStatus, TaskPriority } from './create.js';
+import { isUpcoming } from './recurrence.js';
 
 const PRIORITY_ORDER: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
 
@@ -19,6 +20,8 @@ export interface TaskListFilters {
   includeComplete?: boolean;
   /** Also tasks archived here after their owner deleted them on the sync service. */
   includeArchived?: boolean;
+  /** Also recurring occurrences that haven't opened yet (see tasks/recurrence.ts). */
+  includeUpcoming?: boolean;
   /** Return at most this many (after sorting). Default: all of them. */
   limit?: number;
 }
@@ -33,6 +36,7 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
     : (await listCollections()).map((c: Collection) => c.name);
 
   const allTasks: TaskListResult[] = [];
+  const now = Math.floor(Date.now() / 1000);
 
   for (const name of collectionNames) {
     const where: Record<string, any> = { type: 'task' };
@@ -49,6 +53,7 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
         if (!filters.includeComplete && task.metadata.status === 'complete') continue;
         // Deleted on the sync service by its owner, kept here archived.
         if (task.metadata.archived === true && !filters.includeArchived) continue;
+        if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) continue;
         allTasks.push({
           id: task.id,
           title: task.content,

@@ -20,6 +20,7 @@ import { claimKey, claimsFor, describeHolder, TaskClaimedError, type ClaimOption
 import { getTask, updateTask } from './update.js';
 import { describeWaits, openWaits } from './close.js';
 import { taskNeedsPeople } from './waiting.js';
+import { isUpcoming } from './recurrence.js';
 
 const PRIORITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -94,7 +95,9 @@ async function expiredLeaseKeys(collection: string): Promise<Set<string>> {
 
 export async function nextTasks(opts: NextOptions): Promise<NextResult> {
   const docs = (await getDocumentsByFilter(opts.collection, { type: 'task' }, 5000).catch(() => [])).filter(d => d.metadata.archived !== true);
-  const open = docs.filter(d => d.metadata.status !== 'complete');
+  const nowS = Math.floor(Date.now() / 1000);
+  // A recurring occurrence that hasn't opened yet isn't offered, and isn't counted as open work.
+  const open = docs.filter(d => d.metadata.status !== 'complete' && !isUpcoming(d.metadata, nowS));
   const byId = new Map(docs.map(d => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live: Lease[] = claims ? [...claims.values()] : [];
@@ -105,7 +108,6 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
   // untouched for a default TTL.
   const local = coordinatedLocally(opts.collection);
   const expired = local ? await expiredLeaseKeys(opts.collection) : undefined;
-  const nowS = Math.floor(Date.now() / 1000);
 
   // Soft scope of what is live right now: the leases' own scope plus the
   // claimed tasks' claim_scope.

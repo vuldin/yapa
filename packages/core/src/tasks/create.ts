@@ -3,6 +3,7 @@ import { addDocument, getOrCreateCollection, getDocumentsByFilter, getDocumentsB
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { localCoordination } from '../sync/coordination.js';
+import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -18,8 +19,21 @@ export interface TaskOptions {
   project?: string;
   depends_on?: string[];
   blocks?: string[];
+  /** Implied by recurrence_pattern. */
   is_recurring?: boolean;
-  recurrence_pattern?: 'daily' | 'weekly' | 'monthly';
+  recurrence_pattern?: RecurrencePattern;
+  /** Every N periods (default 1). */
+  recurrence_interval?: number;
+  /** Due date of the series' first occurrence (default: this task's due date). */
+  recurrence_anchor?: number;
+  /** Days before the due day the occurrence opens (default by pattern). */
+  lead_days?: number;
+  /** The notes each new occurrence starts with (default: notes). */
+  recurrence_notes?: string;
+  /** Id of the series' first task (default: this task). */
+  recurrence_series?: string;
+  /** Id of the occurrence this one follows. */
+  previous_occurrence?: string;
   salience?: number;
   duration_minutes?: number;
   completed_at?: number;
@@ -143,6 +157,12 @@ export async function createTask(
   options: TaskOptions = {},
   requested: string = 'global',
 ): Promise<string> {
+  const recurring = options.is_recurring ?? options.recurrence_pattern !== undefined;
+  if (recurring && !isRecurrencePattern(options.recurrence_pattern)) {
+    throw new RecurrenceError(`A recurring task needs recurrence_pattern: one of ${RECURRENCE_PATTERNS.join(', ')}`);
+  }
+  if (recurring && options.recurrence_interval !== undefined) checkInterval(options.recurrence_interval);
+  if (recurring && options.lead_days !== undefined) checkLeadDays(options.lead_days);
   // A collection merged away here is followed, never recreated.
   const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
@@ -164,8 +184,7 @@ export async function createTask(
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
     ...(options.claim_scope?.length ? { claim_scope: options.claim_scope } : {}),
-    is_recurring: options.is_recurring ?? false,
-    recurrence_pattern: options.recurrence_pattern,
+    is_recurring: recurring,
     created_at: now,
     updated_at: now,
     accessed_at: now,
@@ -174,6 +193,20 @@ export async function createTask(
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? 'medium'],
     sector: 'semantic',
   };
+  if (recurring) {
+    const pattern = options.recurrence_pattern!;
+    const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue();
+    Object.assign(metadata, {
+      due_date: due,
+      recurrence_pattern: pattern,
+      recurrence_interval: options.recurrence_interval ?? 1,
+      recurrence_anchor: options.recurrence_anchor ?? due,
+      lead_days: options.lead_days ?? DEFAULT_LEAD_DAYS[pattern],
+      recurrence_notes: options.recurrence_notes ?? options.notes ?? '',
+      recurrence_series: options.recurrence_series ?? id,
+      previous_occurrence: options.previous_occurrence,
+    });
+  }
   metadata.is_synced = false;
 
   await addDocument(collection, id, title, metadata);
