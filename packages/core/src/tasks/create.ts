@@ -3,6 +3,7 @@ import { addDocument, getOrCreateCollection, getDocumentsByFilter, getDocumentsB
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { localCoordination } from '../sync/coordination.js';
+import { withDocLock } from '../doc-lock.js';
 import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, localZone, opensAt, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
 
 
@@ -143,12 +144,7 @@ async function idTaken(id: string): Promise<boolean> {
 const ID_ATTEMPTS = 5;
 
 /** A task id no document uses yet: getNextTaskId, skipping any number found taken. */
-/** An id for a task created later (completeTask allocates its successor's before taking a lock). */
-export async function newTaskId(): Promise<string> {
-  return freshTaskId();
-}
-
-async function freshTaskId(): Promise<string> {
+export async function freshTaskId(): Promise<string> {
   let floor = 0;
   let id = await getNextTaskId();
   for (let i = 1; i < ID_ATTEMPTS && (await idTaken(id)); i++) {
@@ -167,7 +163,12 @@ export async function createTask(
   return (await createTaskWithMetadata(title, options, requested)).id;
 }
 
-/** createTask, returning the collection it was written to and the metadata it wrote. `opts.id`: one from newTaskId. */
+/**
+ * createTask, returning the collection it was written to and the metadata it
+ * wrote. `opts.id` (one from freshTaskId) is written only if no document in
+ * the collection has it: TaskIdTakenError otherwise, for the caller to
+ * allocate another. The check and the write share the id's lock.
+ */
 export async function createTaskWithMetadata(
   title: string,
   options: TaskOptions = {},
@@ -190,6 +191,24 @@ export async function createTaskWithMetadata(
   const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
   const id = opts.id ?? await freshTaskId();
+  return withDocLock(collection, id, async () => {
+    if ((await getDocumentsByIds(collection, [id])).length) {
+      if (opts.id) throw new TaskIdTakenError(id);
+      // Taken since it was allocated (a process without local coordination): the next free one.
+      return createTaskWithMetadata(title, options, collection);
+    }
+    return writeTask(collection, id, title, options, recurring);
+  });
+}
+
+/** An explicit task id is already a document in the collection. */
+export class TaskIdTakenError extends Error {
+  constructor(readonly id: string) {
+    super(`task id ${id} is already taken`);
+  }
+}
+
+async function writeTask(collection: string, id: string, title: string, options: TaskOptions, recurring: boolean) {
   const now = Math.floor(Date.now() / 1000);
 
   const metadata: Record<string, any> = {

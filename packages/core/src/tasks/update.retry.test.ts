@@ -72,7 +72,7 @@ describe('completeTask and the next occurrence', () => {
     expect(made).toBeDefined();
 
     const r = await completeTask(id);
-    expect(r.regeneratedId).toBe(made.id);
+    expect(r).toMatchObject({ existingNext: made.id });
     expect(await successorsOf(id)).toHaveLength(1);
     expect((await getTask(id))!.metadata).toMatchObject({ status: 'complete', next_occurrence: made.id });
   });

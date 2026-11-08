@@ -33,7 +33,7 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
 }
 
 /** List fields: comma-separated, or JSON when an item holds a comma. */
-const ARRAY_FIELDS = new Set(['tags', 'depends_on', 'blocks', 'related_ids', 'claim_scope', 'task_ids', 'memory_ids', 'waits_on', 'options', 'disposition_ids']);
+const ARRAY_FIELDS = new Set(['tags', 'depends_on', 'blocks', 'related_ids', 'claim_scope', 'task_ids', 'memory_ids', 'waits_on', 'options', 'disposition_ids', 'rekeyed_from_all']);
 /** Object-valued fields, stored as JSON (sync/sentinel.ts). */
 const OBJECT_FIELDS = new Set(['redirects']);
 

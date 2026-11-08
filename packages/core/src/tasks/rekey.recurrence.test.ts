@@ -34,7 +34,7 @@ describe('a re-keyed occurrence keeps its successor', () => {
     // A successor from another machine still names the old id: found through rekeyed_from.
     await patchDocument(C, next, { previous_occurrence: id });
     await updateTask(moved.id, { status: 'pending' });
-    expect((await completeTask(moved.id)).regeneratedId).toBe(next);
+    expect((await completeTask(moved.id)).existingNext).toBe(next);
     expect(await successorsOf(moved.id)).toHaveLength(0);
     expect(await successorsOf(id)).toHaveLength(1);
   });

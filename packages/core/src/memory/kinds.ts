@@ -17,6 +17,7 @@
  *
  * @module @yapa/core/memory/kinds
  */
+import { metadataList } from '../metadata-adapter.js';
 
 export const MEMORY_KINDS = ['finding', 'decision', 'limitation', 'question', 'idea'] as const;
 export type MemoryKind = (typeof MEMORY_KINDS)[number];
@@ -98,9 +99,6 @@ export function isMemoryKind(k: unknown): k is MemoryKind {
   return typeof k === 'string' && (MEMORY_KINDS as readonly string[]).includes(k);
 }
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
-
 /**
  * Validate typed fields as they will be stored (`current` is the existing
  * metadata on an update) and return the metadata to write. Fills the default
@@ -112,7 +110,7 @@ export function normalizeTyped(fields: TypedFields, current: Record<string, any>
   for (const k of TYPED_KEYS) {
     const v = (fields as Record<string, unknown>)[k];
     if (v === undefined) continue;
-    out[k] = k === 'task_ids' || k === 'options' || k === 'disposition_ids' ? list(v) : typeof v === 'string' ? v.trim() : v;
+    out[k] = k === 'task_ids' || k === 'options' || k === 'disposition_ids' ? metadataList(v) : typeof v === 'string' ? v.trim() : v;
   }
   if (!Object.keys(out).length) return out;
 
@@ -139,7 +137,7 @@ export function normalizeTyped(fields: TypedFields, current: Record<string, any>
       throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(', ')}`);
     }
     const merged = { ...current, ...out };
-    if (kind === 'decision' && status === 'needed' && list(merged.options).length < 2) {
+    if (kind === 'decision' && status === 'needed' && metadataList(merged.options).length < 2) {
       throw new TypedMemoryError('a decision that is needed lists at least two options (and ideally a recommendation)');
     }
     if (kind === 'finding' && status === 'resolved') {
@@ -150,7 +148,7 @@ export function normalizeTyped(fields: TypedFields, current: Record<string, any>
       if (d === 'no-action' && !String(merged.disposition_reason ?? '').trim()) {
         throw new TypedMemoryError('a no-action disposition gives disposition_reason');
       }
-      if (d !== 'no-action' && !list(merged.disposition_ids).length) {
+      if (d !== 'no-action' && !metadataList(merged.disposition_ids).length) {
         throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
       }
     }

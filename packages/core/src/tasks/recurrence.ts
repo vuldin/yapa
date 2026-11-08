@@ -30,9 +30,15 @@ const MAX_PERIOD: Record<RecurrencePattern, number> = {
 /** This machine's IANA time zone, stored with a series when it is anchored (recurrence_tz). */
 export const localZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-/** The series' time zone, or undefined (local time) for a series from before 1.19 or an unknown zone. */
-export const seriesZone = (m: Record<string, any>): string | undefined =>
-  typeof m.recurrence_tz === 'string' && m.recurrence_tz && zoneFormatter(m.recurrence_tz) ? m.recurrence_tz : undefined;
+/** The series' stored time zone string, whether or not this machine knows it. */
+export const storedZone = (m: Record<string, any>): string | undefined =>
+  typeof m.recurrence_tz === 'string' && m.recurrence_tz ? m.recurrence_tz : undefined;
+
+/** The zone to count the series in: its stored zone if this machine knows it, else undefined (local time; a series from before 1.19, or an unknown zone). */
+export const seriesZone = (m: Record<string, any>): string | undefined => {
+  const tz = storedZone(m);
+  return tz && zoneFormatter(tz) ? tz : undefined;
+};
 
 const formatters = new Map<string, Intl.DateTimeFormat | null>();
 function zoneFormatter(tz: string): Intl.DateTimeFormat | null {
@@ -344,7 +350,7 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
       recurrence_anchor: d,
       recurrence_slot: d,
       // A re-anchor keeps the series' zone: an editor elsewhere doesn't move it.
-      recurrence_tz: seriesZone(cur) ?? localZone(),
+      recurrence_tz: storedZone(cur) ?? localZone(),
       recurrence_interval: iv ?? (same ? recurrenceInterval(cur) : 1),
       lead_days: ld ?? (same ? leadDays(cur) : DEFAULT_LEAD_DAYS[pattern]),
     });

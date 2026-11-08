@@ -419,7 +419,7 @@ describe('recurring tasks over the store', () => {
       const first = await completeTask(id);
       expect((await getTask(id))!.metadata.next_occurrence).toBe(first.regeneratedId);
       await updateTask(id, { status: 'pending' });
-      expect((await completeTask(id)).regeneratedId).toBe(first.regeneratedId);
+      expect(await completeTask(id)).toMatchObject({ existingNext: first.regeneratedId });
       expect((await getDocumentsByFilter(R, { type: 'task' }, 1000)).filter(d => d.metadata.previous_occurrence === id)).toHaveLength(1);
 
       const both = await Promise.all([completeTask(first.regeneratedId!), completeTask(first.regeneratedId!)]);

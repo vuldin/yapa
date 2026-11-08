@@ -18,7 +18,7 @@ import { storeMemory } from '../memory/store.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
-import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
+import { checkSeriesUpdate, getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
 import { isRecurring, recurrenceChanges, recurrenceNote } from './recurrence.js';
 import { forgetMemory } from '../memory/forget.js';
 import { metadataList } from '../metadata-adapter.js';
@@ -126,6 +126,7 @@ export async function requestDecision(
   if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, 'decision_needed (a YAPA decision the task waits on)', 'set the task to blocked with a blocked_reason that names the record');
   // An update that would be refused is refused before the decision is stored.
   recurrenceChanges(task.id, task.metadata, extra);
+  await checkSeriesUpdate(task, { ...extra, status: 'pending' });
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join('\n\n');
   const typed = normalizeTyped({
     kind: 'decision', status: 'needed', options: d.options, task_ids: [task.id],
@@ -219,16 +220,22 @@ export function closeText(r: { recorded?: Recorded; nudge?: string }): string {
 }
 
 /**
+ * "regenerated as X (recurring), due …, opens …" for a next occurrence the
+ * completion created, "next occurrence X (already created)" for an open one
+ * it found, or ''.
+ */
+export function nextOccurrenceText(result: CompleteResult): string {
+  if (result.regeneratedId) {
+    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}` : ''}`;
+  }
+  return result.existingNext ? `next occurrence ${result.existingNext} (already created)` : '';
+}
+
+/**
  * The reply to a completion: the next occurrence of a recurring task, the
  * claim release, what was recorded. With `seriesChanged` (recurrence fields
  * changed in the same call), what the series does now.
  */
-/** "regenerated as X (recurring), due …, opens …", or '' with no next occurrence. */
-export function nextOccurrenceText(result: CompleteResult): string {
-  if (!result.regeneratedId) return '';
-  return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}` : ''}`;
-}
-
 export function completedText(id: string, result: CompleteResult, opts: { durationMinutes?: number; seriesChanged?: boolean } = {}): string {
   let text = `Completed task ${id}`;
   if (opts.durationMinutes != null) text += ` (effort: ${formatDuration(opts.durationMinutes)})`;
