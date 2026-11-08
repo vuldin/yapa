@@ -174,6 +174,11 @@ describe('upcoming recurring tasks', () => {
     // Numbers held as strings, as core reads them.
     expect(opensAt(rec({ due_date: String(due), lead_days: '0' }))).toBe(due - 86399);
     expect(opensAt(rec({ opens_at: ` ${due - 2 * 86400 - 5 * 3600} ` }))).toBe(due - 2 * 86400 - 5 * 3600);
+    // A value core reads as non-finite counts as missing.
+    expect(opensAt(rec({ due_date: '1e999' }))).toBeUndefined();
+    expect(opensAt(rec({ lead_days: '1e999' }))).toBe(due - 86399 - 2 * 86400);
+    expect(opensAt(rec({ opens_at: '1e999' }))).toBe(due - 86399 - 2 * 86400);
+    expect(isUpcoming(rec({ due_date: '1e999' }), 0)).toBe(false);
   });
 
   it('only a pending recurring occurrence with a due date is upcoming', () => {

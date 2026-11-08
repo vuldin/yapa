@@ -193,14 +193,21 @@ export interface TaskFilters {
   limit: number;
 }
 
-// format.ts isUpcoming, in SQL, from core's patterns and lead-time defaults (literals checked here).
+// Core's isUpcoming (tasks/recurrence.ts, with format.ts endOfDayOpening as the fallback), the one copy that has to be SQL:
+// it filters before LIMIT. Patterns and lead-time defaults come from core (literals checked here).
 const sqlWord = (w: string) => { if (!/^[a-z]+$/.test(w)) throw new Error(`unexpected recurrence pattern ${w}`); return `'${w}'`; };
 const sqlInt = (n: number) => { if (!Number.isInteger(n)) throw new Error(`unexpected lead time ${n}`); return String(n); };
 const DEFAULT_LEAD_SQL = `CASE metadata->>'recurrence_pattern' ${Object.entries(DEFAULT_LEAD_DAYS).map(([p, n]) => `WHEN ${sqlWord(p)} THEN ${sqlInt(n)}`).join(' ')} ELSE 0 END`;
-/** A metadata number as core's Number() reads it: a JSON number, or a string holding a decimal number; else NULL (and no cast is tried). */
-const NUMERIC_RE = '^\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*$';
+/**
+ * A metadata number as core's Number() reads it: a JSON number, or a string
+ * holding a decimal number; else NULL, with no cast tried. A value core reads
+ * as non-finite counts as missing: a JSON number past 1e300, and a string
+ * longer than 20 digits on either side of the point or with an exponent of
+ * more than two digits (bounds under which float8 can't overflow).
+ */
+const NUMERIC_RE = '^\\s*[-+]?([0-9]{1,20}(\\.[0-9]{0,20})?|\\.[0-9]{1,20})([eE][-+]?[0-9]{1,2})?\\s*$';
 const metaNumber = (key: 'due_date' | 'lead_days' | 'opens_at') => `CASE jsonb_typeof(metadata->'${key}')
-    WHEN 'number' THEN (metadata->>'${key}')::float8
+    WHEN 'number' THEN CASE WHEN abs((metadata->'${key}')::numeric) < 1e300 THEN (metadata->>'${key}')::float8 END
     WHEN 'string' THEN CASE WHEN metadata->>'${key}' ~ '${NUMERIC_RE}' THEN (metadata->>'${key}')::float8 END END`;
 /**
  * Per row, once: the due date, the lead time (core's leadDays), the opening
