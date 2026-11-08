@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
-  formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, opensAt, recurrenceInterval,
+  formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, opensAtOf, recurrenceInterval,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -75,7 +75,7 @@ function taskJson(t: { id: string; title: string; collection: string; metadata: 
     recurrence: isRecurring(m) ? {
       pattern: m.recurrence_pattern, interval: recurrenceInterval(m), lead_days: leadDays(m), anchor: m.recurrence_anchor ?? null,
       series: m.recurrence_series || t.id, previous: m.previous_occurrence ?? null, series_notes: m.recurrence_notes ?? null,
-      upcoming: isUpcoming(m), opens_at: m.due_date ? opensAt(Number(m.due_date), leadDays(m)) : null,
+      upcoming: isUpcoming(m), opens_at: Number(m.due_date) > 0 ? opensAtOf(m) : null,
     } : null,
     created_at: m.created_at ?? null, updated_at: m.updated_at ?? null,
     claim: lease ? { user: lease.holder.user, session: lease.holder.session, since: lease.acquired_at, expires_at: lease.expires_at } : null,

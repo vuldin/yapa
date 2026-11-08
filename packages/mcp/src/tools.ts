@@ -49,6 +49,7 @@ import {
   getCurationModel,
   getCurationState,
   getDocumentsByFilter,
+  getDocumentsByIds,
   getDueTasks,
   getOrCreateCollection,
   getPendingDeletes,
@@ -98,8 +99,7 @@ import {
   RECURRENCE_PATTERNS,
   formatTaskDay,
   isUpcoming,
-  leadDays,
-  opensAt,
+  recurrenceLine,
   recurrenceNote,
   upcomingNote,
   redirectNote,
@@ -213,13 +213,19 @@ const writeTarget = (name: string) => resolveWriteCollection(name, { folder: ses
 
 const checkFollowUps = (followUps: Array<{ title: string; collection?: string }> | undefined) => checkFollowUpCollections(followUps, sessionFolder());
 
-/** What a recurring task's series does now. */
-function recurrenceLine(m: Record<string, any>): string {
-  const repeats = recurrenceNote(m);
-  if (!repeats) return 'Not recurring: completing it creates no next occurrence.';
-  const opens = opensAt(m.due_date, leadDays(m));
-  const when = isUpcoming(m) ? `opens ${formatTaskDay(opens)} (hidden from task lists until then)` : 'open now';
-  return `${repeats[0].toUpperCase()}${repeats.slice(1)}; this occurrence is due ${formatTaskDate(m.due_date)}, ${when}.`;
+/** The reply to a completion (task_complete, or task_update with status complete). */
+function completedText(id: string, durationMinutes: number | undefined, result: Awaited<ReturnType<typeof completeTask>>): string {
+  let text = `Completed task ${id}`;
+  if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
+  if (result.regeneratedId) {
+    text += ` → regenerated as ${result.regeneratedId} (recurring)`;
+    if (result.next) text += `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}`;
+  }
+  const release = releaseNote(result.release);
+  if (release) text += `\n${release}`;
+  const rec = closeText(result);
+  if (rec) text += `\n${rec}`;
+  return text;
 }
 
 function typedError(e: unknown) {
@@ -1106,7 +1112,8 @@ export function registerTools(server: McpServer): void {
         return typedError(e);
       }
       recordLastWrite(target.collection);
-      const m = (await getTask(id))?.metadata ?? {};
+      // A recurring task's due date and series are set by createTask: read them back from where it was written.
+      const m = is_recurring || recurrence_pattern ? (await getDocumentsByIds(target.collection, [id]))[0]?.metadata ?? {} : { due_date };
 
       let text = `Created task ${id}: "${title}"`;
       if (m.due_date) text += ` (due: ${formatTaskDate(m.due_date)})`;
@@ -1200,7 +1207,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'task_update',
-    'Update task fields (title, status, priority, notes, due, tags), or set, change or stop recurrence',
+    'Update task fields (title, status, priority, notes, due, tags), or set, change or stop recurrence. status complete completes the task as task_complete does (a recurring one gets its next occurrence)',
     {
       id: z.string().describe('Task ID'),
       title: z.string().trim().min(1).optional().describe('New task title (rename)'),
@@ -1269,6 +1276,12 @@ export function registerTools(server: McpServer): void {
           const d = await requestDecision(id, decision_needed, { reclaim }, rest);
           decision = d.decision;
           r = d;
+        } else if (status === 'complete') {
+          // A completion, with the other fields written first: a recurring task's series goes on.
+          const { status: _s, duration_minutes: minutes, ...rest } = updates;
+          const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
+          recordLastWrite((await getTask(id))?.collection);
+          return { content: [{ type: 'text' as const, text: completedText(id, minutes, c) }] };
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
@@ -1320,17 +1333,7 @@ export function registerTools(server: McpServer): void {
       } catch (e) {
         return typedError(e);
       }
-      let text = `Completed task ${id}`;
-      if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
-      const release = releaseNote(result.release);
-      if (release) text += `\n${release}`;
-      if (result.regeneratedId) {
-        text += ` → regenerated as ${result.regeneratedId} (recurring)`;
-        if (result.next) text += `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}`;
-      }
-      const rec = closeText(result);
-      if (rec) text += `\n${rec}`;
-      return { content: [{ type: 'text' as const, text }] };
+      return { content: [{ type: 'text' as const, text: completedText(id, durationMinutes, result) }] };
     },
   );
 

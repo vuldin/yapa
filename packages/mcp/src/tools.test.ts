@@ -9,7 +9,7 @@ vi.mock('@yapa/core', async importOriginal => ({ ...(await importOriginal<any>()
 
 import {
   createConfig, createLocalStore, createNewCollection, createTask, getTask, listCollections,
-  readLastWrite, resetConfig, resetStore, setConfig, setStore,
+  readLastWrite, resetConfig, resetStore, setConfig, setStore, claimsFor,
 } from '@yapa/core';
 import { withSyncOnWrite, SYNC_ON_WRITE_TOOLS, registerTools } from './tools.js';
 
@@ -242,6 +242,30 @@ describe('registered tools over the local store', () => {
     const plain = await createTask('back up the laptop', {}, C);
     const set = await call('task_update', { id: plain, recurrence_pattern: 'weekly', recurrence_interval: 2 });
     expect(set.content[0].text).toMatch(/\nRepeats every 2 weeks, opens 2 day\(s\) before it is due; this occurrence is due .*, open now\.$/);
+  });
+
+  it('task_update status complete continues a series like task_complete, with the other fields written first', async () => {
+    const C = 'private-recurring';
+    const id = (await call('task_create', { title: 'send the monthly summary', collection: C, recurrence_pattern: 'monthly', notes: 'v1' })).content[0].text.match(/(tester-\d+)/)[1];
+    const r = await call('task_update', { id, status: 'complete', series_notes: 'v2', duration: '30m' });
+    expect(r.content[0].text.split('\n')[0]).toMatch(new RegExp(`^Completed task ${id} \\(effort: 30m\\) → regenerated as (tester-\\d+) \\(recurring\\), due .*, opens `));
+    const next = r.content[0].text.match(/regenerated as (tester-\d+)/)[1];
+    expect((await getTask(next))?.metadata).toMatchObject({ notes: 'v2', previous_occurrence: id });
+    expect((await getTask(id))?.metadata).toMatchObject({ status: 'complete', duration_minutes: 30 });
+
+    const refused = await call('task_update', { id: next, status: 'complete', recurrence_pattern: 'none', lead_days: 3 });
+    expect(refused.isError).toBe(true);
+    expect((await getTask(next))?.metadata.status).toBe('pending');
+  });
+
+  it('a refused recurrence change on task_update in_progress leaves no claim', async () => {
+    const C = 'private-recurring';
+    const id = await createTask('a one-off chore', {}, C);
+    const r = await call('task_update', { id, status: 'in_progress', lead_days: 3 });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toMatch(/not recurring/);
+    expect((await claimsFor(C))?.get(id)).toBeUndefined();
+    expect((await getTask(id))?.metadata.status).toBe('pending');
   });
 
   it('write tools note the collection this session last wrote to, for the status line', async () => {
