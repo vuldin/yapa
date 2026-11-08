@@ -37,7 +37,8 @@ const ARRAY_FIELDS = new Set(['tags', 'depends_on', 'blocks', 'related_ids', 'cl
 /** Free text: always a string, even when it looks like JSON ("[2026] plan", a template starting with "{"). */
 const TEXT_FIELDS = new Set([
   'title', 'notes', 'recurrence_notes', 'blockedReason', 'blocked_reason', 'recommendation', 'exit_criteria',
-  'disposition_reason', 'context', 'question', 'owner', 'external_ref', 'sync_rejected_message',
+  'disposition_reason', 'context', 'question', 'owner', 'external_ref', 'sync_rejected_message', 'customer', 'project',
+  'source', 'session_id', 'recurrence_tz',
 ]);
 
 /** A list field as stored (an array, or comma-separated), trimmed, without empty entries. */

@@ -12,7 +12,7 @@ import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type 
 import { pushDocsNow } from '../sync/push.js';
 import {
   isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, RecurrenceError, recurrenceChanges, recurrenceInterval,
-  metaTime, opensAtOf, SERIES_PARAMS, seriesChanged, seriesZone, storedZone, todayDue, type RecurrencePattern, type RecurrenceUpdate,
+  isRecurrencePattern, metaTime, opensAtOf, SERIES_PARAMS, seriesChanged, seriesZone, storedZone, todayDue, type RecurrencePattern, type RecurrenceUpdate,
 } from './recurrence.js';
 import { metadataList } from '../metadata-adapter.js';
 
@@ -103,12 +103,15 @@ export async function updateTask(
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
   const result: TaskUpdateResult = { id, collection: task.collection };
-  // is_recurring false stops the series, as recurrence_pattern "none" does.
+  // is_recurring false stops the series, as recurrence_pattern "none" does; true sets the task's own pattern again.
   if (updates.is_recurring === false && updates.recurrence_pattern === undefined) updates = { ...updates, recurrence_pattern: 'none' };
+  if (updates.is_recurring === true && updates.recurrence_pattern === undefined && !isRecurring(task.metadata)) {
+    if (!isRecurrencePattern(task.metadata.recurrence_pattern)) throw new RecurrenceError(`${task.id} has no recurrence_pattern to repeat on: pass one`);
+    updates = { ...updates, recurrence_pattern: task.metadata.recurrence_pattern };
+  }
 
   if (updates.status === 'in_progress') {
     // Refused before the claim is taken, so there is nothing to give back (checked again under the lock).
-    await checkSeriesUpdate(task, updates);
     recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
     const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
     if (claim.kind === 'refused') throw new TaskClaimedError(claim);
@@ -313,14 +316,17 @@ async function createSuccessor(collection: string, id: string, title: string, m:
  */
 export async function checkSeriesUpdate(task: { id: string; collection: string; metadata: Record<string, any> }, updates: TaskUpdates): Promise<void> {
   if (!seriesChanged(updates)) return;
-  // An open occurrence after this one holds the series, whatever this one's status (it may have been reopened).
-  const next = await successorOf(task.collection, task.id);
-  if (next && next.status !== 'complete') throw notOpen(task.id, next.id);
-  if (task.metadata.status !== 'complete') return;
+  // The series' open occurrence is its latest one not complete, by slot (a reopened older one doesn't hold it).
   const series = task.metadata.recurrence_series || task.id;
-  const open = (await getDocumentsByFilter(task.collection, { type: 'task', recurrence_series: series }, 100_000))
-    .find(d => d.id !== task.id && d.metadata.status !== 'complete' && d.metadata.archived !== true);
-  if (open) throw notOpen(task.id, open.id);
+  let open: { id: string; at: [number, number] } | undefined;
+  for (const status of ['pending', 'in_progress', 'blocked']) {
+    for (const d of await getDocumentsByFilter(task.collection, { type: 'task', recurrence_series: series, status }, 5)) {
+      const at: [number, number] = [occurrenceSlot(d.metadata), metaTime(d.metadata.created_at)];
+      if (d.metadata.archived !== true && (!open || at[0] > open.at[0] || (at[0] === open.at[0] && at[1] > open.at[1]))) open = { id: d.id, at };
+    }
+  }
+  if (open && open.id !== task.id) throw notOpen(task.id, open.id);
+  if (open || task.metadata.status !== 'complete') return;
   if (updates.status !== undefined && updates.status !== 'complete') return;
   throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
 }

@@ -97,7 +97,9 @@ describe('the opening day in the series\' zone', () => {
     try {
       // Due Fri Mar 15 2030, 23:59:59 in Tokyo; opens two days before, at Tokyo's midnight: Wed Mar 13 there, still Mar 12 in LA.
       const m = { is_recurring: true, recurrence_pattern: 'weekly', status: 'pending', lead_days: 2, recurrence_tz: 'Asia/Tokyo', due_date: Date.UTC(2030, 2, 15, 14, 59, 59) / 1000 };
-      expect(upcomingInfo(m, 0)!.note).toMatch(/opens Wed, Mar 13$/);
+      // The due date in the same zone: Fri Mar 15 at the end of the day, not "Fri, Mar 15, 7 AM" in LA.
+      expect(upcomingInfo(m, 0)!.note).toBe('upcoming: due Fri, Mar 15, opens Wed, Mar 13');
+      expect(recurrenceLine(m, 0)).toMatch(/this occurrence is due Fri, Mar 15, opens Wed, Mar 13/);
       expect(recurrenceLine(m, 0)).toMatch(/opens Wed, Mar 13 \(hidden/);
     } finally {
       if (saved === undefined) delete process.env.TZ;

@@ -60,6 +60,7 @@ describe('metadata-adapter round trip', () => {
     const input = {
       kind: 'decision', recommendation: '["retry", "give up"]', exit_criteria: '{"p99_ms": 5}', title: '[2026] plan', notes: '{draft}',
       context: '{"from": "the review"}', question: '[a] or [b]?', disposition_reason: '[dup]', recurrence_notes: '["venue"]',
+      project: '[2026]', customer: '{internal}',
       options: ['retry, then give up', 'give up'], tags: ['a', 'b'], redirects: { 'project-old': 'project-new' },
       provenance: { tool: 'importer', version: 2 }, scores: [0.5, 0.25],
     };

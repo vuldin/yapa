@@ -207,12 +207,15 @@ export function captureNudge(taskId: string, metadata: Record<string, any>, reco
 // ------------------------------------------------- reply text
 // Shared by the MCP tools, the DSH tools and the CLI.
 
-/** What happened to a claim when its task left in_progress. */
-export function releaseText(r: ReleaseResult | undefined): string {
+/** What happened to a claim when its task left in_progress (`fullSession`: the holder's whole session id, for scripts). */
+export function releaseText(r: ReleaseResult | undefined, opts: { fullSession?: boolean } = {}): string {
   if (!r) return '';
   if (r.kind === 'released') return 'Claim released.';
-  if (r.kind === 'held_by_other') return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
-  if (r.kind === 'unshared') return `Claim release not shared (${r.reason}); it lapses on its own.`;
+  if (r.kind === 'held_by_other') {
+    const s = r.lease.holder.session;
+    return `Note: ${r.lease.holder.user} (session ${opts.fullSession ? s : s.slice(0, 8)}) still holds a claim on it.`;
+  }
+  if (r.kind === 'unshared') return `Release not shared (${r.reason}); the claim lapses on its own.`;
   return '';
 }
 
@@ -233,8 +236,8 @@ export function closeText(r: { recorded?: Recorded; nudge?: string }): string {
  */
 export function nextOccurrenceText(result: CompleteResult): string {
   if (result.regeneratedId) {
-    const opens = result.next && formatTaskDay(result.next.opens_at, seriesZone(result.metadata ?? {}));
-    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date)}, opens ${opens}` : ''}`;
+    const tz = seriesZone(result.metadata ?? {});
+    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date, tz)}, opens ${formatTaskDay(result.next.opens_at, tz)}` : ''}`;
   }
   return result.existingNext ? `next occurrence ${result.existingNext} (already created)` : '';
 }

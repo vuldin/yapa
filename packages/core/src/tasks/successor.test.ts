@@ -92,6 +92,24 @@ describe('the next occurrence', () => {
     await expect(updateTask(next, { status: 'pending', recurrence_pattern: 'weekly' })).resolves.toBeDefined();
   });
 
+  it('a reopened occurrence refuses series changes when a later one is open, naming the newest open one', async () => {
+    const x = await createTask('defrost the freezer', { recurrence_pattern: 'monthly' }, C);
+    const y = (await completeTask(x)).regeneratedId!;
+    const z = (await completeTask(y)).regeneratedId!;
+    await updateTask(x, { status: 'pending' });
+    await expect(updateTask(x, { lead_days: 1 })).rejects.toThrow(new RegExp(`${x} isn't the open occurrence of its series: change the series on ${z}`));
+    await expect(updateTask(z, { lead_days: 1 })).resolves.toBeDefined();
+  });
+
+  it('is_recurring true sets the task\'s own pattern again; with none it is refused', async () => {
+    await addDocument(C, 'manual-30', 'clean the filters', { type: 'task', id: 'manual-30', status: 'pending', is_recurring: false, recurrence_pattern: 'weekly', created_at: 1, updated_at: 1 });
+    await updateTask('manual-30', { is_recurring: true });
+    expect((await getTask('manual-30'))!.metadata).toMatchObject({ is_recurring: true, recurrence_pattern: 'weekly', lead_days: 2 });
+    expect((await getTask('manual-30'))!.metadata.recurrence_anchor).toBeGreaterThan(0);
+    const plain = await createTask('a one-off', {}, C);
+    await expect(updateTask(plain, { is_recurring: true })).rejects.toThrow(/no recurrence_pattern to repeat on/);
+  });
+
   it('a reopened occurrence with an open successor refuses series changes, naming it', async () => {
     const id = await createTask('rotate the passwords', { recurrence_pattern: 'monthly' }, C);
     const next = (await completeTask(id)).regeneratedId!;

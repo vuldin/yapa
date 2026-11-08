@@ -73,14 +73,17 @@ export function parseRelativeDate(phrase: string): number | null {
   return null;
 }
 
-/** Format timestamp for human-readable display. */
-export function formatTaskDate(timestamp: number): string {
+/** Format timestamp for human-readable display, in `timeZone` (a valid IANA zone; default local). */
+export function formatTaskDate(timestamp: number, timeZone?: string): string {
   const date = new Date(timestamp * 1000);
+  const parts = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: 'numeric', hourCycle: 'h23', timeZone }).formatToParts(date);
+  const at = (type: string) => Number(parts.find(p => p.type === type)?.value);
   return date.toLocaleDateString('en-US', {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
-    ...(date.getHours() !== 23 || date.getMinutes() !== 59 ? { hour: 'numeric' } : {}),
+    timeZone,
+    ...(at('hour') % 24 !== 23 || at('minute') !== 59 ? { hour: 'numeric' } : {}),
   });
 }
 
