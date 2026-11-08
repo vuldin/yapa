@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.19.0 (2026-11-08)
+
+Recurring tasks now keep their place in the calendar, stay out of the way until they're nearly due, and start each occurrence from the series' own notes. They can repeat quarterly, yearly or every N periods, and `task_update` can set, change and stop a series.
+
+**Upgrading:** update the plugin and restart Claude Code. There's no schema change. Existing recurring tasks keep working: each one's next occurrence is anchored at its current due date and starts from its current notes, which become the series template.
+
+Everyone sharing a collection should be on 1.19 before using quarterly or yearly tasks, or `recurrence_interval`. YAPA 1.18 and earlier completes recurring tasks with its old rules: a quarterly or yearly task comes back due the same day, and the interval, lead time and series notes are dropped. The next completion on 1.19 picks the pattern back up, but not the interval or the notes.
+
+### Features
+- **Patterns.** Recurring tasks can be `daily`, `weekly`, `monthly`, `quarterly` or `yearly`. `recurrence_interval` repeats them every N periods, for example every 2 weeks.
+- **A series keeps its calendar slot.**
+  - Each occurrence remembers the slot it was scheduled for (`recurrence_slot`). The next one is due at the first slot after the later of that slot and now.
+  - A late completion doesn't shift the series, and missed periods are skipped instead of piling up as overdue copies. A postponed occurrence is followed by the slot after its own.
+  - Month, quarter and year steps clamp to month ends: Jan 31, then Feb 28, Mar 31, Apr 30.
+  - Slots are counted in the series' time zone (`recurrence_tz`), so a teammate in another zone doesn't move the series.
+  - A recurring task created without a due date is due at the end of today.
+- **Upcoming occurrences stay out of the way.**
+  - An occurrence opens `lead_days` before its due day. The defaults are daily 0, weekly 2, monthly 7, quarterly 14 and yearly 30.
+  - Until it opens, it's left out of `task_list`, session start and prompt context, the standup, `task_next` and `waiting`.
+  - `task_list` says how many it hid. `include_upcoming: true` (`yapa task list --include-upcoming`) shows them, with the day each one opens.
+  - The dashboard's "Upcoming (7 days)" section lists them, and the remote MCP server applies the same rule.
+- **Series notes and links.**
+  - Each new occurrence starts from the series template (`recurrence_notes`). `task_update` with `notes` changes only the current occurrence; `series_notes` replaces the template.
+  - Occurrences carry `recurrence_series` and `previous_occurrence`, and a completed occurrence records `next_occurrence`.
+- **`task_update` sets, changes and stops recurrence.**
+  - It takes `recurrence_pattern` (`"none"` stops the series), `recurrence_interval`, `lead_days`, `series_notes` and `is_recurring`.
+  - Only the series' open occurrence takes series changes. On any other occurrence the change is refused, and the reply names the open one.
+  - With `status: complete` it completes the task as `task_complete` does, in the same write.
+  - The DSH tools work the same way.
+- **Completion replies.**
+  - `task_complete` gives the next occurrence's due date and the day it opens. If the next occurrence already existed because the task was reopened and completed again, it says "next occurrence X (already created)".
+  - `yapa task release --status complete` keeps its first line and adds the next-occurrence line. Its JSON has `regenerated` and `existing_next`.
+
+### Fixes
+- A monthly task due on the 31st no longer jumps to the 3rd of the month after next.
+- A recurring task completed late no longer comes back already overdue.
+- Closing notes no longer pile up from one occurrence to the next.
+- Completing an occurrence creates its successor before the completion is written, under the task's lock. So:
+  - a failed create writes nothing;
+  - two sessions completing the task at once create one successor;
+  - reopening and completing again doesn't create a second one.
+- When sync re-keys a task, the links on your own neighbouring tasks follow the new id.
+- An update that would be refused writes nothing: no claim is taken, and no `decision_needed` decision is left behind.
+- Metadata text that looks like JSON stays text: a title such as "[2026] plan", a notes template, a project name.
+- Linking a memory to a task whose `memory_ids` was stored as "a, b" no longer appends a duplicate.
+
+### Known limitations
+- **Unlinked pre-1.19 occurrences.** Occurrences completed before 1.19 aren't linked to their successors, so reopening one and completing it again can create a second occurrence. Delete the extra.
+- **Two unsynced machines.** If two machines complete the same shared occurrence before syncing, each can create a successor. Delete the extra.
+- **Due-date labels in `yapa-mcp`.** It labels due dates by their UTC date, so an end-of-day due date west of UTC shows as the next day.
+
 ## 1.18.0 (2026-11-07)
 
 A project that keeps its findings, decisions and questions in its own files can now stop YAPA from making typed copies of them.
