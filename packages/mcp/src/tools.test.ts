@@ -200,6 +200,50 @@ describe('registered tools over the local store', () => {
     await call('scope', { action: 'remove_records_elsewhere', collection: 'private-recs' });
   });
 
+  it('recurring tasks: created, listed (upcoming hidden unless asked), changed, stopped, and regenerated with dates', async () => {
+    const C = 'project-recurring';
+    const idOf = (r: any) => r.content[0].text.match(/(tester-\d+)/)[1];
+    expect((await call('task_create', { title: 'x', collection: C, is_recurring: true })).isError).toBe(true);
+    expect(() => z.object(tools.get('task_create')!.schema).parse({ title: 'x', recurrence_pattern: 'hourly' })).toThrow();
+
+    const daily = await call('task_create', { title: 'check the backups', collection: C, recurrence_pattern: 'daily' });
+    expect(daily.content[0].text).toMatch(/\nRepeats daily, opens on the day it is due; this occurrence is due .*, open now\.$/);
+    const later = await call('task_create', { title: 'file the quarterly report', collection: C, recurrence_pattern: 'quarterly', due: 'in 60 days', notes: 'figures, review' });
+    expect(later.content[0].text).toMatch(/Repeats quarterly, opens 14 day\(s\) before it is due; .*, opens \w{3}, \w{3} \d+ \(hidden from task lists until then\)\.$/);
+    const laterId = idOf(later);
+
+    const listed = (await call('task_list', { collection: C })).content[0].text;
+    expect(listed).toContain(idOf(daily));
+    expect(listed).not.toContain(laterId);
+    expect(listed.split('\n').at(-1)).toBe('_1 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
+    const all = (await call('task_list', { collection: C, include_upcoming: true })).content[0].text;
+    expect(all).toMatch(new RegExp(`\\*\\*${laterId}\\*\\* .*\\(upcoming: due .*, opens \\w{3}, \\w{3} \\d+\\)`));
+    expect(all).not.toMatch(/hidden/);
+    const one = (await call('task_list', { id: laterId })).content[0].text;
+    expect(one).toMatch(/Recurrence: repeats quarterly, opens 14 day\(s\) before it is due; upcoming: due/);
+    expect(one).toContain(`Series: series ${laterId}`);
+
+    const upd = await call('task_update', { id: laterId, lead_days: 90, series_notes: 'figures, review, archive' });
+    expect(upd.content[0].text).toMatch(/\nRepeats quarterly, opens 90 day\(s\) before it is due; this occurrence is due .*, open now\.$/);
+    expect(() => z.object(tools.get('task_update')!.schema).parse({ id: laterId, recurrence_interval: 0 })).toThrow();
+    const cleared = await call('task_update', { id: laterId, due: 'none' });
+    expect(cleared.isError).toBe(true);
+    expect(cleared.content[0].text).toMatch(/needs a due date/);
+
+    const done = await call('task_complete', { id: laterId });
+    expect(done.content[0].text.split('\n')[0]).toMatch(new RegExp(`^Completed task ${laterId} → regenerated as (tester-\\d+) \\(recurring\\), due \\w{3}, \\w{3} \\d+, opens \\w{3}, \\w{3} \\d+$`));
+    const nextId = done.content[0].text.match(/regenerated as (tester-\d+)/)[1];
+    expect((await getTask(nextId))?.metadata).toMatchObject({ notes: 'figures, review, archive', recurrence_series: laterId, previous_occurrence: laterId, lead_days: 90 });
+
+    const stop = await call('task_update', { id: nextId, recurrence_pattern: 'none' });
+    expect(stop.content[0].text).toBe(`Updated task ${nextId}\nNot recurring: completing it creates no next occurrence.`);
+    expect((await call('task_complete', { id: nextId })).content[0].text.split('\n')[0]).toBe(`Completed task ${nextId}`);
+
+    const plain = await createTask('back up the laptop', {}, C);
+    const set = await call('task_update', { id: plain, recurrence_pattern: 'weekly', recurrence_interval: 2 });
+    expect(set.content[0].text).toMatch(/\nRepeats every 2 weeks, opens 2 day\(s\) before it is due; this occurrence is due .*, open now\.$/);
+  });
+
   it('write tools note the collection this session last wrote to, for the status line', async () => {
     const saved = process.env.CLAUDE_CODE_SESSION_ID;
     process.env.CLAUDE_CODE_SESSION_ID = 'sess-lw';

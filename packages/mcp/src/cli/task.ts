@@ -13,12 +13,13 @@ import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
+  formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, opensAt, recurrenceInterval,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
 
 export const TASK_USAGE =
-  'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete]\n' +
+  'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete] [--include-upcoming]\n' +
   '       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n' +
   '       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n' +
   '       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n' +
@@ -29,7 +30,8 @@ export const TASK_USAGE =
   'status and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\n' +
   'hold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n' +
   '--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\n' +
-  'on it, pending). "-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\n' +
+  'on it, pending). list leaves out recurring occurrences that have not opened yet unless --include-upcoming.\n' +
+  '"-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\n' +
   'Prints one JSON object (--text: a short summary).\n' +
   'Exit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
 
@@ -70,6 +72,11 @@ function taskJson(t: { id: string; title: string; collection: string; metadata: 
     memory_ids: Array.isArray(m.memory_ids) ? m.memory_ids : String(m.memory_ids ?? '').split(',').filter(Boolean),
     blocked_reason: m.blockedReason || m.blocked_reason || null,
     notes: m.notes ?? '', due_date: m.due_date || null, owner: m.origin_user ?? null,
+    recurrence: isRecurring(m) ? {
+      pattern: m.recurrence_pattern, interval: recurrenceInterval(m), lead_days: leadDays(m), anchor: m.recurrence_anchor ?? null,
+      series: m.recurrence_series || t.id, previous: m.previous_occurrence ?? null, series_notes: m.recurrence_notes ?? null,
+      upcoming: isUpcoming(m), opens_at: m.due_date ? opensAt(Number(m.due_date), leadDays(m)) : null,
+    } : null,
     created_at: m.created_at ?? null, updated_at: m.updated_at ?? null,
     claim: lease ? { user: lease.holder.user, session: lease.holder.session, since: lease.acquired_at, expires_at: lease.expires_at } : null,
     claim_note: claimNote(t, claims) || null,
@@ -128,7 +135,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(', ')}`);
       const collection = flag(args, '--collection');
       const wantTags = list(flag(args, '--tag')) ?? [];
-      const tasks = (await listTasks({ collection, status: status as TaskStatus | undefined, includeComplete: args.includes('--include-complete') }))
+      const tasks = (await listTasks({ collection, status: status as TaskStatus | undefined, includeComplete: args.includes('--include-complete'), includeUpcoming: args.includes('--include-upcoming') }))
         .filter(t => {
           if (!wantTags.length) return true;
           const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? '').split(',');
@@ -212,11 +219,13 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       let recorded: { memories: string[]; follow_ups: string[] } | undefined;
       let nudge: string | undefined;
       let decision: string | undefined;
+      let regenerated: { id: string; due_date: number; opens_at: number } | undefined;
       if (status === 'complete') {
         const c = await completeTask(t.id, int(flag(args, '--duration'), '--duration'), { session }, { learned, follow_ups: followUps });
         release = c.release;
         recorded = c.recorded;
         nudge = c.nudge;
+        if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
       } else {
         const reason = flag(args, '--reason');
         const fields = { ...(reason ? { blockedReason: reason } : {}) };
@@ -231,17 +240,18 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       }
       recordLastWrite(t.collection);
       // A CLI process has no background sync: push the new status before exiting.
-      const pushed = await pushDocsNow(t.collection, [t.id]).catch(() => undefined);
+      const pushed = await pushDocsNow(t.collection, [t.id, ...(regenerated ? [regenerated.id] : [])]).catch(() => undefined);
       const exit = release?.kind === 'unshared' || (pushed && pushed.errors > 0) ? EXIT.unavailable : EXIT.ok;
       const text = release?.kind === 'released' ? `${t.id} -> ${status}; claim released`
         : release?.kind === 'held_by_other' ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it`
           : release?.kind === 'unshared' ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own`
             : `${t.id} -> ${status}`;
-      const more = [decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
+      const more = [regenerated ? `next occurrence ${regenerated.id}, due ${formatTaskDate(regenerated.due_date)}, opens ${formatTaskDay(regenerated.opens_at)}` : '',
+        decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
         recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
       return {
         exit,
-        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null },
+        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null },
         text: more.length ? `${text}\n${more.join('\n')}` : text,
       };
     }
@@ -268,5 +278,5 @@ function jsonFile<T>(path: string | undefined, shape: 'array' | 'object'): T | u
 /** True when `a` is the value of a `--flag value` pair (not a positional). */
 function isFlagValue(args: string[], a: string): boolean {
   const i = args.indexOf(a);
-  return i > 0 && args[i - 1].startsWith('--') && !['--claim', '--reclaim', '--include-complete', '--text', '--auto-only', '--include-cleanup'].includes(args[i - 1]);
+  return i > 0 && args[i - 1].startsWith('--') && !['--claim', '--reclaim', '--include-complete', '--include-upcoming', '--text', '--auto-only', '--include-cleanup'].includes(args[i - 1]);
 }
