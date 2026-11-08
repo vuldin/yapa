@@ -8,6 +8,7 @@ vi.mock('@yapa/core', async importOriginal => {
     setConfig: vi.fn(),
     getConfig: vi.fn(() => actual.createConfig({})),
     createTask: vi.fn(async (title: string) => 'user-7'),
+    createTaskWithMetadata: vi.fn(async (title: string) => ({ id: 'user-7', collection: 'global', metadata: { title } })),
     parseRelativeDate: actual.parseRelativeDate,
   };
 });

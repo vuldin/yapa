@@ -55,6 +55,8 @@ describe('DSH recurring tasks', () => {
     expect(all.text).toMatch(new RegExp(`\\*\\*${later.value.id}\\*\\* .*\\(upcoming: due .*, opens \\w{3}, \\w{3} \\d+\\)`));
     expect((await run('yapa_task_list', { id: later.value.id })).text).toMatch(/Recurrence: repeats yearly, opens 30 day\(s\) before it is due; upcoming: due .*, opens /);
 
+    const notesOnly = await run('yapa_task_update', { id: later.value.id, series_notes: 'two-year term, auto-renew' });
+    expect(notesOnly.text).toMatch(/^Updated task tester-\d+\nRepeats yearly, opens 30 day\(s\) before it is due; /);
     const upd = await run('yapa_task_update', { id: later.value.id, lead_days: 120, series_notes: 'one-year term' });
     expect(upd.text).toMatch(/\nRepeats yearly, opens 120 day\(s\) before it is due; .*, open now\.$/);
 

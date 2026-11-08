@@ -17,7 +17,7 @@ import {
   collectionSize,
   completeTask,
   createNewCollection,
-  createTask,
+  createTaskWithMetadata,
   deleteTask,
   detectChromaVersion,
   forgetMemory,
@@ -30,7 +30,6 @@ import {
   recurrenceLine,
   recurrenceNote,
   upcomingNote,
-  getDocumentsByIds,
   closeText,
   completedText,
   hiddenUpcomingLine,
@@ -827,7 +826,7 @@ export function registerTools(ctx: Context): void {
     async execute(args, exec) {
       const due_date = args.due ? parseRelativeDate(args.due) ?? undefined : undefined;
       const target = await writeTarget(args.collection ?? 'global', exec);
-      const id = await createTask(args.title, {
+      const { id, metadata: m } = await createTaskWithMetadata(args.title, {
         priority: args.priority,
         due_date,
         tags: args.tags,
@@ -839,8 +838,6 @@ export function registerTools(ctx: Context): void {
         recurrence_interval: args.recurrence_interval,
         lead_days: args.lead_days,
       }, target.collection);
-      // A recurring task's due date and series are set by createTask: read them back from where it was written.
-      const m = args.is_recurring || args.recurrence_pattern ? (await getDocumentsByIds(target.collection, [id]))[0]?.metadata ?? {} : {};
       const due = m.due_date ?? due_date;
       return {
         id, title: args.title, ...(due !== undefined && { due_date: due }), ...(isRecurring(m) && { recurrence: recurrenceLine(m) }),
@@ -988,6 +985,7 @@ export function registerTools(ctx: Context): void {
       }
       // A move to in_progress claims the task; someone else's claim throws
       // TaskClaimedError, whose message names the holder.
+      const seriesChanged = ['recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes'].some(k => args[k as keyof typeof args] !== undefined);
       let decision: string | undefined;
       let r;
       if (args.decision_needed) {
@@ -999,18 +997,16 @@ export function registerTools(ctx: Context): void {
         // A completion, with the other fields written first: a recurring task's series goes on.
         const { status: _s, ...rest } = updates;
         const c = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups }, rest);
-        const seriesChanged = ['recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes'].some(k => args[k as keyof typeof args] !== undefined);
         return { id: args.id, completed: true, ...completion(args.id, c, seriesChanged) };
       } else {
         r = await updateTask(args.id, updates);
       }
-      const updated = (await getTask(r.id))!;
       const recorded = args.learned?.length || args.follow_ups?.length
-        ? await recordForTask({ id: r.id, collection: updated.collection }, { learned: args.learned, follow_ups: args.follow_ups })
+        ? await recordForTask({ id: r.id, collection: r.collection! }, { learned: args.learned, follow_ups: args.follow_ups })
         : undefined;
       const claim = r.claim ? describeClaim(r.claim) : '';
       const rec = closeText({ recorded });
-      const recurrence = args.recurrence_pattern || args.recurrence_interval !== undefined || args.lead_days !== undefined ? recurrenceLine(updated.metadata) : '';
+      const recurrence = seriesChanged && r.metadata ? recurrenceLine(r.metadata) : '';
       return { id: r.id, ...(recurrence && { recurrence }), ...(claim && { claim }), ...(decision && { decision }), ...(rec && { recorded: rec }) };
     },
     presentCall: args => ({ card: 'generic', title: `Update task ${args.id}`, kind: 'edit' }),
