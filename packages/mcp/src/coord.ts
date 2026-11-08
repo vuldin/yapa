@@ -17,7 +17,8 @@ import { coordinatedLocally, currentSession, getDeviceId, isCoordinationUnavaila
 // Re-exported so the CLI never imports the whole @yapa/core namespace (it would defeat tree-shaking).
 export { currentSession };
 
-export const EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4 } as const;
+/** partial: done, but a follow-on step failed (yapa task release --status complete: the next occurrence wasn't created). */
+export const EXIT = { ok: 0, error: 1, usage: 2, refused: 3, unavailable: 4, partial: 5 } as const;
 
 export interface CoordResult {
   exit: number;

@@ -93,6 +93,7 @@ import {
   KEPT_AS_NOTE_REASON,
   RecordsElsewhereError,
   RecurrenceError,
+  RegenerationError,
   RECURRENCE_PATTERNS,
   closeText,
   completedText,
@@ -1180,7 +1181,7 @@ export function registerTools(server: McpServer): void {
       status: z.enum(['pending', 'in_progress', 'blocked', 'complete']).optional(),
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
       notes: z.string().optional().describe('Notes (on a recurring task, this occurrence only)'),
-      due: z.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date'),
+      due: z.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date (refused on a recurring task: stop the series first)'),
       recurrence_pattern: z.enum([...RECURRENCE_PATTERNS, 'none']).optional().describe('Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series'),
       recurrence_interval: z.number().int().min(1).optional().describe('Every N periods (re-anchors the series at the due date)'),
       lead_days: z.number().int().min(0).optional().describe('Days before its due day an occurrence opens'),
@@ -1297,6 +1298,8 @@ export function registerTools(server: McpServer): void {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
         recordLastWrite(result.collection);
       } catch (e) {
+        // The completion itself was written: it syncs like any other.
+        if (e instanceof RegenerationError) recordLastWrite((await getTask(id))?.collection);
         return typedError(e);
       }
       return { content: [{ type: 'text' as const, text: completedText(id, result, { durationMinutes }) }] };
