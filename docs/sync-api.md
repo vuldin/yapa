@@ -672,7 +672,11 @@ writes (all optional unless noted):
   `depends_on`, `blocks`, `is_recurring`, `recurrence_pattern` (`daily` |
   `weekly` | `monthly` | `quarterly` | `yearly`; `''` once stopped),
   `recurrence_interval` (integer >= 1), `recurrence_anchor` (Unix seconds:
-  the first occurrence's due date), `lead_days` (integer >= 0),
+  the first occurrence's due date), `recurrence_slot` (Unix seconds: the
+  slot this occurrence was scheduled for; a due-date move leaves it),
+  `lead_days` (integer >= 0), `opens_at` (Unix seconds: when the
+  occurrence stops being upcoming, the start of its due day `lead_days`
+  earlier in the writer's time zone; 0 once the series is stopped),
   `recurrence_notes` (the series' notes template), `recurrence_series` (id
   of the series' first task), `previous_occurrence` (id of the occurrence
   completed before this one),
