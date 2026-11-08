@@ -370,6 +370,35 @@ describe('recurring tasks over the store', () => {
       expect((await getTask(id))!.metadata.lead_days).toBe(2);
     });
 
+    it('records next_occurrence: reopening and completing again, or two completions at once, create one next occurrence', async () => {
+      now(at(2027, 11, 1, 9));
+      const id = await createTask('rotate the backup tapes', { recurrence_pattern: 'weekly' }, R);
+      const first = await completeTask(id);
+      expect((await getTask(id))!.metadata.next_occurrence).toBe(first.regeneratedId);
+      await updateTask(id, { status: 'pending' });
+      expect((await completeTask(id)).regeneratedId).toBeUndefined();
+
+      const both = await Promise.all([completeTask(first.regeneratedId!), completeTask(first.regeneratedId!)]);
+      expect(both.filter(r => r.regeneratedId)).toHaveLength(1);
+      const children = (await getDocumentsByFilter(R, { type: 'task' }, 1000)).filter(d => d.metadata.previous_occurrence === first.regeneratedId);
+      expect(children).toHaveLength(1);
+    });
+
+    it('keeps a title and a template that look like JSON as they are', async () => {
+      now(at(2027, 11, 1, 9));
+      const id = await createTask('[2026] plan the offsite', { recurrence_pattern: 'yearly', notes: '["venue","catering"]' }, R);
+      expect((await getTask(id))!.metadata).toMatchObject({ title: '[2026] plan the offsite', notes: '["venue","catering"]', recurrence_notes: '["venue","catering"]' });
+      const r = await completeTask(id);
+      const next = (await getTask(r.regeneratedId!))!;
+      expect(next.title).toBe('[2026] plan the offsite');
+      expect(next.metadata).toMatchObject({ notes: '["venue","catering"]', recurrence_notes: '["venue","catering"]' });
+    });
+
+    it('refuses recurrence_interval or lead_days at create without a pattern', async () => {
+      await expect(createTask('x', { lead_days: 3 }, R)).rejects.toThrow(/need a recurrence_pattern/);
+      await expect(createTask('x', { recurrence_interval: 2 }, R)).rejects.toThrow(/need a recurrence_pattern/);
+    });
+
     it('a refused recurrence change takes no claim', async () => {
       const id = await createTask('a one-off', {}, R);
       await expect(updateTask(id, { status: 'in_progress', lead_days: 3 }, { session: 's-review' })).rejects.toThrow(/not recurring/);

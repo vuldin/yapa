@@ -21,6 +21,7 @@ import { getTask, updateTask } from './update.js';
 import { describeWaits, openWaits } from './close.js';
 import { taskNeedsPeople } from './waiting.js';
 import { isUpcoming } from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 const PRIORITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -81,7 +82,7 @@ export interface NextResult {
   cleanup: CleanupItem[];
 }
 
-const norm = (x: unknown): string[] => (Array.isArray(x) ? x : (x ?? '').toString().split(',')).map(String).map(s => s.trim()).filter(Boolean);
+const norm = metadataList;
 
 /** Keys of this machine's expired (not yet pruned) leases in `collection`. */
 async function expiredLeaseKeys(collection: string): Promise<Set<string>> {

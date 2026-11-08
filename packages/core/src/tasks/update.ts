@@ -10,9 +10,10 @@ import { createTask } from './create.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
 import {
-  isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, recurrenceChanges, recurrenceInterval, todayDue,
-  type RecurrencePattern, type RecurrenceUpdate,
+  isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, RecurrenceError, recurrenceChanges, recurrenceInterval,
+  SERIES_PARAMS, todayDue, type RecurrencePattern, type RecurrenceUpdate,
 } from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 export interface TaskResult {
   id: string;
@@ -105,7 +106,7 @@ export async function updateTask(
   }
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', 'recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes', 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', ...SERIES_PARAMS, 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   // The write itself, under the task's lock and over the task as it is now:
@@ -208,7 +209,7 @@ export async function completeTask(
     completionUpdates.duration_minutes = durationMinutes;
   }
 
-  const { release, previousStatus, metadata: written } = await updateTask(id, completionUpdates, ctx);
+  const { release, metadata: written } = await updateTask(id, completionUpdates, ctx);
   const recorded = record.learned?.length || record.follow_ups?.length
     ? await recordForTask({ id: task.id, collection: task.collection }, record)
     : undefined;
@@ -216,41 +217,48 @@ export async function completeTask(
   const m = written ?? task.metadata;
   const extras = { metadata: m, collection: task.collection, ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
 
-  // Handle recurring tasks: once, by whichever completion found it still open
-  // (two sessions completing it at once must not create two next occurrences).
-  if (isRecurring(m) && previousStatus !== 'complete') {
-    const pattern = m.recurrence_pattern as RecurrencePattern;
-    const interval = recurrenceInterval(m);
-    const lead = leadDays(m);
-    const slot = occurrenceSlot(m);
-    const anchor = Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : slot || todayDue();
+  // A recurring task gets its next occurrence once: decided under the task's lock, which next_occurrence records.
+  // Reopening and completing again creates nothing; a completion whose next occurrence failed can be retried.
+  if (!isRecurring(m) || m.next_occurrence) return extras;
+  const title = rest.title ?? task.title;
+  const regenerated = await withDocLock(task.collection, task.id, async () => {
+    const cur = (await getDocumentsByIds(task.collection, [task.id]))[0]?.metadata;
+    if (!cur || !isRecurring(cur) || cur.next_occurrence || cur.status !== 'complete') return undefined;
+    const pattern = cur.recurrence_pattern as RecurrencePattern;
+    const interval = recurrenceInterval(cur);
+    const lead = leadDays(cur);
+    const slot = occurrenceSlot(cur);
+    const anchor = Number(cur.recurrence_anchor) > 0 ? Number(cur.recurrence_anchor) : slot || todayDue();
     // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this
     // occurrence's slot (where it was scheduled, even if its due date was moved).
     const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)));
     // Series created before templates start from their last notes.
-    const template = m.recurrence_notes !== undefined ? String(m.recurrence_notes) : (m.notes ?? '');
-
-    // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
-    // The title as just written: a rename sent with the completion carries over.
-    const newId = await createTask(String(m.title ?? task.title), {
-      priority: m.priority,
-      tags: Array.isArray(m.tags) ? m.tags : (m.tags ?? '').split(',').filter(Boolean),
-      notes: template,
-      customer: m.customer,
-      project: m.project,
-      due_date: nextDue,
-      is_recurring: true,
-      recurrence_pattern: pattern,
-      recurrence_interval: interval,
-      recurrence_anchor: anchor,
-      lead_days: lead,
-      recurrence_notes: template,
-      recurrence_series: m.recurrence_series || task.id,
-      previous_occurrence: task.id,
-    }, task.collection);
-
-    return { regeneratedId: newId, next: { due_date: nextDue, opens_at: opensAt(nextDue, lead) }, ...extras };
-  }
-
-  return extras;
+    const template = cur.recurrence_notes !== undefined ? String(cur.recurrence_notes) : String(cur.notes ?? '');
+    let newId: string;
+    try {
+      // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
+      newId = await createTask(title, {
+        priority: cur.priority,
+        tags: metadataList(cur.tags),
+        notes: template,
+        customer: cur.customer,
+        project: cur.project,
+        due_date: nextDue,
+        is_recurring: true,
+        recurrence_pattern: pattern,
+        recurrence_interval: interval,
+        recurrence_anchor: anchor,
+        lead_days: lead,
+        recurrence_notes: template,
+        recurrence_series: cur.recurrence_series || task.id,
+        previous_occurrence: task.id,
+      }, task.collection);
+    } catch (e) {
+      throw new RecurrenceError(`${task.id} is complete, but its next occurrence could not be created (${e instanceof Error ? e.message : e}): complete it again to retry`);
+    }
+    await patchDocument(task.collection, task.id, { next_occurrence: newId, updated_at: Math.floor(Date.now() / 1000), ...(getConfig().SYNC_ENABLED ? { is_synced: false } : {}) });
+    return { regeneratedId: newId, next: { due_date: nextDue, opens_at: opensAt(nextDue, lead) } };
+  });
+  return regenerated ? { ...extras, ...regenerated, metadata: { ...m, next_occurrence: regenerated.regeneratedId } } : extras;
 }
+

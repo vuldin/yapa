@@ -20,6 +20,7 @@ import { includesUser, ownerWaitsOn } from '../memory/owners.js';
 import { knownUsers, usersIn } from '../memory/known-users.js';
 import { getConfig } from '../config.js';
 import { isUpcoming } from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 export interface WaitingItem {
   id: string;
@@ -57,8 +58,7 @@ export interface WaitingOptions {
   user?: string;
 }
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
+const list = metadataList;
 
 const firstLine = (s: string) => {
   const line = s.split('\n').find(l => l.trim()) ?? '';

@@ -158,10 +158,49 @@ export function checkLeadDays(v: unknown): number {
   return v as number;
 }
 
+/** The task_update parameters that change a series (MCP, DSH, and updateTask's re-sync keys). */
+export const SERIES_PARAMS = ['recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes'] as const;
+
+/** Did these update parameters change the series? */
+export const seriesChanged = (params: Record<string, unknown>): boolean => SERIES_PARAMS.some(k => params[k] !== undefined);
+
+export interface SeriesInfo {
+  pattern: RecurrencePattern;
+  interval: number;
+  lead_days: number;
+  anchor: number | null;
+  slot: number | null;
+  series: string;
+  previous: string | null;
+  next: string | null;
+  series_notes: string | null;
+  upcoming: boolean;
+  opens_at: number | null;
+}
+
+/** A task's series, for listings and JSON; null when it isn't recurring. */
+export function seriesInfo(m: Record<string, any>, id: string, now = Math.floor(Date.now() / 1000)): SeriesInfo | null {
+  if (!isRecurring(m)) return null;
+  const due = Number(m.due_date);
+  return {
+    pattern: m.recurrence_pattern,
+    interval: recurrenceInterval(m),
+    lead_days: leadDays(m),
+    anchor: Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : null,
+    slot: occurrenceSlot(m) || null,
+    series: m.recurrence_series || id,
+    previous: m.previous_occurrence || null,
+    next: m.next_occurrence || null,
+    series_notes: m.recurrence_notes !== undefined ? String(m.recurrence_notes) : null,
+    upcoming: isUpcoming(m, now),
+    opens_at: Number.isFinite(due) && due > 0 ? opensAtOf(m) : null,
+  };
+}
+
 /** Series fields only recurrenceChanges writes on an update. */
 export const RECURRENCE_KEYS = [
   'is_recurring', 'recurrence_pattern', 'recurrence_interval', 'recurrence_anchor', 'recurrence_slot', 'lead_days',
-  'recurrence_notes', 'recurrence_series', 'previous_occurrence', 'opens_at', 'series_notes',
+  'recurrence_notes', 'recurrence_series', 'previous_occurrence', 'next_occurrence', 'opens_at', 'series_notes',
 ] as const;
 
 export interface RecurrenceUpdate {

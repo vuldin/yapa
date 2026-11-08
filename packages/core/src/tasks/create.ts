@@ -170,6 +170,9 @@ export async function createTaskWithMetadata(
     throw new RecurrenceError('is_recurring false contradicts recurrence_pattern: leave one of them out');
   }
   const recurring = options.is_recurring ?? options.recurrence_pattern !== undefined;
+  if (!recurring && (options.recurrence_interval !== undefined || options.lead_days !== undefined)) {
+    throw new RecurrenceError('recurrence_interval and lead_days need a recurrence_pattern');
+  }
   if (recurring && !isRecurrencePattern(options.recurrence_pattern)) {
     throw new RecurrenceError(`A recurring task needs recurrence_pattern: one of ${RECURRENCE_PATTERNS.join(', ')}`);
   }

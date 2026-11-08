@@ -1,6 +1,7 @@
 import { getDocumentsByFilter, listCollections, type Collection } from '../store/index.js';
 import type { TaskStatus, TaskPriority } from './create.js';
 import { isUpcoming } from './recurrence.js';
+import { metadataList } from '../metadata-adapter.js';
 
 const PRIORITY_ORDER: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
 
@@ -62,7 +63,7 @@ export async function listTasksCounted(filters: TaskListFilters = {}): Promise<{
         // Deleted on the sync service by its owner, kept here archived.
         if (task.metadata.archived === true && !filters.includeArchived) continue;
         if (filters.tags?.length) {
-          const tags = Array.isArray(task.metadata.tags) ? task.metadata.tags : String(task.metadata.tags ?? '').split(',');
+          const tags = metadataList(task.metadata.tags);
           if (!filters.tags.every(t => tags.includes(t))) continue;
         }
         if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) {

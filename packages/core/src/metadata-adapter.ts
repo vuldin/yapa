@@ -32,6 +32,13 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
   return result;
 }
 
+/** Free text that is always a string, even when it looks like JSON ("[2026] plan", a template starting with "{"). */
+const TEXT_FIELDS = new Set(['title', 'notes', 'recurrence_notes', 'blockedReason']);
+
+/** A list field as stored (an array, or comma-separated), trimmed, without empty entries. */
+export const metadataList = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
+
 /**
  * Convert ChromaDB format back to JavaScript objects.
  * Comma-separated strings -> Arrays (for known array fields), JSON strings -> Objects.
@@ -42,6 +49,10 @@ export function fromChroma(metadata: RawMetadata): Record<string, any> {
 
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === 'string') {
+      if (TEXT_FIELDS.has(key)) {
+        result[key] = value;
+        continue;
+      }
       if (value.startsWith('{') || value.startsWith('[')) {
         try {
           result[key] = JSON.parse(value);
