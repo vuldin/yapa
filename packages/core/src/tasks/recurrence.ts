@@ -18,6 +18,13 @@ export const DEFAULT_LEAD_DAYS: Record<RecurrencePattern, number> = { daily: 0, 
 
 export class RecurrenceError extends Error {}
 
+/** The task was completed, but its next occurrence could not be created: completing it again retries. */
+export class RegenerationError extends RecurrenceError {
+  constructor(readonly taskId: string, cause: unknown) {
+    super(`${taskId} is complete, but its next occurrence could not be created (${cause instanceof Error ? cause.message : String(cause)}): complete it again to retry`);
+  }
+}
+
 export const isRecurrencePattern = (p: unknown): p is RecurrencePattern => RECURRENCE_PATTERNS.includes(p as RecurrencePattern);
 
 const MONTHS: Partial<Record<RecurrencePattern, number>> = { monthly: 1, quarterly: 3, yearly: 12 };
@@ -27,34 +34,99 @@ const MAX_PERIOD: Record<RecurrencePattern, number> = {
   daily: 25 * 3600, weekly: 7 * 86400 + 3600, monthly: 31 * 86400 + 3600, quarterly: 92 * 86400 + 3600, yearly: 366 * 86400 + 3600,
 };
 
-/** Slot k of a series (unix seconds). */
-export function recurrenceSlot(anchor: number, pattern: RecurrencePattern, interval: number, k: number): number {
-  const a = new Date(anchor * 1000);
+/** This machine's IANA time zone, stored with a series when it is anchored (recurrence_tz). */
+export const localZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+/** The series' time zone, or undefined (local time) for a series from before 1.19 or an unknown zone. */
+export const seriesZone = (m: Record<string, any>): string | undefined =>
+  typeof m.recurrence_tz === 'string' && m.recurrence_tz && zoneFormatter(m.recurrence_tz) ? m.recurrence_tz : undefined;
+
+const formatters = new Map<string, Intl.DateTimeFormat | null>();
+function zoneFormatter(tz: string): Intl.DateTimeFormat | null {
+  if (!formatters.has(tz)) {
+    try {
+      formatters.set(tz, new Intl.DateTimeFormat('en-US', {
+        timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+      }));
+    } catch {
+      formatters.set(tz, null);
+    }
+  }
+  return formatters.get(tz)!;
+}
+
+/** Wall-clock fields (month 0-based); fields may overflow on the way back, as with Date. */
+interface Wall { y: number; m: number; d: number; h: number; mi: number; s: number }
+
+function wallClock(t: number, tz?: string): Wall {
+  const f = tz ? zoneFormatter(tz) : null;
+  if (!f) {
+    const a = new Date(t * 1000);
+    return { y: a.getFullYear(), m: a.getMonth(), d: a.getDate(), h: a.getHours(), mi: a.getMinutes(), s: a.getSeconds() };
+  }
+  const p: Record<string, number> = {};
+  for (const x of f.formatToParts(new Date(t * 1000))) if (x.type !== 'literal') p[x.type] = Number(x.value);
+  return { y: p.year, m: p.month - 1, d: p.day, h: p.hour % 24, mi: p.minute, s: p.second };
+}
+
+/** Unix seconds of a wall-clock time in `tz` (local time without one), corrected for the zone's offset at that time. */
+function fromWallClock(w: Wall, tz?: string): number {
+  const f = tz ? zoneFormatter(tz) : null;
+  if (!f) return Math.floor(new Date(w.y, w.m, w.d, w.h, w.mi, w.s).getTime() / 1000);
+  const asUtc = Date.UTC(w.y, w.m, w.d, w.h, w.mi, w.s) / 1000;
+  const offset = (t: number) => { const x = wallClock(t, tz); return Date.UTC(x.y, x.m, x.d, x.h, x.mi, x.s) / 1000 - t; };
+  const first = offset(asUtc);
+  const t = asUtc - first;
+  const second = offset(t);
+  return second === first ? t : asUtc - second;
+}
+
+/** Slot k of a series (unix seconds), counted in the series' zone (local time without one). */
+export function recurrenceSlot(anchor: number, pattern: RecurrencePattern, interval: number, k: number, tz?: string): number {
+  const a = wallClock(anchor, tz);
   const steps = k * interval;
-  let y = a.getFullYear(), m = a.getMonth(), d = a.getDate();
+  let { y, m, d } = a;
   if (MONTHS[pattern]) {
     m += steps * MONTHS[pattern]!;
-    d = Math.min(d, new Date(y, m + 1, 0).getDate());
+    d = Math.min(d, new Date(Date.UTC(y, m + 1, 0)).getUTCDate());
   } else {
     d += steps * DAYS[pattern]!;
   }
-  return Math.floor(new Date(y, m, d, a.getHours(), a.getMinutes(), a.getSeconds()).getTime() / 1000);
+  return fromWallClock({ y, m, d, h: a.h, mi: a.mi, s: a.s }, tz);
 }
 
 /** The first slot of the series strictly after `after`. */
-export function nextRecurrenceDue(anchor: number, pattern: RecurrencePattern, interval: number, after: number): number {
+export function nextRecurrenceDue(anchor: number, pattern: RecurrencePattern, interval: number, after: number, tz?: string): number {
   let k = Math.max(1, Math.floor((after - anchor) / (MAX_PERIOD[pattern] * interval)));
-  let slot = recurrenceSlot(anchor, pattern, interval, k);
-  while (slot <= after) slot = recurrenceSlot(anchor, pattern, interval, ++k);
+  let slot = recurrenceSlot(anchor, pattern, interval, k, tz);
+  while (slot <= after) slot = recurrenceSlot(anchor, pattern, interval, ++k, tz);
   return slot;
+}
+
+/** Decimal numbers as stored in a string: no more than 20 digits a side and a two-digit exponent, so never out of float8's range. */
+export const NUMERIC_PATTERN = '^\\s*[-+]?([0-9]{1,20}(\\.[0-9]{0,20})?|\\.[0-9]{1,20})([eE][-+]?[0-9]{1,2})?\\s*$';
+const NUMERIC = new RegExp(NUMERIC_PATTERN);
+
+/**
+ * A metadata number: a JSON number (one too small for float8 is 0, one of
+ * 1e300 or more is missing), or a string matching NUMERIC_PATTERN. Anything
+ * else (a boolean, hex, other text) is missing. The remote SQL reads them the same way.
+ */
+export function metaNumber(v: unknown): number | undefined {
+  if (typeof v === 'number') {
+    const a = Math.abs(v);
+    return !Number.isFinite(v) || a >= 1e300 ? undefined : a < 1e-300 ? 0 : v;
+  }
+  return typeof v === 'string' && NUMERIC.test(v) ? Number(v) : undefined;
 }
 
 const truthy = (v: unknown) => v === true || v === 'true';
 const nonNegInt = (v: unknown): number | undefined => {
-  if (v === undefined || v === null || v === '') return undefined;
-  const n = Number(v);
-  return Number.isInteger(n) && n >= 0 ? n : undefined;
+  const n = metaNumber(v);
+  return n !== undefined && Number.isInteger(n) && n >= 0 ? n : undefined;
 };
+/** A positive metadata time (unix seconds), else 0. */
+const metaTime = (v: unknown): number => { const n = metaNumber(v); return n !== undefined && n > 0 ? n : 0; };
 
 export function isRecurring(m: Record<string, any>): boolean {
   return truthy(m.is_recurring) && isRecurrencePattern(m.recurrence_pattern);
@@ -71,25 +143,24 @@ export function leadDays(m: Record<string, any>): number {
 
 /** The slot this occurrence holds in its series: recurrence_slot, else (before slots were stored) its due date. */
 export function occurrenceSlot(m: Record<string, any>): number {
-  const slot = Number(m.recurrence_slot);
-  return slot > 0 ? slot : Number(m.due_date) > 0 ? Number(m.due_date) : 0;
+  return metaTime(m.recurrence_slot) || metaTime(m.due_date);
 }
 
-/** When an occurrence due at `due` opens: the start of its due day, `lead` days earlier (local time). */
-export function opensAt(due: number, lead: number): number {
-  const d = new Date(due * 1000);
-  return Math.floor(new Date(d.getFullYear(), d.getMonth(), d.getDate() - lead).getTime() / 1000);
+/** When an occurrence due at `due` opens: the start of its due day, `lead` days earlier, in `tz` (local time without one). */
+export function opensAt(due: number, lead: number, tz?: string): number {
+  const w = wallClock(due, tz);
+  return fromWallClock({ y: w.y, m: w.m, d: w.d - lead, h: 0, mi: 0, s: 0 }, tz);
 }
 
 /**
- * The opening time stored when the task was written (`opens_at`, in its
- * writer's time zone), if it still fits the due date and lead time: within
- * the day before the due date, lead_days earlier. Undefined when absent or
- * stale (a due date moved by a client that doesn't store it).
+ * The opening time stored when the task was written (`opens_at`), if it
+ * still fits the due date and lead time: within the day before the due
+ * date, lead_days earlier. Undefined when absent or stale (a due date moved
+ * by a client that doesn't store it).
  */
 export function storedOpensAt(m: Record<string, any>): number | undefined {
-  const stored = Number(m.opens_at), due = Number(m.due_date);
-  if (!(stored > 0) || !(due > 0) || !Number.isFinite(stored) || !Number.isFinite(due)) return undefined;
+  const stored = metaTime(m.opens_at), due = metaTime(m.due_date);
+  if (!stored || !due) return undefined;
   const lead = leadDays(m);
   return stored <= due - lead * 86400 + 3600 && stored > due - (lead + 1) * 86400 - 3600 ? stored : undefined;
 }
@@ -97,15 +168,15 @@ export function storedOpensAt(m: Record<string, any>): number | undefined {
 /** How an opening time is worked out when none is stored: (due, lead) -> unix seconds. */
 export type OpeningRule = (due: number, lead: number) => number;
 
-/** When this occurrence opens: as stored, else by `fallback` (default: the start of the due day here, as opensAt). */
-export function opensAtOf(m: Record<string, any>, fallback: OpeningRule = opensAt): number {
-  return storedOpensAt(m) ?? fallback(Number(m.due_date), leadDays(m));
+/** When this occurrence opens: as stored, else by `fallback` (default: opensAt in the series' zone). */
+export function opensAtOf(m: Record<string, any>, fallback?: OpeningRule): number {
+  const due = metaTime(m.due_date), lead = leadDays(m);
+  return storedOpensAt(m) ?? (fallback ? fallback(due, lead) : opensAt(due, lead, seriesZone(m)));
 }
 
 /** Upcoming: a pending occurrence of a recurring task that hasn't opened yet. */
-export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000), fallback: OpeningRule = opensAt): boolean {
-  const due = Number(m.due_date);
-  return isRecurring(m) && Number.isFinite(due) && due > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m, fallback);
+export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000), fallback?: OpeningRule): boolean {
+  return isRecurring(m) && metaTime(m.due_date) > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m, fallback);
 }
 
 /** "weekly", "every 2 months". */
@@ -174,6 +245,8 @@ export interface SeriesInfo {
   previous: string | null;
   next: string | null;
   series_notes: string | null;
+  /** The zone its slots are counted in; null: local time (a series from before 1.19). */
+  zone: string | null;
   upcoming: boolean;
   opens_at: number | null;
 }
@@ -181,25 +254,25 @@ export interface SeriesInfo {
 /** A task's series, for listings and JSON; null when it isn't recurring. */
 export function seriesInfo(m: Record<string, any>, id: string, now = Math.floor(Date.now() / 1000)): SeriesInfo | null {
   if (!isRecurring(m)) return null;
-  const due = Number(m.due_date);
   return {
     pattern: m.recurrence_pattern,
     interval: recurrenceInterval(m),
     lead_days: leadDays(m),
-    anchor: Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : null,
+    anchor: metaTime(m.recurrence_anchor) || null,
     slot: occurrenceSlot(m) || null,
     series: m.recurrence_series || id,
     previous: m.previous_occurrence || null,
     next: m.next_occurrence || null,
     series_notes: m.recurrence_notes !== undefined ? String(m.recurrence_notes) : null,
+    zone: seriesZone(m) ?? null,
     upcoming: isUpcoming(m, now),
-    opens_at: Number.isFinite(due) && due > 0 ? opensAtOf(m) : null,
+    opens_at: metaTime(m.due_date) ? opensAtOf(m) : null,
   };
 }
 
 /** Series fields only recurrenceChanges writes on an update. */
 export const RECURRENCE_KEYS = [
-  'is_recurring', 'recurrence_pattern', 'recurrence_interval', 'recurrence_anchor', 'recurrence_slot', 'lead_days',
+  'is_recurring', 'recurrence_pattern', 'recurrence_interval', 'recurrence_anchor', 'recurrence_slot', 'recurrence_tz', 'lead_days',
   'recurrence_notes', 'recurrence_series', 'previous_occurrence', 'next_occurrence', 'opens_at', 'series_notes',
 ] as const;
 
@@ -257,6 +330,7 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
       due_date: d,
       recurrence_anchor: d,
       recurrence_slot: d,
+      recurrence_tz: localZone(),
       recurrence_interval: iv ?? (same ? recurrenceInterval(cur) : 1),
       lead_days: ld ?? (same ? leadDays(cur) : DEFAULT_LEAD_DAYS[pattern]),
     });
@@ -272,7 +346,7 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
   if (sn !== undefined) out.recurrence_notes = sn;
   const finalDue = out.due_date ?? due;
   if (finalDue > 0 && (out.due_date !== undefined || out.lead_days !== undefined || u.due_date !== undefined || !(Number(cur.opens_at) > 0))) {
-    out.opens_at = opensAt(finalDue, out.lead_days ?? leadDays(cur));
+    out.opens_at = opensAt(finalDue, out.lead_days ?? leadDays(cur), out.recurrence_tz ?? seriesZone(cur));
   }
   return out;
 }

@@ -3,7 +3,7 @@ import { addDocument, getOrCreateCollection, getDocumentsByFilter, getDocumentsB
 import { getSyncBackend, isSyncConfigured, resolveSyncUsername } from '../sync/backend.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { localCoordination } from '../sync/coordination.js';
-import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, opensAt, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
+import { checkInterval, checkLeadDays, DEFAULT_LEAD_DAYS, isRecurrencePattern, localZone, opensAt, RecurrenceError, RECURRENCE_PATTERNS, todayDue, type RecurrencePattern } from './recurrence.js';
 
 
 export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'complete';
@@ -34,6 +34,8 @@ export interface TaskOptions {
   recurrence_series?: string;
   /** Id of the occurrence this one follows. */
   previous_occurrence?: string;
+  /** IANA zone the series' slots are counted in (default: this machine's). */
+  recurrence_tz?: string;
   salience?: number;
   duration_minutes?: number;
   completed_at?: number;
@@ -141,6 +143,10 @@ async function idTaken(id: string): Promise<boolean> {
 const ID_ATTEMPTS = 5;
 
 /** A task id no document uses yet: getNextTaskId, skipping any number found taken. */
+export async function reserveTaskId(): Promise<string> {
+  return freshTaskId();
+}
+
 async function freshTaskId(): Promise<string> {
   let floor = 0;
   let id = await getNextTaskId();
@@ -160,11 +166,12 @@ export async function createTask(
   return (await createTaskWithMetadata(title, options, requested)).id;
 }
 
-/** createTask, returning the collection it was written to and the metadata it wrote. */
+/** createTask, returning the collection it was written to and the metadata it wrote. `opts.id`: an id from reserveTaskId. */
 export async function createTaskWithMetadata(
   title: string,
   options: TaskOptions = {},
   requested: string = 'global',
+  opts: { id?: string } = {},
 ): Promise<{ id: string; collection: string; metadata: Record<string, any> }> {
   if (options.is_recurring === false && options.recurrence_pattern !== undefined) {
     throw new RecurrenceError('is_recurring false contradicts recurrence_pattern: leave one of them out');
@@ -181,7 +188,7 @@ export async function createTaskWithMetadata(
   // A collection merged away here is followed, never recreated.
   const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
-  const id = await freshTaskId();
+  const id = opts.id ?? await freshTaskId();
   const now = Math.floor(Date.now() / 1000);
 
   const metadata: Record<string, any> = {
@@ -212,14 +219,16 @@ export async function createTaskWithMetadata(
     const pattern = options.recurrence_pattern!;
     const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue();
     const lead = options.lead_days ?? DEFAULT_LEAD_DAYS[pattern];
+    const tz = options.recurrence_tz ?? localZone();
     Object.assign(metadata, {
       due_date: due,
       recurrence_pattern: pattern,
       recurrence_interval: options.recurrence_interval ?? 1,
       recurrence_anchor: options.recurrence_anchor ?? due,
       recurrence_slot: due,
+      recurrence_tz: tz,
       lead_days: lead,
-      opens_at: opensAt(due, lead),
+      opens_at: opensAt(due, lead, tz),
       recurrence_notes: options.recurrence_notes ?? options.notes ?? '',
       recurrence_series: options.recurrence_series ?? id,
       previous_occurrence: options.previous_occurrence,

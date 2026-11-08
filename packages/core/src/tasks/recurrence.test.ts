@@ -13,8 +13,8 @@ import { requestDecision } from './close.js';
 import { claimsFor } from './claim.js';
 import { addDocument, getDocumentsByFilter, patchDocument } from '../store/index.js';
 import {
-  DEFAULT_LEAD_DAYS, isUpcoming, nextRecurrenceDue, opensAt, opensAtOf, RECURRENCE_PATTERNS, recurrenceLine, recurrenceSlot, todayDue, upcomingNote,
-  type RecurrencePattern,
+  DEFAULT_LEAD_DAYS, isUpcoming, leadDays, metaNumber, nextRecurrenceDue, opensAt, opensAtOf, RECURRENCE_PATTERNS, recurrenceInterval, recurrenceLine,
+  recurrenceSlot, todayDue, upcomingNote, type RecurrencePattern,
 } from './recurrence.js';
 
 const at = (y: number, m: number, d: number, h = 23, mi = 59, s = 59) => Math.floor(new Date(y, m - 1, d, h, mi, s).getTime() / 1000);
@@ -57,6 +57,49 @@ describe('recurrence slots', () => {
       if (saved === undefined) delete process.env.TZ;
       else process.env.TZ = saved;
     }
+  });
+});
+
+describe('slots in the series time zone', () => {
+  const withTz = <T>(tz: string, fn: () => T): T => {
+    const saved = process.env.TZ;
+    process.env.TZ = tz;
+    try { return fn(); } finally { if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved; }
+  };
+  const iso = (t: number) => new Date(t * 1000).toISOString();
+
+  it('a month-end series in Los Angeles gets the same slots whether the completer is there or on UTC', () => {
+    // Jan 31 2027, 23:59:59 in Los Angeles (PST, UTC-8).
+    const anchor = Date.UTC(2027, 1, 1, 7, 59, 59) / 1000;
+    const zone = 'America/Los_Angeles';
+    const there = withTz(zone, () => [1, 2, 3].map(k => iso(recurrenceSlot(anchor, 'monthly', 1, k, zone))));
+    const utc = withTz('UTC', () => [1, 2, 3].map(k => iso(recurrenceSlot(anchor, 'monthly', 1, k, zone))));
+    expect(utc).toEqual(there);
+    // Feb 28 (PST), Mar 31 and Apr 30 (PDT, UTC-7), each at 23:59:59 local.
+    expect(utc).toEqual(['2027-03-01T07:59:59.000Z', '2027-04-01T06:59:59.000Z', '2027-05-01T06:59:59.000Z']);
+    // Without a zone, the UTC completer would count in UTC: the series moves.
+    expect(withTz('UTC', () => iso(recurrenceSlot(anchor, 'monthly', 1, 2)))).not.toBe(utc[1]);
+  });
+
+  it('keeps the wall-clock time across a DST change, and opens at the zone\'s midnight', () => {
+    const zone = 'America/New_York';
+    const anchor = Date.UTC(2027, 2, 8, 14) / 1000; // Mon Mar 8 2027, 09:00 EST
+    const slot = withTz('Asia/Tokyo', () => recurrenceSlot(anchor, 'weekly', 1, 1, zone));
+    expect(iso(slot)).toBe('2027-03-15T13:00:00.000Z'); // 09:00 EDT after Mar 14
+    expect(iso(withTz('UTC', () => opensAt(slot, 2, zone)))).toBe('2027-03-13T05:00:00.000Z'); // Sat Mar 13, 00:00 EST
+  });
+});
+
+describe('metadata numbers', () => {
+  it('accept integer JSON numbers and decimal strings only, as the remote SQL does', () => {
+    expect(metaNumber(3)).toBe(3);
+    expect(metaNumber(' 2 ')).toBe(2);
+    expect(metaNumber('1.5e1')).toBe(15);
+    for (const v of [true, false, '0x10', '', 'two', null, Infinity, 1e300, '1e999']) expect(metaNumber(v)).toBeUndefined();
+    expect(metaNumber(1e-320)).toBe(0);
+    expect(leadDays({ recurrence_pattern: 'weekly', lead_days: true })).toBe(2);
+    expect(leadDays({ recurrence_pattern: 'weekly', lead_days: '0x10' })).toBe(2);
+    expect(recurrenceInterval({ recurrence_interval: true })).toBe(1);
   });
 });
 
@@ -397,6 +440,25 @@ describe('recurring tasks over the store', () => {
     it('refuses recurrence_interval or lead_days at create without a pattern', async () => {
       await expect(createTask('x', { lead_days: 3 }, R)).rejects.toThrow(/need a recurrence_pattern/);
       await expect(createTask('x', { recurrence_interval: 2 }, R)).rejects.toThrow(/need a recurrence_pattern/);
+    });
+
+    it('refuses series changes on a completed occurrence, naming the open one', async () => {
+      now(at(2027, 11, 1, 9));
+      const id = await createTask('reconcile the petty cash', { recurrence_pattern: 'weekly' }, R);
+      const second = (await completeTask(id)).regeneratedId!;
+      const third = (await completeTask(second)).regeneratedId!;
+      for (const u of [{ lead_days: 1 }, { series_notes: 'x' }, { recurrence_pattern: 'none' as const }, { recurrence_interval: 2 }]) {
+        await expect(updateTask(id, u)).rejects.toThrow(new RegExp(`${id} is a completed occurrence: change the series on ${third}, its open occurrence`));
+      }
+      await updateTask(third, { recurrence_pattern: 'none' });
+      await completeTask(third);
+      await expect(updateTask(third, { lead_days: 1 })).rejects.toThrow(/is complete and no open occurrence follows it/);
+      await expect(updateTask(id, { notes: 'a note on the done one' })).resolves.toBeDefined();
+    });
+
+    it('a recurring task created here records this machine\'s zone', async () => {
+      const id = await createTask('wind the clocks', { recurrence_pattern: 'monthly', due_date: at(2030, 1, 31) }, R);
+      expect((await getTask(id))!.metadata.recurrence_tz).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
     });
 
     it('a refused recurrence change takes no claim', async () => {

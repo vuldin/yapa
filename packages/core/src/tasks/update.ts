@@ -6,12 +6,12 @@ import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
-import { createTask } from './create.js';
+import { createTaskWithMetadata, reserveTaskId } from './create.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
 import {
   isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, RecurrenceError, recurrenceChanges, recurrenceInterval,
-  SERIES_PARAMS, todayDue, type RecurrencePattern, type RecurrenceUpdate,
+  RegenerationError, SERIES_PARAMS, seriesChanged, seriesZone, todayDue, type RecurrencePattern, type RecurrenceUpdate,
 } from './recurrence.js';
 import { metadataList } from '../metadata-adapter.js';
 
@@ -91,6 +91,7 @@ export async function updateTask(
   const prevStatus = task.metadata.status;
   const result: TaskUpdateResult = { id, collection: task.collection };
   // Refused before a claim is taken: nothing to undo.
+  await checkSeriesTarget(task, updates);
   recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
 
   if (updates.status === 'in_progress') {
@@ -195,49 +196,78 @@ export async function completeTask(
   if (!task) throw new Error(`Task ${id} not found`);
   const { status: _s, ...rest } = fields;
 
-  const completionUpdates: TaskUpdates = {
-    ...rest,
-    status: 'complete',
-    salience: (task.metadata.salience ?? 2.0) * 0.5,
-  };
-  // Set completed_at exactly once (first-completion-wins). A later reopen -> re-complete
-  // preserves the original close time, and editing duration later never moves it.
-  if (task.metadata.completed_at == null) {
-    completionUpdates.completed_at = Math.floor(Date.now() / 1000);
+  let written: Record<string, any> | undefined;
+  let release: ReleaseResult | undefined;
+  let movedToComplete = false;
+  if (task.metadata.status === 'complete') {
+    // Already complete (a retry of its next occurrence, say): only the fields passed, nothing about closing it again.
+    const extra: TaskUpdates = { ...rest, ...(durationMinutes != null ? { duration_minutes: durationMinutes } : {}) };
+    written = Object.keys(extra).length ? (await updateTask(id, extra, ctx)).metadata : task.metadata;
+  } else {
+    const completionUpdates: TaskUpdates = {
+      ...rest,
+      status: 'complete',
+      salience: (task.metadata.salience ?? 2.0) * 0.5,
+    };
+    // Set completed_at exactly once (first-completion-wins). A later reopen -> re-complete
+    // preserves the original close time, and editing duration later never moves it.
+    if (task.metadata.completed_at == null) {
+      completionUpdates.completed_at = Math.floor(Date.now() / 1000);
+    }
+    if (durationMinutes != null) {
+      completionUpdates.duration_minutes = durationMinutes;
+    }
+    const u = await updateTask(id, completionUpdates, ctx);
+    written = u.metadata;
+    release = u.release;
+    movedToComplete = u.previousStatus !== 'complete';
   }
-  if (durationMinutes != null) {
-    completionUpdates.duration_minutes = durationMinutes;
-  }
-
-  const { release, metadata: written } = await updateTask(id, completionUpdates, ctx);
   const recorded = record.learned?.length || record.follow_ups?.length
     ? await recordForTask({ id: task.id, collection: task.collection }, record)
     : undefined;
-  const nudge = captureNudge(task.id, task.metadata, recorded);
+  const nudge = movedToComplete ? captureNudge(task.id, task.metadata, recorded) : undefined;
   const m = written ?? task.metadata;
   const extras = { metadata: m, collection: task.collection, ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
+  if (!isRecurring(m)) return extras;
+  const regenerated = await nextOccurrence(task, rest.title, movedToComplete);
+  return regenerated ? { ...extras, ...regenerated, metadata: { ...m, next_occurrence: regenerated.regeneratedId } } : extras;
+}
 
-  // A recurring task gets its next occurrence once: decided under the task's lock, which next_occurrence records.
-  // Reopening and completing again creates nothing; a completion whose next occurrence failed can be retried.
-  if (!isRecurring(m) || m.next_occurrence) return extras;
-  const title = rest.title ?? task.title;
-  const regenerated = await withDocLock(task.collection, task.id, async () => {
-    const cur = (await getDocumentsByIds(task.collection, [task.id]))[0]?.metadata;
-    if (!cur || !isRecurring(cur) || cur.next_occurrence || cur.status !== 'complete') return undefined;
+/**
+ * Create a completed recurring task's next occurrence, under its lock. The
+ * successor's id is reserved and written as next_occurrence first, then the
+ * task is created with that id. So it is created when this call completed
+ * the task and none is reserved, or when one was reserved but never created
+ * (a failed create, retried by completing again); never twice, and never for
+ * a task completed before 1.19 and completed again.
+ */
+async function nextOccurrence(task: TaskResult, title: string | undefined, movedToComplete: boolean) {
+  return withDocLock(task.collection, task.id, async () => {
+    const doc = (await getDocumentsByIds(task.collection, [task.id]))[0];
+    const cur = doc?.metadata;
+    if (!cur || !isRecurring(cur) || cur.status !== 'complete') return undefined;
+    let nextId: string | undefined = typeof cur.next_occurrence === 'string' && cur.next_occurrence ? cur.next_occurrence : undefined;
+    if (nextId) {
+      if (await getTask(nextId)) return undefined;
+    } else {
+      if (!movedToComplete) return undefined;
+      nextId = await reserveTaskId();
+      await patchDocument(task.collection, task.id, { next_occurrence: nextId, updated_at: Math.floor(Date.now() / 1000), ...(getConfig().SYNC_ENABLED ? { is_synced: false } : {}) });
+    }
     const pattern = cur.recurrence_pattern as RecurrencePattern;
     const interval = recurrenceInterval(cur);
     const lead = leadDays(cur);
+    const tz = seriesZone(cur);
     const slot = occurrenceSlot(cur);
     const anchor = Number(cur.recurrence_anchor) > 0 ? Number(cur.recurrence_anchor) : slot || todayDue();
     // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this
     // occurrence's slot (where it was scheduled, even if its due date was moved).
-    const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)));
+    const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)), tz);
     // Series created before templates start from their last notes.
     const template = cur.recurrence_notes !== undefined ? String(cur.recurrence_notes) : String(cur.notes ?? '');
-    let newId: string;
     try {
       // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
-      newId = await createTask(title, {
+      await createTaskWithMetadata(title ?? doc.content, {
         priority: cur.priority,
         tags: metadataList(cur.tags),
         notes: template,
@@ -248,17 +278,32 @@ export async function completeTask(
         recurrence_pattern: pattern,
         recurrence_interval: interval,
         recurrence_anchor: anchor,
+        recurrence_tz: tz,
         lead_days: lead,
         recurrence_notes: template,
         recurrence_series: cur.recurrence_series || task.id,
         previous_occurrence: task.id,
-      }, task.collection);
+      }, task.collection, { id: nextId });
     } catch (e) {
-      throw new RecurrenceError(`${task.id} is complete, but its next occurrence could not be created (${e instanceof Error ? e.message : e}): complete it again to retry`);
+      throw new RegenerationError(task.id, e);
     }
-    await patchDocument(task.collection, task.id, { next_occurrence: newId, updated_at: Math.floor(Date.now() / 1000), ...(getConfig().SYNC_ENABLED ? { is_synced: false } : {}) });
-    return { regeneratedId: newId, next: { due_date: nextDue, opens_at: opensAt(nextDue, lead) } };
+    return { regeneratedId: nextId, next: { due_date: nextDue, opens_at: opensAt(nextDue, lead, tz) } };
   });
-  return regenerated ? { ...extras, ...regenerated, metadata: { ...m, next_occurrence: regenerated.regeneratedId } } : extras;
+}
+
+/** A series change on a completed occurrence belongs on the open one: refused, naming it. */
+async function checkSeriesTarget(task: TaskResult, updates: TaskUpdates): Promise<void> {
+  if (!seriesChanged(updates) || task.metadata.status !== 'complete') return;
+  if (updates.status !== undefined && updates.status !== 'complete') return;
+  let next: unknown = task.metadata.next_occurrence;
+  for (let hops = 0; typeof next === 'string' && next && hops < 50; hops++) {
+    const t = await getTask(next);
+    if (!t) break;
+    if (t.metadata.status !== 'complete') {
+      throw new RecurrenceError(`${task.id} is a completed occurrence: change the series on ${t.id}, its open occurrence`);
+    }
+    next = t.metadata.next_occurrence;
+  }
+  throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
 }
 
