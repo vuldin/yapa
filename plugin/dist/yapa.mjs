@@ -209,17 +209,17 @@ function toChroma(metadata) {
 }
 function fromChroma(metadata) {
   const result = {};
-  const arrayFields = ["tags", "depends_on", "blocks", "related_ids", "claim_scope", "task_ids", "memory_ids", "waits_on", "options", "disposition_ids"];
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === "string") {
-      if (value.startsWith("{") || value.startsWith("[")) {
+      const json = !TEXT_FIELDS.has(key) && (value.startsWith("{") || value.startsWith("["));
+      if (json) {
         try {
           result[key] = JSON.parse(value);
           continue;
         } catch {
         }
       }
-      if (arrayFields.includes(key)) {
+      if (ARRAY_FIELDS.has(key)) {
         if (value === "") {
           result[key] = [];
         } else if (value.includes(",")) {
@@ -236,9 +236,32 @@ function fromChroma(metadata) {
   }
   return result;
 }
+var ARRAY_FIELDS, TEXT_FIELDS, metadataList;
 var init_metadata_adapter = __esm({
   "packages/core/src/metadata-adapter.ts"() {
     "use strict";
+    ARRAY_FIELDS = /* @__PURE__ */ new Set(["tags", "depends_on", "blocks", "related_ids", "claim_scope", "task_ids", "memory_ids", "waits_on", "options", "disposition_ids"]);
+    TEXT_FIELDS = /* @__PURE__ */ new Set([
+      "title",
+      "notes",
+      "recurrence_notes",
+      "blockedReason",
+      "blocked_reason",
+      "recommendation",
+      "exit_criteria",
+      "disposition_reason",
+      "context",
+      "question",
+      "owner",
+      "external_ref",
+      "sync_rejected_message",
+      "customer",
+      "project",
+      "source",
+      "session_id",
+      "recurrence_tz"
+    ]);
+    metadataList = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -2069,7 +2092,7 @@ function normalizeTyped(fields, current = {}) {
   for (const k of TYPED_KEYS) {
     const v = fields[k];
     if (v === void 0) continue;
-    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list(v) : typeof v === "string" ? v.trim() : v;
+    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? metadataList(v) : typeof v === "string" ? v.trim() : v;
   }
   if (!Object.keys(out).length) return out;
   const curKind = isMemoryKind(current.kind) ? current.kind : void 0;
@@ -2095,7 +2118,7 @@ function normalizeTyped(fields, current = {}) {
       throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(", ")}`);
     }
     const merged = { ...current, ...out };
-    if (kind === "decision" && status === "needed" && list(merged.options).length < 2) {
+    if (kind === "decision" && status === "needed" && metadataList(merged.options).length < 2) {
       throw new TypedMemoryError("a decision that is needed lists at least two options (and ideally a recommendation)");
     }
     if (kind === "finding" && status === "resolved") {
@@ -2106,7 +2129,7 @@ function normalizeTyped(fields, current = {}) {
       if (d === "no-action" && !String(merged.disposition_reason ?? "").trim()) {
         throw new TypedMemoryError("a no-action disposition gives disposition_reason");
       }
-      if (d !== "no-action" && !list(merged.disposition_ids).length) {
+      if (d !== "no-action" && !metadataList(merged.disposition_ids).length) {
         throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
       }
     }
@@ -2132,10 +2155,11 @@ function typedLabel(meta) {
   if (meta.owner && (meta.kind === "decision" || meta.kind === "question")) parts.push(`for ${meta.owner}`);
   return `[${parts.join(", ")}]`;
 }
-var MEMORY_KINDS, KIND_STATUSES, DEFAULT_STATUS, OPEN_STATUSES, DISPOSITIONS, TYPED_KEYS, KIND_ONLY, TypedMemoryError, list;
+var MEMORY_KINDS, KIND_STATUSES, DEFAULT_STATUS, OPEN_STATUSES, DISPOSITIONS, TYPED_KEYS, KIND_ONLY, TypedMemoryError;
 var init_kinds = __esm({
   "packages/core/src/memory/kinds.ts"() {
     "use strict";
+    init_metadata_adapter();
     MEMORY_KINDS = ["finding", "decision", "limitation", "question", "idea"];
     KIND_STATUSES = {
       finding: ["open", "resolved"],
@@ -2187,7 +2211,6 @@ var init_kinds = __esm({
         this.name = "TypedMemoryError";
       }
     };
-    list = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -2210,7 +2233,7 @@ async function linkMemoryToTasks(memoryId, taskIds) {
     const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
       if (!fresh) return false;
-      const cur = list2(fresh.metadata.memory_ids);
+      const cur = metadataList(fresh.metadata.memory_ids);
       if (cur.includes(memoryId)) return true;
       await updateDocument2(t.collection, tid, {
         ...fresh.metadata,
@@ -2224,13 +2247,12 @@ async function linkMemoryToTasks(memoryId, taskIds) {
   }
   return out;
 }
-var list2;
 var init_links = __esm({
   "packages/core/src/memory/links.ts"() {
     "use strict";
     init_doc_lock();
     init_store();
-    list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+    init_metadata_adapter();
   }
 });
 
@@ -4688,15 +4710,15 @@ function noticesPath() {
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list9 = [];
+      let list3 = [];
       try {
-        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list3 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list9)) list9 = [];
-      if (list9.some((n) => n.text === text)) return;
-      list9.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list9.slice(-20));
+      if (!Array.isArray(list3)) list3 = [];
+      if (list3.some((n) => n.text === text)) return;
+      list3.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list3.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -4704,14 +4726,14 @@ function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
 function takeClaimNotices() {
   try {
     return withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list9 = [];
+      let list3 = [];
       try {
-        list9 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
+        list3 = JSON.parse(readFileSync8(noticesPath(), "utf-8"));
       } catch {
         return [];
       }
       rmSync3(noticesPath(), { force: true });
-      return Array.isArray(list9) ? list9.map((n) => n.text) : [];
+      return Array.isArray(list3) ? list3.map((n) => n.text) : [];
     }, { waitMs: 2e3 });
   } catch {
     return [];
@@ -4903,11 +4925,403 @@ var init_coordination = __esm({
   }
 });
 
+// packages/core/src/tasks/dates.ts
+function parseRelativeDate(phrase) {
+  const now = /* @__PURE__ */ new Date();
+  const lower = phrase.toLowerCase().trim();
+  if (lower === "today") {
+    return endOfDay(now);
+  }
+  if (lower === "tomorrow") {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 1);
+    return endOfDay(d);
+  }
+  const dayMatch = lower.match(/next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
+  if (dayMatch) {
+    const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    const targetDay = days.indexOf(dayMatch[1]);
+    const currentDay = now.getDay();
+    let daysUntil = targetDay - currentDay;
+    if (daysUntil <= 0) daysUntil += 7;
+    const d = new Date(now);
+    d.setDate(d.getDate() + daysUntil);
+    return endOfDay(d);
+  }
+  const inDaysMatch = lower.match(/in\s+(\d+)\s+day/);
+  if (inDaysMatch) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + parseInt(inDaysMatch[1]));
+    return endOfDay(d);
+  }
+  const inWeeksMatch = lower.match(/in\s+(\d+)\s+week/);
+  if (inWeeksMatch) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + parseInt(inWeeksMatch[1]) * 7);
+    return endOfDay(d);
+  }
+  if (lower === "end of week") {
+    const d = new Date(now);
+    const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntilFriday);
+    d.setHours(17, 0, 0, 0);
+    return Math.floor(d.getTime() / 1e3);
+  }
+  const dateMatch = phrase.match(/([A-Za-z]+)\s+(\d{1,2})(?:,\s+(\d{4}))?/);
+  if (dateMatch) {
+    const monthNames = [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december"
+    ];
+    const month = monthNames.indexOf(dateMatch[1].toLowerCase());
+    const day = parseInt(dateMatch[2]);
+    const year = dateMatch[3] ? parseInt(dateMatch[3]) : now.getFullYear();
+    if (month !== -1) {
+      const d = new Date(year, month, day, 23, 59, 59, 999);
+      return Math.floor(d.getTime() / 1e3);
+    }
+  }
+  return null;
+}
+function formatTaskDate(timestamp, timeZone) {
+  const date = new Date(timestamp * 1e3);
+  const parts = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "numeric", hourCycle: "h23", timeZone }).formatToParts(date);
+  const at = (type) => Number(parts.find((p) => p.type === type)?.value);
+  return date.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone,
+    ...at("hour") % 24 !== 23 || at("minute") !== 59 ? { hour: "numeric" } : {}
+  });
+}
+function formatTaskDay(timestamp, timeZone) {
+  return new Date(timestamp * 1e3).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone });
+}
+function endOfDay(d) {
+  d.setHours(23, 59, 59, 999);
+  return Math.floor(d.getTime() / 1e3);
+}
+function parseDuration(input2) {
+  const s = input2.toLowerCase().trim();
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+  if (!m) return null;
+  const value = parseFloat(m[1]);
+  if (isNaN(value)) return null;
+  const unit = m[2] ?? "m";
+  let minutes;
+  if (unit.startsWith("h")) minutes = value * 60;
+  else if (unit.startsWith("d")) minutes = value * 60 * 8;
+  else minutes = value;
+  return Math.round(minutes);
+}
+function formatDuration(minutes) {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+var init_dates = __esm({
+  "packages/core/src/tasks/dates.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/tasks/recurrence.ts
+function zoneFormatter(tz) {
+  if (!formatters.has(tz)) {
+    try {
+      formatters.set(tz, new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+        hour: "numeric",
+        minute: "numeric",
+        second: "numeric"
+      }));
+    } catch {
+      formatters.set(tz, null);
+    }
+  }
+  return formatters.get(tz);
+}
+function wallClock(t, tz) {
+  const f = tz ? zoneFormatter(tz) : null;
+  if (!f) {
+    const a = new Date(t * 1e3);
+    return { y: a.getFullYear(), m: a.getMonth(), d: a.getDate(), h: a.getHours(), mi: a.getMinutes(), s: a.getSeconds() };
+  }
+  const p = {};
+  for (const x of f.formatToParts(new Date(t * 1e3))) if (x.type !== "literal") p[x.type] = Number(x.value);
+  return { y: p.year, m: p.month - 1, d: p.day, h: p.hour % 24, mi: p.minute, s: p.second };
+}
+function fromWallClock(w, tz) {
+  const f = tz ? zoneFormatter(tz) : null;
+  if (!f) return Math.floor(new Date(w.y, w.m, w.d, w.h, w.mi, w.s).getTime() / 1e3);
+  const asUtc = Date.UTC(w.y, w.m, w.d, w.h, w.mi, w.s) / 1e3;
+  const offset = (t2) => {
+    const x = wallClock(t2, tz);
+    return Date.UTC(x.y, x.m, x.d, x.h, x.mi, x.s) / 1e3 - t2;
+  };
+  const first = offset(asUtc);
+  const t = asUtc - first;
+  const second = offset(t);
+  return second === first ? t : asUtc - second;
+}
+function recurrenceSlot(anchor, pattern, interval, k, tz) {
+  const a = wallClock(anchor, tz);
+  const steps = k * interval;
+  let { y, m, d } = a;
+  if (MONTHS[pattern]) {
+    m += steps * MONTHS[pattern];
+    d = Math.min(d, new Date(Date.UTC(y, m + 1, 0)).getUTCDate());
+  } else {
+    d += steps * DAYS[pattern];
+  }
+  return fromWallClock({ y, m, d, h: a.h, mi: a.mi, s: a.s }, tz);
+}
+function nextRecurrenceDue(anchor, pattern, interval, after, tz) {
+  let k = Math.max(1, Math.floor((after - anchor) / (MAX_PERIOD[pattern] * interval)));
+  let slot = recurrenceSlot(anchor, pattern, interval, k, tz);
+  while (slot <= after) slot = recurrenceSlot(anchor, pattern, interval, ++k, tz);
+  return slot;
+}
+function metaNumber(v) {
+  if (typeof v === "number") {
+    const a = Math.abs(v);
+    return !Number.isFinite(v) || a >= 1e300 ? void 0 : a < 1e-300 ? 0 : v;
+  }
+  return typeof v === "string" && NUMERIC.test(v) ? Number(v) : void 0;
+}
+function isRecurring(m) {
+  return truthy(m.is_recurring) && isRecurrencePattern(m.recurrence_pattern);
+}
+function recurrenceInterval(m) {
+  const n = nonNegInt(m.recurrence_interval);
+  return n && n >= 1 ? n : 1;
+}
+function leadDays(m) {
+  return nonNegInt(m.lead_days) ?? DEFAULT_LEAD_DAYS[m.recurrence_pattern] ?? 0;
+}
+function occurrenceSlot(m) {
+  return metaTime(m.recurrence_slot) || metaTime(m.due_date);
+}
+function opensAt(due, lead, tz) {
+  const w = wallClock(due, tz);
+  return fromWallClock({ y: w.y, m: w.m, d: w.d - lead, h: 0, mi: 0, s: 0 }, tz);
+}
+function storedOpensAt(m) {
+  const stored = metaTime(m.opens_at), due = metaTime(m.due_date);
+  if (!stored || !due) return void 0;
+  const lead = leadDays(m);
+  return stored <= due - lead * 86400 + 3600 && stored > due - (lead + 1) * 86400 - 3600 ? stored : void 0;
+}
+function opensAtOf(m, fallback) {
+  const due = metaTime(m.due_date), lead = leadDays(m);
+  return storedOpensAt(m) ?? (fallback ? fallback(due, lead) : opensAt(due, lead, seriesZone(m)));
+}
+function openingOf(m, now = Math.floor(Date.now() / 1e3), fallback) {
+  if (!isRecurring(m) || !metaTime(m.due_date)) return void 0;
+  const opens = opensAtOf(m, fallback);
+  return { opens_at: opens, upcoming: (m.status ?? "pending") === "pending" && now < opens };
+}
+function isUpcoming(m, now = Math.floor(Date.now() / 1e3), fallback) {
+  return openingOf(m, now, fallback)?.upcoming ?? false;
+}
+function describeRecurrence(m) {
+  const n = recurrenceInterval(m);
+  if (n === 1) return String(m.recurrence_pattern);
+  const unit = { daily: "days", weekly: "weeks", monthly: "months", quarterly: "quarters", yearly: "years" }[m.recurrence_pattern];
+  return `every ${n} ${unit}`;
+}
+function upcomingInfo(m, now = Math.floor(Date.now() / 1e3)) {
+  const o = openingOf(m, now);
+  return o?.upcoming ? { opens_at: o.opens_at, note: `upcoming: due ${formatTaskDate(metaTime(m.due_date), seriesZone(m))}, opens ${formatTaskDay(o.opens_at, seriesZone(m))}` } : void 0;
+}
+function recurrenceNote(m) {
+  if (!isRecurring(m)) return "";
+  const lead = leadDays(m);
+  return `repeats ${describeRecurrence(m)}, ${lead ? `opens ${lead} day(s) before it is due` : "opens on the day it is due"}`;
+}
+function recurrenceSentence(m) {
+  const note = recurrenceNote(m);
+  return note && `${note[0].toUpperCase()}${note.slice(1)}`;
+}
+function recurrenceLine(m, now = Math.floor(Date.now() / 1e3)) {
+  const head = recurrenceSentence(m);
+  if (!head) return "Not recurring: completing it creates no next occurrence.";
+  const due = metaTime(m.due_date);
+  if (!due) return `${head}.`;
+  const upcoming = upcomingInfo(m, now);
+  const when2 = upcoming ? `opens ${formatTaskDay(upcoming.opens_at, seriesZone(m))} (hidden from task lists until then)` : "open now";
+  return `${head}; this occurrence is due ${formatTaskDate(due, seriesZone(m))}, ${when2}.`;
+}
+function hiddenUpcomingLine(n) {
+  return n ? `_${n} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : "";
+}
+function todayDue(tz) {
+  const zone = tz && zoneFormatter(tz) ? tz : void 0;
+  const w = wallClock(Math.floor(Date.now() / 1e3), zone);
+  return fromWallClock({ ...w, h: 23, mi: 59, s: 59 }, zone);
+}
+function checkInterval(v) {
+  if (!Number.isInteger(v) || v < 1) throw new RecurrenceError("recurrence_interval must be an integer of at least 1");
+  return v;
+}
+function checkLeadDays(v) {
+  if (!Number.isInteger(v) || v < 0) throw new RecurrenceError("lead_days must be a non-negative integer");
+  return v;
+}
+function seriesInfo(m, id, now = Math.floor(Date.now() / 1e3)) {
+  if (!isRecurring(m)) return null;
+  const o = openingOf(m, now);
+  return {
+    pattern: m.recurrence_pattern,
+    interval: recurrenceInterval(m),
+    lead_days: leadDays(m),
+    anchor: metaTime(m.recurrence_anchor) || null,
+    slot: occurrenceSlot(m) || null,
+    series: m.recurrence_series || id,
+    previous: m.previous_occurrence || null,
+    next: m.next_occurrence || null,
+    series_notes: m.recurrence_notes !== void 0 ? String(m.recurrence_notes) : null,
+    zone: seriesZone(m) ?? null,
+    upcoming: o?.upcoming ?? false,
+    opens_at: o?.opens_at ?? null
+  };
+}
+function recurrenceChanges(id, cur, u) {
+  const { recurrence_pattern: p, recurrence_interval: iv, lead_days: ld, series_notes: sn } = u;
+  if (p !== void 0 && p !== "none" && !isRecurrencePattern(p)) throw new RecurrenceError(`recurrence_pattern must be one of ${RECURRENCE_PATTERNS.join(", ")} or none`);
+  if (iv !== void 0) checkInterval(iv);
+  if (ld !== void 0) checkLeadDays(ld);
+  if (sn !== void 0 && typeof sn !== "string") throw new RecurrenceError("series_notes must be a string");
+  const series = iv !== void 0 || ld !== void 0 || sn !== void 0;
+  const recurring = isRecurring(cur);
+  if (p === "none") {
+    if (series) throw new RecurrenceError('recurrence_pattern "none" stops the series: leave out recurrence_interval, lead_days and series_notes');
+    return truthy(cur.is_recurring) || cur.recurrence_pattern ? { is_recurring: false, recurrence_pattern: "", opens_at: 0 } : {};
+  }
+  if (p === void 0 && !recurring) {
+    if (series) throw new RecurrenceError(`${id} is not recurring: set recurrence_pattern first`);
+    return {};
+  }
+  if (u.due_date === 0) {
+    throw p === void 0 ? needsDue(id) : new RecurrenceError("A recurring task needs a due date: don't clear the due date when setting recurrence_pattern");
+  }
+  const curDue = metaTime(cur.due_date);
+  const due = u.due_date !== void 0 ? u.due_date : curDue;
+  const pattern = p ?? cur.recurrence_pattern;
+  const same2 = recurring && pattern === cur.recurrence_pattern;
+  const out = {};
+  if (p !== void 0 || iv !== void 0 && iv !== recurrenceInterval(cur) || series && !(due > 0)) {
+    const d = due > 0 ? due : todayDue(storedZone(cur));
+    Object.assign(out, {
+      is_recurring: true,
+      recurrence_pattern: pattern,
+      due_date: d,
+      recurrence_anchor: d,
+      recurrence_slot: d,
+      // A re-anchor keeps the series' zone: an editor elsewhere doesn't move it.
+      recurrence_tz: storedZone(cur) ?? localZone(),
+      recurrence_interval: iv ?? (same2 ? recurrenceInterval(cur) : 1),
+      lead_days: ld ?? (same2 ? leadDays(cur) : DEFAULT_LEAD_DAYS[pattern])
+    });
+    if (!recurring) {
+      out.recurrence_notes = u.notes ?? cur.notes ?? "";
+      out.recurrence_series = cur.recurrence_series || id;
+    }
+  } else {
+    if (ld !== void 0) out.lead_days = ld;
+    if (u.due_date !== void 0 && curDue && !metaTime(cur.recurrence_slot)) out.recurrence_slot = curDue;
+  }
+  if (sn !== void 0) out.recurrence_notes = sn;
+  const finalDue = out.due_date ?? due;
+  if (finalDue > 0 && (out.due_date !== void 0 || out.lead_days !== void 0 || u.due_date !== void 0 || !metaTime(cur.opens_at))) {
+    out.opens_at = opensAt(finalDue, out.lead_days ?? leadDays(cur), out.recurrence_tz ?? seriesZone(cur));
+  }
+  return out;
+}
+var RECURRENCE_PATTERNS, DEFAULT_LEAD_DAYS, RecurrenceError, isRecurrencePattern, MONTHS, DAYS, MAX_PERIOD, localZone, storedZone, seriesZone, formatters, NUMERIC_PATTERN, NUMERIC, truthy, nonNegInt, metaTime, upcomingNote, SERIES_PARAMS, seriesChanged, RECURRENCE_KEYS, needsDue;
+var init_recurrence = __esm({
+  "packages/core/src/tasks/recurrence.ts"() {
+    "use strict";
+    init_dates();
+    RECURRENCE_PATTERNS = ["daily", "weekly", "monthly", "quarterly", "yearly"];
+    DEFAULT_LEAD_DAYS = { daily: 0, weekly: 2, monthly: 7, quarterly: 14, yearly: 30 };
+    RecurrenceError = class extends Error {
+    };
+    isRecurrencePattern = (p) => RECURRENCE_PATTERNS.includes(p);
+    MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
+    DAYS = { daily: 1, weekly: 7 };
+    MAX_PERIOD = {
+      daily: 25 * 3600,
+      weekly: 7 * 86400 + 3600,
+      monthly: 31 * 86400 + 3600,
+      quarterly: 92 * 86400 + 3600,
+      yearly: 366 * 86400 + 3600
+    };
+    localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+    storedZone = (m) => typeof m.recurrence_tz === "string" && m.recurrence_tz ? m.recurrence_tz : void 0;
+    seriesZone = (m) => {
+      const tz = storedZone(m);
+      return tz && zoneFormatter(tz) ? tz : void 0;
+    };
+    formatters = /* @__PURE__ */ new Map();
+    NUMERIC_PATTERN = "^\\s*[-+]?([0-9]{1,20}(\\.[0-9]{0,20})?|\\.[0-9]{1,20})([eE][-+]?[0-9]{1,2})?\\s*$";
+    NUMERIC = new RegExp(NUMERIC_PATTERN);
+    truthy = (v) => v === true || v === "true";
+    nonNegInt = (v) => {
+      const n = metaNumber(v);
+      return n !== void 0 && Number.isInteger(n) && n >= 0 ? n : void 0;
+    };
+    metaTime = (v) => {
+      const n = metaNumber(v);
+      return n !== void 0 && n > 0 ? n : 0;
+    };
+    upcomingNote = (m, now = Math.floor(Date.now() / 1e3)) => upcomingInfo(m, now)?.note ?? "";
+    SERIES_PARAMS = ["recurrence_pattern", "recurrence_interval", "lead_days", "series_notes"];
+    seriesChanged = (params) => SERIES_PARAMS.some((k) => params[k] !== void 0);
+    RECURRENCE_KEYS = [
+      "is_recurring",
+      "recurrence_pattern",
+      "recurrence_interval",
+      "recurrence_anchor",
+      "recurrence_slot",
+      "recurrence_tz",
+      "lead_days",
+      "recurrence_notes",
+      "recurrence_series",
+      "previous_occurrence",
+      "next_occurrence",
+      "opens_at",
+      "series_notes"
+    ];
+    needsDue = (id) => new RecurrenceError(`${id} is recurring and needs a due date: pass recurrence_pattern "none" to stop the series first`);
+  }
+});
+
 // packages/core/src/tasks/create.ts
 var create_exports = {};
 __export(create_exports, {
+  TaskIdTakenError: () => TaskIdTakenError,
   createTask: () => createTask,
-  getNextTaskId: () => getNextTaskId
+  createTaskWithMetadata: () => createTaskWithMetadata,
+  freshTaskId: () => freshTaskId,
+  getNextTaskId: () => getNextTaskId,
+  localFreeTaskId: () => localFreeTaskId
 });
 async function getNextTaskId(floor = 0, localOnly = false) {
   if (isSyncConfigured() && !localOnly) {
@@ -4981,9 +5395,38 @@ async function freshTaskId() {
   return id;
 }
 async function createTask(title, options = {}, requested = "global") {
-  const { collection } = await resolveWriteCollection(requested);
+  return (await createTaskWithMetadata(title, options, requested)).id;
+}
+async function createTaskWithMetadata(title, options = {}, requested = "global", opts = {}) {
+  if (options.is_recurring === false && options.recurrence_pattern !== void 0) {
+    throw new RecurrenceError("is_recurring false contradicts recurrence_pattern: leave one of them out");
+  }
+  const recurring = options.is_recurring ?? options.recurrence_pattern !== void 0;
+  if (!recurring && (options.recurrence_interval !== void 0 || options.lead_days !== void 0)) {
+    throw new RecurrenceError("recurrence_interval and lead_days need a recurrence_pattern");
+  }
+  if (recurring && !isRecurrencePattern(options.recurrence_pattern)) {
+    throw new RecurrenceError(`A recurring task needs recurrence_pattern: one of ${RECURRENCE_PATTERNS.join(", ")}`);
+  }
+  if (recurring && options.recurrence_interval !== void 0) checkInterval(options.recurrence_interval);
+  if (recurring && options.lead_days !== void 0) checkLeadDays(options.lead_days);
+  const { collection } = opts.exactCollection ? { collection: requested } : await resolveWriteCollection(requested);
   await getOrCreateCollection2(collection);
-  const id = await freshTaskId();
+  let id = opts.id ?? await freshTaskId();
+  for (let attempt2 = 1; ; attempt2++) {
+    const at = id;
+    const made = await withDocLock(collection, at, async () => (await getDocumentsByIds2(collection, [at])).length ? void 0 : writeTask(collection, at, title, options, recurring));
+    if (made) return made;
+    if (attempt2 >= ID_ATTEMPTS) throw new TaskIdTakenError(at);
+    id = await localFreeTaskId(Number(at.slice(at.lastIndexOf("-") + 1)) || 0);
+  }
+}
+async function localFreeTaskId(floor = 0) {
+  let id = await getNextTaskId(floor, true);
+  for (let i = 1; i < ID_ATTEMPTS && await idTaken(id); i++) id = await getNextTaskId(Number(id.slice(id.lastIndexOf("-") + 1)) || 0, true);
+  return id;
+}
+async function writeTask(collection, id, title, options, recurring) {
   const now = Math.floor(Date.now() / 1e3);
   const metadata = {
     type: "task",
@@ -5000,8 +5443,7 @@ async function createTask(title, options = {}, requested = "global") {
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
     ...options.claim_scope?.length ? { claim_scope: options.claim_scope } : {},
-    is_recurring: options.is_recurring ?? false,
-    recurrence_pattern: options.recurrence_pattern,
+    is_recurring: recurring,
     created_at: now,
     updated_at: now,
     accessed_at: now,
@@ -5010,11 +5452,30 @@ async function createTask(title, options = {}, requested = "global") {
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? "medium"],
     sector: "semantic"
   };
+  if (recurring) {
+    const pattern = options.recurrence_pattern;
+    const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue(options.recurrence_tz);
+    const lead = options.lead_days ?? DEFAULT_LEAD_DAYS[pattern];
+    const tz = options.recurrence_tz ?? localZone();
+    Object.assign(metadata, {
+      due_date: due,
+      recurrence_pattern: pattern,
+      recurrence_interval: options.recurrence_interval ?? 1,
+      recurrence_anchor: options.recurrence_anchor ?? due,
+      recurrence_slot: due,
+      recurrence_tz: tz,
+      lead_days: lead,
+      opens_at: opensAt(due, lead, tz),
+      recurrence_notes: options.recurrence_notes ?? options.notes ?? "",
+      recurrence_series: options.recurrence_series ?? id,
+      previous_occurrence: options.previous_occurrence
+    });
+  }
   metadata.is_synced = false;
   await addDocument2(collection, id, title, metadata);
-  return id;
+  return { id, collection, metadata };
 }
-var PRIORITY_SALIENCE, ID_ATTEMPTS;
+var PRIORITY_SALIENCE, ID_ATTEMPTS, TaskIdTakenError;
 var init_create = __esm({
   "packages/core/src/tasks/create.ts"() {
     "use strict";
@@ -5023,6 +5484,8 @@ var init_create = __esm({
     init_backend();
     init_sentinel();
     init_coordination();
+    init_doc_lock();
+    init_recurrence();
     PRIORITY_SALIENCE = {
       critical: 3,
       high: 2.5,
@@ -5030,6 +5493,13 @@ var init_create = __esm({
       low: 1.5
     };
     ID_ATTEMPTS = 5;
+    TaskIdTakenError = class extends Error {
+      constructor(id) {
+        super(`task id ${id} is already taken`);
+        this.id = id;
+      }
+      id;
+    };
   }
 });
 
@@ -5496,8 +5966,13 @@ var init_journal = __esm({
 
 // packages/core/src/tasks/list.ts
 async function listTasks(filters = {}) {
+  return (await listTasksCounted(filters)).tasks;
+}
+async function listTasksCounted(filters = {}) {
   const collectionNames = filters.collection ? [filters.collection] : (await listCollections2()).map((c) => c.name);
   const allTasks = [];
+  const now = Math.floor(Date.now() / 1e3);
+  let upcomingHidden = 0;
   for (const name of collectionNames) {
     const where = { type: "task" };
     if (filters.status) where.status = filters.status;
@@ -5509,6 +5984,14 @@ async function listTasks(filters = {}) {
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
         if (task.metadata.archived === true && !filters.includeArchived) continue;
+        if (filters.tags?.length) {
+          const tags = metadataList(task.metadata.tags);
+          if (!filters.tags.every((t) => tags.includes(t))) continue;
+        }
+        if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) {
+          upcomingHidden++;
+          continue;
+        }
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -5526,11 +6009,11 @@ async function listTasks(filters = {}) {
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
-  return filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted;
+  return { tasks: filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted, upcomingHidden };
 }
 async function getDueTasks(includeOverdue = true) {
   const now = Math.floor(Date.now() / 1e3);
-  const tasks = await listTasks({ includeComplete: false });
+  const tasks = await listTasks({ includeComplete: false, includeUpcoming: true });
   return tasks.filter((t) => t.metadata.due_date).map((t) => {
     const daysUntil = Math.ceil((t.metadata.due_date - now) / (24 * 60 * 60));
     return { ...t, daysUntil };
@@ -5541,6 +6024,8 @@ var init_list2 = __esm({
   "packages/core/src/tasks/list.ts"() {
     "use strict";
     init_store();
+    init_recurrence();
+    init_metadata_adapter();
     PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
     READ_LIMIT = 1e4;
   }
@@ -5586,6 +6071,8 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error("decision_needed needs a question");
   if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, "decision_needed (a YAPA decision the task waits on)", "set the task to blocked with a blocked_reason that names the record");
+  recurrenceChanges(task.id, task.metadata, extra);
+  await checkSeriesUpdate(task, { ...extra, status: "pending" });
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join("\n\n");
   const typed = normalizeTyped({
     kind: "decision",
@@ -5597,9 +6084,19 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   });
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
-  const waits = [.../* @__PURE__ */ new Set([...list3(task.metadata.waits_on), decision])];
-  const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
-  return { ...u, decision };
+  const waits = [.../* @__PURE__ */ new Set([...metadataList(task.metadata.waits_on), decision])];
+  try {
+    const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
+    return { ...u, decision };
+  } catch (e) {
+    await forgetMemory(decision).catch(() => void 0);
+    await withDocLock(task.collection, task.id, async () => {
+      const [cur] = await getDocumentsByIds2(task.collection, [task.id]);
+      const ids = metadataList(cur?.metadata.memory_ids);
+      if (ids.includes(decision)) await patchDocument(task.collection, task.id, { memory_ids: ids.filter((x) => x !== decision) });
+    }).catch(() => void 0);
+    throw e;
+  }
 }
 async function findMemory(id, prefer) {
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
@@ -5614,7 +6111,7 @@ async function findMemory(id, prefer) {
 }
 async function openWaits(metadata, collection) {
   const out = [];
-  for (const start of list3(metadata.waits_on)) {
+  for (const start of metadataList(metadata.waits_on)) {
     let id = start;
     let found = await findMemory(id, collection);
     for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
@@ -5628,21 +6125,62 @@ async function openWaits(metadata, collection) {
   return out;
 }
 function captureNudge(taskId, metadata, recorded) {
-  if (recorded?.memories.length || recorded?.follow_ups.length || list3(metadata.memory_ids).length) return void 0;
+  if (recorded?.memories.length || recorded?.follow_ups.length || metadataList(metadata.memory_ids).length) return void 0;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
 }
-var list3, describeWaits;
+function releaseText(r, opts = {}) {
+  if (!r) return "";
+  if (r.kind === "released") return "Claim released.";
+  if (r.kind === "held_by_other") {
+    const s = r.lease.holder.session;
+    return `Note: ${r.lease.holder.user} (session ${opts.fullSession ? s : s.slice(0, 8)}) still holds a claim on it.`;
+  }
+  if (r.kind === "unshared") return `Release not shared (${r.reason}); the claim lapses on its own.`;
+  return "";
+}
+function closeText(r) {
+  return [
+    r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(", ")}.` : "",
+    r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(", ")}.` : "",
+    keptAsNotesLine(r.recorded),
+    r.nudge ?? ""
+  ].filter(Boolean).join("\n");
+}
+function nextOccurrenceText(result) {
+  if (result.regeneratedId) {
+    const tz = seriesZone(result.metadata ?? {});
+    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date, tz)}, opens ${formatTaskDay(result.next.opens_at, tz)}` : ""}`;
+  }
+  return result.existingNext ? `next occurrence ${result.existingNext} (already created)` : "";
+}
+function completedText(id, result, opts = {}) {
+  let text = `Completed task ${id}`;
+  if (opts.durationMinutes != null) text += ` (effort: ${formatDuration(opts.durationMinutes)})`;
+  const next = nextOccurrenceText(result);
+  if (next) text += ` \u2192 ${next}`;
+  const lines = [text];
+  if (opts.seriesChanged && result.metadata) {
+    lines.push(isRecurring(result.metadata) ? `${recurrenceSentence(result.metadata)}.` : "Series stopped: no next occurrence.");
+  }
+  lines.push(releaseText(result.release), closeText(result));
+  return lines.filter(Boolean).join("\n");
+}
+var describeWaits;
 var init_close = __esm({
   "packages/core/src/tasks/close.ts"() {
     "use strict";
     init_store();
+    init_doc_lock();
     init_kinds();
     init_store2();
     init_sentinel();
     init_records_elsewhere();
     init_create();
     init_update();
-    list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+    init_recurrence();
+    init_forget();
+    init_metadata_adapter();
+    init_dates();
     describeWaits = (w) => `waiting on ${w.map((x) => `${x.kind} ${x.id} (${x.status}${x.owner ? `, for ${x.owner}` : ""})`).join(", ")}`;
   }
 });
@@ -5950,9 +6488,26 @@ async function rekeyTask(collection, doc, suggestedId) {
     await deleteDocument2(collection, doc.id);
     return m;
   });
+  await relinkOccurrences(collection, doc.id, newId);
+  const [after] = await getDocumentsByIds2(collection, [newId]);
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
 `);
-  return { ...doc, id: newId, metadata };
+  return { ...doc, id: newId, metadata: after?.metadata ?? metadata };
+}
+async function relinkOccurrences(collection, oldId, newId) {
+  const me = getConfig().USERNAME;
+  const ours = (m) => !isReadOnlyDoc(m) && (!m.origin_device || m.origin_device === getDeviceId()) && (!m.origin_user || m.origin_user === me);
+  for (const key of ["previous_occurrence", "next_occurrence", "recurrence_series"]) {
+    try {
+      for (const d of (await getDocumentsByFilter2(collection, { type: "task", [key]: oldId }, 1e5)).filter((x) => ours(x.metadata))) {
+        await withDocLock(collection, d.id, () => patchDocument(collection, d.id, { [key]: newId, is_synced: false, updated_at: Math.floor(Date.now() / 1e3) })).catch((e) => process.stderr.write(`[yapa-sync] Could not point ${d.id}'s ${key} at ${newId} (was ${oldId}): ${e}
+`));
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Could not find tasks whose ${key} is ${oldId} after renaming it to ${newId}: ${e}
+`);
+    }
+  }
 }
 async function retractSharedCopies(backend, collection) {
   const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
@@ -6237,13 +6792,19 @@ async function getTask(id) {
   }
   return null;
 }
-async function updateTask(id, updates, ctx = {}) {
+async function updateTask(id, updates, ctx = {}, hooks = {}) {
   let task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
-  const result = { id };
+  const result = { id, collection: task.collection };
+  if (updates.is_recurring === false && updates.recurrence_pattern === void 0) updates = { ...updates, recurrence_pattern: "none" };
+  if (updates.is_recurring === true && updates.recurrence_pattern === void 0 && !isRecurring(task.metadata)) {
+    if (!isRecurrencePattern(task.metadata.recurrence_pattern)) throw new RecurrenceError(`${task.id} has no recurrence_pattern to repeat on: pass one`);
+    updates = { ...updates, recurrence_pattern: task.metadata.recurrence_pattern };
+  }
   if (updates.status === "in_progress") {
+    recurrenceChanges(task.id, task.metadata, updates);
     const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
     if (claim.kind === "refused") throw new TaskClaimedError(claim);
     result.claim = claim;
@@ -6253,15 +6814,19 @@ async function updateTask(id, updates, ctx = {}) {
       result.id = task.id;
     }
   }
-  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", ...SERIES_PARAMS, "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const t = task;
+  const fields = { ...updates };
+  for (const k of RECURRENCE_KEYS) delete fields[k];
   const prev = await withDocLock(t.collection, t.id, async () => {
     const cur = (await getDocumentsByIds2(t.collection, [t.id]))[0];
     if (!cur) throw new Error(`Task ${t.id} not found`);
+    await checkSeriesUpdate({ id: t.id, collection: t.collection, metadata: cur.metadata }, updates);
     const updatedMetadata = {
       ...cur.metadata,
-      ...updates,
+      ...fields,
+      ...recurrenceChanges(t.id, cur.metadata, updates),
       updated_at: Math.floor(Date.now() / 1e3)
     };
     if (updates.completed_at != null && cur.metadata.completed_at != null) updatedMetadata.completed_at = cur.metadata.completed_at;
@@ -6271,14 +6836,23 @@ async function updateTask(id, updates, ctx = {}) {
     }
     if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
     else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
+    if (hooks.beforeWrite) {
+      const extra = await hooks.beforeWrite({ current: cur.metadata, content: updates.title ?? cur.content, metadata: updatedMetadata });
+      if (extra === null) return { status: cur.metadata.status, metadata: cur.metadata };
+      Object.assign(updatedMetadata, extra);
+    }
     if (updates.title !== void 0 && updates.title !== cur.content) {
       await addDocument2(t.collection, t.id, updates.title, updatedMetadata);
     } else {
       await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
-    return cur.metadata.status;
+    return { status: cur.metadata.status, metadata: updatedMetadata };
+  }).catch(async (e) => {
+    if (result.claim?.kind === "granted" && !result.claim.renewed) await releaseTaskClaim(t.id, t.collection, "pending", ctx.session).catch(() => void 0);
+    throw e;
   });
-  result.previousStatus = prev;
+  result.previousStatus = prev.status;
+  result.metadata = prev.metadata;
   if (result.claim?.kind === "granted") {
     await pushDocsNow(task.collection, [task.id]).catch(() => void 0);
   }
@@ -6288,59 +6862,89 @@ async function updateTask(id, updates, ctx = {}) {
   }
   return result;
 }
-async function completeTask(id, durationMinutes, ctx = {}, record = {}) {
+async function completeTask(id, durationMinutes, ctx = {}, record = {}, fields = {}) {
+  validateLearned(record.learned);
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
-  validateLearned(record.learned);
-  const completionUpdates = {
-    status: "complete",
-    salience: (task.metadata.salience ?? 2) * 0.5
+  const collection = task.collection;
+  await resolveWriteCollection(collection);
+  const { status: _s, ...rest } = fields;
+  const given = { ...rest, ...durationMinutes != null ? { duration_minutes: durationMinutes } : {} };
+  const willRecur = rest.recurrence_pattern !== void 0 ? rest.recurrence_pattern !== "none" : isRecurring(task.metadata);
+  const nextId = task.metadata.status !== "complete" && willRecur && !await successorOf(collection, task.id) ? await freshTaskId() : void 0;
+  let closing = false;
+  let successor;
+  const u = await updateTask(id, { ...given, status: "complete" }, ctx, {
+    beforeWrite: async ({ current, content, metadata }) => {
+      if (current.status === "complete") return Object.keys(given).length ? {} : null;
+      closing = true;
+      const close = { salience: (current.salience ?? 2) * 0.5, completed_at: current.completed_at ?? Math.floor(Date.now() / 1e3) };
+      if (!isRecurring(metadata)) return close;
+      successor = await successorOf(collection, task.id) ?? await createSuccessor(collection, task.id, content, { ...metadata, ...close }, nextId ?? await localFreeTaskId());
+      return { ...close, next_occurrence: successor.id };
+    }
+  });
+  const recorded = record.learned?.length || record.follow_ups?.length ? await recordForTask({ id: task.id, collection }, record) : void 0;
+  const nudge = closing ? captureNudge(task.id, task.metadata, recorded) : void 0;
+  return {
+    metadata: u.metadata,
+    collection,
+    ...u.release ? { release: u.release } : {},
+    ...recorded ? { recorded } : {},
+    ...nudge ? { nudge } : {},
+    ...successor?.created ? { regeneratedId: successor.id, next: { due_date: successor.due_date, opens_at: successor.opens_at } } : {},
+    ...successor && !successor.created && successor.status !== "complete" ? { existingNext: successor.id } : {}
   };
-  if (task.metadata.completed_at == null) {
-    completionUpdates.completed_at = Math.floor(Date.now() / 1e3);
-  }
-  if (durationMinutes != null) {
-    completionUpdates.duration_minutes = durationMinutes;
-  }
-  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
-  const recorded = record.learned?.length || record.follow_ups?.length ? await recordForTask({ id: task.id, collection: task.collection }, record) : void 0;
-  const nudge = captureNudge(task.id, task.metadata, recorded);
-  const extras = { ...release ? { release } : {}, ...recorded ? { recorded } : {}, ...nudge ? { nudge } : {} };
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== "complete") {
-    const nextDue = computeNextDue(
-      task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
-      task.metadata.recurrence_pattern
-    );
-    const newId = await createTask(task.title, {
-      priority: task.metadata.priority,
-      tags: Array.isArray(task.metadata.tags) ? task.metadata.tags : (task.metadata.tags ?? "").split(",").filter(Boolean),
-      notes: task.metadata.notes,
-      customer: task.metadata.customer,
-      project: task.metadata.project,
-      due_date: nextDue,
-      is_recurring: true,
-      recurrence_pattern: task.metadata.recurrence_pattern
-    }, task.collection);
-    return { regeneratedId: newId, ...extras };
-  }
-  return extras;
 }
-function computeNextDue(currentDue, pattern) {
-  const d = new Date(currentDue * 1e3);
-  switch (pattern) {
-    case "daily":
-      d.setDate(d.getDate() + 1);
-      break;
-    case "weekly":
-      d.setDate(d.getDate() + 7);
-      break;
-    case "monthly":
-      d.setMonth(d.getMonth() + 1);
-      break;
-  }
-  return Math.floor(d.getTime() / 1e3);
+async function successorOf(collection, id) {
+  const d = (await getDocumentsByFilter2(collection, { type: "task", previous_occurrence: id }, 5)).find((x) => x.metadata.archived !== true);
+  return d && { id: d.id, due_date: metaTime(d.metadata.due_date), opens_at: opensAtOf(d.metadata), status: String(d.metadata.status ?? "pending"), created: false };
 }
-var RELEASE_OUTCOME;
+async function createSuccessor(collection, id, title, m, newId) {
+  const pattern = m.recurrence_pattern;
+  const interval = recurrenceInterval(m);
+  const lead = leadDays(m);
+  const tz = seriesZone(m);
+  const slot = occurrenceSlot(m);
+  const anchor = metaTime(m.recurrence_anchor) || slot || todayDue(storedZone(m));
+  const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1e3)), tz);
+  const template = m.recurrence_notes !== void 0 ? String(m.recurrence_notes) : String(m.notes ?? "");
+  const made = await createTaskWithMetadata(title, {
+    priority: m.priority,
+    tags: metadataList(m.tags),
+    notes: template,
+    customer: m.customer,
+    project: m.project,
+    due_date: nextDue,
+    is_recurring: true,
+    recurrence_pattern: pattern,
+    recurrence_interval: interval,
+    recurrence_anchor: anchor,
+    // The stored zone as it is, even one this machine doesn't know.
+    recurrence_tz: storedZone(m),
+    lead_days: lead,
+    recurrence_notes: template,
+    recurrence_series: m.recurrence_series || id,
+    previous_occurrence: id
+  }, collection, { id: newId, exactCollection: true });
+  return { id: made.id, due_date: nextDue, opens_at: opensAt(nextDue, lead, tz), status: "pending", created: true };
+}
+async function checkSeriesUpdate(task, updates) {
+  if (!seriesChanged(updates)) return;
+  const series = task.metadata.recurrence_series || task.id;
+  let open2;
+  for (const status of ["pending", "in_progress", "blocked"]) {
+    for (const d of await getDocumentsByFilter2(task.collection, { type: "task", recurrence_series: series, status }, 5)) {
+      const at = [occurrenceSlot(d.metadata), metaTime(d.metadata.created_at)];
+      if (d.metadata.archived !== true && (!open2 || at[0] > open2.at[0] || at[0] === open2.at[0] && at[1] > open2.at[1])) open2 = { id: d.id, at };
+    }
+  }
+  if (open2 && open2.id !== task.id) throw notOpen(task.id, open2.id);
+  if (open2 || task.metadata.status !== "complete") return;
+  if (updates.status !== void 0 && updates.status !== "complete") return;
+  throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
+}
+var RELEASE_OUTCOME, notOpen;
 var init_update = __esm({
   "packages/core/src/tasks/update.ts"() {
     "use strict";
@@ -6350,9 +6954,13 @@ var init_update = __esm({
     init_doc_lock();
     init_syncable();
     init_create();
+    init_sentinel();
     init_claim();
     init_push();
+    init_recurrence();
+    init_metadata_adapter();
     RELEASE_OUTCOME = { complete: "done", blocked: "blocked", pending: "pending" };
+    notOpen = (id, open2) => new RecurrenceError(`${id} isn't the open occurrence of its series: change the series on ${open2}`);
   }
 });
 
@@ -6658,7 +7266,7 @@ async function supersedingIds(collection) {
     const reason = String(m.disposition_reason ?? "");
     const named = /^superseded by (\S+?)[:\s]/.exec(`${reason} `)?.[1];
     if (named) out.add(named);
-    if (named || m.disposition !== "no-action") for (const id of list4(m.disposition_ids)) out.add(id);
+    if (named || m.disposition !== "no-action") for (const id of metadataList(m.disposition_ids)) out.add(id);
   }
   return out;
 }
@@ -6784,18 +7392,18 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   }
   return items;
 }
-var DAY4, list4, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
+var DAY4, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
     init_store();
+    init_metadata_adapter();
     init_config();
     init_syncable();
     init_backend();
     init_provider();
     init_update2();
     DAY4 = 86400;
-    list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     author = (m) => String(m.origin_user ?? m.username ?? "");
     isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
     SWEEP_PROMPT_VERSION = "v1";
@@ -6812,7 +7420,7 @@ reason: one short sentence.
 
 OUTPUT: valid JSON only, no commentary, no fences. One entry per finding:
 [{"id": "<finding id>", "verdict": "progress" | "superseded" | "keep", "reason": "<short sentence>"}]`;
-    lasting = (m) => NEIGHBOR_KINDS.includes(m.kind) && m.archived !== true && m.source !== "compaction" && !list4(m.tags).some((t) => t === "journal" || t === "compaction");
+    lasting = (m) => NEIGHBOR_KINDS.includes(m.kind) && m.archived !== true && m.source !== "compaction" && !metadataList(m.tags).some((t) => t === "journal" || t === "compaction");
   }
 });
 
@@ -6902,9 +7510,10 @@ async function waitingOn(opts = {}) {
   if (opts.user) known.add(opts.user);
   for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
   for (const { collection, decisions, questions, tasks } of read) {
-    const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
+    const now = Math.floor(Date.now() / 1e3);
+    const open2 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true && !isUpcoming(t.metadata, now));
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open2) for (const m of list5(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open2) for (const m of metadataList(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -6922,7 +7531,7 @@ async function waitingOn(opts = {}) {
         by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list5(m.options).length ? { options: list5(m.options) } : {},
+        ...metadataList(m.options).length ? { options: metadataList(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -6931,7 +7540,7 @@ async function waitingOn(opts = {}) {
     for (const t of open2) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list5(m.tags));
+      const people = taskNeedsPeople(metadataList(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
@@ -7011,7 +7620,7 @@ function formatWaiting(w, opts = {}) {
 ${items.map((i) => waitingLine(i, opts)).join("\n")}`);
   return parts.length ? parts.join("\n\n") : "Nothing is waiting on anyone.";
 }
-var list5, firstLine, waitingCount, who;
+var firstLine, waitingCount, who;
 var init_waiting = __esm({
   "packages/core/src/tasks/waiting.ts"() {
     "use strict";
@@ -7021,7 +7630,8 @@ var init_waiting = __esm({
     init_owners();
     init_known_users();
     init_config();
-    list5 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+    init_recurrence();
+    init_metadata_adapter();
     firstLine = (s) => {
       const line = s.split("\n").find((l) => l.trim()) ?? "";
       const t = line.replace(/^#+\s*/, "").trim();
@@ -7043,17 +7653,17 @@ async function expiredLeaseKeys(collection) {
 }
 async function nextTasks(opts) {
   const docs = (await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => [])).filter((d) => d.metadata.archived !== true);
-  const open2 = docs.filter((d) => d.metadata.status !== "complete");
+  const nowS = Math.floor(Date.now() / 1e3);
+  const open2 = docs.filter((d) => d.metadata.status !== "complete" && !isUpcoming(d.metadata, nowS));
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live = claims ? [...claims.values()] : [];
   const local2 = coordinatedLocally(opts.collection);
   const expired = local2 ? await expiredLeaseKeys(opts.collection) : void 0;
-  const nowS = Math.floor(Date.now() / 1e3);
   const liveScope = /* @__PURE__ */ new Map();
   for (const l of live) {
     for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
-    for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
+    for (const s of metadataList(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
   }
   const openIds = new Set(open2.map((d) => d.id));
   const skipped = [];
@@ -7065,7 +7675,7 @@ async function nextTasks(opts) {
     return depCache.get(id);
   };
   for (const d of open2) {
-    const tags = norm(d.metadata.tags);
+    const tags = metadataList(d.metadata.tags);
     if (opts.tags?.length && !opts.tags.every((t) => tags.includes(t))) continue;
     if (opts.excludeTags?.some((t) => tags.includes(t))) {
       skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter((t) => tags.includes(t)).join(", ")}` });
@@ -7107,7 +7717,7 @@ async function nextTasks(opts) {
       }
     }
     const waiting = [];
-    for (const dep of norm(d.metadata.depends_on)) {
+    for (const dep of metadataList(d.metadata.depends_on)) {
       const s = await depStatus(dep);
       if (s !== void 0 && s !== "complete") waiting.push(dep);
     }
@@ -7115,12 +7725,12 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `waiting on ${waiting.join(", ")}` });
       continue;
     }
-    const waits = norm(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
+    const waits = metadataList(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
     if (waits.length) {
       skipped.push({ id: d.id, reason: describeWaits(waits) });
       continue;
     }
-    const near = [...new Set(norm(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
+    const near = [...new Set(metadataList(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
     ready.push({
       id: d.id,
       title: d.content,
@@ -7128,7 +7738,7 @@ async function nextTasks(opts) {
       priority: d.metadata.priority ?? "medium",
       status,
       ...d.metadata.due_date ? { due_date: Number(d.metadata.due_date) } : {},
-      unblocks: norm(d.metadata.blocks).filter((b) => openIds.has(b)).length,
+      unblocks: metadataList(d.metadata.blocks).filter((b) => openIds.has(b)).length,
       near,
       lapsed: status === "in_progress"
     });
@@ -7166,8 +7776,8 @@ async function cleanupItems(collection, open2, claims, only) {
   const items = [];
   const want = (key) => !only || only.includes(key);
   const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
-  if (want("cleanup:triage") && open2.some((d) => triageTag(norm(d.metadata.tags)))) {
-    const untriaged = open2.filter((d) => !triageTag(norm(d.metadata.tags))).length;
+  if (want("cleanup:triage") && open2.some((d) => triageTag(metadataList(d.metadata.tags)))) {
+    const untriaged = open2.filter((d) => !triageTag(metadataList(d.metadata.tags))).length;
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const findings = want("cleanup:findings") ? await staleFindings(collection) : [];
@@ -7186,7 +7796,7 @@ async function cleanupItems(collection, open2, claims, only) {
   }
   return items;
 }
-var PRIORITY_RANK, norm;
+var PRIORITY_RANK;
 var init_next = __esm({
   "packages/core/src/tasks/next.ts"() {
     "use strict";
@@ -7200,8 +7810,9 @@ var init_next = __esm({
     init_update();
     init_close();
     init_waiting();
+    init_recurrence();
+    init_metadata_adapter();
     PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
-    norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -7300,112 +7911,6 @@ var init_dependencies = __esm({
     init_doc_lock();
     init_syncable();
     toList = (x) => Array.isArray(x) ? x : String(x ?? "").split(",").filter(Boolean);
-  }
-});
-
-// packages/core/src/tasks/dates.ts
-function parseRelativeDate(phrase) {
-  const now = /* @__PURE__ */ new Date();
-  const lower = phrase.toLowerCase().trim();
-  if (lower === "today") {
-    return endOfDay(now);
-  }
-  if (lower === "tomorrow") {
-    const d = new Date(now);
-    d.setDate(d.getDate() + 1);
-    return endOfDay(d);
-  }
-  const dayMatch = lower.match(/next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
-  if (dayMatch) {
-    const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-    const targetDay = days.indexOf(dayMatch[1]);
-    const currentDay = now.getDay();
-    let daysUntil = targetDay - currentDay;
-    if (daysUntil <= 0) daysUntil += 7;
-    const d = new Date(now);
-    d.setDate(d.getDate() + daysUntil);
-    return endOfDay(d);
-  }
-  const inDaysMatch = lower.match(/in\s+(\d+)\s+day/);
-  if (inDaysMatch) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + parseInt(inDaysMatch[1]));
-    return endOfDay(d);
-  }
-  const inWeeksMatch = lower.match(/in\s+(\d+)\s+week/);
-  if (inWeeksMatch) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + parseInt(inWeeksMatch[1]) * 7);
-    return endOfDay(d);
-  }
-  if (lower === "end of week") {
-    const d = new Date(now);
-    const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
-    d.setDate(d.getDate() + daysUntilFriday);
-    d.setHours(17, 0, 0, 0);
-    return Math.floor(d.getTime() / 1e3);
-  }
-  const dateMatch = phrase.match(/([A-Za-z]+)\s+(\d{1,2})(?:,\s+(\d{4}))?/);
-  if (dateMatch) {
-    const monthNames = [
-      "january",
-      "february",
-      "march",
-      "april",
-      "may",
-      "june",
-      "july",
-      "august",
-      "september",
-      "october",
-      "november",
-      "december"
-    ];
-    const month = monthNames.indexOf(dateMatch[1].toLowerCase());
-    const day = parseInt(dateMatch[2]);
-    const year = dateMatch[3] ? parseInt(dateMatch[3]) : now.getFullYear();
-    if (month !== -1) {
-      const d = new Date(year, month, day, 23, 59, 59, 999);
-      return Math.floor(d.getTime() / 1e3);
-    }
-  }
-  return null;
-}
-function formatTaskDate(timestamp) {
-  const date = new Date(timestamp * 1e3);
-  return date.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    ...date.getHours() !== 23 || date.getMinutes() !== 59 ? { hour: "numeric" } : {}
-  });
-}
-function endOfDay(d) {
-  d.setHours(23, 59, 59, 999);
-  return Math.floor(d.getTime() / 1e3);
-}
-function parseDuration(input2) {
-  const s = input2.toLowerCase().trim();
-  const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
-  if (!m) return null;
-  const value = parseFloat(m[1]);
-  if (isNaN(value)) return null;
-  const unit = m[2] ?? "m";
-  let minutes;
-  if (unit.startsWith("h")) minutes = value * 60;
-  else if (unit.startsWith("d")) minutes = value * 60 * 8;
-  else minutes = value;
-  return Math.round(minutes);
-}
-function formatDuration(minutes) {
-  if (minutes < 60) return `${minutes}m`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
-var init_dates = __esm({
-  "packages/core/src/tasks/dates.ts"() {
-    "use strict";
   }
 });
 
@@ -8266,7 +8771,7 @@ function toItem(collection, d) {
     status: m.status,
     content: d.content.slice(0, 600),
     ...m.owner ? { owner: String(m.owner) } : {},
-    ...list6(m.options).length ? { options: list6(m.options) } : {},
+    ...metadataList(m.options).length ? { options: metadataList(m.options) } : {},
     ...m.recommendation ? { recommendation: String(m.recommendation) } : {}
   };
 }
@@ -8277,8 +8782,8 @@ async function findOpenItems(collection, text, taskIds = []) {
   const waits = [];
   for (const tid of taskIds) {
     const [t] = await getDocumentsByIds2(collection, [tid]).catch(() => []);
-    waits.push(...list6(t?.metadata.waits_on));
-    linked.push(...list6(t?.metadata.memory_ids));
+    waits.push(...metadataList(t?.metadata.waits_on));
+    linked.push(...metadataList(t?.metadata.memory_ids));
   }
   const addById = async (mid) => {
     for (const name of [collection, ...names.filter((n) => n !== collection)]) {
@@ -8414,11 +8919,12 @@ ${turn.assistantText}`, userText: turn.userText, knownUsers: known })) {
   }
   return { judged: items.length, changes };
 }
-var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, WAITS_MAX, NEAR_FETCH, LINKED_TIE, UNLINKED_KEEP, FOLLOW_THROUGH_SYSTEM_PROMPT, list6, flat, excerpt, DISCLAIMS;
+var FOLLOW_THROUGH_PROMPT_VERSION, FOLLOW_THROUGH_MAX_DISTANCE, MAX_ITEMS, WAITS_MAX, NEAR_FETCH, LINKED_TIE, UNLINKED_KEEP, FOLLOW_THROUGH_SYSTEM_PROMPT, flat, excerpt, DISCLAIMS;
 var init_follow_through = __esm({
   "packages/core/src/curation/follow-through.ts"() {
     "use strict";
     init_store();
+    init_metadata_adapter();
     init_config();
     init_kinds();
     init_update2();
@@ -8447,7 +8953,6 @@ Leave out every item the turn does not talk about. Never list an item to say the
 OUTPUT: valid JSON only, no commentary, no fences. An array:
 [{"id": "<item id>", "status": "<new status>", "note": "<short sentence>", "evidence": "<exact words from the turn>", "disposition": "...", "disposition_ids": ["..."], "disposition_reason": "..."}]
 Omit the disposition fields except for a finding. If nothing is settled, return exactly: []`;
-    list6 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
     flat = (s) => s.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u2013\u2014]/g, "-").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
     excerpt = (s) => flat(s).replace(/^["']+|["']+$/g, "").replace(/(\.\.\.|\u2026)$/, "").replace(/[.!?,;:]+$/, "").trim();
     DISCLAIMS = [
@@ -11223,6 +11728,7 @@ __export(src_exports, {
   CollectionLeftError: () => CollectionLeftError,
   CoordinationUnavailableError: () => CoordinationUnavailableError,
   DECAY_INTERVAL_MS: () => DECAY_INTERVAL_MS,
+  DEFAULT_LEAD_DAYS: () => DEFAULT_LEAD_DAYS,
   DEFAULT_STATUS: () => DEFAULT_STATUS,
   DISPOSITIONS: () => DISPOSITIONS,
   EXTRACTOR_PROMPT_VERSION: () => EXTRACTOR_PROMPT_VERSION,
@@ -11242,16 +11748,21 @@ __export(src_exports, {
   MAX_EXTRACT_CHARS: () => MAX_EXTRACT_CHARS,
   MEMORY_KINDS: () => MEMORY_KINDS,
   MemoryNotFoundError: () => MemoryNotFoundError,
+  NUMERIC_PATTERN: () => NUMERIC_PATTERN,
   OPEN_STATUSES: () => OPEN_STATUSES,
   PostgresBackend: () => PostgresBackend,
+  RECURRENCE_KEYS: () => RECURRENCE_KEYS,
+  RECURRENCE_PATTERNS: () => RECURRENCE_PATTERNS,
   REFERENCE_DATA_RULES: () => REFERENCE_DATA_RULES,
   RESOLVER_PROMPT_VERSION: () => RESOLVER_PROMPT_VERSION,
   RESOLVER_SYSTEM_PROMPT: () => RESOLVER_SYSTEM_PROMPT,
   RecordsElsewhereError: () => RecordsElsewhereError,
+  RecurrenceError: () => RecurrenceError,
   SALIENCE_BOOST_ON_ACCESS: () => SALIENCE_BOOST_ON_ACCESS,
   SALIENCE_FLOOR: () => SALIENCE_FLOOR,
   SALIENCE_MAX: () => SALIENCE_MAX,
   SALIENCE_START: () => SALIENCE_START,
+  SERIES_PARAMS: () => SERIES_PARAMS,
   SESSION_ID: () => SESSION_ID,
   SWEEP_PROMPT_VERSION: () => SWEEP_PROMPT_VERSION,
   SWEEP_SYSTEM_PROMPT: () => SWEEP_SYSTEM_PROMPT,
@@ -11263,6 +11774,7 @@ __export(src_exports, {
   TASK_COUNTER_COLLECTION: () => TASK_COUNTER_COLLECTION,
   TYPED_KEYS: () => TYPED_KEYS,
   TaskClaimedError: () => TaskClaimedError,
+  TaskIdTakenError: () => TaskIdTakenError,
   TypedMemoryError: () => TypedMemoryError,
   UPDATE_CHECK_INTERVAL_MS: () => UPDATE_CHECK_INTERVAL_MS,
   UnsupportedByRemoteError: () => UnsupportedByRemoteError,
@@ -11307,6 +11819,9 @@ __export(src_exports, {
   carryTyped: () => carryTyped,
   checkFollowUpCollections: () => checkFollowUpCollections,
   checkForUpdate: () => checkForUpdate,
+  checkInterval: () => checkInterval,
+  checkLeadDays: () => checkLeadDays,
+  checkSeriesUpdate: () => checkSeriesUpdate,
   chromaStore: () => chromaStore,
   chunk: () => chunk,
   chunkText: () => chunkText,
@@ -11325,11 +11840,13 @@ __export(src_exports, {
   clearPendingPurges: () => clearPendingPurges,
   clearSelectedForManifest: () => clearSelectedForManifest,
   closeSyncBackend: () => closeSyncBackend,
+  closeText: () => closeText,
   collectClassifiedMemories: () => collectClassifiedMemories,
   collectionMapEntries: () => collectionMapEntries,
   collectionSize: () => collectionSize,
   compareVersions: () => compareVersions,
   completeTask: () => completeTask,
+  completedText: () => completedText,
   consolidateSessionEverywhere: () => consolidateSessionEverywhere,
   consolidateStaleDrafts: () => consolidateStaleDrafts,
   coordinatedLocally: () => coordinatedLocally,
@@ -11340,6 +11857,7 @@ __export(src_exports, {
   createLocalStore: () => createLocalStore,
   createNewCollection: () => createNewCollection,
   createTask: () => createTask,
+  createTaskWithMetadata: () => createTaskWithMetadata,
   curationCycle: () => curationCycle,
   currentSession: () => currentSession,
   dayKey: () => dayKey,
@@ -11353,6 +11871,7 @@ __export(src_exports, {
   describeClaim: () => describeClaim,
   describeDataRules: () => describeDataRules,
   describeHolder: () => describeHolder,
+  describeRecurrence: () => describeRecurrence,
   describeRefusal: () => describeRefusal,
   describeWaits: () => describeWaits,
   detectChromaVersion: () => detectChromaVersion,
@@ -11378,8 +11897,10 @@ __export(src_exports, {
   formatScopeSettings: () => formatScopeSettings,
   formatSyncStats: () => formatSyncStats,
   formatTaskDate: () => formatTaskDate,
+  formatTaskDay: () => formatTaskDay,
   formatTrainingJsonl: () => formatTrainingJsonl,
   formatWaiting: () => formatWaiting,
+  freshTaskId: () => freshTaskId,
   fromChroma: () => fromChroma,
   generateEmbedding: () => generateEmbedding,
   generateEmbeddingsBatch: () => generateEmbeddingsBatch,
@@ -11414,6 +11935,7 @@ __export(src_exports, {
   healthStatusFor: () => healthStatusFor,
   heartbeatIfDue: () => heartbeatIfDue,
   heldKeys: () => heldKeys,
+  hiddenUpcomingLine: () => hiddenUpcomingLine,
   importLegacyScope: () => importLegacyScope,
   includesUser: () => includesUser,
   isCoordinationUnavailable: () => isCoordinationUnavailable,
@@ -11424,11 +11946,14 @@ __export(src_exports, {
   isOwnAuthor: () => isOwnAuthor,
   isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
+  isRecurrencePattern: () => isRecurrencePattern,
+  isRecurring: () => isRecurring,
   isRejectedUnchanged: () => isRejectedUnchanged,
   isSessionSummary: () => isSessionSummary,
   isSignedOutError: () => isSignedOutError,
   isSyncConfigured: () => isSyncConfigured,
   isSyncableCollection: () => isSyncableCollection,
+  isUpcoming: () => isUpcoming,
   janitorSweep: () => janitorSweep,
   journalAppend: () => journalAppend,
   journalConsolidate: () => journalConsolidate,
@@ -11441,6 +11966,7 @@ __export(src_exports, {
   lastSyncError: () => lastSyncError,
   lastWriteDir: () => lastWriteDir,
   lastWriteFile: () => lastWriteFile,
+  leadDays: () => leadDays,
   linkMemoryToTasks: () => linkMemoryToTasks,
   listAdapters: () => listAdapters,
   listCollections: () => listCollections2,
@@ -11450,10 +11976,13 @@ __export(src_exports, {
   listRejectedDocs: () => listRejectedDocs,
   listSessionDrafts: () => listSessionDrafts,
   listTasks: () => listTasks,
+  listTasksCounted: () => listTasksCounted,
   listTrash: () => listTrash,
   listVersions: () => listVersions,
   loadManifestSplit: () => loadManifestSplit,
   localCoordination: () => localCoordination,
+  localFreeTaskId: () => localFreeTaskId,
+  localZone: () => localZone,
   lockFileFor: () => lockFileFor,
   looksPrivateButShared: () => looksPrivateButShared,
   markDecayRun: () => markDecayRun,
@@ -11462,8 +11991,13 @@ __export(src_exports, {
   mayCreateSharedFrom: () => mayCreateSharedFrom,
   mergeCollections: () => mergeCollections,
   mergeReportLines: () => mergeReportLines,
+  metaNumber: () => metaNumber,
+  metaTime: () => metaTime,
   metadataDelta: () => metadataDelta,
+  metadataList: () => metadataList,
   moveOwnLeases: () => moveOwnLeases,
+  nextOccurrenceText: () => nextOccurrenceText,
+  nextRecurrenceDue: () => nextRecurrenceDue,
   nextTasks: () => nextTasks,
   nextVersion: () => nextVersion,
   normalizeTyped: () => normalizeTyped,
@@ -11474,7 +12008,11 @@ __export(src_exports, {
   noteSessionStarting: () => noteSessionStarting,
   noteSyncError: () => noteSyncError,
   noteSyncOk: () => noteSyncOk,
+  occurrenceSlot: () => occurrenceSlot,
   openWaits: () => openWaits,
+  openingOf: () => openingOf,
+  opensAt: () => opensAt,
+  opensAtOf: () => opensAtOf,
   ownUsernames: () => ownUsernames,
   ownerWaitsOn: () => ownerWaitsOn,
   parseAggregateJudge: () => parseAggregateJudge,
@@ -11530,11 +12068,18 @@ __export(src_exports, {
   recordSyncHealth: () => recordSyncHealth,
   recordUnpushed: () => recordUnpushed,
   recordsElsewhere: () => recordsElsewhere,
+  recurrenceChanges: () => recurrenceChanges,
+  recurrenceInterval: () => recurrenceInterval,
+  recurrenceLine: () => recurrenceLine,
+  recurrenceNote: () => recurrenceNote,
+  recurrenceSentence: () => recurrenceSentence,
+  recurrenceSlot: () => recurrenceSlot,
   redirectNote: () => redirectNote,
   refreshSyncHealthNames: () => refreshSyncHealthNames,
   rejoinCollection: () => rejoinCollection,
   rekeyTask: () => rekeyTask,
   releaseTaskClaim: () => releaseTaskClaim,
+  releaseText: () => releaseText,
   remoteDataRules: () => remoteDataRules,
   removeCollection: () => removeCollection,
   removeDependency: () => removeDependency,
@@ -11564,6 +12109,9 @@ __export(src_exports, {
   scopeNotes: () => scopeNotes,
   scopePath: () => scopePath,
   searchTasks: () => searchTasks,
+  seriesChanged: () => seriesChanged,
+  seriesInfo: () => seriesInfo,
+  seriesZone: () => seriesZone,
   serviceCoordination: () => serviceCoordination,
   sessionFolder: () => sessionFolder,
   sessionRecordDir: () => sessionRecordDir,
@@ -11591,6 +12139,8 @@ __export(src_exports, {
   stopSync: () => stopSync,
   stopUpdateChecks: () => stopUpdateChecks,
   storeMemory: () => storeMemory,
+  storedOpensAt: () => storedOpensAt,
+  storedZone: () => storedZone,
   suggestCompaction: () => suggestCompaction,
   summarizeCapture: () => summarizeCapture,
   sweepDeletedUpstream: () => sweepDeletedUpstream,
@@ -11611,6 +12161,7 @@ __export(src_exports, {
   takeClaimNotices: () => takeClaimNotices,
   taskNeedsPeople: () => taskNeedsPeople,
   toChroma: () => toChroma,
+  todayDue: () => todayDue,
   touchDocument: () => touchDocument,
   trainingCancel: () => trainingCancel,
   trainingDatasetPreview: () => trainingDatasetPreview,
@@ -11622,6 +12173,8 @@ __export(src_exports, {
   typedForCollection: () => typedForCollection,
   typedLabel: () => typedLabel,
   untypeCollection: () => untypeCollection,
+  upcomingInfo: () => upcomingInfo,
+  upcomingNote: () => upcomingNote,
   updateAdapter: () => updateAdapter,
   updateDocument: () => updateDocument2,
   updateDocumentsBatch: () => updateDocumentsBatch2,
@@ -11674,6 +12227,7 @@ var init_src = __esm({
     init_delete();
     init_dependencies();
     init_dates();
+    init_recurrence();
     init_manage();
     init_curation();
     init_classifier();
@@ -12139,7 +12693,7 @@ var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
-    SCRIPT_VERSION = true ? "1.18.0" : void 0;
+    SCRIPT_VERSION = true ? "1.19.0" : void 0;
     SEMVER2 = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
     DEFAULT_INTERVAL_MS = 3e5;
     STALE_INTERVALS = 3;
@@ -12168,7 +12722,7 @@ var YAPA_VERSION;
 var init_version = __esm({
   "packages/mcp/src/version.ts"() {
     "use strict";
-    YAPA_VERSION = true ? "1.18.0" : fromPackage();
+    YAPA_VERSION = true ? "1.19.0" : fromPackage();
   }
 });
 
@@ -12527,13 +13081,13 @@ async function sessionStart(input2) {
         const claim = claimNote(t, held2.claims, leaseSessions(input2));
         return `- **${t.id}** [${status}${prio}${attribution(t.metadata)}${claim ? `; ${claim}` : ""}] ${clip(t.title, 200)}`;
       };
-      const list9 = (n) => [
+      const list3 = (n) => [
         "",
         "## Open tasks",
         ...tasks.slice(0, n).map(line),
         ...tasks.length > n ? [`- _\u2026${tasks.length - n} more (call \`task_list\` for the full list)_`] : []
       ];
-      sections.push({ lines: list9(10), shrink: [list9(5), ["", `_${tasks.length} open task(s) in ${collection}: call \`task_list\`._`]], priority: 5 });
+      sections.push({ lines: list3(10), shrink: [list3(5), ["", `_${tasks.length} open task(s) in ${collection}: call \`task_list\`._`]], priority: 5 });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] task_list failed: ${e}
@@ -12559,8 +13113,8 @@ async function sessionStart(input2) {
   try {
     const memories = (await listMemories({ collection, limit: 25 })).filter((r) => !isSessionSummary(r.metadata)).slice(0, 5);
     if (memories.length) {
-      const list9 = (n, chars) => ["", "## Top memories (by salience)", ...memories.slice(0, n).map((r) => `- **${r.id}** (salience ${r.metadata.salience?.toFixed(2) ?? "?"}${attribution(r.metadata)}): ${clip(r.content, chars)}`)];
-      sections.push({ lines: list9(5, 200), shrink: [list9(3, 120), []], priority: 2 });
+      const list3 = (n, chars) => ["", "## Top memories (by salience)", ...memories.slice(0, n).map((r) => `- **${r.id}** (salience ${r.metadata.salience?.toFixed(2) ?? "?"}${attribution(r.metadata)}): ${clip(r.content, chars)}`)];
+      sections.push({ lines: list3(5, 200), shrink: [list3(3, 120), []], priority: 2 });
     }
   } catch (e) {
     process.stderr.write(`[yapa-hook] memory list failed: ${e}
@@ -12963,16 +13517,17 @@ function taskJson(t, claims) {
     collection: t.collection,
     status: m.status,
     priority: m.priority,
-    tags: Array.isArray(m.tags) ? m.tags : String(m.tags ?? "").split(",").filter(Boolean),
-    depends_on: Array.isArray(m.depends_on) ? m.depends_on : String(m.depends_on ?? "").split(",").filter(Boolean),
-    blocks: Array.isArray(m.blocks) ? m.blocks : String(m.blocks ?? "").split(",").filter(Boolean),
-    claim_scope: Array.isArray(m.claim_scope) ? m.claim_scope : String(m.claim_scope ?? "").split(",").filter(Boolean),
-    waits_on: Array.isArray(m.waits_on) ? m.waits_on : String(m.waits_on ?? "").split(",").filter(Boolean),
-    memory_ids: Array.isArray(m.memory_ids) ? m.memory_ids : String(m.memory_ids ?? "").split(",").filter(Boolean),
+    tags: metadataList(m.tags),
+    depends_on: metadataList(m.depends_on),
+    blocks: metadataList(m.blocks),
+    claim_scope: metadataList(m.claim_scope),
+    waits_on: metadataList(m.waits_on),
+    memory_ids: metadataList(m.memory_ids),
     blocked_reason: m.blockedReason || m.blocked_reason || null,
     notes: m.notes ?? "",
     due_date: m.due_date || null,
     owner: m.origin_user ?? null,
+    recurrence: seriesInfo(m, t.id),
     created_at: m.created_at ?? null,
     updated_at: m.updated_at ?? null,
     claim: lease ? { user: lease.holder.user, session: lease.holder.session, since: lease.acquired_at, expires_at: lease.expires_at } : null,
@@ -13021,7 +13576,7 @@ async function dispatch(sub, args) {
   const session = flag(args, "--session");
   const claimOpts = {
     session,
-    scope: list7(flag(args, "--scope")),
+    scope: list(flag(args, "--scope")),
     ttlSeconds: int(flag(args, "--ttl"), "--ttl"),
     title: flag(args, "--title"),
     reclaim: args.includes("--reclaim") || void 0
@@ -13031,14 +13586,21 @@ async function dispatch(sub, args) {
       const status = flag(args, "--status");
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(", ")}`);
       const collection = flag(args, "--collection");
-      const wantTags = list7(flag(args, "--tag")) ?? [];
-      const tasks = (await listTasks({ collection, status, includeComplete: args.includes("--include-complete") })).filter((t) => {
-        if (!wantTags.length) return true;
-        const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? "").split(",");
-        return wantTags.every((x) => tags.includes(x));
+      const wantTags = list(flag(args, "--tag")) ?? [];
+      const listed = await listTasksCounted({
+        collection,
+        status,
+        tags: wantTags,
+        includeComplete: args.includes("--include-complete"),
+        includeUpcoming: args.includes("--include-upcoming")
       });
+      const tasks = listed.tasks;
       const claims = collection ? await claimsFor(collection) : void 0;
-      return { exit: EXIT.ok, json: { ok: true, tasks: tasks.map((t) => taskJson(t, claims)) }, text: `${tasks.length} task(s)` };
+      return {
+        exit: EXIT.ok,
+        json: { ok: true, tasks: tasks.map((t) => taskJson(t, claims)), upcoming_hidden: listed.upcomingHidden },
+        text: `${tasks.length} task(s)${listed.upcomingHidden ? ` (${listed.upcomingHidden} upcoming hidden: --include-upcoming)` : ""}`
+      };
     }
     case "show": {
       if (!positional2) throw new UsageError("task id required");
@@ -13051,8 +13613,8 @@ async function dispatch(sub, args) {
       if (!collection) throw new UsageError("--collection is required");
       const r = await nextTasks({
         collection,
-        tags: list7(flag(args, "--tag")),
-        excludeTags: list7(flag(args, "--exclude-tag")),
+        tags: list(flag(args, "--tag")),
+        excludeTags: list(flag(args, "--exclude-tag")),
         claim: args.includes("--claim"),
         autoOnly: args.includes("--auto-only"),
         includeCleanup: args.includes("--include-cleanup"),
@@ -13095,23 +13657,22 @@ async function dispatch(sub, args) {
       const t = await getTask(positional2);
       if (!t) return { exit: EXIT.error, json: { ok: false, error: "not_found" }, text: `${positional2} not found` };
       const note = flag(args, "--note");
-      const addTags = list7(flag(args, "--tag")) ?? [];
+      const addTags = list(flag(args, "--tag")) ?? [];
       const learned = jsonFile(flag(args, "--learned-file"), "array");
       const followUps = jsonFile(flag(args, "--follow-ups-file"), "array");
       const decisionNeeded = jsonFile(flag(args, "--decision-needed-file"), "object");
-      const waitsOn = list7(flag(args, "--waits-on"));
+      const waitsOn = list(flag(args, "--waits-on"));
       if (decisionNeeded && status !== "pending") throw new UsageError("--decision-needed-file goes with --status pending");
       validateLearned(learned);
       await checkFollowUpCollections(followUps, sessionFolder());
-      const listOf = (v) => Array.isArray(v) ? v : String(v ?? "").split(",").filter(Boolean);
       if (note || addTags.length || waitsOn?.length) {
         await withDocLock(t.collection, t.id, async () => {
           const now = await getTask(t.id) ?? t;
           const extra = {};
           if (note) extra.notes = now.metadata.notes ? `${now.metadata.notes}
 ${note}` : note;
-          if (addTags.length) extra.tags = [.../* @__PURE__ */ new Set([...listOf(now.metadata.tags), ...addTags])];
-          if (waitsOn?.length) extra.waits_on = [.../* @__PURE__ */ new Set([...listOf(now.metadata.waits_on), ...waitsOn])];
+          if (addTags.length) extra.tags = [.../* @__PURE__ */ new Set([...metadataList(now.metadata.tags), ...addTags])];
+          if (waitsOn?.length) extra.waits_on = [.../* @__PURE__ */ new Set([...metadataList(now.metadata.waits_on), ...waitsOn])];
           await updateTask(t.id, extra, { session });
         });
       }
@@ -13119,11 +13680,18 @@ ${note}` : note;
       let recorded;
       let nudge;
       let decision;
+      let regenerated;
+      let nextLine = "";
+      let existingNext;
       if (status === "complete") {
-        const c = await completeTask(t.id, int(flag(args, "--duration"), "--duration"), { session }, { learned, follow_ups: followUps });
+        const durationMinutes = int(flag(args, "--duration"), "--duration");
+        const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
         release = c.release;
         recorded = c.recorded;
         nudge = c.nudge;
+        if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
+        nextLine = nextOccurrenceText(c);
+        existingNext = c.existingNext;
       } else {
         const reason = flag(args, "--reason");
         const fields = { ...reason ? { blockedReason: reason } : {} };
@@ -13137,19 +13705,14 @@ ${note}` : note;
         if (learned?.length || followUps?.length) recorded = await recordForTask({ id: t.id, collection: t.collection }, { learned, follow_ups: followUps });
       }
       recordLastWrite(t.collection);
-      const pushed = await pushDocsNow(t.collection, [t.id]).catch(() => void 0);
+      const pushed = await pushDocsNow(t.collection, [t.id, ...regenerated ? [regenerated.id] : []]).catch(() => void 0);
       const exit = release?.kind === "unshared" || pushed && pushed.errors > 0 ? EXIT.unavailable : EXIT.ok;
-      const text = release?.kind === "released" ? `${t.id} -> ${status}; claim released` : release?.kind === "held_by_other" ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it` : release?.kind === "unshared" ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own` : `${t.id} -> ${status}`;
-      const more = [
-        decision ? `decision ${decision} recorded; the task waits on it` : "",
-        recorded?.memories.length ? `recorded ${recorded.memories.join(", ")}` : "",
-        recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(", ")}` : "",
-        keptAsNotesLine(recorded),
-        nudge ?? ""
-      ].filter(Boolean);
+      const released = releaseText(release, { fullSession: true });
+      const text = `${t.id} -> ${status}${released ? `; ${released[0].toLowerCase()}${released.slice(1, -1)}` : ""}`;
+      const more = [nextLine, decision ? `decision ${decision} recorded; the task waits on it` : "", closeText({ recorded, nudge })].filter(Boolean);
       return {
         exit,
-        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null },
+        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null, existing_next: existingNext ?? null },
         text: more.length ? `${text}
 ${more.join("\n")}` : text
       };
@@ -13174,16 +13737,16 @@ function jsonFile(path2, shape) {
 }
 function isFlagValue(args, a) {
   const i = args.indexOf(a);
-  return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--text", "--auto-only", "--include-cleanup"].includes(args[i - 1]);
+  return i > 0 && args[i - 1].startsWith("--") && !["--claim", "--reclaim", "--include-complete", "--include-upcoming", "--text", "--auto-only", "--include-cleanup"].includes(args[i - 1]);
 }
-var TASK_USAGE, list7, UsageError, STATUSES;
+var TASK_USAGE, list, UsageError, STATUSES;
 var init_task = __esm({
   "packages/mcp/src/cli/task.ts"() {
     "use strict";
     init_src();
     init_coord();
-    TASK_USAGE = 'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n                         [--waits-on MEM,..] [--learned-file F] [--follow-ups-file F] [--decision-needed-file F] [--session S]\n       yapa task release cleanup:KIND --collection C [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\nhold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\non it, pending). "-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
-    list7 = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
+    TASK_USAGE = 'Usage: yapa task list    [--collection C] [--status S] [--tag a,b] [--include-complete] [--include-upcoming]\n       yapa task next    --collection C [--tag a,b] [--exclude-tag a,b] [--auto-only] [--include-cleanup] [--claim [claim options]]\n       yapa task claim   ID|cleanup:KIND [--collection C] [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa task release ID --status pending|blocked|complete [--reason R] [--note N] [--tag a,b] [--duration MIN]\n                         [--waits-on MEM,..] [--learned-file F] [--follow-ups-file F] [--decision-needed-file F] [--session S]\n       yapa task release cleanup:KIND --collection C [--session S]\n       yapa task show    ID\nclaim moves the task to in_progress and takes a lease on its id (shared collections); release sets the new\nstatus and releases it. A cleanup:KIND key (from next) is a lease only. --learned-file and --follow-ups-file\nhold a JSON array (learned: {content, kind, status, ...}; follow-ups: {title, priority, tags, notes});\n--decision-needed-file a JSON object {question, options, recommendation, owner, context} (the task then waits\non it, pending). list leaves out recurring occurrences that have not opened yet unless --include-upcoming.\n"-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\nPrints one JSON object (--text: a short summary).\nExit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
+    list = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
     UsageError = class extends Error {
     };
     STATUSES = ["pending", "in_progress", "blocked", "complete"];
@@ -13748,7 +14311,7 @@ function flag3(args, name) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : void 0;
 }
-function list8(v) {
+function list2(v) {
   return v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 function int2(v, name) {
@@ -13781,14 +14344,14 @@ async function runCoord(sub, args) {
           collection: need(collection, "--collection"),
           key: need(flag3(args, "--key"), "--key"),
           session,
-          scope: list8(flag3(args, "--scope")),
+          scope: list2(flag3(args, "--scope")),
           ttlSeconds: int2(flag3(args, "--ttl"), "--ttl"),
           title: flag3(args, "--title"),
           ...args.includes("--reclaim") ? { reclaim: true } : {}
         });
         break;
       case "heartbeat":
-        r = await coord.leaseHeartbeat(collection, session, list8(flag3(args, "--keys")));
+        r = await coord.leaseHeartbeat(collection, session, list2(flag3(args, "--keys")));
         break;
       case "release":
         r = await coord.leaseRelease(need(collection, "--collection"), need(flag3(args, "--key"), "--key"), session, flag3(args, "--outcome"));

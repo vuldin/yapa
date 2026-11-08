@@ -7023,7 +7023,7 @@ var require_formats = __commonJS({
       return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
     }
     var DATE = /^(\d\d\d\d)-(\d\d)-(\d\d)$/;
-    var DAYS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    var DAYS2 = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     function date5(str) {
       const matches = DATE.exec(str);
       if (!matches)
@@ -7031,7 +7031,7 @@ var require_formats = __commonJS({
       const year = +matches[1];
       const month = +matches[2];
       const day = +matches[3];
-      return month >= 1 && month <= 12 && day >= 1 && day <= (month === 2 && isLeapYear(year) ? 29 : DAYS[month]);
+      return month >= 1 && month <= 12 && day >= 1 && day <= (month === 2 && isLeapYear(year) ? 29 : DAYS2[month]);
     }
     function compareDate(d1, d2) {
       if (!(d1 && d2))
@@ -7238,8 +7238,8 @@ var require_dist = __commonJS({
         return ajv;
       }
       const [formats, exportName] = opts.mode === "fast" ? [formats_1.fastFormats, fastName] : [formats_1.fullFormats, fullName];
-      const list5 = opts.formats || formats_1.formatNames;
-      addFormats(ajv, list5, formats, exportName);
+      const list = opts.formats || formats_1.formatNames;
+      addFormats(ajv, list, formats, exportName);
       if (opts.keywords)
         (0, limit_1.default)(ajv);
       return ajv;
@@ -7251,11 +7251,11 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list5, fs, exportName) {
+    function addFormats(ajv, list, fs, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
-      for (const f of list5)
+      for (const f of list)
         ajv.addFormat(f, fs[f]);
     }
     module.exports = exports = formatsPlugin;
@@ -7451,17 +7451,17 @@ function toChroma(metadata) {
 }
 function fromChroma(metadata) {
   const result = {};
-  const arrayFields = ["tags", "depends_on", "blocks", "related_ids", "claim_scope", "task_ids", "memory_ids", "waits_on", "options", "disposition_ids"];
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === "string") {
-      if (value.startsWith("{") || value.startsWith("[")) {
+      const json2 = !TEXT_FIELDS.has(key) && (value.startsWith("{") || value.startsWith("["));
+      if (json2) {
         try {
           result[key] = JSON.parse(value);
           continue;
         } catch {
         }
       }
-      if (arrayFields.includes(key)) {
+      if (ARRAY_FIELDS.has(key)) {
         if (value === "") {
           result[key] = [];
         } else if (value.includes(",")) {
@@ -7478,9 +7478,32 @@ function fromChroma(metadata) {
   }
   return result;
 }
+var ARRAY_FIELDS, TEXT_FIELDS, metadataList;
 var init_metadata_adapter = __esm({
   "packages/core/src/metadata-adapter.ts"() {
     "use strict";
+    ARRAY_FIELDS = /* @__PURE__ */ new Set(["tags", "depends_on", "blocks", "related_ids", "claim_scope", "task_ids", "memory_ids", "waits_on", "options", "disposition_ids"]);
+    TEXT_FIELDS = /* @__PURE__ */ new Set([
+      "title",
+      "notes",
+      "recurrence_notes",
+      "blockedReason",
+      "blocked_reason",
+      "recommendation",
+      "exit_criteria",
+      "disposition_reason",
+      "context",
+      "question",
+      "owner",
+      "external_ref",
+      "sync_rejected_message",
+      "customer",
+      "project",
+      "source",
+      "session_id",
+      "recurrence_tz"
+    ]);
+    metadataList = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
   }
 });
 
@@ -11034,15 +11057,15 @@ function noticesPath() {
 function addClaimNotice(text, now = Math.floor(Date.now() / 1e3)) {
   try {
     withFileLockSync(lockFileFor(noticesPath()), () => {
-      let list5 = [];
+      let list = [];
       try {
-        list5 = JSON.parse(readFileSync9(noticesPath(), "utf-8"));
+        list = JSON.parse(readFileSync9(noticesPath(), "utf-8"));
       } catch {
       }
-      if (!Array.isArray(list5)) list5 = [];
-      if (list5.some((n) => n.text === text)) return;
-      list5.push({ at: now, text });
-      writeJsonAtomic(noticesPath(), list5.slice(-20));
+      if (!Array.isArray(list)) list = [];
+      if (list.some((n) => n.text === text)) return;
+      list.push({ at: now, text });
+      writeJsonAtomic(noticesPath(), list.slice(-20));
     }, { waitMs: 2e3 });
   } catch {
   }
@@ -11198,11 +11221,403 @@ var init_coordination = __esm({
   }
 });
 
+// packages/core/src/tasks/dates.ts
+function parseRelativeDate(phrase) {
+  const now = /* @__PURE__ */ new Date();
+  const lower = phrase.toLowerCase().trim();
+  if (lower === "today") {
+    return endOfDay(now);
+  }
+  if (lower === "tomorrow") {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 1);
+    return endOfDay(d);
+  }
+  const dayMatch = lower.match(/next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
+  if (dayMatch) {
+    const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    const targetDay = days.indexOf(dayMatch[1]);
+    const currentDay = now.getDay();
+    let daysUntil = targetDay - currentDay;
+    if (daysUntil <= 0) daysUntil += 7;
+    const d = new Date(now);
+    d.setDate(d.getDate() + daysUntil);
+    return endOfDay(d);
+  }
+  const inDaysMatch = lower.match(/in\s+(\d+)\s+day/);
+  if (inDaysMatch) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + parseInt(inDaysMatch[1]));
+    return endOfDay(d);
+  }
+  const inWeeksMatch = lower.match(/in\s+(\d+)\s+week/);
+  if (inWeeksMatch) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + parseInt(inWeeksMatch[1]) * 7);
+    return endOfDay(d);
+  }
+  if (lower === "end of week") {
+    const d = new Date(now);
+    const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntilFriday);
+    d.setHours(17, 0, 0, 0);
+    return Math.floor(d.getTime() / 1e3);
+  }
+  const dateMatch = phrase.match(/([A-Za-z]+)\s+(\d{1,2})(?:,\s+(\d{4}))?/);
+  if (dateMatch) {
+    const monthNames = [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december"
+    ];
+    const month = monthNames.indexOf(dateMatch[1].toLowerCase());
+    const day = parseInt(dateMatch[2]);
+    const year = dateMatch[3] ? parseInt(dateMatch[3]) : now.getFullYear();
+    if (month !== -1) {
+      const d = new Date(year, month, day, 23, 59, 59, 999);
+      return Math.floor(d.getTime() / 1e3);
+    }
+  }
+  return null;
+}
+function formatTaskDate(timestamp, timeZone) {
+  const date5 = new Date(timestamp * 1e3);
+  const parts = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "numeric", hourCycle: "h23", timeZone }).formatToParts(date5);
+  const at = (type) => Number(parts.find((p) => p.type === type)?.value);
+  return date5.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone,
+    ...at("hour") % 24 !== 23 || at("minute") !== 59 ? { hour: "numeric" } : {}
+  });
+}
+function formatTaskDay(timestamp, timeZone) {
+  return new Date(timestamp * 1e3).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone });
+}
+function endOfDay(d) {
+  d.setHours(23, 59, 59, 999);
+  return Math.floor(d.getTime() / 1e3);
+}
+function parseDuration(input2) {
+  const s = input2.toLowerCase().trim();
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+  if (!m) return null;
+  const value = parseFloat(m[1]);
+  if (isNaN(value)) return null;
+  const unit = m[2] ?? "m";
+  let minutes;
+  if (unit.startsWith("h")) minutes = value * 60;
+  else if (unit.startsWith("d")) minutes = value * 60 * 8;
+  else minutes = value;
+  return Math.round(minutes);
+}
+function formatDuration(minutes) {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+var init_dates = __esm({
+  "packages/core/src/tasks/dates.ts"() {
+    "use strict";
+  }
+});
+
+// packages/core/src/tasks/recurrence.ts
+function zoneFormatter(tz) {
+  if (!formatters.has(tz)) {
+    try {
+      formatters.set(tz, new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+        hour: "numeric",
+        minute: "numeric",
+        second: "numeric"
+      }));
+    } catch {
+      formatters.set(tz, null);
+    }
+  }
+  return formatters.get(tz);
+}
+function wallClock(t, tz) {
+  const f = tz ? zoneFormatter(tz) : null;
+  if (!f) {
+    const a = new Date(t * 1e3);
+    return { y: a.getFullYear(), m: a.getMonth(), d: a.getDate(), h: a.getHours(), mi: a.getMinutes(), s: a.getSeconds() };
+  }
+  const p = {};
+  for (const x of f.formatToParts(new Date(t * 1e3))) if (x.type !== "literal") p[x.type] = Number(x.value);
+  return { y: p.year, m: p.month - 1, d: p.day, h: p.hour % 24, mi: p.minute, s: p.second };
+}
+function fromWallClock(w, tz) {
+  const f = tz ? zoneFormatter(tz) : null;
+  if (!f) return Math.floor(new Date(w.y, w.m, w.d, w.h, w.mi, w.s).getTime() / 1e3);
+  const asUtc = Date.UTC(w.y, w.m, w.d, w.h, w.mi, w.s) / 1e3;
+  const offset = (t2) => {
+    const x = wallClock(t2, tz);
+    return Date.UTC(x.y, x.m, x.d, x.h, x.mi, x.s) / 1e3 - t2;
+  };
+  const first = offset(asUtc);
+  const t = asUtc - first;
+  const second = offset(t);
+  return second === first ? t : asUtc - second;
+}
+function recurrenceSlot(anchor2, pattern, interval, k, tz) {
+  const a = wallClock(anchor2, tz);
+  const steps = k * interval;
+  let { y, m, d } = a;
+  if (MONTHS[pattern]) {
+    m += steps * MONTHS[pattern];
+    d = Math.min(d, new Date(Date.UTC(y, m + 1, 0)).getUTCDate());
+  } else {
+    d += steps * DAYS[pattern];
+  }
+  return fromWallClock({ y, m, d, h: a.h, mi: a.mi, s: a.s }, tz);
+}
+function nextRecurrenceDue(anchor2, pattern, interval, after, tz) {
+  let k = Math.max(1, Math.floor((after - anchor2) / (MAX_PERIOD[pattern] * interval)));
+  let slot = recurrenceSlot(anchor2, pattern, interval, k, tz);
+  while (slot <= after) slot = recurrenceSlot(anchor2, pattern, interval, ++k, tz);
+  return slot;
+}
+function metaNumber(v) {
+  if (typeof v === "number") {
+    const a = Math.abs(v);
+    return !Number.isFinite(v) || a >= 1e300 ? void 0 : a < 1e-300 ? 0 : v;
+  }
+  return typeof v === "string" && NUMERIC.test(v) ? Number(v) : void 0;
+}
+function isRecurring(m) {
+  return truthy(m.is_recurring) && isRecurrencePattern(m.recurrence_pattern);
+}
+function recurrenceInterval(m) {
+  const n = nonNegInt(m.recurrence_interval);
+  return n && n >= 1 ? n : 1;
+}
+function leadDays(m) {
+  return nonNegInt(m.lead_days) ?? DEFAULT_LEAD_DAYS[m.recurrence_pattern] ?? 0;
+}
+function occurrenceSlot(m) {
+  return metaTime(m.recurrence_slot) || metaTime(m.due_date);
+}
+function opensAt(due, lead, tz) {
+  const w = wallClock(due, tz);
+  return fromWallClock({ y: w.y, m: w.m, d: w.d - lead, h: 0, mi: 0, s: 0 }, tz);
+}
+function storedOpensAt(m) {
+  const stored = metaTime(m.opens_at), due = metaTime(m.due_date);
+  if (!stored || !due) return void 0;
+  const lead = leadDays(m);
+  return stored <= due - lead * 86400 + 3600 && stored > due - (lead + 1) * 86400 - 3600 ? stored : void 0;
+}
+function opensAtOf(m, fallback) {
+  const due = metaTime(m.due_date), lead = leadDays(m);
+  return storedOpensAt(m) ?? (fallback ? fallback(due, lead) : opensAt(due, lead, seriesZone(m)));
+}
+function openingOf(m, now = Math.floor(Date.now() / 1e3), fallback) {
+  if (!isRecurring(m) || !metaTime(m.due_date)) return void 0;
+  const opens = opensAtOf(m, fallback);
+  return { opens_at: opens, upcoming: (m.status ?? "pending") === "pending" && now < opens };
+}
+function isUpcoming(m, now = Math.floor(Date.now() / 1e3), fallback) {
+  return openingOf(m, now, fallback)?.upcoming ?? false;
+}
+function describeRecurrence(m) {
+  const n = recurrenceInterval(m);
+  if (n === 1) return String(m.recurrence_pattern);
+  const unit = { daily: "days", weekly: "weeks", monthly: "months", quarterly: "quarters", yearly: "years" }[m.recurrence_pattern];
+  return `every ${n} ${unit}`;
+}
+function upcomingInfo(m, now = Math.floor(Date.now() / 1e3)) {
+  const o = openingOf(m, now);
+  return o?.upcoming ? { opens_at: o.opens_at, note: `upcoming: due ${formatTaskDate(metaTime(m.due_date), seriesZone(m))}, opens ${formatTaskDay(o.opens_at, seriesZone(m))}` } : void 0;
+}
+function recurrenceNote(m) {
+  if (!isRecurring(m)) return "";
+  const lead = leadDays(m);
+  return `repeats ${describeRecurrence(m)}, ${lead ? `opens ${lead} day(s) before it is due` : "opens on the day it is due"}`;
+}
+function recurrenceSentence(m) {
+  const note = recurrenceNote(m);
+  return note && `${note[0].toUpperCase()}${note.slice(1)}`;
+}
+function recurrenceLine(m, now = Math.floor(Date.now() / 1e3)) {
+  const head = recurrenceSentence(m);
+  if (!head) return "Not recurring: completing it creates no next occurrence.";
+  const due = metaTime(m.due_date);
+  if (!due) return `${head}.`;
+  const upcoming = upcomingInfo(m, now);
+  const when = upcoming ? `opens ${formatTaskDay(upcoming.opens_at, seriesZone(m))} (hidden from task lists until then)` : "open now";
+  return `${head}; this occurrence is due ${formatTaskDate(due, seriesZone(m))}, ${when}.`;
+}
+function hiddenUpcomingLine(n) {
+  return n ? `_${n} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : "";
+}
+function todayDue(tz) {
+  const zone = tz && zoneFormatter(tz) ? tz : void 0;
+  const w = wallClock(Math.floor(Date.now() / 1e3), zone);
+  return fromWallClock({ ...w, h: 23, mi: 59, s: 59 }, zone);
+}
+function checkInterval(v) {
+  if (!Number.isInteger(v) || v < 1) throw new RecurrenceError("recurrence_interval must be an integer of at least 1");
+  return v;
+}
+function checkLeadDays(v) {
+  if (!Number.isInteger(v) || v < 0) throw new RecurrenceError("lead_days must be a non-negative integer");
+  return v;
+}
+function seriesInfo(m, id, now = Math.floor(Date.now() / 1e3)) {
+  if (!isRecurring(m)) return null;
+  const o = openingOf(m, now);
+  return {
+    pattern: m.recurrence_pattern,
+    interval: recurrenceInterval(m),
+    lead_days: leadDays(m),
+    anchor: metaTime(m.recurrence_anchor) || null,
+    slot: occurrenceSlot(m) || null,
+    series: m.recurrence_series || id,
+    previous: m.previous_occurrence || null,
+    next: m.next_occurrence || null,
+    series_notes: m.recurrence_notes !== void 0 ? String(m.recurrence_notes) : null,
+    zone: seriesZone(m) ?? null,
+    upcoming: o?.upcoming ?? false,
+    opens_at: o?.opens_at ?? null
+  };
+}
+function recurrenceChanges(id, cur, u) {
+  const { recurrence_pattern: p, recurrence_interval: iv, lead_days: ld, series_notes: sn } = u;
+  if (p !== void 0 && p !== "none" && !isRecurrencePattern(p)) throw new RecurrenceError(`recurrence_pattern must be one of ${RECURRENCE_PATTERNS.join(", ")} or none`);
+  if (iv !== void 0) checkInterval(iv);
+  if (ld !== void 0) checkLeadDays(ld);
+  if (sn !== void 0 && typeof sn !== "string") throw new RecurrenceError("series_notes must be a string");
+  const series = iv !== void 0 || ld !== void 0 || sn !== void 0;
+  const recurring = isRecurring(cur);
+  if (p === "none") {
+    if (series) throw new RecurrenceError('recurrence_pattern "none" stops the series: leave out recurrence_interval, lead_days and series_notes');
+    return truthy(cur.is_recurring) || cur.recurrence_pattern ? { is_recurring: false, recurrence_pattern: "", opens_at: 0 } : {};
+  }
+  if (p === void 0 && !recurring) {
+    if (series) throw new RecurrenceError(`${id} is not recurring: set recurrence_pattern first`);
+    return {};
+  }
+  if (u.due_date === 0) {
+    throw p === void 0 ? needsDue(id) : new RecurrenceError("A recurring task needs a due date: don't clear the due date when setting recurrence_pattern");
+  }
+  const curDue = metaTime(cur.due_date);
+  const due = u.due_date !== void 0 ? u.due_date : curDue;
+  const pattern = p ?? cur.recurrence_pattern;
+  const same = recurring && pattern === cur.recurrence_pattern;
+  const out = {};
+  if (p !== void 0 || iv !== void 0 && iv !== recurrenceInterval(cur) || series && !(due > 0)) {
+    const d = due > 0 ? due : todayDue(storedZone(cur));
+    Object.assign(out, {
+      is_recurring: true,
+      recurrence_pattern: pattern,
+      due_date: d,
+      recurrence_anchor: d,
+      recurrence_slot: d,
+      // A re-anchor keeps the series' zone: an editor elsewhere doesn't move it.
+      recurrence_tz: storedZone(cur) ?? localZone(),
+      recurrence_interval: iv ?? (same ? recurrenceInterval(cur) : 1),
+      lead_days: ld ?? (same ? leadDays(cur) : DEFAULT_LEAD_DAYS[pattern])
+    });
+    if (!recurring) {
+      out.recurrence_notes = u.notes ?? cur.notes ?? "";
+      out.recurrence_series = cur.recurrence_series || id;
+    }
+  } else {
+    if (ld !== void 0) out.lead_days = ld;
+    if (u.due_date !== void 0 && curDue && !metaTime(cur.recurrence_slot)) out.recurrence_slot = curDue;
+  }
+  if (sn !== void 0) out.recurrence_notes = sn;
+  const finalDue = out.due_date ?? due;
+  if (finalDue > 0 && (out.due_date !== void 0 || out.lead_days !== void 0 || u.due_date !== void 0 || !metaTime(cur.opens_at))) {
+    out.opens_at = opensAt(finalDue, out.lead_days ?? leadDays(cur), out.recurrence_tz ?? seriesZone(cur));
+  }
+  return out;
+}
+var RECURRENCE_PATTERNS, DEFAULT_LEAD_DAYS, RecurrenceError, isRecurrencePattern, MONTHS, DAYS, MAX_PERIOD, localZone, storedZone, seriesZone, formatters, NUMERIC_PATTERN, NUMERIC, truthy, nonNegInt, metaTime, upcomingNote, SERIES_PARAMS, seriesChanged, RECURRENCE_KEYS, needsDue;
+var init_recurrence = __esm({
+  "packages/core/src/tasks/recurrence.ts"() {
+    "use strict";
+    init_dates();
+    RECURRENCE_PATTERNS = ["daily", "weekly", "monthly", "quarterly", "yearly"];
+    DEFAULT_LEAD_DAYS = { daily: 0, weekly: 2, monthly: 7, quarterly: 14, yearly: 30 };
+    RecurrenceError = class extends Error {
+    };
+    isRecurrencePattern = (p) => RECURRENCE_PATTERNS.includes(p);
+    MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
+    DAYS = { daily: 1, weekly: 7 };
+    MAX_PERIOD = {
+      daily: 25 * 3600,
+      weekly: 7 * 86400 + 3600,
+      monthly: 31 * 86400 + 3600,
+      quarterly: 92 * 86400 + 3600,
+      yearly: 366 * 86400 + 3600
+    };
+    localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+    storedZone = (m) => typeof m.recurrence_tz === "string" && m.recurrence_tz ? m.recurrence_tz : void 0;
+    seriesZone = (m) => {
+      const tz = storedZone(m);
+      return tz && zoneFormatter(tz) ? tz : void 0;
+    };
+    formatters = /* @__PURE__ */ new Map();
+    NUMERIC_PATTERN = "^\\s*[-+]?([0-9]{1,20}(\\.[0-9]{0,20})?|\\.[0-9]{1,20})([eE][-+]?[0-9]{1,2})?\\s*$";
+    NUMERIC = new RegExp(NUMERIC_PATTERN);
+    truthy = (v) => v === true || v === "true";
+    nonNegInt = (v) => {
+      const n = metaNumber(v);
+      return n !== void 0 && Number.isInteger(n) && n >= 0 ? n : void 0;
+    };
+    metaTime = (v) => {
+      const n = metaNumber(v);
+      return n !== void 0 && n > 0 ? n : 0;
+    };
+    upcomingNote = (m, now = Math.floor(Date.now() / 1e3)) => upcomingInfo(m, now)?.note ?? "";
+    SERIES_PARAMS = ["recurrence_pattern", "recurrence_interval", "lead_days", "series_notes"];
+    seriesChanged = (params) => SERIES_PARAMS.some((k) => params[k] !== void 0);
+    RECURRENCE_KEYS = [
+      "is_recurring",
+      "recurrence_pattern",
+      "recurrence_interval",
+      "recurrence_anchor",
+      "recurrence_slot",
+      "recurrence_tz",
+      "lead_days",
+      "recurrence_notes",
+      "recurrence_series",
+      "previous_occurrence",
+      "next_occurrence",
+      "opens_at",
+      "series_notes"
+    ];
+    needsDue = (id) => new RecurrenceError(`${id} is recurring and needs a due date: pass recurrence_pattern "none" to stop the series first`);
+  }
+});
+
 // packages/core/src/tasks/create.ts
 var create_exports = {};
 __export(create_exports, {
+  TaskIdTakenError: () => TaskIdTakenError,
   createTask: () => createTask,
-  getNextTaskId: () => getNextTaskId
+  createTaskWithMetadata: () => createTaskWithMetadata,
+  freshTaskId: () => freshTaskId,
+  getNextTaskId: () => getNextTaskId,
+  localFreeTaskId: () => localFreeTaskId
 });
 async function getNextTaskId(floor = 0, localOnly = false) {
   if (isSyncConfigured() && !localOnly) {
@@ -11276,9 +11691,38 @@ async function freshTaskId() {
   return id;
 }
 async function createTask(title, options = {}, requested = "global") {
-  const { collection } = await resolveWriteCollection(requested);
+  return (await createTaskWithMetadata(title, options, requested)).id;
+}
+async function createTaskWithMetadata(title, options = {}, requested = "global", opts = {}) {
+  if (options.is_recurring === false && options.recurrence_pattern !== void 0) {
+    throw new RecurrenceError("is_recurring false contradicts recurrence_pattern: leave one of them out");
+  }
+  const recurring = options.is_recurring ?? options.recurrence_pattern !== void 0;
+  if (!recurring && (options.recurrence_interval !== void 0 || options.lead_days !== void 0)) {
+    throw new RecurrenceError("recurrence_interval and lead_days need a recurrence_pattern");
+  }
+  if (recurring && !isRecurrencePattern(options.recurrence_pattern)) {
+    throw new RecurrenceError(`A recurring task needs recurrence_pattern: one of ${RECURRENCE_PATTERNS.join(", ")}`);
+  }
+  if (recurring && options.recurrence_interval !== void 0) checkInterval(options.recurrence_interval);
+  if (recurring && options.lead_days !== void 0) checkLeadDays(options.lead_days);
+  const { collection } = opts.exactCollection ? { collection: requested } : await resolveWriteCollection(requested);
   await getOrCreateCollection2(collection);
-  const id = await freshTaskId();
+  let id = opts.id ?? await freshTaskId();
+  for (let attempt2 = 1; ; attempt2++) {
+    const at = id;
+    const made = await withDocLock(collection, at, async () => (await getDocumentsByIds2(collection, [at])).length ? void 0 : writeTask(collection, at, title, options, recurring));
+    if (made) return made;
+    if (attempt2 >= ID_ATTEMPTS) throw new TaskIdTakenError(at);
+    id = await localFreeTaskId(Number(at.slice(at.lastIndexOf("-") + 1)) || 0);
+  }
+}
+async function localFreeTaskId(floor = 0) {
+  let id = await getNextTaskId(floor, true);
+  for (let i = 1; i < ID_ATTEMPTS && await idTaken(id); i++) id = await getNextTaskId(Number(id.slice(id.lastIndexOf("-") + 1)) || 0, true);
+  return id;
+}
+async function writeTask(collection, id, title, options, recurring) {
   const now = Math.floor(Date.now() / 1e3);
   const metadata = {
     type: "task",
@@ -11295,8 +11739,7 @@ async function createTask(title, options = {}, requested = "global") {
     depends_on: options.depends_on ?? [],
     blocks: options.blocks ?? [],
     ...options.claim_scope?.length ? { claim_scope: options.claim_scope } : {},
-    is_recurring: options.is_recurring ?? false,
-    recurrence_pattern: options.recurrence_pattern,
+    is_recurring: recurring,
     created_at: now,
     updated_at: now,
     accessed_at: now,
@@ -11305,11 +11748,30 @@ async function createTask(title, options = {}, requested = "global") {
     salience: options.salience ?? PRIORITY_SALIENCE[options.priority ?? "medium"],
     sector: "semantic"
   };
+  if (recurring) {
+    const pattern = options.recurrence_pattern;
+    const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue(options.recurrence_tz);
+    const lead = options.lead_days ?? DEFAULT_LEAD_DAYS[pattern];
+    const tz = options.recurrence_tz ?? localZone();
+    Object.assign(metadata, {
+      due_date: due,
+      recurrence_pattern: pattern,
+      recurrence_interval: options.recurrence_interval ?? 1,
+      recurrence_anchor: options.recurrence_anchor ?? due,
+      recurrence_slot: due,
+      recurrence_tz: tz,
+      lead_days: lead,
+      opens_at: opensAt(due, lead, tz),
+      recurrence_notes: options.recurrence_notes ?? options.notes ?? "",
+      recurrence_series: options.recurrence_series ?? id,
+      previous_occurrence: options.previous_occurrence
+    });
+  }
   metadata.is_synced = false;
   await addDocument2(collection, id, title, metadata);
-  return id;
+  return { id, collection, metadata };
 }
-var PRIORITY_SALIENCE, ID_ATTEMPTS;
+var PRIORITY_SALIENCE, ID_ATTEMPTS, TaskIdTakenError;
 var init_create = __esm({
   "packages/core/src/tasks/create.ts"() {
     "use strict";
@@ -11318,6 +11780,8 @@ var init_create = __esm({
     init_backend();
     init_sentinel();
     init_coordination();
+    init_doc_lock();
+    init_recurrence();
     PRIORITY_SALIENCE = {
       critical: 3,
       high: 2.5,
@@ -11325,6 +11789,13 @@ var init_create = __esm({
       low: 1.5
     };
     ID_ATTEMPTS = 5;
+    TaskIdTakenError = class extends Error {
+      constructor(id) {
+        super(`task id ${id} is already taken`);
+        this.id = id;
+      }
+      id;
+    };
   }
 });
 
@@ -11631,9 +12102,26 @@ async function rekeyTask(collection, doc, suggestedId) {
     await deleteDocument2(collection, doc.id);
     return m;
   });
+  await relinkOccurrences(collection, doc.id, newId);
+  const [after] = await getDocumentsByIds2(collection, [newId]);
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}
 `);
-  return { ...doc, id: newId, metadata };
+  return { ...doc, id: newId, metadata: after?.metadata ?? metadata };
+}
+async function relinkOccurrences(collection, oldId, newId) {
+  const me = getConfig().USERNAME;
+  const ours = (m) => !isReadOnlyDoc(m) && (!m.origin_device || m.origin_device === getDeviceId()) && (!m.origin_user || m.origin_user === me);
+  for (const key of ["previous_occurrence", "next_occurrence", "recurrence_series"]) {
+    try {
+      for (const d of (await getDocumentsByFilter2(collection, { type: "task", [key]: oldId }, 1e5)).filter((x) => ours(x.metadata))) {
+        await withDocLock(collection, d.id, () => patchDocument(collection, d.id, { [key]: newId, is_synced: false, updated_at: Math.floor(Date.now() / 1e3) })).catch((e) => process.stderr.write(`[yapa-sync] Could not point ${d.id}'s ${key} at ${newId} (was ${oldId}): ${e}
+`));
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Could not find tasks whose ${key} is ${oldId} after renaming it to ${newId}: ${e}
+`);
+    }
+  }
 }
 async function retractSharedCopies(backend, collection) {
   const versionOf = (d) => Number(d.metadata.updated_at ?? d.metadata.created_at ?? 0);
@@ -11899,7 +12387,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.18.0" : fromPackage();
+var YAPA_VERSION = true ? "1.19.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -30996,13 +31484,13 @@ function _promise(Class2, innerType) {
 }
 // @__NO_SIDE_EFFECTS__
 function _custom(Class2, fn, _params) {
-  const norm2 = normalizeParams(_params);
-  norm2.abort ?? (norm2.abort = true);
+  const norm = normalizeParams(_params);
+  norm.abort ?? (norm.abort = true);
   const schema = new Class2({
     type: "custom",
     check: "custom",
     fn,
-    ...norm2
+    ...norm
   });
   return schema;
 }
@@ -31738,8 +32226,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list5 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list5)
+  const list = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -41685,6 +42173,7 @@ init_config();
 init_syncable();
 
 // packages/core/src/memory/kinds.ts
+init_metadata_adapter();
 var MEMORY_KINDS = ["finding", "decision", "limitation", "question", "idea"];
 var KIND_STATUSES = {
   finding: ["open", "resolved"],
@@ -41739,13 +42228,12 @@ var TypedMemoryError = class extends Error {
 function isMemoryKind(k) {
   return typeof k === "string" && MEMORY_KINDS.includes(k);
 }
-var list = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
 function normalizeTyped(fields, current = {}) {
   const out = {};
   for (const k of TYPED_KEYS) {
     const v = fields[k];
     if (v === void 0) continue;
-    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? list(v) : typeof v === "string" ? v.trim() : v;
+    out[k] = k === "task_ids" || k === "options" || k === "disposition_ids" ? metadataList(v) : typeof v === "string" ? v.trim() : v;
   }
   if (!Object.keys(out).length) return out;
   const curKind = isMemoryKind(current.kind) ? current.kind : void 0;
@@ -41771,7 +42259,7 @@ function normalizeTyped(fields, current = {}) {
       throw new TypedMemoryError(`a ${kind}'s status is one of ${KIND_STATUSES[kind].join(", ")}`);
     }
     const merged = { ...current, ...out };
-    if (kind === "decision" && status === "needed" && list(merged.options).length < 2) {
+    if (kind === "decision" && status === "needed" && metadataList(merged.options).length < 2) {
       throw new TypedMemoryError("a decision that is needed lists at least two options (and ideally a recommendation)");
     }
     if (kind === "finding" && status === "resolved") {
@@ -41782,7 +42270,7 @@ function normalizeTyped(fields, current = {}) {
       if (d === "no-action" && !String(merged.disposition_reason ?? "").trim()) {
         throw new TypedMemoryError("a no-action disposition gives disposition_reason");
       }
-      if (d !== "no-action" && !list(merged.disposition_ids).length) {
+      if (d !== "no-action" && !metadataList(merged.disposition_ids).length) {
         throw new TypedMemoryError(`a ${d} disposition names it in disposition_ids`);
       }
     }
@@ -41803,7 +42291,7 @@ function typedLabel(meta3) {
 // packages/core/src/memory/links.ts
 init_doc_lock();
 init_store();
-var list2 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
+init_metadata_adapter();
 async function findDoc(id) {
   for (const c of await listCollections2().catch(() => [])) {
     const [d] = await getDocumentsByIds2(c.name, [id]).catch(() => []);
@@ -41822,7 +42310,7 @@ async function linkMemoryToTasks(memoryId, taskIds) {
     const present = await withDocLock(t.collection, tid, async () => {
       const fresh = (await getDocumentsByIds2(t.collection, [tid]))[0];
       if (!fresh) return false;
-      const cur = list2(fresh.metadata.memory_ids);
+      const cur = metadataList(fresh.metadata.memory_ids);
       if (cur.includes(memoryId)) return true;
       await updateDocument2(t.collection, tid, {
         ...fresh.metadata,
@@ -42581,11 +43069,18 @@ init_create();
 
 // packages/core/src/tasks/list.ts
 init_store();
+init_recurrence();
+init_metadata_adapter();
 var PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
 var READ_LIMIT = 1e4;
 async function listTasks(filters = {}) {
+  return (await listTasksCounted(filters)).tasks;
+}
+async function listTasksCounted(filters = {}) {
   const collectionNames = filters.collection ? [filters.collection] : (await listCollections2()).map((c) => c.name);
   const allTasks = [];
+  const now = Math.floor(Date.now() / 1e3);
+  let upcomingHidden = 0;
   for (const name of collectionNames) {
     const where = { type: "task" };
     if (filters.status) where.status = filters.status;
@@ -42597,6 +43092,14 @@ async function listTasks(filters = {}) {
       for (const task of tasks) {
         if (!filters.includeComplete && task.metadata.status === "complete") continue;
         if (task.metadata.archived === true && !filters.includeArchived) continue;
+        if (filters.tags?.length) {
+          const tags = metadataList(task.metadata.tags);
+          if (!filters.tags.every((t) => tags.includes(t))) continue;
+        }
+        if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) {
+          upcomingHidden++;
+          continue;
+        }
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -42614,11 +43117,11 @@ async function listTasks(filters = {}) {
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
-  return filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted;
+  return { tasks: filters.limit !== void 0 ? sorted.slice(0, filters.limit) : sorted, upcomingHidden };
 }
 async function getDueTasks(includeOverdue = true) {
   const now = Math.floor(Date.now() / 1e3);
-  const tasks = await listTasks({ includeComplete: false });
+  const tasks = await listTasks({ includeComplete: false, includeUpcoming: true });
   return tasks.filter((t) => t.metadata.due_date).map((t) => {
     const daysUntil = Math.ceil((t.metadata.due_date - now) / (24 * 60 * 60));
     return { ...t, daysUntil };
@@ -42630,13 +43133,16 @@ init_config();
 
 // packages/core/src/tasks/close.ts
 init_store();
+init_doc_lock();
 init_sentinel();
 init_create();
+init_recurrence();
+init_metadata_adapter();
+init_dates();
 function keptAsNotesLine(r) {
   const ids = r?.kept_as_notes ?? [];
   return ids.length ? `Kept ${ids.join(", ")} as ${ids.length === 1 ? "a note" : "notes"}, without a kind: ${KEPT_AS_NOTE_REASON}.` : "";
 }
-var list3 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).filter(Boolean);
 function validateLearned(items = []) {
   for (const it of items) {
     if (!it.content?.trim()) throw new Error("each learned item needs content");
@@ -42672,6 +43178,8 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   if (!task) throw new Error(`Task ${taskId} not found`);
   if (!d.question?.trim()) throw new Error("decision_needed needs a question");
   if (await keepsRecordsElsewhere(task.collection)) throw new RecordsElsewhereError(task.collection, "decision_needed (a YAPA decision the task waits on)", "set the task to blocked with a blocked_reason that names the record");
+  recurrenceChanges(task.id, task.metadata, extra);
+  await checkSeriesUpdate(task, { ...extra, status: "pending" });
   const content = [d.question.trim(), d.context?.trim()].filter(Boolean).join("\n\n");
   const typed = normalizeTyped({
     kind: "decision",
@@ -42683,9 +43191,19 @@ async function requestDecision(taskId, d, ctx = {}, extra = {}) {
   });
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, "") : r.ids[0];
-  const waits = [.../* @__PURE__ */ new Set([...list3(task.metadata.waits_on), decision])];
-  const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
-  return { ...u, decision };
+  const waits = [.../* @__PURE__ */ new Set([...metadataList(task.metadata.waits_on), decision])];
+  try {
+    const u = await updateTask(task.id, { ...extra, status: "pending", waits_on: waits }, ctx);
+    return { ...u, decision };
+  } catch (e) {
+    await forgetMemory(decision).catch(() => void 0);
+    await withDocLock(task.collection, task.id, async () => {
+      const [cur] = await getDocumentsByIds2(task.collection, [task.id]);
+      const ids = metadataList(cur?.metadata.memory_ids);
+      if (ids.includes(decision)) await patchDocument(task.collection, task.id, { memory_ids: ids.filter((x) => x !== decision) });
+    }).catch(() => void 0);
+    throw e;
+  }
 }
 async function findMemory(id, prefer) {
   const names = (await listCollections2().catch(() => [])).map((c) => c.name);
@@ -42700,7 +43218,7 @@ async function findMemory(id, prefer) {
 }
 async function openWaits(metadata, collection) {
   const out = [];
-  for (const start of list3(metadata.waits_on)) {
+  for (const start of metadataList(metadata.waits_on)) {
     let id = start;
     let found = await findMemory(id, collection);
     for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
@@ -42715,8 +43233,45 @@ async function openWaits(metadata, collection) {
 }
 var describeWaits = (w) => `waiting on ${w.map((x) => `${x.kind} ${x.id} (${x.status}${x.owner ? `, for ${x.owner}` : ""})`).join(", ")}`;
 function captureNudge(taskId, metadata, recorded) {
-  if (recorded?.memories.length || recorded?.follow_ups.length || list3(metadata.memory_ids).length) return void 0;
+  if (recorded?.memories.length || recorded?.follow_ups.length || metadataList(metadata.memory_ids).length) return void 0;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
+}
+function releaseText(r, opts = {}) {
+  if (!r) return "";
+  if (r.kind === "released") return "Claim released.";
+  if (r.kind === "held_by_other") {
+    const s = r.lease.holder.session;
+    return `Note: ${r.lease.holder.user} (session ${opts.fullSession ? s : s.slice(0, 8)}) still holds a claim on it.`;
+  }
+  if (r.kind === "unshared") return `Release not shared (${r.reason}); the claim lapses on its own.`;
+  return "";
+}
+function closeText(r) {
+  return [
+    r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(", ")}.` : "",
+    r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(", ")}.` : "",
+    keptAsNotesLine(r.recorded),
+    r.nudge ?? ""
+  ].filter(Boolean).join("\n");
+}
+function nextOccurrenceText(result) {
+  if (result.regeneratedId) {
+    const tz = seriesZone(result.metadata ?? {});
+    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date, tz)}, opens ${formatTaskDay(result.next.opens_at, tz)}` : ""}`;
+  }
+  return result.existingNext ? `next occurrence ${result.existingNext} (already created)` : "";
+}
+function completedText(id, result, opts = {}) {
+  let text = `Completed task ${id}`;
+  if (opts.durationMinutes != null) text += ` (effort: ${formatDuration(opts.durationMinutes)})`;
+  const next = nextOccurrenceText(result);
+  if (next) text += ` \u2192 ${next}`;
+  const lines = [text];
+  if (opts.seriesChanged && result.metadata) {
+    lines.push(isRecurring(result.metadata) ? `${recurrenceSentence(result.metadata)}.` : "Series stopped: no next occurrence.");
+  }
+  lines.push(releaseText(result.release), closeText(result));
+  return lines.filter(Boolean).join("\n");
 }
 
 // packages/core/src/tasks/update.ts
@@ -42724,8 +43279,11 @@ init_store();
 init_doc_lock();
 init_syncable();
 init_create();
+init_sentinel();
 init_claim();
 init_push();
+init_recurrence();
+init_metadata_adapter();
 async function getTask(id) {
   const collections = await listCollections2();
   for (const collection of collections) {
@@ -42746,13 +43304,19 @@ async function getTask(id) {
   return null;
 }
 var RELEASE_OUTCOME = { complete: "done", blocked: "blocked", pending: "pending" };
-async function updateTask(id, updates, ctx = {}) {
+async function updateTask(id, updates, ctx = {}, hooks = {}) {
   let task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
-  const result = { id };
+  const result = { id, collection: task.collection };
+  if (updates.is_recurring === false && updates.recurrence_pattern === void 0) updates = { ...updates, recurrence_pattern: "none" };
+  if (updates.is_recurring === true && updates.recurrence_pattern === void 0 && !isRecurring(task.metadata)) {
+    if (!isRecurrencePattern(task.metadata.recurrence_pattern)) throw new RecurrenceError(`${task.id} has no recurrence_pattern to repeat on: pass one`);
+    updates = { ...updates, recurrence_pattern: task.metadata.recurrence_pattern };
+  }
   if (updates.status === "in_progress") {
+    recurrenceChanges(task.id, task.metadata, updates);
     const claim2 = await claimTask(task.id, task.collection, task.metadata, ctx);
     if (claim2.kind === "refused") throw new TaskClaimedError(claim2);
     result.claim = claim2;
@@ -42762,15 +43326,19 @@ async function updateTask(id, updates, ctx = {}) {
       result.id = task.id;
     }
   }
-  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", "is_recurring", "recurrence_pattern", "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
+  const structuralKeys = ["status", "priority", "title", "notes", "tags", "due_date", "customer", "project", "depends_on", "blocks", ...SERIES_PARAMS, "completed_at", "duration_minutes", "claim_scope", "blockedReason", "waits_on", "memory_ids"];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some((k) => structuralKeys.includes(k));
   const t = task;
+  const fields = { ...updates };
+  for (const k of RECURRENCE_KEYS) delete fields[k];
   const prev = await withDocLock(t.collection, t.id, async () => {
     const cur = (await getDocumentsByIds2(t.collection, [t.id]))[0];
     if (!cur) throw new Error(`Task ${t.id} not found`);
+    await checkSeriesUpdate({ id: t.id, collection: t.collection, metadata: cur.metadata }, updates);
     const updatedMetadata = {
       ...cur.metadata,
-      ...updates,
+      ...fields,
+      ...recurrenceChanges(t.id, cur.metadata, updates),
       updated_at: Math.floor(Date.now() / 1e3)
     };
     if (updates.completed_at != null && cur.metadata.completed_at != null) updatedMetadata.completed_at = cur.metadata.completed_at;
@@ -42780,14 +43348,23 @@ async function updateTask(id, updates, ctx = {}) {
     }
     if (result.claim?.kind === "unshared") updatedMetadata.claim_unshared = result.claim.session;
     else if (updates.status !== void 0 && updatedMetadata.claim_unshared) updatedMetadata.claim_unshared = "";
+    if (hooks.beforeWrite) {
+      const extra = await hooks.beforeWrite({ current: cur.metadata, content: updates.title ?? cur.content, metadata: updatedMetadata });
+      if (extra === null) return { status: cur.metadata.status, metadata: cur.metadata };
+      Object.assign(updatedMetadata, extra);
+    }
     if (updates.title !== void 0 && updates.title !== cur.content) {
       await addDocument2(t.collection, t.id, updates.title, updatedMetadata);
     } else {
       await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
-    return cur.metadata.status;
+    return { status: cur.metadata.status, metadata: updatedMetadata };
+  }).catch(async (e) => {
+    if (result.claim?.kind === "granted" && !result.claim.renewed) await releaseTaskClaim(t.id, t.collection, "pending", ctx.session).catch(() => void 0);
+    throw e;
   });
-  result.previousStatus = prev;
+  result.previousStatus = prev.status;
+  result.metadata = prev.metadata;
   if (result.claim?.kind === "granted") {
     await pushDocsNow(task.collection, [task.id]).catch(() => void 0);
   }
@@ -42797,64 +43374,96 @@ async function updateTask(id, updates, ctx = {}) {
   }
   return result;
 }
-async function completeTask(id, durationMinutes, ctx = {}, record2 = {}) {
+async function completeTask(id, durationMinutes, ctx = {}, record2 = {}, fields = {}) {
+  validateLearned(record2.learned);
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
-  validateLearned(record2.learned);
-  const completionUpdates = {
-    status: "complete",
-    salience: (task.metadata.salience ?? 2) * 0.5
+  const collection = task.collection;
+  await resolveWriteCollection(collection);
+  const { status: _s, ...rest } = fields;
+  const given = { ...rest, ...durationMinutes != null ? { duration_minutes: durationMinutes } : {} };
+  const willRecur = rest.recurrence_pattern !== void 0 ? rest.recurrence_pattern !== "none" : isRecurring(task.metadata);
+  const nextId = task.metadata.status !== "complete" && willRecur && !await successorOf(collection, task.id) ? await freshTaskId() : void 0;
+  let closing = false;
+  let successor;
+  const u = await updateTask(id, { ...given, status: "complete" }, ctx, {
+    beforeWrite: async ({ current, content, metadata }) => {
+      if (current.status === "complete") return Object.keys(given).length ? {} : null;
+      closing = true;
+      const close = { salience: (current.salience ?? 2) * 0.5, completed_at: current.completed_at ?? Math.floor(Date.now() / 1e3) };
+      if (!isRecurring(metadata)) return close;
+      successor = await successorOf(collection, task.id) ?? await createSuccessor(collection, task.id, content, { ...metadata, ...close }, nextId ?? await localFreeTaskId());
+      return { ...close, next_occurrence: successor.id };
+    }
+  });
+  const recorded = record2.learned?.length || record2.follow_ups?.length ? await recordForTask({ id: task.id, collection }, record2) : void 0;
+  const nudge = closing ? captureNudge(task.id, task.metadata, recorded) : void 0;
+  return {
+    metadata: u.metadata,
+    collection,
+    ...u.release ? { release: u.release } : {},
+    ...recorded ? { recorded } : {},
+    ...nudge ? { nudge } : {},
+    ...successor?.created ? { regeneratedId: successor.id, next: { due_date: successor.due_date, opens_at: successor.opens_at } } : {},
+    ...successor && !successor.created && successor.status !== "complete" ? { existingNext: successor.id } : {}
   };
-  if (task.metadata.completed_at == null) {
-    completionUpdates.completed_at = Math.floor(Date.now() / 1e3);
-  }
-  if (durationMinutes != null) {
-    completionUpdates.duration_minutes = durationMinutes;
-  }
-  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
-  const recorded = record2.learned?.length || record2.follow_ups?.length ? await recordForTask({ id: task.id, collection: task.collection }, record2) : void 0;
-  const nudge = captureNudge(task.id, task.metadata, recorded);
-  const extras = { ...release ? { release } : {}, ...recorded ? { recorded } : {}, ...nudge ? { nudge } : {} };
-  if (task.metadata.is_recurring && task.metadata.recurrence_pattern && previousStatus !== "complete") {
-    const nextDue = computeNextDue(
-      task.metadata.due_date ?? Math.floor(Date.now() / 1e3),
-      task.metadata.recurrence_pattern
-    );
-    const newId = await createTask(task.title, {
-      priority: task.metadata.priority,
-      tags: Array.isArray(task.metadata.tags) ? task.metadata.tags : (task.metadata.tags ?? "").split(",").filter(Boolean),
-      notes: task.metadata.notes,
-      customer: task.metadata.customer,
-      project: task.metadata.project,
-      due_date: nextDue,
-      is_recurring: true,
-      recurrence_pattern: task.metadata.recurrence_pattern
-    }, task.collection);
-    return { regeneratedId: newId, ...extras };
-  }
-  return extras;
 }
-function computeNextDue(currentDue, pattern) {
-  const d = new Date(currentDue * 1e3);
-  switch (pattern) {
-    case "daily":
-      d.setDate(d.getDate() + 1);
-      break;
-    case "weekly":
-      d.setDate(d.getDate() + 7);
-      break;
-    case "monthly":
-      d.setMonth(d.getMonth() + 1);
-      break;
-  }
-  return Math.floor(d.getTime() / 1e3);
+async function successorOf(collection, id) {
+  const d = (await getDocumentsByFilter2(collection, { type: "task", previous_occurrence: id }, 5)).find((x) => x.metadata.archived !== true);
+  return d && { id: d.id, due_date: metaTime(d.metadata.due_date), opens_at: opensAtOf(d.metadata), status: String(d.metadata.status ?? "pending"), created: false };
 }
+async function createSuccessor(collection, id, title, m, newId) {
+  const pattern = m.recurrence_pattern;
+  const interval = recurrenceInterval(m);
+  const lead = leadDays(m);
+  const tz = seriesZone(m);
+  const slot = occurrenceSlot(m);
+  const anchor2 = metaTime(m.recurrence_anchor) || slot || todayDue(storedZone(m));
+  const nextDue = nextRecurrenceDue(anchor2, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1e3)), tz);
+  const template = m.recurrence_notes !== void 0 ? String(m.recurrence_notes) : String(m.notes ?? "");
+  const made = await createTaskWithMetadata(title, {
+    priority: m.priority,
+    tags: metadataList(m.tags),
+    notes: template,
+    customer: m.customer,
+    project: m.project,
+    due_date: nextDue,
+    is_recurring: true,
+    recurrence_pattern: pattern,
+    recurrence_interval: interval,
+    recurrence_anchor: anchor2,
+    // The stored zone as it is, even one this machine doesn't know.
+    recurrence_tz: storedZone(m),
+    lead_days: lead,
+    recurrence_notes: template,
+    recurrence_series: m.recurrence_series || id,
+    previous_occurrence: id
+  }, collection, { id: newId, exactCollection: true });
+  return { id: made.id, due_date: nextDue, opens_at: opensAt(nextDue, lead, tz), status: "pending", created: true };
+}
+async function checkSeriesUpdate(task, updates) {
+  if (!seriesChanged(updates)) return;
+  const series = task.metadata.recurrence_series || task.id;
+  let open3;
+  for (const status of ["pending", "in_progress", "blocked"]) {
+    for (const d of await getDocumentsByFilter2(task.collection, { type: "task", recurrence_series: series, status }, 5)) {
+      const at = [occurrenceSlot(d.metadata), metaTime(d.metadata.created_at)];
+      if (d.metadata.archived !== true && (!open3 || at[0] > open3.at[0] || at[0] === open3.at[0] && at[1] > open3.at[1])) open3 = { id: d.id, at };
+    }
+  }
+  if (open3 && open3.id !== task.id) throw notOpen(task.id, open3.id);
+  if (open3 || task.metadata.status !== "complete") return;
+  if (updates.status !== void 0 && updates.status !== "complete") return;
+  throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
+}
+var notOpen = (id, open3) => new RecurrenceError(`${id} isn't the open occurrence of its series: change the series on ${open3}`);
 
 // packages/core/src/index.ts
 init_claim();
 
 // packages/core/src/memory/sweep.ts
 init_store();
+init_metadata_adapter();
 init_config();
 init_syncable();
 init_backend();
@@ -43141,7 +43750,8 @@ async function knownUsers() {
 
 // packages/core/src/tasks/waiting.ts
 init_config();
-var list4 = (v) => (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map(String).map((s) => s.trim()).filter(Boolean);
+init_recurrence();
+init_metadata_adapter();
 var firstLine = (s) => {
   const line = s.split("\n").find((l) => l.trim()) ?? "";
   const t = line.replace(/^#+\s*/, "").trim();
@@ -43167,9 +43777,10 @@ async function waitingOn(opts = {}) {
   if (opts.user) known.add(opts.user);
   for (const r of read) for (const u of usersIn([...r.decisions, ...r.questions, ...r.tasks])) known.add(u);
   for (const { collection, decisions, questions, tasks } of read) {
-    const open3 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true);
+    const now = Math.floor(Date.now() / 1e3);
+    const open3 = tasks.filter((t) => t.metadata.status !== "complete" && t.metadata.archived !== true && !isUpcoming(t.metadata, now));
     const waitingOnIt = /* @__PURE__ */ new Map();
-    for (const t of open3) for (const m of list4(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
+    for (const t of open3) for (const m of metadataList(t.metadata.waits_on)) waitingOnIt.set(m, [...waitingOnIt.get(m) ?? [], t.id]);
     const seen = /* @__PURE__ */ new Set();
     for (const d of [...decisions, ...questions]) {
       const m = d.metadata;
@@ -43187,7 +43798,7 @@ async function waitingOn(opts = {}) {
         by,
         since: Number(m.updated_at ?? m.created_at ?? 0),
         status: m.status ?? DEFAULT_STATUS[m.kind],
-        ...list4(m.options).length ? { options: list4(m.options) } : {},
+        ...metadataList(m.options).length ? { options: metadataList(m.options) } : {},
         ...m.recommendation ? { recommendation: String(m.recommendation) } : {},
         ...waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}
       };
@@ -43196,7 +43807,7 @@ async function waitingOn(opts = {}) {
     for (const t of open3) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? "";
-      const people = taskNeedsPeople(list4(m.tags));
+      const people = taskNeedsPeople(metadataList(m.tags));
       if (people) {
         out.actions.push({
           id: t.id,
@@ -43268,8 +43879,9 @@ ${items.map((i) => waitingLine(i, opts)).join("\n")}`);
 }
 
 // packages/core/src/tasks/next.ts
+init_recurrence();
+init_metadata_adapter();
 var PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
-var norm = (x) => (Array.isArray(x) ? x : (x ?? "").toString().split(",")).map(String).map((s) => s.trim()).filter(Boolean);
 async function expiredLeaseKeys(collection) {
   try {
     const r = await (await requireCoordination()).leaseList(collection, true);
@@ -43280,17 +43892,17 @@ async function expiredLeaseKeys(collection) {
 }
 async function nextTasks(opts) {
   const docs = (await getDocumentsByFilter2(opts.collection, { type: "task" }, 5e3).catch(() => [])).filter((d) => d.metadata.archived !== true);
-  const open3 = docs.filter((d) => d.metadata.status !== "complete");
+  const nowS = Math.floor(Date.now() / 1e3);
+  const open3 = docs.filter((d) => d.metadata.status !== "complete" && !isUpcoming(d.metadata, nowS));
   const byId = new Map(docs.map((d) => [d.id, d]));
   const claims = await claimsFor(opts.collection);
   const live = claims ? [...claims.values()] : [];
   const local2 = coordinatedLocally(opts.collection);
   const expired = local2 ? await expiredLeaseKeys(opts.collection) : void 0;
-  const nowS = Math.floor(Date.now() / 1e3);
   const liveScope = /* @__PURE__ */ new Map();
   for (const l of live) {
     for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
-    for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
+    for (const s of metadataList(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
   }
   const openIds = new Set(open3.map((d) => d.id));
   const skipped = [];
@@ -43302,7 +43914,7 @@ async function nextTasks(opts) {
     return depCache.get(id);
   };
   for (const d of open3) {
-    const tags = norm(d.metadata.tags);
+    const tags = metadataList(d.metadata.tags);
     if (opts.tags?.length && !opts.tags.every((t) => tags.includes(t))) continue;
     if (opts.excludeTags?.some((t) => tags.includes(t))) {
       skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter((t) => tags.includes(t)).join(", ")}` });
@@ -43344,7 +43956,7 @@ async function nextTasks(opts) {
       }
     }
     const waiting = [];
-    for (const dep of norm(d.metadata.depends_on)) {
+    for (const dep of metadataList(d.metadata.depends_on)) {
       const s = await depStatus(dep);
       if (s !== void 0 && s !== "complete") waiting.push(dep);
     }
@@ -43352,12 +43964,12 @@ async function nextTasks(opts) {
       skipped.push({ id: d.id, reason: `waiting on ${waiting.join(", ")}` });
       continue;
     }
-    const waits = norm(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
+    const waits = metadataList(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
     if (waits.length) {
       skipped.push({ id: d.id, reason: describeWaits(waits) });
       continue;
     }
-    const near = [...new Set(norm(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
+    const near = [...new Set(metadataList(d.metadata.claim_scope).filter((s) => liveScope.has(s)).map((s) => liveScope.get(s)))];
     ready.push({
       id: d.id,
       title: d.content,
@@ -43365,7 +43977,7 @@ async function nextTasks(opts) {
       priority: d.metadata.priority ?? "medium",
       status,
       ...d.metadata.due_date ? { due_date: Number(d.metadata.due_date) } : {},
-      unblocks: norm(d.metadata.blocks).filter((b) => openIds.has(b)).length,
+      unblocks: metadataList(d.metadata.blocks).filter((b) => openIds.has(b)).length,
       near,
       lapsed: status === "in_progress"
     });
@@ -43403,8 +44015,8 @@ async function cleanupItems(collection, open3, claims, only) {
   const items = [];
   const want = (key) => !only || only.includes(key);
   const triageTag = (tags) => tags.includes("auto") || tags.includes("needs-human") || tags.some((t) => t.startsWith("needs:"));
-  if (want("cleanup:triage") && open3.some((d) => triageTag(norm(d.metadata.tags)))) {
-    const untriaged = open3.filter((d) => !triageTag(norm(d.metadata.tags))).length;
+  if (want("cleanup:triage") && open3.some((d) => triageTag(metadataList(d.metadata.tags)))) {
+    const untriaged = open3.filter((d) => !triageTag(metadataList(d.metadata.tags))).length;
     if (untriaged) items.push({ key: "cleanup:triage", title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const findings = want("cleanup:findings") ? await staleFindings(collection) : [];
@@ -43503,106 +44115,9 @@ async function removeDependency(taskId, dependsOnId) {
   }
 }
 
-// packages/core/src/tasks/dates.ts
-function parseRelativeDate(phrase) {
-  const now = /* @__PURE__ */ new Date();
-  const lower = phrase.toLowerCase().trim();
-  if (lower === "today") {
-    return endOfDay(now);
-  }
-  if (lower === "tomorrow") {
-    const d = new Date(now);
-    d.setDate(d.getDate() + 1);
-    return endOfDay(d);
-  }
-  const dayMatch = lower.match(/next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
-  if (dayMatch) {
-    const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-    const targetDay = days.indexOf(dayMatch[1]);
-    const currentDay = now.getDay();
-    let daysUntil = targetDay - currentDay;
-    if (daysUntil <= 0) daysUntil += 7;
-    const d = new Date(now);
-    d.setDate(d.getDate() + daysUntil);
-    return endOfDay(d);
-  }
-  const inDaysMatch = lower.match(/in\s+(\d+)\s+day/);
-  if (inDaysMatch) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + parseInt(inDaysMatch[1]));
-    return endOfDay(d);
-  }
-  const inWeeksMatch = lower.match(/in\s+(\d+)\s+week/);
-  if (inWeeksMatch) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + parseInt(inWeeksMatch[1]) * 7);
-    return endOfDay(d);
-  }
-  if (lower === "end of week") {
-    const d = new Date(now);
-    const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
-    d.setDate(d.getDate() + daysUntilFriday);
-    d.setHours(17, 0, 0, 0);
-    return Math.floor(d.getTime() / 1e3);
-  }
-  const dateMatch = phrase.match(/([A-Za-z]+)\s+(\d{1,2})(?:,\s+(\d{4}))?/);
-  if (dateMatch) {
-    const monthNames = [
-      "january",
-      "february",
-      "march",
-      "april",
-      "may",
-      "june",
-      "july",
-      "august",
-      "september",
-      "october",
-      "november",
-      "december"
-    ];
-    const month = monthNames.indexOf(dateMatch[1].toLowerCase());
-    const day = parseInt(dateMatch[2]);
-    const year = dateMatch[3] ? parseInt(dateMatch[3]) : now.getFullYear();
-    if (month !== -1) {
-      const d = new Date(year, month, day, 23, 59, 59, 999);
-      return Math.floor(d.getTime() / 1e3);
-    }
-  }
-  return null;
-}
-function formatTaskDate(timestamp) {
-  const date5 = new Date(timestamp * 1e3);
-  return date5.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    ...date5.getHours() !== 23 || date5.getMinutes() !== 59 ? { hour: "numeric" } : {}
-  });
-}
-function endOfDay(d) {
-  d.setHours(23, 59, 59, 999);
-  return Math.floor(d.getTime() / 1e3);
-}
-function parseDuration(input2) {
-  const s = input2.toLowerCase().trim();
-  const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
-  if (!m) return null;
-  const value = parseFloat(m[1]);
-  if (isNaN(value)) return null;
-  const unit = m[2] ?? "m";
-  let minutes;
-  if (unit.startsWith("h")) minutes = value * 60;
-  else if (unit.startsWith("d")) minutes = value * 60 * 8;
-  else minutes = value;
-  return Math.round(minutes);
-}
-function formatDuration(minutes) {
-  if (minutes < 60) return `${minutes}m`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
+// packages/core/src/index.ts
+init_dates();
+init_recurrence();
 
 // packages/core/src/collections/manage.ts
 init_config();
@@ -44267,6 +44782,7 @@ init_store();
 
 // packages/core/src/curation/follow-through.ts
 init_store();
+init_metadata_adapter();
 init_config();
 
 // packages/core/src/curation/health.ts
@@ -46597,13 +47113,6 @@ async function claimsByCollection(collections) {
   }));
   return out;
 }
-function releaseNote(r) {
-  if (!r) return "";
-  if (r.kind === "released") return "Claim released.";
-  if (r.kind === "held_by_other") return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
-  if (r.kind === "unshared") return `Claim release not shared (${r.reason}); it lapses on its own.`;
-  return "";
-}
 var TYPED_PARAMS = {
   kind: external_exports.enum(MEMORY_KINDS).optional().describe("What kind of knowledge this is: finding (a result, root cause, retraction or trap), decision (a choice made, or one a person must make), limitation (something that cannot be done yet), question (for a person or another team), idea. Omit for an ordinary note."),
   status: external_exports.string().optional().describe(`Where it stands. ${Object.entries(KIND_STATUSES).map(([k, v]) => `${k}: ${v.join("|")}`).join("; ")}. Default: finding open, decision proposed, question open. Use decision "needed" for a choice only a person can make: never leave that only in chat.`),
@@ -46631,18 +47140,10 @@ var CLOSE_PARAMS = {
     collection: external_exports.string().optional().describe("Default: the task's collection")
   })).optional().describe("Follow-up work, created as new tasks that say where they came from")
 };
-function closeText(r) {
-  const parts = [];
-  if (r.recorded?.memories.length) parts.push(`Recorded ${r.recorded.memories.join(", ")}.`);
-  if (r.recorded?.follow_ups.length) parts.push(`Follow-ups: ${r.recorded.follow_ups.join(", ")}.`);
-  if (keptAsNotesLine(r.recorded)) parts.push(keptAsNotesLine(r.recorded));
-  if (r.nudge) parts.push(r.nudge);
-  return parts.join("\n");
-}
 var writeTarget = (name) => resolveWriteCollection(name, { folder: sessionFolder() });
 var checkFollowUps = (followUps) => checkFollowUpCollections(followUps, sessionFolder());
 function typedError(e) {
-  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError) {
+  if (e instanceof TypedMemoryError || e instanceof MemoryNotFoundError || e instanceof RecordsElsewhereError || e instanceof RecurrenceError) {
     return { content: [{ type: "text", text: e.message }], isError: true };
   }
   throw e;
@@ -47437,27 +47938,39 @@ ${redirectNote(target)}` : "";
       customer: external_exports.string().optional().describe("Customer name"),
       project: external_exports.string().optional().describe("Project name"),
       collection: external_exports.string().optional().describe("Collection (default: global)"),
-      is_recurring: external_exports.boolean().optional().describe("Whether task recurs"),
-      recurrence_pattern: external_exports.enum(["daily", "weekly", "monthly"]).optional().describe("Recurrence pattern"),
+      is_recurring: external_exports.boolean().optional().describe("Whether task recurs (implied by recurrence_pattern)"),
+      recurrence_pattern: external_exports.enum(RECURRENCE_PATTERNS).optional().describe("Repeat on this period: completing an occurrence creates the next one in its calendar slot. Due defaults to today"),
+      recurrence_interval: external_exports.number().int().min(1).optional().describe("Every N periods, e.g. 2 with weekly for every two weeks (default 1)"),
+      lead_days: external_exports.number().int().min(0).optional().describe("Days before its due day an occurrence opens; until then task lists hide it (default: daily 0, weekly 2, monthly 7, quarterly 14, yearly 30)"),
       claim_scope: external_exports.array(external_exports.string()).optional().describe('Soft scope: what the task touches (e.g. "repo:infra"); task_next ranks tasks near live claims last')
     },
-    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, claim_scope }) => {
+    async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, recurrence_interval, lead_days, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? void 0 : void 0;
       const target = await writeTarget(collection ?? "global");
-      const id = await createTask(title, {
-        priority,
-        due_date,
-        tags,
-        notes,
-        customer,
-        project,
-        is_recurring,
-        recurrence_pattern,
-        claim_scope
-      }, target.collection);
-      recordLastWrite(target.collection);
+      let made;
+      try {
+        made = await createTaskWithMetadata(title, {
+          priority,
+          due_date,
+          tags,
+          notes,
+          customer,
+          project,
+          is_recurring,
+          recurrence_pattern,
+          recurrence_interval,
+          lead_days,
+          claim_scope
+        }, target.collection);
+      } catch (e) {
+        return typedError(e);
+      }
+      recordLastWrite(made.collection);
+      const { id, metadata: m } = made;
       let text = `Created task ${id}: "${title}"`;
-      if (due_date) text += ` (due: ${formatTaskDate(due_date)})`;
+      if (m.due_date) text += ` (due: ${formatTaskDate(m.due_date)})`;
+      if (recurrenceNote(m)) text += `
+${recurrenceLine(m)}`;
       if (target.redirectedFrom) text += `
 ${redirectNote(target)}`;
       return { content: [{ type: "text", text }] };
@@ -47473,45 +47986,58 @@ ${redirectNote(target)}`;
       customer: external_exports.string().optional(),
       project: external_exports.string().optional(),
       collection: external_exports.string().optional(),
-      include_complete: external_exports.boolean().optional().describe("Include completed tasks (default: false)")
+      include_complete: external_exports.boolean().optional().describe("Include completed tasks (default: false)"),
+      include_upcoming: external_exports.boolean().optional().describe("Include recurring occurrences that have not opened yet (default: false)")
     },
-    async ({ id, status, priority, customer, project, collection, include_complete }) => {
+    async ({ id, status, priority, customer, project, collection, include_complete, include_upcoming }) => {
       if (id) {
         const task = await getTask(id);
         if (!task) {
           return { content: [{ type: "text", text: `Task ${id} not found.` }] };
         }
-        const norm2 = (x) => Array.isArray(x) ? x : (x ?? "").toString().split(",").filter(Boolean);
         const lines2 = [
           `**${task.id}**: ${task.title}`,
           `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
           `Collection: ${task.collection}`
         ];
         if (task.metadata.due_date) lines2.push(`Due: ${formatTaskDate(task.metadata.due_date)}`);
+        const series = seriesInfo(task.metadata, task.id);
+        if (series) {
+          const upcoming = upcomingNote(task.metadata);
+          lines2.push(`Recurrence: ${recurrenceNote(task.metadata)}${upcoming ? `; ${upcoming}` : ""}`);
+          const links = [`series ${series.series}`, series.previous && `previous ${series.previous}`, series.next && `next ${series.next}`];
+          lines2.push(`Series: ${links.filter(Boolean).join(", ")}`);
+        }
         if (task.metadata.completed_at) lines2.push(`Completed: ${formatTaskDate(task.metadata.completed_at)}`);
         if (task.metadata.duration_minutes != null) lines2.push(`Effort: ${formatDuration(task.metadata.duration_minutes)}`);
         if (task.metadata.origin_user && task.metadata.origin_user !== getConfig().USERNAME) lines2.push(`Owner: ${task.metadata.origin_user}`);
         const held2 = claimNote(task, await claimsFor(task.collection));
         if (held2) lines2.push(`Claim: ${held2}`);
         if (task.metadata.notes) lines2.push(`Notes: ${task.metadata.notes}`);
-        const tags = norm2(task.metadata.tags);
+        if (series && series.series_notes !== null && series.series_notes !== (task.metadata.notes ?? "")) {
+          lines2.push(`Series notes: ${series.series_notes || "(none)"}`);
+        }
+        const tags = metadataList(task.metadata.tags);
         if (tags.length) lines2.push(`Tags: ${tags.join(", ")}`);
-        const deps = norm2(task.metadata.depends_on);
+        const deps = metadataList(task.metadata.depends_on);
         if (deps.length) lines2.push(`Depends on: ${deps.join(", ")}`);
-        const blocks = norm2(task.metadata.blocks);
+        const blocks = metadataList(task.metadata.blocks);
         if (blocks.length) lines2.push(`Blocks: ${blocks.join(", ")}`);
         return { content: [{ type: "text", text: lines2.join("\n") }] };
       }
-      const tasks = await listTasks({
+      const { tasks, upcomingHidden: hidden } = await listTasksCounted({
         status,
         priority,
         customer,
         project,
         collection,
-        includeComplete: include_complete
+        includeComplete: include_complete,
+        includeUpcoming: include_upcoming
       });
+      const hiddenLine = hiddenUpcomingLine(hidden);
       if (tasks.length === 0) {
-        return { content: [{ type: "text", text: "No tasks found." }] };
+        return { content: [{ type: "text", text: hidden ? `No open tasks found.
+${hiddenLine}` : "No tasks found." }] };
       }
       const SHOWN = 100;
       const shown = tasks.slice(0, SHOWN);
@@ -47520,26 +48046,33 @@ ${redirectNote(target)}`;
         let line = `- **${t.id}** [${t.metadata.status}] ${t.metadata.priority} | ${t.title}`;
         const held2 = t.metadata.status === "complete" ? "" : claimNote(t, claims.get(t.collection));
         if (held2) line += ` (${held2})`;
-        if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
+        const upcoming = upcomingNote(t.metadata);
+        if (upcoming) line += ` (${upcoming})`;
+        else if (t.metadata.due_date) line += ` (due: ${formatTaskDate(t.metadata.due_date)})`;
         if (t.metadata.duration_minutes != null) line += ` (effort: ${formatDuration(t.metadata.duration_minutes)})`;
         if (t.metadata.origin_user && t.metadata.origin_user !== getConfig().USERNAME) line += ` (by ${t.metadata.origin_user})`;
         line += ` [${t.collection}]`;
         return line;
       });
       if (tasks.length > SHOWN) lines.push(`- _\u2026${tasks.length - SHOWN} more: narrow with status, priority or collection, or use task_next_`);
+      if (hiddenLine) lines.push(hiddenLine);
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
   server2.tool(
     "task_update",
-    "Update task fields (title, status, priority, notes, due, tags)",
+    "Update task fields (title, status, priority, notes, due, tags), or set, change or stop recurrence. status complete completes the task as task_complete does (a recurring one gets its next occurrence)",
     {
       id: external_exports.string().describe("Task ID"),
       title: external_exports.string().trim().min(1).optional().describe("New task title (rename)"),
       status: external_exports.enum(["pending", "in_progress", "blocked", "complete"]).optional(),
       priority: external_exports.enum(["critical", "high", "medium", "low"]).optional(),
-      notes: external_exports.string().optional(),
-      due: external_exports.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date'),
+      notes: external_exports.string().optional().describe("Notes (on a recurring task, this occurrence only)"),
+      due: external_exports.string().optional().describe('Due date phrase, or "none"/"clear" to remove the due date (refused on a recurring task: stop the series first)'),
+      recurrence_pattern: external_exports.enum([...RECURRENCE_PATTERNS, "none"]).optional().describe('Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series'),
+      recurrence_interval: external_exports.number().int().min(1).optional().describe("Every N periods (re-anchors the series at the due date)"),
+      lead_days: external_exports.number().int().min(0).optional().describe("Days before its due day an occurrence opens"),
+      series_notes: external_exports.string().optional().describe("Replace the notes each new occurrence starts with"),
       tags: external_exports.array(external_exports.string()).optional(),
       blocked_reason: external_exports.string().optional(),
       duration: external_exports.string().optional().describe('Revise hands-on effort to complete, e.g. "90m", "2h", "1.5d"'),
@@ -47554,7 +48087,8 @@ ${redirectNote(target)}`;
       }).optional().describe("A choice only a person can make: records it as a decision that is needed, and the task waits on it (pending; task_next skips it until the decision is recorded with memory_update). Then take other work. Do not combine with a status other than pending."),
       ...CLOSE_PARAMS
     },
-    async ({ id, title, status, priority, notes, due, tags, blocked_reason, duration: duration3, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+    async ({ id, title, status, priority, notes, due, recurrence_pattern, recurrence_interval, lead_days, series_notes, tags, blocked_reason, duration: duration3, reclaim, claim_scope, decision_needed, learned, follow_ups }) => {
+      const changesSeries = seriesChanged({ recurrence_pattern, recurrence_interval, lead_days, series_notes });
       if (decision_needed && status && status !== "pending") {
         return { content: [{ type: "text", text: "decision_needed sets the task to pending (waiting on the decision); leave status out or pass pending." }], isError: true };
       }
@@ -47567,6 +48101,10 @@ ${redirectNote(target)}`;
       if (notes !== void 0) updates.notes = notes;
       if (tags) updates.tags = tags;
       if (blocked_reason) updates.blockedReason = blocked_reason;
+      if (recurrence_pattern) updates.recurrence_pattern = recurrence_pattern;
+      if (recurrence_interval !== void 0) updates.recurrence_interval = recurrence_interval;
+      if (lead_days !== void 0) updates.lead_days = lead_days;
+      if (series_notes !== void 0) updates.series_notes = series_notes;
       if (due !== void 0) {
         const low = due.trim().toLowerCase();
         if (low === "none" || low === "clear" || low === "") {
@@ -47592,19 +48130,26 @@ ${redirectNote(target)}`;
           const d = await requestDecision(id, decision_needed, { reclaim }, rest);
           decision = d.decision;
           r = d;
+        } else if (status === "complete") {
+          const { status: _s, duration_minutes: minutes, ...rest } = updates;
+          const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
+          recordLastWrite(c.collection);
+          return { content: [{ type: "text", text: completedText(id, c, { durationMinutes: minutes, seriesChanged: changesSeries }) }] };
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
-        const taskCollection = (await getTask(r.id))?.collection;
+        const taskCollection = r.collection;
         recordLastWrite(taskCollection);
         const recorded = learned?.length || follow_ups?.length ? await recordForTask({ id: r.id, collection: taskCollection }, { learned, follow_ups }) : void 0;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
+        if (r.metadata && changesSeries) text += `
+${recurrenceLine(r.metadata)}`;
         if (decision) text += `
 Recorded decision ${decision} (needed${decision_needed.owner ? `, for ${decision_needed.owner}` : ""}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim2 = r.claim ? describeClaim(r.claim) : "";
         if (claim2) text += `
 ${claim2}`;
-        const release = releaseNote(r.release);
+        const release = releaseText(r.release);
         if (release) text += `
 ${release}`;
         const rec = closeText({ recorded });
@@ -47638,22 +48183,11 @@ ${rec}`;
       let result;
       try {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
-        recordLastWrite((await getTask(id))?.collection);
+        recordLastWrite(result.collection);
       } catch (e) {
         return typedError(e);
       }
-      let text = `Completed task ${id}`;
-      if (durationMinutes != null) text += ` (effort: ${formatDuration(durationMinutes)})`;
-      const release = releaseNote(result.release);
-      if (release) text += `
-${release}`;
-      if (result.regeneratedId) {
-        text += ` \u2192 regenerated as ${result.regeneratedId} (recurring)`;
-      }
-      const rec = closeText(result);
-      if (rec) text += `
-${rec}`;
-      return { content: [{ type: "text", text }] };
+      return { content: [{ type: "text", text: completedText(id, result, { durationMinutes }) }] };
     }
   );
   server2.tool(
