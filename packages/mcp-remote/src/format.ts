@@ -97,6 +97,12 @@ export function opensAt(m: Record<string, any>): number | undefined {
   return isRecurring(m) && Number.isFinite(due) && due > 0 ? opensAtOf(m, endOfDayOpening) : undefined;
 }
 
+/** The date an occurrence opens on. Midday after the writer's midnight is that date in UTC for offsets from -12 to +12. */
+export function opensDay(m: Record<string, any>): string | undefined {
+  const opens = opensAt(m);
+  return opens === undefined ? undefined : isoDate(opens + 43200);
+}
+
 /** A pending recurring occurrence that hasn't opened yet: left out of task lists. */
 export const isUpcoming = (m: Record<string, any>, now: number): boolean => coreIsUpcoming(m, now, endOfDayOpening);
 

@@ -17,7 +17,7 @@ import {
 import type { Caller } from './auth.js';
 import type { QueryEmbedder } from './embedder.js';
 import {
-  author, buildWaiting, dueDate, formatWaiting, isoDate, isoMinute, isUpcoming, itemContent, joinBounded, list, MAX_RESULT_BYTES, opensAt,
+  author, buildWaiting, dueDate, formatWaiting, isoDate, isoMinute, isUpcoming, itemContent, joinBounded, list, MAX_RESULT_BYTES, opensDay,
   needsPersonText, salience, truncateBytes, typedSuffix, waitingCount, waitsOnText,
 } from './format.js';
 import {
@@ -217,7 +217,7 @@ function taskLine(t: DocRow, now: number): string {
   const m = t.metadata;
   let line = `- **${t.id}** [${m.status ?? '?'}] ${m.priority ?? '?'} | ${truncateBytes(t.content, 512)}${taskFlags(m)}`;
   const due = dueDate(m);
-  if (due && isUpcoming(m, now)) line += ` (upcoming: due ${due}, opens ${isoDate(opensAt(m)! + 86399)})`;
+  if (due && isUpcoming(m, now)) line += ` (upcoming: due ${due}, opens ${opensDay(m)})`;
   else if (due) line += ` (due: ${due})`;
   line += ` (${author(t)}, updated ${isoDate(t.updated_at)}) [${t.collection}]`;
   return line;

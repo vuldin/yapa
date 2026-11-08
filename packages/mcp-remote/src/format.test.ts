@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   author, buildWaiting, dueDate, formatWaiting, isOpenTyped, isUpcoming, itemContent, joinBounded, MAX_ITEM_CONTENT_BYTES, MAX_RESULT_BYTES,
-  needsPersonText, opensAt, truncateBytes, typedLabel, waitingCount, waitsOnText,
+  needsPersonText, opensAt, opensDay, truncateBytes, typedLabel, waitingCount, waitsOnText,
 } from './format.js';
 import type { DocRow } from './queries.js';
 
@@ -179,6 +179,16 @@ describe('upcoming recurring tasks', () => {
     expect(opensAt(rec({ lead_days: '1e999' }))).toBe(due - 86399 - 2 * 86400);
     expect(opensAt(rec({ opens_at: '1e999' }))).toBe(due - 86399 - 2 * 86400);
     expect(isUpcoming(rec({ due_date: '1e999' }), 0)).toBe(false);
+  });
+
+  it('names the day an occurrence opens on, west and east of UTC', () => {
+    // Stored as local midnight on 2027-03-10: in Los Angeles (UTC-8) and Tokyo (UTC+9).
+    const pst = Date.UTC(2027, 2, 10, 8) / 1000, jst = Date.UTC(2027, 2, 9, 15) / 1000;
+    expect(opensDay(rec({ due_date: pst + 2 * 86400 + 86399, opens_at: pst }))).toBe('2027-03-10');
+    expect(opensDay(rec({ due_date: jst + 2 * 86400 + 86399, opens_at: jst }))).toBe('2027-03-10');
+    // Without a stored opens_at: an end-of-day due, two days ahead.
+    expect(opensDay(rec({ due_date: pst + 2 * 86400 + 86399 }))).toBe('2027-03-10');
+    expect(opensDay(rec({ due_date: jst + 2 * 86400 + 86399 }))).toBe('2027-03-10');
   });
 
   it('only a pending recurring occurrence with a due date is upcoming', () => {

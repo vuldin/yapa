@@ -200,14 +200,16 @@ const sqlInt = (n: number) => { if (!Number.isInteger(n)) throw new Error(`unexp
 const DEFAULT_LEAD_SQL = `CASE metadata->>'recurrence_pattern' ${Object.entries(DEFAULT_LEAD_DAYS).map(([p, n]) => `WHEN ${sqlWord(p)} THEN ${sqlInt(n)}`).join(' ')} ELSE 0 END`;
 /**
  * A metadata number as core's Number() reads it: a JSON number, or a string
- * holding a decimal number; else NULL, with no cast tried. A value core reads
- * as non-finite counts as missing: a JSON number past 1e300, and a string
+ * holding a decimal number; else NULL, with no cast tried. A JSON number too
+ * small for float8 is 0, as JSON.parse reads it. A value core reads as
+ * non-finite counts as missing: a JSON number past 1e300, and a string
  * longer than 20 digits on either side of the point or with an exponent of
  * more than two digits (bounds under which float8 can't overflow).
  */
 const NUMERIC_RE = '^\\s*[-+]?([0-9]{1,20}(\\.[0-9]{0,20})?|\\.[0-9]{1,20})([eE][-+]?[0-9]{1,2})?\\s*$';
 const metaNumber = (key: 'due_date' | 'lead_days' | 'opens_at') => `CASE jsonb_typeof(metadata->'${key}')
-    WHEN 'number' THEN CASE WHEN abs((metadata->'${key}')::numeric) < 1e300 THEN (metadata->>'${key}')::float8 END
+    WHEN 'number' THEN CASE WHEN abs((metadata->'${key}')::numeric) < 1e-300 THEN 0
+      WHEN abs((metadata->'${key}')::numeric) < 1e300 THEN (metadata->>'${key}')::float8 END
     WHEN 'string' THEN CASE WHEN metadata->>'${key}' ~ '${NUMERIC_RE}' THEN (metadata->>'${key}')::float8 END END`;
 /**
  * Per row, once: the due date, the lead time (core's leadDays), the opening
