@@ -10,7 +10,7 @@ Writes reach the remote seconds after they happen, but a status change is still 
 
 Completing, blocking, resetting to pending or deleting the task releases the claim. The hooks renew this session's claims while it is active, and a claim lapses one TTL (2 h by default) after the session goes quiet. Its task then shows `no live claim` and is offered again by `task_next`. If another session takes a claim over, the next prompt says so.
 
-`task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
+`task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared, 5 completed but its next occurrence wasn't created). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
 
 ## Recurring tasks
 
@@ -27,7 +27,7 @@ task_complete id: alex-41
 - Completed on time or early, the next one takes the following slot.
 - Completed late, the series doesn't shift: a monthly task due on the 15th and done on the 20th comes back on the 15th of next month. Periods missed entirely are skipped, not piled up as overdue copies.
 - Postponed, it still counts from its slot: a weekly review scheduled for Monday the 8th, moved to Wednesday the 10th and done that day, is followed by Monday the 15th. Moved past its next slot instead, to the 17th, and done then, it is followed by Monday the 22nd.
-- Months, quarters and years count from the anchor's day of the month, clamped to the end of shorter months: a monthly series anchored on January 31 is due February 28 (29 in a leap year), March 31, April 30. The time of day is kept in local time, across DST changes.
+- Months, quarters and years count from the anchor's day of the month, clamped to the end of shorter months: a monthly series anchored on January 31 is due February 28 (29 in a leap year), March 31, April 30. The time of day is kept in the series' time zone (`recurrence_tz`, the zone of the machine that set the series up), across DST changes, so a teammate completing it from another zone doesn't shift it.
 - With no due date, a recurring task is due today, and today is its anchor.
 
 **Upcoming occurrences stay out of the way.** An occurrence opens `lead_days` before the day it is due, at the start of that day; until then it is *upcoming*. `lead_days` defaults by pattern: daily 0 (open on its due day), weekly 2, monthly 7, quarterly 14, yearly 30. The default ignores the interval: a task every two months still opens 7 days ahead; pass `lead_days` to change it. Upcoming tasks are left out of `task_list`, session start and prompt context, the standup and dashboard, `task_next` and `waiting`. `task_list` says how many it left out; `include_upcoming: true` (`yapa task list --include-upcoming`) lists them with their due date and the day they open. The opening time is stored as `opens_at` whenever the due date or lead time is written, so a new `lead_days` takes effect at once, and the remote MCP server uses the same time. For a task without one (written by an older YAPA), the remote assumes an end-of-day due.
@@ -38,7 +38,9 @@ task_complete id: alex-41
 
 **Links.** Every occurrence carries `recurrence_series` (the id of the series' first task) and, after the first, `previous_occurrence` (the one completed before it). A completed occurrence records `next_occurrence`, the one its completion created. `task_list` with an `id` shows all three.
 
-**Each occurrence gets one successor.** Reopening a completed occurrence and completing it again creates nothing new, and two sessions completing it at once create one. If the next occurrence can't be created (the store is unavailable, say), the completion still stands and the reply says so: complete the task again to retry. An occurrence completed before 1.19 has no `next_occurrence`, so reopening and completing it again creates another one.
+**Each occurrence gets one successor.** Its id is reserved and recorded as `next_occurrence` before the task is created. Reopening a completed occurrence and completing it again creates nothing new, and two sessions completing it at once create one. If the next occurrence can't be created (the store is unavailable, say), the completion still stands and the reply says so (`yapa task release` exits 5): complete the task again to retry, which creates it with the reserved id and doesn't close the task a second time. Completing an occurrence that is already complete without a reservation (one completed before 1.19) creates nothing; reopening such an occurrence and completing it again does create a successor.
+
+A completed occurrence's series can't be changed: `task_update` with a series parameter is refused and names the open occurrence to change instead.
 
 **Changing a series** with `task_update`:
 - `recurrence_pattern` makes a plain task recurring, or changes the period. Either way the series is re-anchored at the task's due date (today if it has none). A new pattern resets `recurrence_interval` to 1 and `lead_days` to the pattern's default unless you pass them.
