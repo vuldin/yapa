@@ -42,8 +42,9 @@ task_complete id: alex-41
 - If the successor can't be created (the store is unavailable, say), nothing is written: the task stays open and completing it again is safe.
 - If it was created but the completion couldn't be written, completing again finds it and creates no second one.
 - On one machine an occurrence gets one successor: two sessions completing it at once create one, and reopening it and completing it again finds the one it has (also after sync re-keys either task). Two machines that complete the same shared occurrence before syncing can each create one; delete the extra.
-- A task that is already complete never gets a successor, so a deleted successor stays deleted, and completing again an occurrence completed before 1.19 creates nothing.
-- Reopened and completed again, an occurrence from before 1.19 (whose successor has no link back) takes the one open occurrence with the same title made after it was completed, and links it; with none or several, it gets a new one.
+- A task that is already complete never gets a successor, so a deleted successor stays deleted.
+- When sync re-keys a task, the links and series id of the tasks next to it in the collection follow the new id.
+- Occurrences completed before 1.19 aren't linked to their successors: reopening and completing one again can create a second occurrence (delete the extra).
 - When the successor already existed, the reply says `next occurrence X (already created)` instead of "regenerated".
 
 A completed occurrence's series can't be changed: `task_update` with a series parameter is refused and names the open occurrence to change instead, also when the same call reopens it. Reopening one with no open occurrence after it makes it the open one.

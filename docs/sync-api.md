@@ -685,8 +685,7 @@ writes (all optional unless noted):
   `recurrence_tz` (IANA
   time zone the series' slots and opening days are counted in; absent:
   the completing machine's local time),
-  `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from` (the
-  id a re-keyed task last had), `rekeyed_from_all` (array: every id it had),
+  `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from`,
   `claim_scope` (array), `memory_ids` (array: typed memories recorded for the
   task), `waits_on` (array: memory ids the task waits on; it is not ready
   while any of them is open). Triage lives in `tags`: `auto`, `needs-human`,
