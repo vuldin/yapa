@@ -20,7 +20,7 @@ import {
   needsPersonText, salience, truncateBytes, typedSuffix, waitingCount, waitsOnText,
 } from './format.js';
 import {
-  getTask, listMemories, listTasks, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
+  countUpcomingTasks, getTask, listMemories, listTasks, memoryChunks, recentMemories, typedMemoriesForWaiting, vectorSearch, WAITING_MAX_ROWS,
   type DocRow,
 } from './queries.js';
 import { inferCollection, resolveCollection } from './resolve.js';
@@ -400,10 +400,15 @@ export function registerReadTools(server: McpServer, ctx: ToolContext, enabled: 
         return { text: truncateBytes(lines.join('\n'), 16 * 1024), count: 1, collections: [t.collection] };
       }
       const coll = await pickCollection(collection);
-      const tasks = await listTasks(pool, me, { collection: coll, status, priority, includeComplete: include_complete ?? false, includeUpcoming: include_upcoming ?? false, now: ctx.nowSecs?.(), limit: 200 });
-      if (tasks.length === 0) return { text: 'No tasks found.', count: 0, collections: coll ? [coll] : [] };
+      const filters = { collection: coll, status, priority, includeComplete: include_complete ?? false, now: ctx.nowSecs?.() };
+      const [tasks, hidden] = await Promise.all([
+        listTasks(pool, me, { ...filters, includeUpcoming: include_upcoming ?? false, limit: 200 }),
+        include_upcoming ? 0 : countUpcomingTasks(pool, me, filters),
+      ]);
+      const hiddenLine = hidden ? `_${hidden} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
+      if (tasks.length === 0) return { text: hidden ? `No open tasks found.\n${hiddenLine}` : 'No tasks found.', count: 0, collections: coll ? [coll] : [] };
       return {
-        text: joinBounded(tasks.map(taskLine), '\n'),
+        text: joinBounded(tasks.map(taskLine), '\n', hiddenLine ? [hiddenLine] : []),
         count: tasks.length,
         collections: [...new Set(tasks.map(t => t.collection))],
       };

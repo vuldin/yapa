@@ -7,6 +7,7 @@
  */
 import type pg from 'pg';
 import { ApiError, toPgVector, withUserTx } from '@yapa/service/lib';
+import { DEFAULT_LEAD_DAYS, RECURRENCE_PATTERNS } from '@yapa/core/recurrence';
 
 export interface DocRow {
   id: string;
@@ -192,14 +193,37 @@ export interface TaskFilters {
   limit: number;
 }
 
-// format.ts isUpcoming, in SQL (lead_days defaults as in core's tasks/recurrence.ts).
-const LEAD_DAYS_SQL = `CASE WHEN jsonb_typeof(metadata->'lead_days') = 'number' THEN (metadata->>'lead_days')::float8
-  ELSE CASE metadata->>'recurrence_pattern' WHEN 'weekly' THEN 2 WHEN 'monthly' THEN 7 WHEN 'quarterly' THEN 14 WHEN 'yearly' THEN 30 ELSE 0 END END`;
+// format.ts isUpcoming, in SQL, from core's patterns and lead-time defaults (literals checked here).
+const sqlWord = (w: string) => { if (!/^[a-z]+$/.test(w)) throw new Error(`unexpected recurrence pattern ${w}`); return `'${w}'`; };
+const sqlInt = (n: number) => { if (!Number.isInteger(n)) throw new Error(`unexpected lead time ${n}`); return String(n); };
+const DEFAULT_LEAD_SQL = `CASE metadata->>'recurrence_pattern' ${Object.entries(DEFAULT_LEAD_DAYS).map(([p, n]) => `WHEN ${sqlWord(p)} THEN ${sqlInt(n)}`).join(' ')} ELSE 0 END`;
+const LEAD = "(metadata->>'lead_days')::float8";
+const LEAD_DAYS_SQL = `(CASE WHEN jsonb_typeof(metadata->'lead_days') = 'number'
+  THEN CASE WHEN ${LEAD} >= 0 AND ${LEAD} = floor(${LEAD}) THEN ${LEAD} ELSE ${DEFAULT_LEAD_SQL} END
+  ELSE ${DEFAULT_LEAD_SQL} END)`;
+const DUE = "(metadata->>'due_date')::float8";
+const OPENS = "(metadata->>'opens_at')::float8";
+// core's storedOpensAt, else the end-of-day assumption; only reached once due_date is a number.
+const OPENS_SQL = `(CASE WHEN jsonb_typeof(metadata->'opens_at') = 'number'
+  THEN CASE WHEN ${OPENS} > 0 AND ${OPENS} <= ${DUE} - 86400 * ${LEAD_DAYS_SQL} + 3600 AND ${OPENS} > ${DUE} - 86400 * (${LEAD_DAYS_SQL} + 1) - 3600
+    THEN ${OPENS} ELSE ${DUE} - 86399 - 86400 * ${LEAD_DAYS_SQL} END
+  ELSE ${DUE} - 86399 - 86400 * ${LEAD_DAYS_SQL} END)`;
 const upcomingSql = (now: string) => `COALESCE(CASE WHEN metadata->>'is_recurring' = 'true'
-  AND metadata->>'recurrence_pattern' IN ('daily', 'weekly', 'monthly', 'quarterly', 'yearly')
+  AND metadata->>'recurrence_pattern' IN (${RECURRENCE_PATTERNS.map(sqlWord).join(', ')})
   AND COALESCE(metadata->>'status', 'pending') = 'pending'
   AND jsonb_typeof(metadata->'due_date') = 'number'
-  THEN (metadata->>'due_date')::float8 > 0 AND ${now} < (metadata->>'due_date')::float8 - 86399 - 86400 * ${LEAD_DAYS_SQL} END, false)`;
+  THEN ${DUE} > 0 AND ${now} < ${OPENS_SQL} END, false)`;
+
+/** The WHERE clause for a task listing; `upcoming` keeps only (true) or leaves out (false) upcoming occurrences. */
+function taskWhere(f: TaskFilters, param: (v: unknown) => string, upcoming?: boolean): string {
+  let where = `metadata->>'type' = 'task' AND ${LOCAL_ONLY_SQL}`;
+  if (f.collection !== undefined) where += ` AND collection = ${param(f.collection)}`;
+  if (f.status !== undefined) where += ` AND metadata->>'status' = ${param(f.status)}`;
+  if (f.priority !== undefined) where += ` AND metadata->>'priority' = ${param(f.priority)}`;
+  if (!f.includeComplete && f.status !== 'complete') where += " AND COALESCE(metadata->>'status', '') <> 'complete'";
+  if (upcoming !== undefined) where += ` AND ${upcoming ? '' : 'NOT '}${upcomingSql(param(Math.floor(f.now ?? Date.now() / 1000)))}`;
+  return where;
+}
 
 const PRIORITY_RANK = "CASE metadata->>'priority' WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END";
 
@@ -208,12 +232,7 @@ export async function listTasks(pool: pg.Pool, username: string, f: TaskFilters)
   return withUserTx(pool, username, async c => {
     const values: unknown[] = [];
     const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
-    let where = `metadata->>'type' = 'task' AND ${LOCAL_ONLY_SQL}`;
-    if (f.collection !== undefined) where += ` AND collection = ${param(f.collection)}`;
-    if (f.status !== undefined) where += ` AND metadata->>'status' = ${param(f.status)}`;
-    if (f.priority !== undefined) where += ` AND metadata->>'priority' = ${param(f.priority)}`;
-    if (!f.includeComplete && f.status !== 'complete') where += " AND COALESCE(metadata->>'status', '') <> 'complete'";
-    if (!f.includeUpcoming) where += ` AND NOT ${upcomingSql(param(Math.floor(f.now ?? Date.now() / 1000)))}`;
+    const where = taskWhere(f, param, f.includeUpcoming ? undefined : false);
     const r = await c.query(
       `SELECT ${COLUMNS} FROM documents WHERE ${where}
         ORDER BY ${PRIORITY_RANK} DESC,
@@ -223,6 +242,16 @@ export async function listTasks(pool: pg.Pool, username: string, f: TaskFilters)
       values,
     );
     return r.rows.map(toRow);
+  });
+}
+
+/** How many tasks matching `f` a listing leaves out as upcoming. */
+export async function countUpcomingTasks(pool: pg.Pool, username: string, f: Omit<TaskFilters, 'limit'>): Promise<number> {
+  return withUserTx(pool, username, async c => {
+    const values: unknown[] = [];
+    const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
+    const r = await c.query(`SELECT count(*)::int AS n FROM documents WHERE ${taskWhere({ ...f, limit: 0 }, param, true)}`, values);
+    return r.rows[0]?.n ?? 0;
   });
 }
 

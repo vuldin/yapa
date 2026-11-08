@@ -168,6 +168,9 @@ describe('upcoming recurring tasks', () => {
     expect(opensAt(rec({ lead_days: 0 }))).toBe(due - 86399);
     expect(opensAt(rec({ recurrence_pattern: 'yearly' }))).toBe(due - 86399 - 30 * 86400);
     expect(opensAt({ type: 'task', due_date: due })).toBeUndefined();
+    // A stored opens_at that fits the due date is used; a stale one isn't.
+    expect(opensAt(rec({ opens_at: due - 2 * 86400 - 5 * 3600 }))).toBe(due - 2 * 86400 - 5 * 3600);
+    expect(opensAt(rec({ opens_at: due - 20 * 86400 }))).toBe(due - 86399 - 2 * 86400);
   });
 
   it('only a pending recurring occurrence with a due date is upcoming', () => {

@@ -5,7 +5,7 @@
  * per tool result.
  */
 import { includesUser, ownerWaitsOn } from '@yapa/core/owners';
-import { isRecurring, leadDays } from '@yapa/core/recurrence';
+import { isRecurring, leadDays, storedOpensAt } from '@yapa/core/recurrence';
 import type { DocRow } from './queries.js';
 
 export const MAX_ITEM_CONTENT_BYTES = 4 * 1024;
@@ -83,14 +83,16 @@ export function dueDate(m: Record<string, any>): string | undefined {
 }
 
 /**
- * When a recurring occurrence opens. Core opens it at the start of its due
- * day, lead_days earlier, in the client's time zone, which the server doesn't
- * know: for an end-of-day due (the default) that is due - 86399 s, the rule
- * used here and in queries.ts (UPCOMING_SQL).
+ * When a recurring occurrence opens: opens_at as core stored it (the start of
+ * its due day, lead_days earlier, in the writer's time zone), while it still
+ * fits the due date. Without it (a task written before 1.19) the server,
+ * which doesn't know that time zone, assumes an end-of-day due (the default):
+ * due - 86399 s - lead_days days. queries.ts (upcomingSql) does the same.
  */
 export function opensAt(m: Record<string, any>): number | undefined {
   const due = Number(m.due_date);
-  return isRecurring(m) && due > 0 ? due - 86399 - leadDays(m) * 86400 : undefined;
+  if (!isRecurring(m) || !(due > 0)) return undefined;
+  return storedOpensAt(m) ?? due - 86399 - leadDays(m) * 86400;
 }
 
 /** A pending recurring occurrence that hasn't opened yet: left out of task lists. */

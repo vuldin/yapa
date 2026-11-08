@@ -347,13 +347,19 @@ describe.skipIf(!URL_)('yapa-mcp integration (real Postgres + RLS)', () => {
     await insert('alice-403', C, 'Rotate the shared key', 43, { type: 'task', status: 'blocked', priority: 'low', is_recurring: true, recurrence_pattern: 'monthly', due_date: NOW + 200 * D });
     await insert('alice-404', C, 'Approve the budget', 44, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 30 * D, tags: ['needs-human'] });
     await insert('alice-405', C, 'Plan the offsite', 45, { type: 'task', status: 'pending', priority: 'low', due_date: NOW + 300 * D });
+    // opens_at as core stored it wins over the end-of-day assumption (open 4 h ago); a stale one doesn't.
+    await insert('alice-406', C, 'Check the smoke alarms', 46, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + 2 * D + 20 * 3600, opens_at: NOW + 3600 });
+    await insert('alice-407', C, 'Empty the dehumidifier', 47, { type: 'task', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly', due_date: NOW + D, opens_at: NOW + 100 * D });
 
     const ids = (text: string) => [...text.matchAll(/\*\*(alice-\d+)\*\*/g)].map(m => m[1]).sort();
-    expect(ids((await call('task_list', { collection: C })).text)).toEqual(['alice-401', 'alice-403', 'alice-405']);
+    const open = await call('task_list', { collection: C });
+    expect(ids(open.text)).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407']);
+    expect(open.text.split('\n').at(-1)).toBe('_4 upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._');
     const all = await call('task_list', { collection: C, include_upcoming: true });
-    expect(ids(all.text)).toEqual(['alice-400', 'alice-401', 'alice-402', 'alice-403', 'alice-404', 'alice-405']);
+    expect(ids(all.text)).toEqual(['alice-400', 'alice-401', 'alice-402', 'alice-403', 'alice-404', 'alice-405', 'alice-406', 'alice-407']);
+    expect(all.text).not.toMatch(/hidden/);
     expect(all.text).toMatch(/\*\*alice-400\*\* .*\(upcoming: due \d{4}-\d\d-\d\d, opens \d{4}-\d\d-\d\d\)/);
-    expect(ids((await call('memory_recall', { query: 'seed:40 chores', collection: C })).text).filter(id => id >= 'alice-400')).toEqual(['alice-401', 'alice-403', 'alice-405']);
+    expect(ids((await call('memory_recall', { query: 'seed:40 chores', collection: C })).text).filter(id => id >= 'alice-400')).toEqual(['alice-401', 'alice-403', 'alice-405', 'alice-407']);
     expect((await call('waiting', { collection: C, user: '*' })).text).not.toContain('alice-404');
   });
 });
