@@ -165,9 +165,9 @@ export async function createTask(
 
 /**
  * createTask, returning the collection it was written to and the metadata it
- * wrote. `opts.id` (one from freshTaskId) is written only if no document in
- * the collection has it: TaskIdTakenError otherwise, for the caller to
- * allocate another. The check and the write share the id's lock.
+ * wrote. It never writes over a document: an id found taken (checked and
+ * written under the id's lock) moves on to the next free one, so `opts.id`
+ * is where it starts.
  */
 export async function createTaskWithMetadata(
   title: string,
@@ -190,18 +190,19 @@ export async function createTaskWithMetadata(
   // A collection merged away here is followed, never recreated.
   const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
-  const id = opts.id ?? await freshTaskId();
-  return withDocLock(collection, id, async () => {
-    if ((await getDocumentsByIds(collection, [id])).length) {
-      if (opts.id) throw new TaskIdTakenError(id);
-      // Taken since it was allocated (a process without local coordination): the next free one.
-      return createTaskWithMetadata(title, options, collection);
-    }
-    return writeTask(collection, id, title, options, recurring);
-  });
+  // The first id may ask the sync service; a retry for a taken one stays local (this may run under a caller's lock).
+  let id = opts.id ?? await freshTaskId();
+  for (let attempt = 1; ; attempt++) {
+    const at = id;
+    const made = await withDocLock(collection, at, async () =>
+      (await getDocumentsByIds(collection, [at])).length ? undefined : writeTask(collection, at, title, options, recurring));
+    if (made) return made;
+    if (attempt >= ID_ATTEMPTS) throw new TaskIdTakenError(at);
+    id = await getNextTaskId(Number(at.slice(at.lastIndexOf('-') + 1)) || 0, true);
+  }
 }
 
-/** An explicit task id is already a document in the collection. */
+/** No free id was found after ID_ATTEMPTS tries. */
 export class TaskIdTakenError extends Error {
   constructor(readonly id: string) {
     super(`task id ${id} is already taken`);

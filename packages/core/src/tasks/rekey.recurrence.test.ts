@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setConfig, resetConfig, createConfig } from '../config.js';
-import { setStore, resetStore, createLocalStore, getDocumentsByFilter, getDocumentsByIds, patchDocument } from '../store/index.js';
+import { setStore, resetStore, createLocalStore, getDocumentsByFilter, getDocumentsByIds } from '../store/index.js';
 import { rekeyTask } from '../sync/push.js';
 import { createTask } from './create.js';
 import { completeTask, getTask, updateTask } from './update.js';
@@ -23,19 +23,20 @@ afterAll(async () => {
 });
 
 describe('a re-keyed occurrence keeps its successor', () => {
-  it('rekeyTask points the successor at the new id, and completing again finds it either way', async () => {
+  it('rekeyTask points the successor\'s links and series at the new id, and completing again finds it', async () => {
     const id = await createTask('file the expense report', { recurrence_pattern: 'monthly' }, C);
     const next = (await completeTask(id)).regeneratedId!;
     const [doc] = await getDocumentsByIds(C, [id]);
     const moved = await rekeyTask(C, doc);
     expect(moved.id).not.toBe(id);
-    expect((await getTask(next))!.metadata.previous_occurrence).toBe(moved.id);
+    expect(moved.metadata.rekeyed_from).toBe(id);
+    expect((await getTask(next))!.metadata).toMatchObject({ previous_occurrence: moved.id, recurrence_series: moved.id });
+    expect((await getTask(moved.id))!.metadata.recurrence_series).toBe(moved.id);
 
-    // A successor from another machine still names the old id: found through rekeyed_from.
-    await patchDocument(C, next, { previous_occurrence: id });
     await updateTask(moved.id, { status: 'pending' });
     expect((await completeTask(moved.id)).existingNext).toBe(next);
-    expect(await successorsOf(moved.id)).toHaveLength(0);
-    expect(await successorsOf(id)).toHaveLength(1);
+    expect(await successorsOf(moved.id)).toHaveLength(1);
+    // The series check finds the open occurrence by the new series id.
+    await expect(updateTask(moved.id, { lead_days: 1 })).rejects.toThrow(new RegExp(`change the series on ${next}`));
   });
 });

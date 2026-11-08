@@ -3,7 +3,6 @@ import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
 import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, patchDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
-import { metadataList } from '../metadata-adapter.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, UnsupportedByRemoteError, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
 import { getPendingDeletes, clearPendingDeletes, getPendingPurges, clearPendingPurges } from './deletes.js';
@@ -427,8 +426,7 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
   const metadata = await withDocLock(collection, doc.id, async () => {
     const [cur] = await getDocumentsByIds(collection, [doc.id]);
     const src = cur ?? doc;
-    // rekeyed_from: the id just left; rekeyed_from_all: every id it had, for links made under any of them.
-    const m = { ...src.metadata, id: newId, rekeyed_from: doc.id, rekeyed_from_all: [...new Set([...metadataList(src.metadata.rekeyed_from_all), doc.id])] };
+    const m = { ...src.metadata, id: newId, rekeyed_from: doc.id };
     await addDocument(collection, newId, src.content, m);
     await deleteDocument(collection, doc.id);
     return m;
@@ -440,12 +438,12 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
 
 /**
  * A re-keyed recurring task's neighbours in its collection point at its new
- * id (previous_occurrence, next_occurrence). An error fails the re-key's push
- * like any push error; the neighbours are still found through
- * rekeyed_from_all meanwhile, and a later re-key or edit links them.
+ * id: previous_occurrence, next_occurrence and recurrence_series. Safe now:
+ * the remote task holding the old id isn't local, or the id wouldn't have
+ * been free here. An error fails the re-key's push like any push error.
  */
 async function relinkOccurrences(collection: string, oldId: string, newId: string): Promise<void> {
-  for (const key of ['previous_occurrence', 'next_occurrence'] as const) {
+  for (const key of ['previous_occurrence', 'next_occurrence', 'recurrence_series'] as const) {
     for (const d of await getDocumentsByFilter(collection, { type: 'task', [key]: oldId }, 100_000)) {
       await withDocLock(collection, d.id, () => patchDocument(collection, d.id, { [key]: newId, is_synced: false, updated_at: Math.floor(Date.now() / 1000) }));
     }

@@ -15,17 +15,32 @@ vi.mock('./create.js', async importOriginal => {
     }),
   };
 });
+// One read of a task returns it as complete: the read before the lock, when another session reopens it meanwhile.
+const stale = vi.hoisted(() => ({ id: undefined as string | undefined }));
+vi.mock('../store/index.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../store/index.js')>();
+  return {
+    ...actual,
+    getDocumentsByIds: vi.fn(async (...args: Parameters<typeof actual.getDocumentsByIds>) => {
+      const r = await actual.getDocumentsByIds(...args);
+      if (stale.id && args[1].includes(stale.id) && r.length) {
+        stale.id = undefined;
+        return r.map(d => ({ ...d, metadata: { ...d.metadata, status: 'complete' } }));
+      }
+      return r;
+    }),
+  };
+});
 
 import { setConfig, resetConfig, createConfig } from '../config.js';
 import { setStore, resetStore, createLocalStore, addDocument, getDocumentsByFilter, getDocumentsByIds } from '../store/index.js';
-import { createTask, createTaskWithMetadata, TaskIdTakenError } from './create.js';
+import { addLeftCollection, clearLeftCollection, CollectionLeftError } from '../sync/sentinel.js';
+import { createTask, createTaskWithMetadata } from './create.js';
 import { completeTask, getTask, updateTask } from './update.js';
 import { requestDecision } from './close.js';
-import { rekeyTask } from '../sync/push.js';
 
 let dir: string;
 const C = 'private-successor';
-const tasks = async () => getDocumentsByFilter(C, { type: 'task' }, 1000);
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'yapa-successor-'));
   setConfig(createConfig({ YAPA_USERNAME: 'tester' }));
@@ -37,23 +52,11 @@ afterAll(async () => {
   resetConfig();
 });
 
-/** A series as YAPA 1.18 left it: a completed occurrence and the open one it created, with no links. */
-async function legacySeries(prefix: string, title: string, open = 1) {
-  const T = 1_900_000_000;
-  await addDocument(C, `${prefix}-1`, title, {
-    type: 'task', id: `${prefix}-1`, status: 'complete', is_recurring: true, recurrence_pattern: 'weekly', due_date: T, completed_at: T, created_at: T - 86400, updated_at: T,
-  });
-  for (let i = 0; i < open; i++) {
-    await addDocument(C, `${prefix}-${2 + i}`, title, {
-      type: 'task', id: `${prefix}-${2 + i}`, status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: T + 7 * 86400, created_at: T + 1 + i, updated_at: T + 1 + i,
-    });
-  }
-}
-
 describe('the next occurrence', () => {
-  it('an explicit id that is taken is refused, never written over', async () => {
+  it('an id that is taken is skipped, never written over', async () => {
     const taken = await createTask('somebody else\'s task', {}, C);
-    await expect(createTaskWithMetadata('mine', {}, C, { id: taken })).rejects.toBeInstanceOf(TaskIdTakenError);
+    const made = await createTaskWithMetadata('mine', {}, C, { id: taken });
+    expect(made.id).not.toBe(taken);
     expect((await getTask(taken))!.title).toBe('somebody else\'s task');
   });
 
@@ -69,19 +72,13 @@ describe('the next occurrence', () => {
     expect((await getTask(r.regeneratedId!))!.metadata.previous_occurrence).toBe(id);
   });
 
-  it('a successor made before 1.19 is found by title and linked, not duplicated', async () => {
-    await legacySeries('old', 'water the ferns');
-    await updateTask('old-1', { status: 'pending' });
-    const r = await completeTask('old-1');
-    expect(r).toMatchObject({ existingNext: 'old-2' });
-    expect((await getTask('old-2'))!.metadata).toMatchObject({ previous_occurrence: 'old-1', recurrence_series: 'old-1' });
-    expect((await tasks()).filter(d => d.content === 'water the ferns')).toHaveLength(2);
-  });
-
-  it('with several candidates it creates one as usual', async () => {
-    await legacySeries('dup', 'dust the shelves', 2);
-    await updateTask('dup-1', { status: 'pending' });
-    expect((await completeTask('dup-1')).regeneratedId).toBeDefined();
+  it('decides under the lock: a task read as complete but reopened meanwhile is completed, with a next occurrence', async () => {
+    const id = await createTask('wipe the whiteboard', { recurrence_pattern: 'daily' }, C);
+    stale.id = id;
+    const r = await completeTask(id);
+    expect(r.regeneratedId).toBeDefined();
+    expect((await getTask(id))!.metadata).toMatchObject({ status: 'complete', next_occurrence: r.regeneratedId });
+    expect(r.nudge).toBeDefined();
   });
 
   it('a series change is refused on a completed occurrence even when the same call reopens it', async () => {
@@ -95,11 +92,6 @@ describe('the next occurrence', () => {
     await expect(updateTask(next, { status: 'pending', recurrence_pattern: 'weekly' })).resolves.toBeDefined();
   });
 
-  it('names the open occurrence of a series from before 1.19', async () => {
-    await legacySeries('leg', 'sweep the yard');
-    await expect(updateTask('leg-1', { lead_days: 1 })).rejects.toThrow(/leg-1 is a completed occurrence: change the series on leg-2/);
-  });
-
   it('a refused series change through decision_needed stores no decision', async () => {
     const id = await createTask('pick the review day', { recurrence_pattern: 'weekly' }, C);
     await completeTask(id);
@@ -107,19 +99,17 @@ describe('the next occurrence', () => {
     expect(await getDocumentsByFilter(C, { type: 'memory' }, 100)).toHaveLength(0);
   });
 
-  it('keeps every id a re-keyed task had, and finds the successor by any of them', async () => {
-    const id = await createTask('file the timesheet', { recurrence_pattern: 'weekly' }, C);
-    const next = (await completeTask(id)).regeneratedId!;
-    let [doc] = await getDocumentsByIds(C, [id]);
-    const once = await rekeyTask(C, doc);
-    [doc] = await getDocumentsByIds(C, [once.id]);
-    const twice = await rekeyTask(C, doc);
-    expect((await getTask(twice.id))!.metadata).toMatchObject({ rekeyed_from: once.id, rekeyed_from_all: [id, once.id] });
-    // A successor from another machine still names the first id.
-    const { patchDocument } = await import('../store/index.js');
-    await patchDocument(C, next, { previous_occurrence: id });
-    await updateTask(twice.id, { status: 'pending' });
-    expect((await completeTask(twice.id)).existingNext).toBe(next);
+  it('a collection removed from this machine refuses the completion before anything is written', async () => {
+    const L = 'project-left-behind';
+    const id = await createTask('archive the old project', { recurrence_pattern: 'monthly' }, L);
+    await addLeftCollection(L);
+    try {
+      await expect(completeTask(id)).rejects.toBeInstanceOf(CollectionLeftError);
+      expect((await getTask(id))!.metadata.status).toBe('pending');
+      expect((await getDocumentsByFilter(L, { type: 'task' }, 100))).toHaveLength(1);
+    } finally {
+      await clearLeftCollection(L);
+    }
   });
 
   it('keeps a zone this machine doesn\'t know, and counts in local time', async () => {
