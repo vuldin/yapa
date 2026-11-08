@@ -47,7 +47,7 @@ task_complete id: alex-41
 - Occurrences completed before 1.19 aren't linked to their successors: reopening and completing one again can create a second occurrence (delete the extra).
 - When the successor already existed, the reply says `next occurrence X (already created)` instead of "regenerated".
 
-A completed occurrence's series can't be changed: `task_update` with a series parameter is refused and names the open occurrence to change instead, also when the same call reopens it. Reopening one with no open occurrence after it makes it the open one.
+Only the series' open occurrence (its latest one that isn't complete) takes series changes: on any other, including an older one that was reopened, `task_update` with a series parameter is refused and names the open one. Reopening a completed occurrence with no open one after it makes it the open one.
 
 **Changing a series** with `task_update`:
 - `recurrence_pattern` makes a plain task recurring, or changes the period. Either way the series is re-anchored at the task's due date (today if it has none). A new pattern resets `recurrence_interval` to 1 and `lead_days` to the pattern's default unless you pass them.
@@ -55,6 +55,7 @@ A completed occurrence's series can't be changed: `task_update` with a series pa
 - Changing just `due` moves this occurrence, not its slot: moved a few days earlier or later and completed, it is followed by the slot after the one it was scheduled for. To move the whole series, pass the pattern again with the new `due`.
 - A change to `recurrence_interval`, `lead_days` or `series_notes` on a recurring task with no due date (one from before 1.19) gives it today as its due date and anchor.
 - `status: complete` completes the task as `task_complete` does, with the other fields written first, so the series goes on.
+- `is_recurring: false` stops the series too; `is_recurring: true` starts it again on the task's own pattern (refused when it has none).
 - `recurrence_pattern: "none"` stops the series: the task stays, and completing it creates no next occurrence. It can't be combined with `recurrence_interval`, `lead_days` or `series_notes`. A recurring task can't lose its due date; stop the series first.
 - An update that would be refused writes nothing: no claim is taken and no `decision_needed` decision is stored.
 - Deleting an occurrence (`task_delete`) ends the series, since nothing is left to complete.

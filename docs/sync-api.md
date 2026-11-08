@@ -680,8 +680,10 @@ writes (all optional unless noted):
   `recurrence_notes` (the series' notes template), `recurrence_series` (id
   of the series' first task), `previous_occurrence` (id of the occurrence
   completed before this one; this link is what makes a task the successor),
-  `next_occurrence` (informational: the id the successor had when this
-  occurrence was completed; it goes stale if the successor is re-keyed),
+  `next_occurrence` (informational: the successor's id). When sync
+  re-keys a task, `previous_occurrence`, `next_occurrence` and
+  `recurrence_series` naming the old id are rewritten on the writer's own
+  tasks in that collection; others' copies aren't rewritten,
   `recurrence_tz` (IANA
   time zone the series' slots and opening days are counted in; absent:
   the completing machine's local time),

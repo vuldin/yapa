@@ -12,8 +12,8 @@
 import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, nextTasks, pushDocsNow, recordForTask,
-  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
-  nextOccurrenceText, listTasksCounted, metadataList, seriesInfo,
+  recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
+  closeText, nextOccurrenceText, releaseText, listTasksCounted, metadataList, seriesInfo,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -240,13 +240,10 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       // A CLI process has no background sync: push the new status before exiting.
       const pushed = await pushDocsNow(t.collection, [t.id, ...(regenerated ? [regenerated.id] : [])]).catch(() => undefined);
       const exit = release?.kind === 'unshared' || (pushed && pushed.errors > 0) ? EXIT.unavailable : EXIT.ok;
-      const text = release?.kind === 'released' ? `${t.id} -> ${status}; claim released`
-        : release?.kind === 'held_by_other' ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it`
-          : release?.kind === 'unshared' ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own`
-            : `${t.id} -> ${status}`;
-      // The first line keeps its format for scripts; the next occurrence follows it.
-      const more = [nextLine, decision ? `decision ${decision} recorded; the task waits on it` : '', recorded?.memories.length ? `recorded ${recorded.memories.join(', ')}` : '',
-        recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
+      // The first line keeps its format for scripts ("ID -> status; claim released", the holder's full session id).
+      const released = releaseText(release, { fullSession: true });
+      const text = `${t.id} -> ${status}${released ? `; ${released[0].toLowerCase()}${released.slice(1, -1)}` : ''}`;
+      const more = [nextLine, decision ? `decision ${decision} recorded; the task waits on it` : '', closeText({ recorded, nudge })].filter(Boolean);
       return {
         exit,
         json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null, existing_next: existingNext ?? null },
