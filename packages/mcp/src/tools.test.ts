@@ -246,7 +246,7 @@ describe('registered tools over the local store', () => {
     expect(set.content[0].text).toMatch(/\nRepeats every 2 weeks, opens 2 day\(s\) before it is due; this occurrence is due .*, open now\.$/);
   });
 
-  it('task_update status complete continues a series like task_complete, with the other fields written first', async () => {
+  it('task_update status complete continues a series like task_complete, with the other fields written with it', async () => {
     const C = 'private-recurring';
     const id = (await call('task_create', { title: 'send the monthly summary', collection: C, recurrence_pattern: 'monthly', notes: 'v1' })).content[0].text.match(/(tester-\d+)/)[1];
     const r = await call('task_update', { id, status: 'complete', series_notes: 'v2', duration: '30m' });

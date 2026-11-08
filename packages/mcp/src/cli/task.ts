@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import {
   ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
-  completedText, listTasksCounted, metadataList, RegenerationError, seriesInfo,
+  completedText, listTasksCounted, metadataList, seriesInfo,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
 } from '@yapa/core';
 import { EXIT } from '../coord.js';
@@ -33,8 +33,7 @@ export const TASK_USAGE =
   'on it, pending). list leaves out recurring occurrences that have not opened yet unless --include-upcoming.\n' +
   '"-" reads stdin. --session defaults to $YAPA_SESSION, then $CLAUDE_CODE_SESSION_ID, else this process.\n' +
   'Prints one JSON object (--text: a short summary).\n' +
-  'Exit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 5 completed but its next occurrence\n' +
-  'was not created (release --status complete again to retry), 2 bad arguments, 1 other error.\n';
+  'Exit: 0 done, 3 refused (held by someone else), 4 done locally but not shared, 2 bad arguments, 1 other error.\n';
 
 export interface TaskCliResult {
   exit: number;
@@ -215,22 +214,14 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       let decision: string | undefined;
       let regenerated: { id: string; due_date: number; opens_at: number } | undefined;
       let completed: string | undefined;
-      let regenerationError: string | undefined;
       if (status === 'complete') {
         const durationMinutes = int(flag(args, '--duration'), '--duration');
-        try {
-          const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
-          release = c.release;
-          recorded = c.recorded;
-          nudge = c.nudge;
-          if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
-          completed = completedText(t.id, c, { durationMinutes });
-        } catch (e) {
-          // The completion was written; only its next occurrence is missing. Sync it below, and say so.
-          if (!(e instanceof RegenerationError)) throw e;
-          regenerationError = e.message;
-          completed = `${t.id} -> complete; ${e.message}`;
-        }
+        const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
+        release = c.release;
+        recorded = c.recorded;
+        nudge = c.nudge;
+        if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
+        completed = completedText(t.id, c, { durationMinutes });
       } else {
         const reason = flag(args, '--reason');
         const fields = { ...(reason ? { blockedReason: reason } : {}) };
@@ -246,7 +237,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       recordLastWrite(t.collection);
       // A CLI process has no background sync: push the new status before exiting.
       const pushed = await pushDocsNow(t.collection, [t.id, ...(regenerated ? [regenerated.id] : [])]).catch(() => undefined);
-      const exit = regenerationError ? EXIT.partial : release?.kind === 'unshared' || (pushed && pushed.errors > 0) ? EXIT.unavailable : EXIT.ok;
+      const exit = release?.kind === 'unshared' || (pushed && pushed.errors > 0) ? EXIT.unavailable : EXIT.ok;
       const text = release?.kind === 'released' ? `${t.id} -> ${status}; claim released`
         : release?.kind === 'held_by_other' ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it`
           : release?.kind === 'unshared' ? `${t.id} -> ${status}; release not shared (${release.reason}); the claim lapses on its own`
@@ -255,7 +246,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
       return {
         exit,
-        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null, regeneration_error: regenerationError ?? null },
+        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null },
         text: completed ?? (more.length ? `${text}\n${more.join('\n')}` : text),
       };
     }

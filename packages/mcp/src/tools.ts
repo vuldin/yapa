@@ -93,7 +93,6 @@ import {
   KEPT_AS_NOTE_REASON,
   RecordsElsewhereError,
   RecurrenceError,
-  RegenerationError,
   RECURRENCE_PATTERNS,
   closeText,
   completedText,
@@ -104,6 +103,7 @@ import {
   recurrenceNote,
   seriesChanged,
   seriesInfo,
+  metadataList,
   upcomingNote,
   redirectNote,
   removeCollection,
@@ -1111,7 +1111,6 @@ export function registerTools(server: McpServer): void {
         if (!task) {
           return { content: [{ type: 'text' as const, text: `Task ${id} not found.` }] };
         }
-        const norm = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toString().split(',').filter(Boolean);
         const lines = [
           `**${task.id}**: ${task.title}`,
           `Status: ${task.metadata.status} | Priority: ${task.metadata.priority}`,
@@ -1134,11 +1133,11 @@ export function registerTools(server: McpServer): void {
         if (series && series.series_notes !== null && series.series_notes !== (task.metadata.notes ?? '')) {
           lines.push(`Series notes: ${series.series_notes || '(none)'}`);
         }
-        const tags = norm(task.metadata.tags);
+        const tags = metadataList(task.metadata.tags);
         if (tags.length) lines.push(`Tags: ${tags.join(', ')}`);
-        const deps = norm(task.metadata.depends_on);
+        const deps = metadataList(task.metadata.depends_on);
         if (deps.length) lines.push(`Depends on: ${deps.join(', ')}`);
-        const blocks = norm(task.metadata.blocks);
+        const blocks = metadataList(task.metadata.blocks);
         if (blocks.length) lines.push(`Blocks: ${blocks.join(', ')}`);
         return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
       }
@@ -1245,7 +1244,7 @@ export function registerTools(server: McpServer): void {
           decision = d.decision;
           r = d;
         } else if (status === 'complete') {
-          // A completion, with the other fields written first: a recurring task's series goes on.
+          // A completion, the other fields written with it: a recurring task's series goes on.
           const { status: _s, duration_minutes: minutes, ...rest } = updates;
           const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
           recordLastWrite(c.collection);
@@ -1298,8 +1297,6 @@ export function registerTools(server: McpServer): void {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
         recordLastWrite(result.collection);
       } catch (e) {
-        // The completion itself was written: it syncs like any other.
-        if (e instanceof RegenerationError) recordLastWrite((await getTask(id))?.collection);
         return typedError(e);
       }
       return { content: [{ type: 'text' as const, text: completedText(id, result, { durationMinutes }) }] };
