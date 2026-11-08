@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 
 // Mock the core before importing the plugin modules that use it.
 vi.mock('@yapa/core', async importOriginal => {
@@ -99,6 +99,21 @@ describe('rules prompt section', () => {
 
 describe('tool registration', () => {
   beforeEach(() => vi.clearAllMocks());
+  // A temporary store, so a tool that reaches a real core write path can't touch this machine's store.
+  let storeDir: string;
+  beforeAll(async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const core = await import('@yapa/core');
+    storeDir = mkdtempSync(join(tmpdir(), 'yapa-dsh-plugin-'));
+    core.setStore(core.createLocalStore(storeDir));
+  });
+  afterAll(async () => {
+    const core = await import('@yapa/core');
+    core.resetStore();
+    (await import('node:fs')).rmSync(storeDir, { recursive: true, force: true });
+  });
 
   it('registers the mission tool set by default (ML-ops gated off)', async () => {
     const registered: { name: string }[] = [];
