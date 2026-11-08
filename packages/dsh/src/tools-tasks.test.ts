@@ -75,5 +75,9 @@ describe('DSH recurring tasks', () => {
     expect((await getTask(r.value.regenerated_id))?.metadata).toMatchObject({ notes: 'v2', previous_occurrence: id });
     await expect(run('yapa_task_update', { id: r.value.regenerated_id, status: 'complete', recurrence_pattern: 'none', lead_days: 2 })).rejects.toThrow(/stops the series/);
     expect((await getTask(r.value.regenerated_id))?.metadata.status).toBe('pending');
+    const lead = await run('yapa_task_update', { id: r.value.regenerated_id, status: 'complete', lead_days: 4 });
+    expect(lead.text.split('\n')[1]).toBe('Repeats monthly, opens 4 day(s) before it is due.');
+    expect((await getTask(lead.value.regenerated_id))?.metadata.lead_days).toBe(4);
+    expect((await run('yapa_task_list', { collection: C })).text).not.toContain(lead.value.regenerated_id);
   });
 });

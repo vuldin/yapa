@@ -22,7 +22,6 @@ import {
   detectChromaVersion,
   forgetMemory,
   formatTaskDate,
-  formatTaskDay,
   type RecurrencePattern,
   isRecurring,
   isUpcoming,
@@ -32,20 +31,23 @@ import {
   recurrenceNote,
   upcomingNote,
   getDocumentsByIds,
+  closeText,
+  completedText,
+  hiddenUpcomingLine,
+  listTasksCounted,
+  type CompleteResult,
   getTask,
   journalAppend,
   journalConsolidate,
   listCollections,
   listCollectionsWithCounts,
   listMemories,
-  listTasks,
   mergeCollections,
   mergeReportLines,
   resolveWriteCollection,
   assertMayCreateCollection,
   sessionFolder,
   runScopeAction,
-  keptAsNotesLine,
   KEPT_AS_NOTE_REASON,
   redirectNote,
   parseRelativeDate,
@@ -125,12 +127,6 @@ type ExecLike = { agent?: { session: { header: { cwd?: string } } } } | undefine
 const folderOf = (exec: ExecLike) => exec?.agent?.session.header.cwd || sessionFolder();
 const writeTarget = (name: string, exec: ExecLike) => resolveWriteCollection(name, { folder: folderOf(exec) });
 
-const closeSummary = (r: { recorded?: { memories: string[]; follow_ups: string[] }; nudge?: string }) => [
-  r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(', ')}.` : '',
-  r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(', ')}.` : '',
-  keptAsNotesLine(r.recorded),
-  r.nudge ?? '',
-].filter(Boolean).join('\n');
 const pickTyped = (args: Record<string, any>) =>
   Object.fromEntries(TYPED_KEYS.filter(k => args[k] !== undefined).map(k => [k, args[k]]));
 
@@ -203,23 +199,21 @@ function toTaskItem(t: { id: string; title: string; collection: string; metadata
   };
 }
 
-/** Structured completion fields, shared by yapa_task_complete and yapa_task_update (status complete). */
+/** Completion fields, shared by yapa_task_complete and yapa_task_update (status complete); `summary` is core's reply text. */
 const completionProps = {
   regenerated_id: { type: 'string' },
   next_due: { type: 'number' },
   opens_at: { type: 'number' },
+  summary: { type: 'string' },
 } as const;
 
-function completion(result: Awaited<ReturnType<typeof completeTask>>) {
+function completion(id: string, result: CompleteResult, seriesChanged = false) {
   return {
     ...(result.regeneratedId && { regenerated_id: result.regeneratedId }),
     ...(result.next && { next_due: result.next.due_date, opens_at: result.next.opens_at }),
+    summary: completedText(id, result, { seriesChanged }),
   };
 }
-
-const completedText = (id: string, v: { regenerated_id?: string; next_due?: number; opens_at?: number }) =>
-  `Completed task ${id}${v.regenerated_id ? ` → regenerated as ${v.regenerated_id} (recurring)` : ''}`
-  + `${v.next_due && v.opens_at ? `, due ${formatTaskDate(v.next_due)}, opens ${formatTaskDay(v.opens_at)}` : ''}`;
 
 export function registerTools(ctx: Context): void {
   // --- Status -------------------------------------------------------------
@@ -894,7 +888,7 @@ export function registerTools(ctx: Context): void {
           if (t.blocks?.length) lines.push(`Blocks: ${t.blocks.join(', ')}`);
           return text(lines.join('\n'));
         }
-        const hidden = v.upcoming_hidden ? `_${v.upcoming_hidden} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
+        const hidden = hiddenUpcomingLine(v.upcoming_hidden ?? 0);
         if (v.tasks.length === 0) return text(hidden ? `No open tasks found.\n${hidden}` : 'No tasks found.');
         return text([...v.tasks.map(t => {
           let line = `- **${t.id}** [${t.status}] ${t.priority ?? 'medium'} | ${t.title}`;
@@ -910,17 +904,15 @@ export function registerTools(ctx: Context): void {
         const task = await getTask(args.id);
         return { tasks: task ? [toTaskDetail(task)] : [] };
       }
-      const listed = await listTasks({
+      const { tasks, upcomingHidden: hidden } = await listTasksCounted({
         status: args.status,
         priority: args.priority,
         customer: args.customer,
         project: args.project,
         collection: args.collection,
         includeComplete: args.include_complete,
-        includeUpcoming: true,
+        includeUpcoming: args.include_upcoming,
       });
-      const tasks = args.include_upcoming ? listed : listed.filter(t => !isUpcoming(t.metadata));
-      const hidden = listed.length - tasks.length;
       return { tasks: tasks.map(toTaskItem), ...(hidden && { upcoming_hidden: hidden }) };
     },
     presentCall: args => ({
@@ -971,7 +963,8 @@ export function registerTools(ctx: Context): void {
           recurrence: { type: 'string' }, claim: { type: 'string' }, decision: { type: 'string' }, recorded: { type: 'string' },
         },
       },
-      render: (_args, v) => text(`${v.completed ? completedText(v.id, v) : `Updated task ${v.id}`}${v.recurrence ? `\n${v.recurrence}` : ''}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
+      render: (_args, v) => text(v.completed && v.summary ? v.summary
+        : `Updated task ${v.id}${v.recurrence ? `\n${v.recurrence}` : ''}${v.decision ? `\nRecorded decision ${v.decision}; the task waits on it.` : ''}${v.claim ? `\n${v.claim}` : ''}${v.recorded ? `\n${v.recorded}` : ''}`),
     },
     async execute(args) {
       const updates: Record<string, any> = {};
@@ -1006,8 +999,8 @@ export function registerTools(ctx: Context): void {
         // A completion, with the other fields written first: a recurring task's series goes on.
         const { status: _s, ...rest } = updates;
         const c = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups }, rest);
-        const rec = closeSummary(c);
-        return { id: args.id, completed: true, ...completion(c), ...(rec && { recorded: rec }) };
+        const seriesChanged = ['recurrence_pattern', 'recurrence_interval', 'lead_days', 'series_notes'].some(k => args[k as keyof typeof args] !== undefined);
+        return { id: args.id, completed: true, ...completion(args.id, c, seriesChanged) };
       } else {
         r = await updateTask(args.id, updates);
       }
@@ -1016,7 +1009,7 @@ export function registerTools(ctx: Context): void {
         ? await recordForTask({ id: r.id, collection: updated.collection }, { learned: args.learned, follow_ups: args.follow_ups })
         : undefined;
       const claim = r.claim ? describeClaim(r.claim) : '';
-      const rec = closeSummary({ recorded });
+      const rec = closeText({ recorded });
       const recurrence = args.recurrence_pattern || args.recurrence_interval !== undefined || args.lead_days !== undefined ? recurrenceLine(updated.metadata) : '';
       return { id: r.id, ...(recurrence && { recurrence }), ...(claim && { claim }), ...(decision && { decision }), ...(rec && { recorded: rec }) };
     },
@@ -1037,15 +1030,13 @@ export function registerTools(ctx: Context): void {
         properties: {
           id: { type: 'string', required: true },
           ...completionProps,
-          recorded: { type: 'string' },
         },
       },
-      render: (_args, v) => text(`${completedText(v.id, v)}${v.recorded ? `\n${v.recorded}` : ''}`),
+      render: (_args, v) => text(v.summary ?? `Completed task ${v.id}`),
     },
     async execute(args) {
       const result = await completeTask(args.id, undefined, {}, { learned: args.learned, follow_ups: args.follow_ups });
-      const rec = closeSummary(result);
-      return { id: args.id, ...completion(result), ...(rec && { recorded: rec }) };
+      return { id: args.id, ...completion(args.id, result) };
     },
     presentCall: args => ({ card: 'generic', title: `Complete task ${args.id}`, kind: 'edit' }),
   }));
