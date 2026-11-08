@@ -223,13 +223,17 @@ export function closeText(r: { recorded?: Recorded; nudge?: string }): string {
  * claim release, what was recorded. With `seriesChanged` (recurrence fields
  * changed in the same call), what the series does now.
  */
+/** "regenerated as X (recurring), due …, opens …", or '' with no next occurrence. */
+export function nextOccurrenceText(result: CompleteResult): string {
+  if (!result.regeneratedId) return '';
+  return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}` : ''}`;
+}
+
 export function completedText(id: string, result: CompleteResult, opts: { durationMinutes?: number; seriesChanged?: boolean } = {}): string {
   let text = `Completed task ${id}`;
   if (opts.durationMinutes != null) text += ` (effort: ${formatDuration(opts.durationMinutes)})`;
-  if (result.regeneratedId) {
-    text += ` → regenerated as ${result.regeneratedId} (recurring)`;
-    if (result.next) text += `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}`;
-  }
+  const next = nextOccurrenceText(result);
+  if (next) text += ` → ${next}`;
   const lines = [text];
   if (opts.seriesChanged && result.metadata) {
     const note = recurrenceNote(result.metadata);

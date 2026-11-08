@@ -6,12 +6,12 @@ import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
-import { createTaskWithMetadata } from './create.js';
+import { createTaskWithMetadata, newTaskId } from './create.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
 import {
   isRecurring, leadDays, nextRecurrenceDue, occurrenceSlot, opensAt, RECURRENCE_KEYS, RecurrenceError, recurrenceChanges, recurrenceInterval,
-  opensAtOf, SERIES_PARAMS, seriesChanged, seriesZone, todayDue, type RecurrencePattern, type RecurrenceUpdate,
+  metaTime, opensAtOf, SERIES_PARAMS, seriesChanged, seriesZone, todayDue, type RecurrencePattern, type RecurrenceUpdate,
 } from './recurrence.js';
 import { metadataList } from '../metadata-adapter.js';
 
@@ -209,11 +209,18 @@ export async function completeTask(
   const { status: _s, ...rest } = fields;
   const duration = durationMinutes != null ? { duration_minutes: durationMinutes } : {};
 
+  const record_ = async () => record.learned?.length || record.follow_ups?.length
+    ? await recordForTask({ id: task.id, collection: task.collection }, record)
+    : undefined;
+
   let updates: TaskUpdates;
   if (task.metadata.status === 'complete') {
     // Already complete: only the fields passed, nothing about closing it again (and no next occurrence).
     updates = { ...rest, ...duration };
-    if (!Object.keys(updates).length) return { metadata: task.metadata, collection: task.collection };
+    if (!Object.keys(updates).length) {
+      const recorded = await record_();
+      return { metadata: task.metadata, collection: task.collection, ...(recorded ? { recorded } : {}) };
+    }
   } else {
     updates = { ...rest, ...duration, status: 'complete', salience: (task.metadata.salience ?? 2.0) * 0.5 };
     // Set completed_at exactly once (first-completion-wins). A later reopen -> re-complete
@@ -222,17 +229,18 @@ export async function completeTask(
   }
 
   // A recurring task gets its next occurrence on the move to complete, before that is written and under the same lock.
+  // Its id is allocated first, outside the lock (allocation can wait on the sync service); a refused completion wastes it.
+  const nextId = task.metadata.status !== 'complete' && isRecurring(task.metadata) ? await newTaskId() : undefined;
   let successor: { id: string; due_date: number; opens_at: number } | undefined;
   const u = await updateTask(id, updates, ctx, {
     beforeWrite: async ({ content, metadata, previousStatus }) => {
       if (previousStatus === 'complete' || metadata.status !== 'complete' || !isRecurring(metadata)) return {};
-      successor = await findSuccessorOf(task.collection, task.id) ?? await createSuccessor(task.collection, task.id, content, metadata);
+      successor = await findSuccessorOf(task.collection, [task.id, ...formerIds(metadata)])
+        ?? await createSuccessor(task.collection, task.id, content, metadata, nextId);
       return { next_occurrence: successor.id };
     },
   });
-  const recorded = record.learned?.length || record.follow_ups?.length
-    ? await recordForTask({ id: task.id, collection: task.collection }, record)
-    : undefined;
+  const recorded = await record_();
   const nudge = u.previousStatus !== 'complete' && u.metadata?.status === 'complete' ? captureNudge(task.id, task.metadata, recorded) : undefined;
   return {
     metadata: u.metadata, collection: task.collection,
@@ -241,25 +249,31 @@ export async function completeTask(
   };
 }
 
+/** The ids a task had before sync re-keyed it. */
+const formerIds = (m: Record<string, any>): string[] => (typeof m.rekeyed_from === 'string' && m.rekeyed_from ? [m.rekeyed_from] : []);
+
 /**
- * The occurrence that follows `id` in its collection: the task whose
- * previous_occurrence is `id` (next_occurrence on `id` is only a pointer to
- * it, and goes stale if the successor is re-keyed).
+ * The occurrence that follows a task in its collection: the task whose
+ * previous_occurrence is one of `ids` (the task's id, and the ids it had
+ * before a re-key). next_occurrence on the task is only a pointer to it.
+ * A store error propagates: "no successor" must mean none.
  */
-async function findSuccessorOf(collection: string, id: string): Promise<{ id: string; due_date: number; opens_at: number } | undefined> {
-  const docs = await getDocumentsByFilter(collection, { type: 'task', previous_occurrence: id }, 5).catch(() => []);
-  const d = docs.find(x => x.metadata.archived !== true);
-  return d ? { id: d.id, due_date: Number(d.metadata.due_date), opens_at: opensAtOf(d.metadata) } : undefined;
+async function findSuccessorOf(collection: string, ids: string[]): Promise<{ id: string; due_date: number; opens_at: number } | undefined> {
+  for (const id of ids) {
+    const d = (await getDocumentsByFilter(collection, { type: 'task', previous_occurrence: id }, 5)).find(x => x.metadata.archived !== true);
+    if (d) return { id: d.id, due_date: metaTime(d.metadata.due_date), opens_at: opensAtOf(d.metadata) };
+  }
+  return undefined;
 }
 
 /** Create the next occurrence of `id`, from the task as the completion is about to write it. */
-async function createSuccessor(collection: string, id: string, title: string, m: Record<string, any>) {
+async function createSuccessor(collection: string, id: string, title: string, m: Record<string, any>, newId?: string) {
   const pattern = m.recurrence_pattern as RecurrencePattern;
   const interval = recurrenceInterval(m);
   const lead = leadDays(m);
   const tz = seriesZone(m);
   const slot = occurrenceSlot(m);
-  const anchor = Number(m.recurrence_anchor) > 0 ? Number(m.recurrence_anchor) : slot || todayDue();
+  const anchor = metaTime(m.recurrence_anchor) || slot || todayDue();
   // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this
   // occurrence's slot (where it was scheduled, even if its due date was moved).
   const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)), tz);
@@ -282,7 +296,7 @@ async function createSuccessor(collection: string, id: string, title: string, m:
     recurrence_notes: template,
     recurrence_series: m.recurrence_series || id,
     previous_occurrence: id,
-  }, collection);
+  }, collection, { id: newId });
   return { id: made.id, due_date: nextDue, opens_at: opensAt(nextDue, lead, tz) };
 }
 
@@ -290,16 +304,12 @@ async function createSuccessor(collection: string, id: string, title: string, m:
 async function checkSeriesTarget(task: TaskResult, updates: TaskUpdates): Promise<void> {
   if (!seriesChanged(updates) || task.metadata.status !== 'complete') return;
   if (updates.status !== undefined && updates.status !== 'complete') return;
-  let at = task.id;
-  for (let hops = 0; hops < 50; hops++) {
-    const next = await findSuccessorOf(task.collection, at);
-    if (!next) break;
-    const t = (await getDocumentsByIds(task.collection, [next.id]))[0];
-    if (t && t.metadata.status !== 'complete') {
-      throw new RecurrenceError(`${task.id} is a completed occurrence: change the series on ${t.id}, its open occurrence`);
-    }
-    at = next.id;
-  }
-  throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
+  // Series from before recurrence_series were named after their first task.
+  const series = task.metadata.recurrence_series || task.id;
+  const open = (await getDocumentsByFilter(task.collection, { type: 'task', recurrence_series: series }, 10_000))
+    .find(d => d.id !== task.id && d.metadata.status !== 'complete' && d.metadata.archived !== true);
+  throw new RecurrenceError(open
+    ? `${task.id} is a completed occurrence: change the series on ${open.id}, its open occurrence`
+    : `${task.id} is complete and no open occurrence follows it: there is no series left to change`);
 }
 

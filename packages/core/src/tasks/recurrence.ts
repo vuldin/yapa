@@ -119,7 +119,7 @@ const nonNegInt = (v: unknown): number | undefined => {
   return n !== undefined && Number.isInteger(n) && n >= 0 ? n : undefined;
 };
 /** A positive metadata time (unix seconds), else 0. */
-const metaTime = (v: unknown): number => { const n = metaNumber(v); return n !== undefined && n > 0 ? n : 0; };
+export const metaTime = (v: unknown): number => { const n = metaNumber(v); return n !== undefined && n > 0 ? n : 0; };
 
 export function isRecurring(m: Record<string, any>): boolean {
   return truthy(m.is_recurring) && isRecurrencePattern(m.recurrence_pattern);
@@ -167,9 +167,20 @@ export function opensAtOf(m: Record<string, any>, fallback?: OpeningRule): numbe
   return storedOpensAt(m) ?? (fallback ? fallback(due, lead) : opensAt(due, lead, seriesZone(m)));
 }
 
+/**
+ * The one upcoming rule: for a recurring task with a due date, when it opens
+ * and whether that is still ahead of `now` for a pending occurrence (it is
+ * upcoming); undefined for any other task.
+ */
+export function openingOf(m: Record<string, any>, now = Math.floor(Date.now() / 1000), fallback?: OpeningRule): { opens_at: number; upcoming: boolean } | undefined {
+  if (!isRecurring(m) || !metaTime(m.due_date)) return undefined;
+  const opens = opensAtOf(m, fallback);
+  return { opens_at: opens, upcoming: (m.status ?? 'pending') === 'pending' && now < opens };
+}
+
 /** Upcoming: a pending occurrence of a recurring task that hasn't opened yet. */
 export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000), fallback?: OpeningRule): boolean {
-  return isRecurring(m) && metaTime(m.due_date) > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m, fallback);
+  return openingOf(m, now, fallback)?.upcoming ?? false;
 }
 
 /** "weekly", "every 2 months". */
@@ -186,10 +197,8 @@ export function describeRecurrence(m: Record<string, any>): string {
  * open. The opening time is worked out once.
  */
 export function upcomingInfo(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): { opens_at: number; note: string } | undefined {
-  const due = metaTime(m.due_date);
-  if (!isRecurring(m) || !due || (m.status ?? 'pending') !== 'pending') return undefined;
-  const opens = opensAtOf(m);
-  return now < opens ? { opens_at: opens, note: `upcoming: due ${formatTaskDate(due)}, opens ${formatTaskDay(opens)}` } : undefined;
+  const o = openingOf(m, now);
+  return o?.upcoming ? { opens_at: o.opens_at, note: `upcoming: due ${formatTaskDate(metaTime(m.due_date))}, opens ${formatTaskDay(o.opens_at)}` } : undefined;
 }
 
 /** upcomingInfo's note, or '' when the task is open. */
@@ -257,7 +266,7 @@ export interface SeriesInfo {
 /** A task's series, for listings and JSON; null when it isn't recurring. */
 export function seriesInfo(m: Record<string, any>, id: string, now = Math.floor(Date.now() / 1000)): SeriesInfo | null {
   if (!isRecurring(m)) return null;
-  const opens = metaTime(m.due_date) ? opensAtOf(m) : null;
+  const o = openingOf(m, now);
   return {
     pattern: m.recurrence_pattern,
     interval: recurrenceInterval(m),
@@ -269,8 +278,8 @@ export function seriesInfo(m: Record<string, any>, id: string, now = Math.floor(
     next: m.next_occurrence || null,
     series_notes: m.recurrence_notes !== undefined ? String(m.recurrence_notes) : null,
     zone: seriesZone(m) ?? null,
-    upcoming: opens !== null && (m.status ?? 'pending') === 'pending' && now < opens,
-    opens_at: opens,
+    upcoming: o?.upcoming ?? false,
+    opens_at: o?.opens_at ?? null,
   };
 }
 
@@ -321,7 +330,7 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
     throw p === undefined ? needsDue(id) : new RecurrenceError('A recurring task needs a due date: don\'t clear the due date when setting recurrence_pattern');
   }
 
-  const curDue = Number(cur.due_date) > 0 ? Number(cur.due_date) : 0;
+  const curDue = metaTime(cur.due_date);
   const due = u.due_date !== undefined ? u.due_date : curDue;
   const pattern = (p ?? cur.recurrence_pattern) as RecurrencePattern;
   const same = recurring && pattern === cur.recurrence_pattern;
@@ -334,7 +343,8 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
       due_date: d,
       recurrence_anchor: d,
       recurrence_slot: d,
-      recurrence_tz: localZone(),
+      // A re-anchor keeps the series' zone: an editor elsewhere doesn't move it.
+      recurrence_tz: seriesZone(cur) ?? localZone(),
       recurrence_interval: iv ?? (same ? recurrenceInterval(cur) : 1),
       lead_days: ld ?? (same ? leadDays(cur) : DEFAULT_LEAD_DAYS[pattern]),
     });
@@ -345,11 +355,11 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
   } else {
     if (ld !== undefined) out.lead_days = ld;
     // An occurrence from before slots were stored keeps its slot when its due date moves.
-    if (u.due_date !== undefined && curDue && !(Number(cur.recurrence_slot) > 0)) out.recurrence_slot = curDue;
+    if (u.due_date !== undefined && curDue && !metaTime(cur.recurrence_slot)) out.recurrence_slot = curDue;
   }
   if (sn !== undefined) out.recurrence_notes = sn;
   const finalDue = out.due_date ?? due;
-  if (finalDue > 0 && (out.due_date !== undefined || out.lead_days !== undefined || u.due_date !== undefined || !(Number(cur.opens_at) > 0))) {
+  if (finalDue > 0 && (out.due_date !== undefined || out.lead_days !== undefined || u.due_date !== undefined || !metaTime(cur.opens_at))) {
     out.opens_at = opensAt(finalDue, out.lead_days ?? leadDays(cur), out.recurrence_tz ?? seriesZone(cur));
   }
   return out;

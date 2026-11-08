@@ -457,6 +457,35 @@ describe('recurring tasks over the store', () => {
       await expect(updateTask(id, { notes: 'a note on the done one' })).resolves.toBeDefined();
     });
 
+    it('a re-anchor keeps the series\' zone: a Berlin editor changing a New York series', async () => {
+      const saved = process.env.TZ;
+      try {
+        process.env.TZ = 'America/New_York';
+        const id = await createTask('call the New York office', { recurrence_pattern: 'weekly', due_date: Date.UTC(2027, 2, 8, 14) / 1000 }, R);
+        expect((await getTask(id))!.metadata.recurrence_tz).toBe('America/New_York');
+        process.env.TZ = 'Europe/Berlin';
+        await updateTask(id, { recurrence_pattern: 'monthly' });
+        const m = (await getTask(id))!.metadata;
+        expect(m.recurrence_tz).toBe('America/New_York');
+        // Mar 8 09:00 in New York, a month on: Apr 8 09:00 EDT.
+        expect(new Date(recurrenceSlot(m.recurrence_anchor, 'monthly', 1, 1, m.recurrence_tz) * 1000).toISOString()).toBe('2027-04-08T13:00:00.000Z');
+      } finally {
+        if (saved === undefined) delete process.env.TZ;
+        else process.env.TZ = saved;
+      }
+    });
+
+    it('a bogus due date reads as none: true or "0x10"', async () => {
+      now(at(2027, 11, 3, 9));
+      for (const [i, bogus] of [true, '0x10'].entries()) {
+        const id = `tester-98${i}`;
+        await addDocument(R, id, 'test the alarm', { type: 'task', id, status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: bogus, created_at: 1, updated_at: 1 });
+        expect(isUpcoming((await getTask(id))!.metadata)).toBe(false);
+        await updateTask(id, { lead_days: 1 });
+        expect((await getTask(id))!.metadata).toMatchObject({ due_date: at(2027, 11, 3), recurrence_anchor: at(2027, 11, 3), lead_days: 1 });
+      }
+    });
+
     it('a recurring task created here records this machine\'s zone', async () => {
       const id = await createTask('wind the clocks', { recurrence_pattern: 'monthly', due_date: at(2030, 1, 31) }, R);
       expect((await getTask(id))!.metadata.recurrence_tz).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);

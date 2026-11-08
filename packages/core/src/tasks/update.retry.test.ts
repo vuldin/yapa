@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // One write fails on demand: the next occurrence's create, or the completion itself.
-const fail = vi.hoisted(() => ({ create: false, patch: false }));
+const fail = vi.hoisted(() => ({ create: false, patch: false, filter: false }));
 vi.mock('./create.js', async importOriginal => {
   const actual = await importOriginal<typeof import('./create.js')>();
   return {
@@ -22,6 +22,10 @@ vi.mock('../store/index.js', async importOriginal => {
     patchDocument: vi.fn(async (...args: Parameters<typeof actual.patchDocument>) => {
       if (fail.patch) { fail.patch = false; throw new Error('disk full'); }
       return actual.patchDocument(...args);
+    }),
+    getDocumentsByFilter: vi.fn(async (...args: Parameters<typeof actual.getDocumentsByFilter>) => {
+      if (fail.filter && (args[1] as any)?.previous_occurrence) { fail.filter = false; throw new Error('index unavailable'); }
+      return actual.getDocumentsByFilter(...args);
     }),
   };
 });
@@ -71,6 +75,23 @@ describe('completeTask and the next occurrence', () => {
     expect(r.regeneratedId).toBe(made.id);
     expect(await successorsOf(id)).toHaveLength(1);
     expect((await getTask(id))!.metadata).toMatchObject({ status: 'complete', next_occurrence: made.id });
+  });
+
+  it('a failed successor lookup is an error, not "no successor": nothing is written', async () => {
+    const id = await createTask('descale the kettle', { recurrence_pattern: 'monthly' }, C);
+    fail.filter = true;
+    await expect(completeTask(id)).rejects.toThrow(/index unavailable/);
+    expect((await getTask(id))!.metadata.status).toBe('pending');
+    expect(await successorsOf(id)).toHaveLength(0);
+  });
+
+  it('records learned items and follow-ups on an already-complete task with no other fields', async () => {
+    const id = await createTask('sort the receipts', {}, C);
+    await completeTask(id);
+    const r = await completeTask(id, undefined, {}, { learned: [{ content: 'receipts older than a year can go', kind: 'finding' }], follow_ups: [{ title: 'shred the old receipts' }] });
+    expect(r.recorded?.memories).toHaveLength(1);
+    expect(r.recorded?.follow_ups).toHaveLength(1);
+    expect((await getTask(id))!.metadata.memory_ids).toEqual(r.recorded!.memories);
   });
 
   it('two completions at once create one successor', async () => {

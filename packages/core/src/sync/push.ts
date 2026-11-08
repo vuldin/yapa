@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { getConfig } from '../config.js';
 import { withDocLock } from '../doc-lock.js';
-import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, type DocumentResult } from '../store/index.js';
+import { listCollections, getDocumentsByFilter, getDocumentsByIds, updateDocument, addDocument, deleteDocument, patchDocument, type DocumentResult } from '../store/index.js';
 import { generateEmbedding } from '../embeddings.js';
 
 import { getSyncBackend, isCycleFatal, noteSyncError, resolveSyncUsername, UnsupportedByRemoteError, type SyncBackend, type UpsertDoc, type UpsertOutcome } from './backend.js';
@@ -431,8 +431,18 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
     await deleteDocument(collection, doc.id);
     return m;
   });
+  await relinkOccurrences(collection, doc.id, newId);
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}\n`);
   return { ...doc, id: newId, metadata };
+}
+
+/** A re-keyed recurring task's neighbours in its collection point at its new id (previous_occurrence, next_occurrence). */
+async function relinkOccurrences(collection: string, oldId: string, newId: string): Promise<void> {
+  for (const key of ['previous_occurrence', 'next_occurrence'] as const) {
+    for (const d of await getDocumentsByFilter(collection, { type: 'task', [key]: oldId }, 100).catch(() => [])) {
+      await withDocLock(collection, d.id, () => patchDocument(collection, d.id, { [key]: newId, is_synced: false, updated_at: Math.floor(Date.now() / 1000) }));
+    }
+  }
 }
 
 /**
