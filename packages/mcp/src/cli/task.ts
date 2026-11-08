@@ -11,7 +11,7 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, listTasks, nextTasks, pushDocsNow, recordForTask,
+  ClaimBusyError, claimKey, claimNote, claimSession, claimsFor, completeTask, describeClaim, getTask, nextTasks, pushDocsNow, recordForTask,
   recordLastWrite, releaseTaskClaim, requestDecision, withDocLock, keptAsNotesLine, TaskClaimedError, TypedMemoryError, updateTask, validateLearned, checkFollowUpCollections, sessionFolder, SharedCollectionNotAllowedError, RecordsElsewhereError,
   formatTaskDate, formatTaskDay, isRecurring, isUpcoming, leadDays, listTasksCounted, opensAtOf, recurrenceInterval,
   type ClaimResult, type DecisionNeeded, type FollowUp, type LearnedItem, type Lease, type TaskStatus,
@@ -135,13 +135,11 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       if (status && !STATUSES.includes(status)) throw new UsageError(`--status must be one of ${STATUSES.join(', ')}`);
       const collection = flag(args, '--collection');
       const wantTags = list(flag(args, '--tag')) ?? [];
-      const listed = await listTasksCounted({ collection, status: status as TaskStatus | undefined, includeComplete: args.includes('--include-complete'), includeUpcoming: args.includes('--include-upcoming') });
-      const tasks = listed.tasks
-        .filter(t => {
-          if (!wantTags.length) return true;
-          const tags = Array.isArray(t.metadata.tags) ? t.metadata.tags : String(t.metadata.tags ?? '').split(',');
-          return wantTags.every(x => tags.includes(x));
-        });
+      const listed = await listTasksCounted({
+        collection, status: status as TaskStatus | undefined, tags: wantTags,
+        includeComplete: args.includes('--include-complete'), includeUpcoming: args.includes('--include-upcoming'),
+      });
+      const tasks = listed.tasks;
       const claims = collection ? await claimsFor(collection) : undefined;
       return {
         exit: EXIT.ok, json: { ok: true, tasks: tasks.map(t => taskJson(t, claims)), upcoming_hidden: listed.upcomingHidden },

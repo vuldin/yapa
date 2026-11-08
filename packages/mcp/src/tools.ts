@@ -37,7 +37,7 @@ import {
   classifyMemories,
   completeTask,
   createNewCollection,
-  createTask,
+  createTaskWithMetadata,
   curationCycle,
   deleteTask,
   evalCompare,
@@ -49,7 +49,6 @@ import {
   getCurationModel,
   getCurationState,
   getDocumentsByFilter,
-  getDocumentsByIds,
   getDueTasks,
   getOrCreateCollection,
   getPendingDeletes,
@@ -68,7 +67,6 @@ import {
   listCollectionsWithCounts,
   listMemories,
   listSessionDrafts,
-  listTasks,
   parseDuration,
   parseRelativeDate,
   pullCollection,
@@ -92,12 +90,10 @@ import {
   checkFollowUpCollections,
   sessionFolder,
   runScopeAction,
-  keptAsNotesLine,
   KEPT_AS_NOTE_REASON,
   RecordsElsewhereError,
   RecurrenceError,
   RECURRENCE_PATTERNS,
-  formatTaskDay,
   closeText,
   completedText,
   hiddenUpcomingLine,
@@ -1074,17 +1070,16 @@ export function registerTools(server: McpServer): void {
     async ({ title, priority, due, tags, notes, customer, project, collection, is_recurring, recurrence_pattern, recurrence_interval, lead_days, claim_scope }) => {
       const due_date = due ? parseRelativeDate(due) ?? undefined : undefined;
       const target = await writeTarget(collection ?? 'global');
-      let id: string;
+      let made;
       try {
-        id = await createTask(title, {
+        made = await createTaskWithMetadata(title, {
           priority, due_date, tags, notes, customer, project, is_recurring, recurrence_pattern, recurrence_interval, lead_days, claim_scope,
         }, target.collection);
       } catch (e) {
         return typedError(e);
       }
-      recordLastWrite(target.collection);
-      // A recurring task's due date and series are set by createTask: read them back from where it was written.
-      const m = is_recurring || recurrence_pattern ? (await getDocumentsByIds(target.collection, [id]))[0]?.metadata ?? {} : { due_date };
+      recordLastWrite(made.collection);
+      const { id, metadata: m } = made;
 
       let text = `Created task ${id}: "${title}"`;
       if (m.due_date) text += ` (due: ${formatTaskDate(m.due_date)})`;
@@ -1249,20 +1244,20 @@ export function registerTools(server: McpServer): void {
           // A completion, with the other fields written first: a recurring task's series goes on.
           const { status: _s, duration_minutes: minutes, ...rest } = updates;
           const c = await completeTask(id, minutes, { reclaim }, { learned, follow_ups }, rest);
-          recordLastWrite((await getTask(id))?.collection);
+          recordLastWrite(c.collection);
           const seriesChanged = recurrence_pattern !== undefined || recurrence_interval !== undefined || lead_days !== undefined || series_notes !== undefined;
           return { content: [{ type: 'text' as const, text: completedText(id, c, { durationMinutes: minutes, seriesChanged }) }] };
         } else {
           r = await updateTask(id, updates, { reclaim });
         }
-        const updated = await getTask(r.id);
-        const taskCollection = updated?.collection;
+        const taskCollection = r.collection;
         recordLastWrite(taskCollection);
         const recorded = learned?.length || follow_ups?.length
           ? await recordForTask({ id: r.id, collection: taskCollection! }, { learned, follow_ups })
           : undefined;
         let text = r.id === id ? `Updated task ${id}` : `Updated task ${id} (now ${r.id}: the shared remote re-keyed it)`;
-        if (updated && (recurrence_pattern || recurrence_interval !== undefined || lead_days !== undefined)) text += `\n${recurrenceLine(updated.metadata)}`;
+        const seriesChanged = recurrence_pattern !== undefined || recurrence_interval !== undefined || lead_days !== undefined || series_notes !== undefined;
+        if (r.metadata && seriesChanged) text += `\n${recurrenceLine(r.metadata)}`;
         if (decision) text += `\nRecorded decision ${decision} (needed${decision_needed!.owner ? `, for ${decision_needed!.owner}` : ''}); ${r.id} is pending and waits on it. Tell the user, then take other work.`;
         const claim = r.claim ? describeClaim(r.claim) : '';
         if (claim) text += `\n${claim}`;
@@ -1299,7 +1294,7 @@ export function registerTools(server: McpServer): void {
       let result;
       try {
         result = await completeTask(id, durationMinutes, {}, { learned, follow_ups });
-        recordLastWrite((await getTask(id))?.collection);
+        recordLastWrite(result.collection);
       } catch (e) {
         return typedError(e);
       }

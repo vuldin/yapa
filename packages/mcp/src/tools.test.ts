@@ -223,6 +223,8 @@ describe('registered tools over the local store', () => {
     expect(one).toMatch(/Recurrence: repeats quarterly, opens 14 day\(s\) before it is due; upcoming: due/);
     expect(one).toContain(`Series: series ${laterId}`);
 
+    const notesOnly = await call('task_update', { id: laterId, series_notes: 'figures, review' });
+    expect(notesOnly.content[0].text).toMatch(/^Updated task tester-\d+\nRepeats quarterly, opens 14 day\(s\) before it is due; /);
     const upd = await call('task_update', { id: laterId, lead_days: 90, series_notes: 'figures, review, archive' });
     expect(upd.content[0].text).toMatch(/\nRepeats quarterly, opens 90 day\(s\) before it is due; this occurrence is due .*, open now\.$/);
     expect(() => z.object(tools.get('task_update')!.schema).parse({ id: laterId, recurrence_interval: 0 })).toThrow();
