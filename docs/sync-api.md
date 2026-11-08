@@ -679,9 +679,10 @@ writes (all optional unless noted):
   earlier in the writer's time zone; 0 once the series is stopped),
   `recurrence_notes` (the series' notes template), `recurrence_series` (id
   of the series' first task), `previous_occurrence` (id of the occurrence
-  completed before this one), `next_occurrence` (id of its successor,
-  reserved and written before that task is created: if no task has the id,
-  completing this one again creates it with that id), `recurrence_tz` (IANA
+  completed before this one; this link is what makes a task the successor),
+  `next_occurrence` (informational: the id the successor had when this
+  occurrence was completed; it goes stale if the successor is re-keyed),
+  `recurrence_tz` (IANA
   time zone the series' slots and opening days are counted in; absent:
   the completing machine's local time),
   `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from`,

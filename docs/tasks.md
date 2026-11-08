@@ -10,7 +10,7 @@ Writes reach the remote seconds after they happen, but a status change is still 
 
 Completing, blocking, resetting to pending or deleting the task releases the claim. The hooks renew this session's claims while it is active, and a claim lapses one TTL (2 h by default) after the session goes quiet. Its task then shows `no live claim` and is offered again by `task_next`. If another session takes a claim over, the next prompt says so.
 
-`task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared, 5 completed but its next occurrence wasn't created). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
+`task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
 
 ## Recurring tasks
 
@@ -38,7 +38,11 @@ task_complete id: alex-41
 
 **Links.** Every occurrence carries `recurrence_series` (the id of the series' first task) and, after the first, `previous_occurrence` (the one completed before it). A completed occurrence records `next_occurrence`, the one its completion created. `task_list` with an `id` shows all three.
 
-**Each occurrence gets one successor.** Its id is reserved and recorded as `next_occurrence` before the task is created. Reopening a completed occurrence and completing it again creates nothing new, and two sessions completing it at once create one. If the next occurrence can't be created (the store is unavailable, say), the completion still stands and the reply says so (`yapa task release` exits 5): complete the task again to retry, which creates it with the reserved id and doesn't close the task a second time. Completing an occurrence that is already complete without a reservation (one completed before 1.19) creates nothing; reopening such an occurrence and completing it again does create a successor.
+**Each occurrence gets one successor**, made when it moves to complete: the successor is created first, then the completion is written. Its link back, `previous_occurrence`, is what counts; `next_occurrence` on the completed task is a pointer for reading.
+- If the successor can't be created (the store is unavailable, say), nothing is written: the task stays open and completing it again is safe.
+- If it was created but the completion couldn't be written, completing again finds it and creates no second one.
+- Two sessions completing it at once create one. Reopening it and completing it again finds the one it has.
+- A task that is already complete never gets a successor, so a deleted successor stays deleted, and completing again an occurrence completed before 1.19 creates nothing.
 
 A completed occurrence's series can't be changed: `task_update` with a series parameter is refused and names the open occurrence to change instead.
 

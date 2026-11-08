@@ -135,7 +135,7 @@ The CLI ships with the plugin as `dist/yapa.mjs` (Claude Code keeps the plugin u
 | Command | What it does |
 |---|---|
 | `yapa scope …` | Show or change the folder rules; `yapa scope --cwd DIR --text` prints the collection a folder uses (for scripts) |
-| `yapa task list\|next\|claim\|release\|show` | Tasks and claims for scripts, as JSON (exit 0 done, 3 refused, 4 not shared, 5 completed but its next occurrence wasn't created) |
+| `yapa task list\|next\|claim\|release\|show` | Tasks and claims for scripts, as JSON (exit 0 done, 3 refused, 4 not shared) |
 | `yapa memory list\|put\|update\|sweep-findings\|untype` | Typed memories for scripts; `put --ref` publishes a record kept elsewhere; `untype` turns earlier copies into notes |
 | `yapa waiting` | Decisions, questions and steps waiting on a person |
 | `yapa coord …` | Bare leases and counters for resources that aren't tasks |
