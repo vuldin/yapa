@@ -204,7 +204,7 @@ export function describeRecurrence(m: Record<string, any>): string {
  */
 export function upcomingInfo(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): { opens_at: number; note: string } | undefined {
   const o = openingOf(m, now);
-  return o?.upcoming ? { opens_at: o.opens_at, note: `upcoming: due ${formatTaskDate(metaTime(m.due_date))}, opens ${formatTaskDay(o.opens_at)}` } : undefined;
+  return o?.upcoming ? { opens_at: o.opens_at, note: `upcoming: due ${formatTaskDate(metaTime(m.due_date))}, opens ${formatTaskDay(o.opens_at, seriesZone(m))}` } : undefined;
 }
 
 /** upcomingInfo's note, or '' when the task is open. */
@@ -230,7 +230,7 @@ export function recurrenceLine(m: Record<string, any>, now = Math.floor(Date.now
   const due = metaTime(m.due_date);
   if (!due) return `${head}.`;
   const upcoming = upcomingInfo(m, now);
-  const when = upcoming ? `opens ${formatTaskDay(upcoming.opens_at)} (hidden from task lists until then)` : 'open now';
+  const when = upcoming ? `opens ${formatTaskDay(upcoming.opens_at, seriesZone(m))} (hidden from task lists until then)` : 'open now';
   return `${head}; this occurrence is due ${formatTaskDate(due)}, ${when}.`;
 }
 

@@ -5,7 +5,7 @@
  * per tool result.
  */
 import { includesUser, ownerWaitsOn } from '@yapa/core/owners';
-import { isRecurring, isUpcoming as coreIsUpcoming, opensAtOf, type OpeningRule } from '@yapa/core/recurrence';
+import { isUpcoming as coreIsUpcoming, openingOf, type OpeningRule } from '@yapa/core/recurrence';
 import type { DocRow } from './queries.js';
 
 export const MAX_ITEM_CONTENT_BYTES = 4 * 1024;
@@ -93,8 +93,7 @@ export const endOfDayOpening: OpeningRule = (due, lead) => due - 86399 - lead * 
 
 /** When a recurring occurrence opens, as core works it out with that fallback. */
 export function opensAt(m: Record<string, any>): number | undefined {
-  const due = Number(m.due_date);
-  return isRecurring(m) && Number.isFinite(due) && due > 0 ? opensAtOf(m, endOfDayOpening) : undefined;
+  return openingOf(m, undefined, endOfDayOpening)?.opens_at;
 }
 
 /** The date an occurrence opens on. Midday after the writer's midnight is that date in UTC for offsets from -12 to +12. */

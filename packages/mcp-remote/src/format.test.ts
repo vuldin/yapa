@@ -175,6 +175,7 @@ describe('upcoming recurring tasks', () => {
     expect(opensAt(rec({ due_date: String(due), lead_days: '0' }))).toBe(due - 86399);
     expect(opensAt(rec({ opens_at: ` ${due - 2 * 86400 - 5 * 3600} ` }))).toBe(due - 2 * 86400 - 5 * 3600);
     // Not numbers: a boolean, hex.
+    expect(opensAt(rec({ due_date: '0x10' }))).toBeUndefined();
     expect(opensAt(rec({ lead_days: true }))).toBe(due - 86399 - 2 * 86400);
     expect(opensAt(rec({ lead_days: '0x10' }))).toBe(due - 86399 - 2 * 86400);
     // A value core reads as non-finite counts as missing.

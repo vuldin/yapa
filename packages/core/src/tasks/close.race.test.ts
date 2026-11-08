@@ -10,7 +10,8 @@ vi.mock('./update.js', async importOriginal => {
 });
 
 import { setConfig, resetConfig, createConfig } from '../config.js';
-import { setStore, resetStore, createLocalStore, getDocumentsByFilter } from '../store/index.js';
+import { setStore, resetStore, createLocalStore, getDocumentsByFilter, getDocumentsByIds } from '../store/index.js';
+import { metadataList } from '../metadata-adapter.js';
 import { createTask } from './create.js';
 import { requestDecision } from './close.js';
 
@@ -32,5 +33,8 @@ describe('requestDecision', () => {
     const id = await createTask('pick the review cadence', {}, C);
     await expect(requestDecision(id, { question: 'Monthly or quarterly?', options: ['monthly', 'quarterly'] })).rejects.toThrow(/refused under the lock/);
     expect(await getDocumentsByFilter(C, { type: 'memory' }, 100)).toHaveLength(0);
+    // Nor a link to it left on the task.
+    const [task] = await getDocumentsByIds(C, [id]);
+    expect(metadataList(task.metadata.memory_ids)).toEqual([]);
   });
 });

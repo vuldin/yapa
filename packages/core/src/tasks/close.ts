@@ -12,14 +12,15 @@
  *
  * @module @yapa/core/tasks/close
  */
-import { getDocumentsByIds, listCollections } from '../store/index.js';
+import { getDocumentsByIds, listCollections, patchDocument } from '../store/index.js';
+import { withDocLock } from '../doc-lock.js';
 import { isOpenTyped, normalizeTyped, type TypedFields } from '../memory/kinds.js';
 import { storeMemory } from '../memory/store.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
 import { checkSeriesUpdate, getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
-import { isRecurring, recurrenceChanges, recurrenceSentence } from './recurrence.js';
+import { isRecurring, recurrenceChanges, recurrenceSentence, seriesZone } from './recurrence.js';
 import { forgetMemory } from '../memory/forget.js';
 import { metadataList } from '../metadata-adapter.js';
 import { formatDuration, formatTaskDate, formatTaskDay } from './dates.js';
@@ -140,8 +141,14 @@ export async function requestDecision(
     const u = await updateTask(task.id, { ...extra, status: 'pending', waits_on: waits }, ctx);
     return { ...u, decision };
   } catch (e) {
-    // Refused after all (the task changed since the check above): no decision without a task waiting on it.
+    // Refused after all (the task changed since the check above): no decision without a task waiting on it,
+    // and no link to it left on the task.
     await forgetMemory(decision).catch(() => undefined);
+    await withDocLock(task.collection, task.id, async () => {
+      const [cur] = await getDocumentsByIds(task.collection, [task.id]);
+      const ids = metadataList(cur?.metadata.memory_ids);
+      if (ids.includes(decision)) await patchDocument(task.collection, task.id, { memory_ids: ids.filter(x => x !== decision) });
+    }).catch(() => undefined);
     throw e;
   }
 }
@@ -226,7 +233,8 @@ export function closeText(r: { recorded?: Recorded; nudge?: string }): string {
  */
 export function nextOccurrenceText(result: CompleteResult): string {
   if (result.regeneratedId) {
-    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}` : ''}`;
+    const opens = result.next && formatTaskDay(result.next.opens_at, seriesZone(result.metadata ?? {}));
+    return `regenerated as ${result.regeneratedId} (recurring)${result.next ? `, due ${formatTaskDate(result.next.due_date)}, opens ${opens}` : ''}`;
   }
   return result.existingNext ? `next occurrence ${result.existingNext} (already created)` : '';
 }

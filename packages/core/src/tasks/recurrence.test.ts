@@ -13,7 +13,7 @@ import { requestDecision } from './close.js';
 import { claimsFor } from './claim.js';
 import { addDocument, getDocumentsByFilter, patchDocument } from '../store/index.js';
 import {
-  DEFAULT_LEAD_DAYS, isUpcoming, leadDays, metaNumber, nextRecurrenceDue, opensAt, opensAtOf, RECURRENCE_PATTERNS, recurrenceInterval, recurrenceLine,
+  DEFAULT_LEAD_DAYS, isUpcoming, leadDays, upcomingInfo, metaNumber, nextRecurrenceDue, opensAt, opensAtOf, RECURRENCE_PATTERNS, recurrenceInterval, recurrenceLine,
   recurrenceSlot, todayDue, upcomingNote, type RecurrencePattern,
 } from './recurrence.js';
 
@@ -87,6 +87,22 @@ describe('slots in the series time zone', () => {
     const slot = withTz('Asia/Tokyo', () => recurrenceSlot(anchor, 'weekly', 1, 1, zone));
     expect(iso(slot)).toBe('2027-03-15T13:00:00.000Z'); // 09:00 EDT after Mar 14
     expect(iso(withTz('UTC', () => opensAt(slot, 2, zone)))).toBe('2027-03-13T05:00:00.000Z'); // Sat Mar 13, 00:00 EST
+  });
+});
+
+describe('the opening day in the series\' zone', () => {
+  it('a Tokyo series viewed from Los Angeles names the Tokyo day', () => {
+    const saved = process.env.TZ;
+    process.env.TZ = 'America/Los_Angeles';
+    try {
+      // Due Fri Mar 15 2030, 23:59:59 in Tokyo; opens two days before, at Tokyo's midnight: Wed Mar 13 there, still Mar 12 in LA.
+      const m = { is_recurring: true, recurrence_pattern: 'weekly', status: 'pending', lead_days: 2, recurrence_tz: 'Asia/Tokyo', due_date: Date.UTC(2030, 2, 15, 14, 59, 59) / 1000 };
+      expect(upcomingInfo(m, 0)!.note).toMatch(/opens Wed, Mar 13$/);
+      expect(recurrenceLine(m, 0)).toMatch(/opens Wed, Mar 13 \(hidden/);
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
   });
 });
 
@@ -339,6 +355,13 @@ describe('recurring tasks over the store', () => {
       expect(m.series_notes).toBeUndefined();
       const r = await completeTask(id);
       expect((await getTask(r.regeneratedId!))!.metadata.notes).toBe('sections 1-4');
+    });
+
+    it('is_recurring false stops the series, as "none" does', async () => {
+      const id = await createTask('send the bulletin', { recurrence_pattern: 'weekly', due_date: at(2030, 8, 6) }, C);
+      await updateTask(id, { is_recurring: false });
+      expect((await getTask(id))!.metadata).toMatchObject({ is_recurring: false, recurrence_pattern: '' });
+      expect((await completeTask(id)).regeneratedId).toBeUndefined();
     });
 
     it('"none" stops the series: completing creates no next occurrence', async () => {

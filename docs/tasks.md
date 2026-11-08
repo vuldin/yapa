@@ -43,7 +43,7 @@ task_complete id: alex-41
 - If it was created but the completion couldn't be written, completing again finds it and creates no second one.
 - On one machine an occurrence gets one successor: two sessions completing it at once create one, and reopening it and completing it again finds the one it has (also after sync re-keys either task). Two machines that complete the same shared occurrence before syncing can each create one; delete the extra.
 - A task that is already complete never gets a successor, so a deleted successor stays deleted.
-- When sync re-keys a task, the links and series id of the tasks next to it in the collection follow the new id.
+- When sync re-keys a task, the links and series id of your own tasks next to it in the collection follow the new id (pulled tasks naming the old id point at the remote task that has it and are left alone). A neighbour that can't be rewritten is logged and keeps a stale link.
 - Occurrences completed before 1.19 aren't linked to their successors: reopening and completing one again can create a second occurrence (delete the extra).
 - When the successor already existed, the reply says `next occurrence X (already created)` instead of "regenerated".
 

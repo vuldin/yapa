@@ -73,6 +73,8 @@ const RELEASE_OUTCOME: Record<string, string> = { complete: 'done', blocked: 'bl
  */
 export type TaskUpdates = Omit<Partial<TaskOptions>, (typeof RECURRENCE_KEYS)[number]> & {
   title?: string; blockedReason?: string; waits_on?: string[]; memory_ids?: string[];
+  /** false stops the series (as recurrence_pattern "none"). */
+  is_recurring?: boolean;
   recurrence_interval?: number;
   lead_days?: number;
   /** A pattern sets or changes recurrence (re-anchored at the due date); "none" stops it. */
@@ -101,11 +103,13 @@ export async function updateTask(
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
   const result: TaskUpdateResult = { id, collection: task.collection };
-  // Refused before a claim is taken: nothing to undo.
-  await checkSeriesUpdate(task, updates);
-  recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
+  // is_recurring false stops the series, as recurrence_pattern "none" does.
+  if (updates.is_recurring === false && updates.recurrence_pattern === undefined) updates = { ...updates, recurrence_pattern: 'none' };
 
   if (updates.status === 'in_progress') {
+    // Refused before the claim is taken, so there is nothing to give back (checked again under the lock).
+    await checkSeriesUpdate(task, updates);
+    recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
     const claim = await claimTask(task.id, task.collection, task.metadata, ctx);
     if (claim.kind === 'refused') throw new TaskClaimedError(claim);
     result.claim = claim;
@@ -118,7 +122,7 @@ export async function updateTask(
   }
 
   // Structural fields that should trigger re-sync (not salience/accessed_at)
-  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', 'is_recurring', ...SERIES_PARAMS, 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
+  const structuralKeys = ['status', 'priority', 'title', 'notes', 'tags', 'due_date', 'customer', 'project', 'depends_on', 'blocks', ...SERIES_PARAMS, 'completed_at', 'duration_minutes', 'claim_scope', 'blockedReason', 'waits_on', 'memory_ids'];
   const hasStructuralChange = getConfig().SYNC_ENABLED && Object.keys(updates).some(k => structuralKeys.includes(k));
 
   // The write itself, under the task's lock and over the task as it is now:
@@ -297,7 +301,7 @@ async function createSuccessor(collection: string, id: string, title: string, m:
     recurrence_notes: template,
     recurrence_series: m.recurrence_series || id,
     previous_occurrence: id,
-  }, collection, { id: newId });
+  }, collection, { id: newId, exactCollection: true });
   return { id: made.id, due_date: nextDue, opens_at: opensAt(nextDue, lead, tz), status: 'pending', created: true };
 }
 

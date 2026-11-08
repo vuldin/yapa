@@ -173,7 +173,7 @@ export async function createTaskWithMetadata(
   title: string,
   options: TaskOptions = {},
   requested: string = 'global',
-  opts: { id?: string } = {},
+  opts: { id?: string; exactCollection?: boolean } = {},
 ): Promise<{ id: string; collection: string; metadata: Record<string, any> }> {
   if (options.is_recurring === false && options.recurrence_pattern !== undefined) {
     throw new RecurrenceError('is_recurring false contradicts recurrence_pattern: leave one of them out');
@@ -187,8 +187,8 @@ export async function createTaskWithMetadata(
   }
   if (recurring && options.recurrence_interval !== undefined) checkInterval(options.recurrence_interval);
   if (recurring && options.lead_days !== undefined) checkLeadDays(options.lead_days);
-  // A collection merged away here is followed, never recreated.
-  const { collection } = await resolveWriteCollection(requested);
+  // A collection merged away here is followed, never recreated (exactCollection: written where asked, as a successor is).
+  const { collection } = opts.exactCollection ? { collection: requested } : await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
   // The first id may ask the sync service; a retry for a taken one stays local (this may run under a caller's lock).
   let id = opts.id ?? await freshTaskId();

@@ -84,9 +84,9 @@ export function formatTaskDate(timestamp: number): string {
   });
 }
 
-/** Format a timestamp as a day, with no time. */
-export function formatTaskDay(timestamp: number): string {
-  return new Date(timestamp * 1000).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+/** Format a timestamp as a day, with no time, in `timeZone` (a valid IANA zone; default local). */
+export function formatTaskDay(timestamp: number, timeZone?: string): string {
+  return new Date(timestamp * 1000).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone });
 }
 
 function endOfDay(d: Date): number {

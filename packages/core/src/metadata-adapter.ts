@@ -34,25 +34,27 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
 
 /** List fields: comma-separated, or JSON when an item holds a comma. */
 const ARRAY_FIELDS = new Set(['tags', 'depends_on', 'blocks', 'related_ids', 'claim_scope', 'task_ids', 'memory_ids', 'waits_on', 'options', 'disposition_ids']);
-/** Object-valued fields, stored as JSON (sync/sentinel.ts). */
-const OBJECT_FIELDS = new Set(['redirects']);
+/** Free text: always a string, even when it looks like JSON ("[2026] plan", a template starting with "{"). */
+const TEXT_FIELDS = new Set([
+  'title', 'notes', 'recurrence_notes', 'blockedReason', 'blocked_reason', 'recommendation', 'exit_criteria',
+  'disposition_reason', 'context', 'question', 'owner', 'external_ref', 'sync_rejected_message',
+]);
 
 /** A list field as stored (an array, or comma-separated), trimmed, without empty entries. */
 export const metadataList = (v: unknown): string[] =>
   (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
 
 /**
- * Convert ChromaDB format back to JavaScript objects: only the fields
- * toChroma encodes are decoded (list fields, comma-separated or JSON; the
- * object fields, JSON). Every other string stays as written, even one that
- * looks like JSON ("[2026] plan", a template starting with "{").
+ * Convert ChromaDB format back to JavaScript objects: JSON-looking strings
+ * are decoded (objects, lists with commas in their items), except free-text
+ * fields; known list fields that aren't JSON are comma-separated.
  */
 export function fromChroma(metadata: RawMetadata): Record<string, any> {
   const result: Record<string, any> = {};
 
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === 'string') {
-      const json = (ARRAY_FIELDS.has(key) && value.startsWith('[')) || (OBJECT_FIELDS.has(key) && value.startsWith('{'));
+      const json = !TEXT_FIELDS.has(key) && (value.startsWith('{') || value.startsWith('['));
       if (json) {
         try {
           result[key] = JSON.parse(value);

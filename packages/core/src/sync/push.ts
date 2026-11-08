@@ -439,15 +439,24 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
 }
 
 /**
- * A re-keyed recurring task's neighbours in its collection point at its new
- * id: previous_occurrence, next_occurrence and recurrence_series. Safe now:
- * the remote task holding the old id isn't local, or the id wouldn't have
- * been free here. An error fails the re-key's push like any push error.
+ * A re-keyed recurring task's neighbours point at its new id:
+ * previous_occurrence, next_occurrence and recurrence_series. Only this
+ * device's own tasks in the collection: a pulled task naming the old id
+ * points at the remote task that really has it. The rename stands whatever
+ * happens here; a neighbour that can't be rewritten is logged and keeps a
+ * stale link.
  */
 async function relinkOccurrences(collection: string, oldId: string, newId: string): Promise<void> {
+  const me = getConfig().USERNAME;
+  const ours = (m: Record<string, any>) => !isReadOnlyDoc(m) && (!m.origin_device || m.origin_device === getDeviceId()) && (!m.origin_user || m.origin_user === me);
   for (const key of ['previous_occurrence', 'next_occurrence', 'recurrence_series'] as const) {
-    for (const d of await getDocumentsByFilter(collection, { type: 'task', [key]: oldId }, 100_000)) {
-      await withDocLock(collection, d.id, () => patchDocument(collection, d.id, { [key]: newId, is_synced: false, updated_at: Math.floor(Date.now() / 1000) }));
+    try {
+      for (const d of (await getDocumentsByFilter(collection, { type: 'task', [key]: oldId }, 100_000)).filter(x => ours(x.metadata))) {
+        await withDocLock(collection, d.id, () => patchDocument(collection, d.id, { [key]: newId, is_synced: false, updated_at: Math.floor(Date.now() / 1000) }))
+          .catch(e => process.stderr.write(`[yapa-sync] Could not point ${d.id}'s ${key} at ${newId} (was ${oldId}): ${e}\n`));
+      }
+    } catch (e) {
+      process.stderr.write(`[yapa-sync] Could not find tasks whose ${key} is ${oldId} after renaming it to ${newId}: ${e}\n`);
     }
   }
 }
