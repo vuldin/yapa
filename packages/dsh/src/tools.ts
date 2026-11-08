@@ -31,6 +31,7 @@ import {
   recurrenceNote,
   seriesChanged,
   seriesInfo,
+  metadataList,
   upcomingNote,
   closeText,
   completedText,
@@ -171,7 +172,7 @@ const taskItem = {
   },
 } as const;
 
-const normList = (x: unknown): string[] => Array.isArray(x) ? x : (x ?? '').toString().split(',').filter(Boolean);
+const normList = metadataList;
 
 /** Full-detail projection (notes/dependencies) for single-task fetches. */
 function toTaskDetail(t: { id: string; title: string; collection: string; metadata: Record<string, any> }) {
@@ -935,7 +936,7 @@ export function registerTools(ctx: Context): void {
       status: { type: 'string', enum: ['pending', 'in_progress', 'blocked', 'complete'] },
       priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
       notes: { type: 'string', description: 'Notes (on a recurring task, this occurrence only)' },
-      due: { type: 'string', description: 'Due date phrase' },
+      due: { type: 'string', description: 'Due date phrase; on a recurring task it moves this occurrence, not its slot' },
       tags: { type: 'array', items: { type: 'string' } },
       blocked_reason: { type: 'string' },
       recurrence_pattern: { type: 'string', enum: [...RECURRENCE_PATTERNS, 'none'], description: 'Make the task recurring or change its period, re-anchoring the series at its due date (today if none); "none" stops the series' },
