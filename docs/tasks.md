@@ -12,6 +12,36 @@ Completing, blocking, resetting to pending or deleting the task releases the cla
 
 `task_next` is the ready queue: pending tasks whose dependencies are complete and that nobody holds, best first (priority, due date, how many tasks each unblocks, age). A task's `claim_scope` (soft scope such as `repo:infra`) ranks it last while something overlapping is claimed. Scripts get the same through `yapa task list|next|claim|release|show` (JSON output; exit 0 done, 3 refused, 4 not shared). For resources that are not tasks, use bare leases (`lease` / `yapa coord`).
 
+## Recurring tasks
+
+A task with a `recurrence_pattern` (`daily`, `weekly`, `monthly`, `quarterly` or `yearly`) repeats. Completing an occurrence creates the next one:
+
+```
+task_create  title: "file the quarterly report", recurrence_pattern: "quarterly", due: "March 31", notes: "figures, review, archive"
+task_create  title: "set up the review", recurrence_pattern: "weekly", recurrence_interval: 2          # every two weeks, from today
+task_complete id: alex-41
+→ Completed task alex-41 → regenerated as alex-57 (recurring), due Wed, Jun 30, opens Wed, Jun 16
+```
+
+**The calendar slot is kept.** The first occurrence's due date is the series' anchor (`recurrence_anchor`), and occurrence k is due k × `recurrence_interval` periods after it. A completed occurrence's successor is due at the first slot after the later of its due date and now:
+- Completed late, the series doesn't shift: a monthly task due on the 15th and done on the 20th comes back on the 15th of next month. Periods missed entirely are skipped, not piled up as overdue copies.
+- Completed early, it moves to the slot after the current due date.
+- Months, quarters and years count from the anchor's day of the month, clamped to the end of shorter months: a monthly series anchored on January 31 is due February 28 (29 in a leap year), March 31, April 30. The time of day is kept in local time, across DST changes.
+- With no due date, a recurring task is due today, and today is its anchor.
+
+**Upcoming occurrences stay out of the way.** An occurrence opens `lead_days` before the day it is due, at the start of that day; until then it is *upcoming*. `lead_days` defaults by pattern: daily 0 (open on its due day), weekly 2, monthly 7, quarterly 14, yearly 30. The default ignores the interval: a task every two months still opens 7 days ahead; pass `lead_days` to change it. Upcoming tasks are left out of `task_list`, session start and prompt context, the standup and dashboard, `task_next` and `waiting`. `task_list` says how many it left out; `include_upcoming: true` (`yapa task list --include-upcoming`) lists them with their due date and the day they open. Whether a task is upcoming is worked out when it is read, so a new `lead_days` takes effect at once.
+
+**Notes.** `recurrence_notes` is the series template: the notes as they were when recurrence was set. Each new occurrence starts with the template, not with what was added to the last one, so a closing note stays with the occurrence it was written on. `task_update` with `notes` changes only the current occurrence; `series_notes` replaces the template. A series created before 1.19 has no template: its next occurrence starts from the last one's notes, which become the template from then on.
+
+**Links.** Every occurrence carries `recurrence_series` (the id of the series' first task) and, after the first, `previous_occurrence` (the one completed before it). `task_list` with an `id` shows both.
+
+**Changing a series** with `task_update`:
+- `recurrence_pattern` makes a plain task recurring, or changes the period. Either way the series is re-anchored at the task's due date (today if it has none). A new pattern resets `recurrence_interval` to 1 and `lead_days` to the pattern's default unless you pass them.
+- `recurrence_interval` re-anchors at the due date too; `lead_days` alone only changes when occurrences open.
+- Changing just `due` moves this occurrence, not the series: its successor is still due in the next slot. To move the whole series, pass the pattern again with the new `due`.
+- `recurrence_pattern: "none"` stops the series: the task stays, and completing it creates no next occurrence. A recurring task can't lose its due date; stop the series first.
+- Deleting an occurrence (`task_delete`) ends the series, since nothing is left to complete.
+
 ## Coordination in local-only collections
 
 `private-*`, `local-*` and `global` never leave your machine, and every collection stays local while sync is off. Coordination works there too, served by this machine instead of the sync service, with the same rules and answers:

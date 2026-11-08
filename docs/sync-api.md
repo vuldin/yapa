@@ -669,7 +669,13 @@ writes (all optional unless noted):
 - Tasks: `id`, `title` (also the content), `notes`, `status` (`pending` |
   `in_progress` | `blocked` | `complete`), `priority` (`critical` | `high` |
   `medium` | `low`), `due_date` (0 = none), `customer`, `project`,
-  `depends_on`, `blocks`, `is_recurring`, `recurrence_pattern`,
+  `depends_on`, `blocks`, `is_recurring`, `recurrence_pattern` (`daily` |
+  `weekly` | `monthly` | `quarterly` | `yearly`; `''` once stopped),
+  `recurrence_interval` (integer >= 1), `recurrence_anchor` (Unix seconds:
+  the first occurrence's due date), `lead_days` (integer >= 0),
+  `recurrence_notes` (the series' notes template), `recurrence_series` (id
+  of the series' first task), `previous_occurrence` (id of the occurrence
+  completed before this one),
   `completed_at`, `duration_minutes`, `blockedReason`, `rekeyed_from`,
   `claim_scope` (array), `memory_ids` (array: typed memories recorded for the
   task), `waits_on` (array: memory ids the task waits on; it is not ready

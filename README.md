@@ -99,6 +99,7 @@ Each memory has a salience score that rises when it's used and decays with time,
 - **The ready queue:** `task_next` offers what to start next: tasks that are pending, unblocked and unclaimed, ranked by priority, due date and how much each unblocks. `/yapa:work` runs the loop: take the next task, do it, record what it produced, complete it, repeat.
 - **Closing work records it:** `task_complete` takes `learned` (typed memories linked to the task) and `follow_ups` (new tasks). A choice only a person can make is recorded with `decision_needed`, and the task waits on it.
 - **`waiting`** lists everything waiting on a person, and session start shows what waits on you.
+- **Recurring tasks** (daily, weekly, monthly, quarterly, yearly, or every N of those) come back in their calendar slot when completed, start from the series' notes, and stay out of task lists until a few days before they are due.
 
 Details: [Tasks, claims, and what waits on people](docs/tasks.md).
 
@@ -166,7 +167,7 @@ Folder rules aren't options: they're in the scope file above. Everything else, i
 
 - [Collections and folder rules](docs/collections.md): folder rules, private collections, the recall fence, merging and redirects
 - [Memory](docs/memory.md): salience, chunking, contradictions, journals, compaction, embedding providers
-- [Tasks, claims, and what waits on people](docs/tasks.md): claims, the ready queue, local coordination, typed memories
+- [Tasks, claims, and what waits on people](docs/tasks.md): claims, the ready queue, recurring tasks, local coordination, typed memories
 - [Sync](docs/sync.md): connecting, the status line, how a cycle works, deletes and purges, a direct database, testing
 - [Connecting to a remote](docs/connecting-to-a-remote.md) and the [Sync API](docs/sync-api.md)
 - [Tools and hooks](docs/tools.md): every tool and hook
