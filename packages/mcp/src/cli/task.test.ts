@@ -79,6 +79,11 @@ describe('yapa task', () => {
     expect((all.find(t => t.id === soon).recurrence)).toMatchObject({ series: soon, next: null });
     const after = ((await runTask('show', [soon])).json.task as any).recurrence;
     expect(after).toMatchObject({ series: soon, next: next.id });
+    expect(done.json.existing_next).toBeNull();
+    await runTask('release', [soon, '--status', 'pending']);
+    const again = await runTask('release', [soon, '--status', 'complete']);
+    expect(again.json).toMatchObject({ regenerated: null, existing_next: next.id });
+    expect(again.text.split('\n')[1]).toBe(`next occurrence ${next.id} (already created)`);
   });
 
   it('bad arguments exit 2', async () => {

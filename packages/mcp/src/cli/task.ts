@@ -214,6 +214,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       let decision: string | undefined;
       let regenerated: { id: string; due_date: number; opens_at: number } | undefined;
       let nextLine = '';
+      let existingNext: string | undefined;
       if (status === 'complete') {
         const durationMinutes = int(flag(args, '--duration'), '--duration');
         const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
@@ -222,6 +223,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         nudge = c.nudge;
         if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
         nextLine = nextOccurrenceText(c);
+        existingNext = c.existingNext;
       } else {
         const reason = flag(args, '--reason');
         const fields = { ...(reason ? { blockedReason: reason } : {}) };
@@ -247,7 +249,7 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         recorded?.follow_ups.length ? `follow-ups ${recorded.follow_ups.join(', ')}` : '', keptAsNotesLine(recorded), nudge ?? ''].filter(Boolean);
       return {
         exit,
-        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null },
+        json: { ok: true, id: t.id, status, release: release ?? null, decision: decision ?? null, recorded: recorded ?? null, nudge: nudge ?? null, regenerated: regenerated ?? null, existing_next: existingNext ?? null },
         text: more.length ? `${text}\n${more.join('\n')}` : text,
       };
     }
