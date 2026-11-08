@@ -123,6 +123,10 @@ describe('recurring tasks over the store', () => {
         expect((await getTask(id))!.metadata.lead_days).toBe(DEFAULT_LEAD_DAYS[p]);
       }
       await expect(createTask('x', { is_recurring: true }, C)).rejects.toThrow(/recurrence_pattern/);
+      await expect(createTask('x', { is_recurring: false, recurrence_pattern: 'weekly' }, C)).rejects.toThrow(/contradicts/);
+      const { createTaskWithMetadata } = await import('./create.js');
+      const made = await createTaskWithMetadata('a returned chore', { recurrence_pattern: 'daily', due_date: at(2030, 1, 15) }, C);
+      expect(made).toMatchObject({ collection: C, metadata: { id: made.id, due_date: at(2030, 1, 15), recurrence_slot: at(2030, 1, 15), lead_days: 0 } });
       await expect(createTask('x', { recurrence_pattern: 'weekly', recurrence_interval: 0 }, C)).rejects.toThrow(/recurrence_interval/);
       await expect(createTask('x', { recurrence_pattern: 'weekly', lead_days: -1 }, C)).rejects.toThrow(/lead_days/);
     });
@@ -357,7 +361,7 @@ describe('recurring tasks over the store', () => {
       await expect(updateTask(id, { recurrence_pattern: 'none', recurrence_interval: 0 })).rejects.toThrow(/recurrence_interval/);
       await expect(updateTask(id, { lead_days: 1.5 })).rejects.toThrow(/lead_days/);
       const plain = await createTask('a one-off to make recurring', {}, R);
-      await expect(updateTask(plain, { recurrence_pattern: 'weekly', due_date: 0 })).rejects.toThrow(/needs a due date/);
+      await expect(updateTask(plain, { recurrence_pattern: 'weekly', due_date: 0 })).rejects.toThrow(/don't clear the due date when setting recurrence_pattern/);
       expect((await getTask(plain))!.metadata.is_recurring).toBe(false);
       expect((await getTask(id))!.metadata).toMatchObject({ is_recurring: true, lead_days: 2 });
       await updateTask(id, { recurrence_pattern: 'none' });
@@ -386,6 +390,8 @@ describe('recurring tasks over the store', () => {
       expect(r.metadata).toMatchObject({ status: 'complete', recurrence_notes: 'v2' });
       await expect(completeTask(r.regeneratedId!, undefined, {}, {}, { lead_days: -1 })).rejects.toThrow(/lead_days/);
       expect((await getTask(r.regeneratedId!))!.metadata.status).toBe('pending');
+      const renamed = await completeTask(r.regeneratedId!, undefined, {}, {}, { title: 'update the release checklist' });
+      expect((await getTask(renamed.regeneratedId!))!.title).toBe('update the release checklist');
       const stop = await createTask('update it once more', { recurrence_pattern: 'weekly' }, R);
       expect((await completeTask(stop, undefined, {}, {}, { recurrence_pattern: 'none' })).regeneratedId).toBeUndefined();
     });

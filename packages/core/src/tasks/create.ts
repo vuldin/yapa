@@ -157,6 +157,18 @@ export async function createTask(
   options: TaskOptions = {},
   requested: string = 'global',
 ): Promise<string> {
+  return (await createTaskWithMetadata(title, options, requested)).id;
+}
+
+/** createTask, returning the collection it was written to and the metadata it wrote. */
+export async function createTaskWithMetadata(
+  title: string,
+  options: TaskOptions = {},
+  requested: string = 'global',
+): Promise<{ id: string; collection: string; metadata: Record<string, any> }> {
+  if (options.is_recurring === false && options.recurrence_pattern !== undefined) {
+    throw new RecurrenceError('is_recurring false contradicts recurrence_pattern: leave one of them out');
+  }
   const recurring = options.is_recurring ?? options.recurrence_pattern !== undefined;
   if (recurring && !isRecurrencePattern(options.recurrence_pattern)) {
     throw new RecurrenceError(`A recurring task needs recurrence_pattern: one of ${RECURRENCE_PATTERNS.join(', ')}`);
@@ -213,5 +225,5 @@ export async function createTask(
   metadata.is_synced = false;
 
   await addDocument(collection, id, title, metadata);
-  return id;
+  return { id, collection, metadata };
 }

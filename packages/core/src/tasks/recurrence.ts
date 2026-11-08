@@ -94,14 +94,17 @@ export function storedOpensAt(m: Record<string, any>): number | undefined {
   return stored <= due - lead * 86400 + 3600 && stored > due - (lead + 1) * 86400 - 3600 ? stored : undefined;
 }
 
-/** When this occurrence opens: as stored, else worked out from its due date here. */
-export function opensAtOf(m: Record<string, any>): number {
-  return storedOpensAt(m) ?? opensAt(Number(m.due_date), leadDays(m));
+/** How an opening time is worked out when none is stored: (due, lead) -> unix seconds. */
+export type OpeningRule = (due: number, lead: number) => number;
+
+/** When this occurrence opens: as stored, else by `fallback` (default: the start of the due day here, as opensAt). */
+export function opensAtOf(m: Record<string, any>, fallback: OpeningRule = opensAt): number {
+  return storedOpensAt(m) ?? fallback(Number(m.due_date), leadDays(m));
 }
 
 /** Upcoming: a pending occurrence of a recurring task that hasn't opened yet. */
-export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): boolean {
-  return isRecurring(m) && Number(m.due_date) > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m);
+export function isUpcoming(m: Record<string, any>, now = Math.floor(Date.now() / 1000), fallback: OpeningRule = opensAt): boolean {
+  return isRecurring(m) && Number(m.due_date) > 0 && (m.status ?? 'pending') === 'pending' && now < opensAtOf(m, fallback);
 }
 
 /** "weekly", "every 2 months". */
@@ -197,7 +200,9 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
     if (series) throw new RecurrenceError(`${id} is not recurring: set recurrence_pattern first`);
     return {};
   }
-  if (u.due_date === 0) throw needsDue(id);
+  if (u.due_date === 0) {
+    throw p === undefined ? needsDue(id) : new RecurrenceError('A recurring task needs a due date: don\'t clear the due date when setting recurrence_pattern');
+  }
 
   const curDue = Number(cur.due_date) > 0 ? Number(cur.due_date) : 0;
   const due = u.due_date !== undefined ? u.due_date : curDue;

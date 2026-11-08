@@ -227,7 +227,8 @@ export async function completeTask(
     const template = m.recurrence_notes !== undefined ? String(m.recurrence_notes) : (m.notes ?? '');
 
     // Intentionally omit completed_at/duration_minutes — the new occurrence starts fresh.
-    const newId = await createTask(task.title, {
+    // The title as just written: a rename sent with the completion carries over.
+    const newId = await createTask(String(m.title ?? task.title), {
       priority: m.priority,
       tags: Array.isArray(m.tags) ? m.tags : (m.tags ?? '').split(',').filter(Boolean),
       notes: template,
