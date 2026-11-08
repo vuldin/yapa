@@ -19,7 +19,11 @@ import { resolveWriteCollection } from '../sync/sentinel.js';
 import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
 import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
-import { recurrenceChanges } from './recurrence.js';
+import { isRecurring, recurrenceChanges, recurrenceNote } from './recurrence.js';
+import { forgetMemory } from '../memory/forget.js';
+import { formatDuration, formatTaskDate, formatTaskDay } from './dates.js';
+import type { CompleteResult } from './update.js';
+import type { ReleaseResult } from './claim.js';
 
 export interface LearnedItem extends TypedFields {
   content: string;
@@ -132,8 +136,14 @@ export async function requestDecision(
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, '') : r.ids[0];
   const waits = [...new Set([...list(task.metadata.waits_on), decision])];
-  const u = await updateTask(task.id, { ...extra, status: 'pending', waits_on: waits }, ctx);
-  return { ...u, decision };
+  try {
+    const u = await updateTask(task.id, { ...extra, status: 'pending', waits_on: waits }, ctx);
+    return { ...u, decision };
+  } catch (e) {
+    // Refused after all (the task changed since the check above): no decision without a task waiting on it.
+    await forgetMemory(decision).catch(() => undefined);
+    throw e;
+  }
 }
 
 // ------------------------------------------------- what a task waits on
@@ -185,4 +195,47 @@ export const describeWaits = (w: OpenWait[]) =>
 export function captureNudge(taskId: string, metadata: Record<string, any>, recorded?: Recorded): string | undefined {
   if (recorded?.memories.length || recorded?.follow_ups.length || list(metadata.memory_ids).length) return undefined;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
+}
+
+// ------------------------------------------------- reply text
+// Shared by the MCP tools, the DSH tools and the CLI.
+
+/** What happened to a claim when its task left in_progress. */
+export function releaseText(r: ReleaseResult | undefined): string {
+  if (!r) return '';
+  if (r.kind === 'released') return 'Claim released.';
+  if (r.kind === 'held_by_other') return `Note: ${r.lease.holder.user} (session ${r.lease.holder.session.slice(0, 8)}) still holds a claim on it.`;
+  if (r.kind === 'unshared') return `Claim release not shared (${r.reason}); it lapses on its own.`;
+  return '';
+}
+
+/** What closing a task recorded, and the nudge when it recorded nothing. */
+export function closeText(r: { recorded?: Recorded; nudge?: string }): string {
+  return [
+    r.recorded?.memories.length ? `Recorded ${r.recorded.memories.join(', ')}.` : '',
+    r.recorded?.follow_ups.length ? `Follow-ups: ${r.recorded.follow_ups.join(', ')}.` : '',
+    keptAsNotesLine(r.recorded),
+    r.nudge ?? '',
+  ].filter(Boolean).join('\n');
+}
+
+/**
+ * The reply to a completion: the next occurrence of a recurring task, the
+ * claim release, what was recorded. With `seriesChanged` (recurrence fields
+ * changed in the same call), what the series does now.
+ */
+export function completedText(id: string, result: CompleteResult, opts: { durationMinutes?: number; seriesChanged?: boolean } = {}): string {
+  let text = `Completed task ${id}`;
+  if (opts.durationMinutes != null) text += ` (effort: ${formatDuration(opts.durationMinutes)})`;
+  if (result.regeneratedId) {
+    text += ` → regenerated as ${result.regeneratedId} (recurring)`;
+    if (result.next) text += `, due ${formatTaskDate(result.next.due_date)}, opens ${formatTaskDay(result.next.opens_at)}`;
+  }
+  const lines = [text];
+  if (opts.seriesChanged && result.metadata) {
+    const note = recurrenceNote(result.metadata);
+    lines.push(isRecurring(result.metadata) ? `${note[0].toUpperCase()}${note.slice(1)}.` : 'Series stopped: no next occurrence.');
+  }
+  lines.push(releaseText(result.release), closeText(result));
+  return lines.filter(Boolean).join('\n');
 }

@@ -136,6 +136,11 @@ export function recurrenceLine(m: Record<string, any>, now = Math.floor(Date.now
   return `${head}; this occurrence is due ${formatTaskDate(due)}, ${when}.`;
 }
 
+/** The line a task listing ends with when it left upcoming occurrences out. */
+export function hiddenUpcomingLine(n: number): string {
+  return n ? `_${n} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
+}
+
 /** Today, as a `due: "today"` phrase gives it (end of day). */
 export const todayDue = (): number => parseRelativeDate('today')!;
 
@@ -192,7 +197,7 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
     if (series) throw new RecurrenceError(`${id} is not recurring: set recurrence_pattern first`);
     return {};
   }
-  if (p === undefined && u.due_date === 0) throw needsDue(id);
+  if (u.due_date === 0) throw needsDue(id);
 
   const curDue = Number(cur.due_date) > 0 ? Number(cur.due_date) : 0;
   const due = u.due_date !== undefined ? u.due_date : curDue;

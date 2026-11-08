@@ -218,6 +218,14 @@ describe('recurring tasks over the store', () => {
       expect((await waitingOn({ collection: L })).actions.map(a => a.id)).toEqual([person]);
     });
 
+    it('listTasksCounted says how many upcoming occurrences it left out', async () => {
+      now(at(2027, 5, 3, 12));
+      const { listTasksCounted } = await import('./list.js');
+      expect((await listTasksCounted({ collection: L })).upcomingHidden).toBe(2);
+      expect((await listTasksCounted({ collection: L, includeUpcoming: true })).upcomingHidden).toBe(0);
+      expect((await listTasksCounted({ collection: L, status: 'blocked' })).upcomingHidden).toBe(0);
+    });
+
     it('a lead-time change takes effect at once', async () => {
       now(at(2027, 5, 3, 12));
       const id = await createTask('review the access list', { recurrence_pattern: 'monthly', due_date: at(2027, 5, 31) }, 'project-lead');
@@ -348,6 +356,9 @@ describe('recurring tasks over the store', () => {
       await expect(updateTask(id, { recurrence_pattern: 'none', series_notes: 'x' })).rejects.toThrow(/stops the series/);
       await expect(updateTask(id, { recurrence_pattern: 'none', recurrence_interval: 0 })).rejects.toThrow(/recurrence_interval/);
       await expect(updateTask(id, { lead_days: 1.5 })).rejects.toThrow(/lead_days/);
+      const plain = await createTask('a one-off to make recurring', {}, R);
+      await expect(updateTask(plain, { recurrence_pattern: 'weekly', due_date: 0 })).rejects.toThrow(/needs a due date/);
+      expect((await getTask(plain))!.metadata.is_recurring).toBe(false);
       expect((await getTask(id))!.metadata).toMatchObject({ is_recurring: true, lead_days: 2 });
       await updateTask(id, { recurrence_pattern: 'none' });
       expect((await getTask(id))!.metadata.lead_days).toBe(2);
@@ -371,6 +382,10 @@ describe('recurring tasks over the store', () => {
       const id = await createTask('update the checklist', { recurrence_pattern: 'weekly', notes: 'v1' }, R);
       const r = await completeTask(id, undefined, {}, {}, { series_notes: 'v2', status: 'complete' });
       expect((await getTask(r.regeneratedId!))!.metadata.notes).toBe('v2');
+      expect((await getTask(id))!.metadata).toMatchObject({ status: 'complete', recurrence_notes: 'v2' });
+      expect(r.metadata).toMatchObject({ status: 'complete', recurrence_notes: 'v2' });
+      await expect(completeTask(r.regeneratedId!, undefined, {}, {}, { lead_days: -1 })).rejects.toThrow(/lead_days/);
+      expect((await getTask(r.regeneratedId!))!.metadata.status).toBe('pending');
       const stop = await createTask('update it once more', { recurrence_pattern: 'weekly' }, R);
       expect((await completeTask(stop, undefined, {}, {}, { recurrence_pattern: 'none' })).regeneratedId).toBeUndefined();
     });

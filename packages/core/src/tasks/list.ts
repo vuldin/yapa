@@ -31,12 +31,18 @@ const READ_LIMIT = 10_000;
 
 /** List tasks with optional filtering. Sorted by priority desc, then salience desc. */
 export async function listTasks(filters: TaskListFilters = {}): Promise<TaskListResult[]> {
+  return (await listTasksCounted(filters)).tasks;
+}
+
+/** listTasks, plus how many upcoming occurrences it left out (0 with includeUpcoming). */
+export async function listTasksCounted(filters: TaskListFilters = {}): Promise<{ tasks: TaskListResult[]; upcomingHidden: number }> {
   const collectionNames = filters.collection
     ? [filters.collection]
     : (await listCollections()).map((c: Collection) => c.name);
 
   const allTasks: TaskListResult[] = [];
   const now = Math.floor(Date.now() / 1000);
+  let upcomingHidden = 0;
 
   for (const name of collectionNames) {
     const where: Record<string, any> = { type: 'task' };
@@ -53,7 +59,10 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
         if (!filters.includeComplete && task.metadata.status === 'complete') continue;
         // Deleted on the sync service by its owner, kept here archived.
         if (task.metadata.archived === true && !filters.includeArchived) continue;
-        if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) continue;
+        if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) {
+          upcomingHidden++;
+          continue;
+        }
         allTasks.push({
           id: task.id,
           title: task.content,
@@ -72,7 +81,7 @@ export async function listTasks(filters: TaskListFilters = {}): Promise<TaskList
     if (pB !== pA) return pB - pA;
     return (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0);
   });
-  return filters.limit !== undefined ? sorted.slice(0, filters.limit) : sorted;
+  return { tasks: filters.limit !== undefined ? sorted.slice(0, filters.limit) : sorted, upcomingHidden };
 }
 
 /** Get tasks that are due today or overdue. */

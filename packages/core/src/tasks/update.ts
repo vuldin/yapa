@@ -52,6 +52,8 @@ export interface TaskUpdateResult {
   release?: ReleaseResult;
   /** The status the task had just before this update was written (read under the lock). */
   previousStatus?: string;
+  /** The task's metadata as this update wrote it. */
+  metadata?: Record<string, any>;
 }
 
 /** Caller context for an update: who is acting, and claim options for a move to in_progress. */
@@ -140,13 +142,14 @@ export async function updateTask(
       // without this lock (a boost, a push marker) is kept too.
       await patchDocument(t.collection, t.id, metadataDelta(cur.metadata, updatedMetadata));
     }
-    return cur.metadata.status as string | undefined;
+    return { status: cur.metadata.status as string | undefined, metadata: updatedMetadata };
   }).catch(async e => {
     // The task changed meanwhile and the update no longer applies: give back a claim just taken for it.
     if (result.claim?.kind === 'granted' && !result.claim.renewed) await releaseTaskClaim(t.id, t.collection, 'pending', ctx.session).catch(() => undefined);
     throw e;
   });
-  result.previousStatus = prev;
+  result.previousStatus = prev.status;
+  result.metadata = prev.metadata;
 
   // A granted claim is visible to teammates at once, not after the debounce.
   if (result.claim?.kind === 'granted') {
@@ -160,9 +163,20 @@ export async function updateTask(
   return result;
 }
 
+export interface CompleteResult {
+  regeneratedId?: string;
+  next?: { due_date: number; opens_at: number };
+  release?: ReleaseResult;
+  recorded?: Recorded;
+  nudge?: string;
+  /** The completed task's metadata as written. */
+  metadata?: Record<string, any>;
+}
+
 /**
  * Mark task as complete. Handles recurring regeneration. `fields` are other
- * task_update fields, written first (a refused one stops the completion).
+ * task_update fields, written in the same write (a refused one stops the
+ * completion); the next occurrence follows the task as written.
  */
 export async function completeTask(
   id: string,
@@ -170,14 +184,14 @@ export async function completeTask(
   ctx: TaskUpdateContext = {},
   record: { learned?: LearnedItem[]; follow_ups?: FollowUp[] } = {},
   fields: TaskUpdates = {},
-): Promise<{ regeneratedId?: string; next?: { due_date: number; opens_at: number }; release?: ReleaseResult; recorded?: Recorded; nudge?: string }> {
+): Promise<CompleteResult> {
   validateLearned(record.learned);
-  const { status: _s, ...rest } = fields;
-  if (Object.keys(rest).length) await updateTask(id, rest, ctx);
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
+  const { status: _s, ...rest } = fields;
 
-  const completionUpdates: Partial<TaskOptions> = {
+  const completionUpdates: TaskUpdates = {
+    ...rest,
     status: 'complete',
     salience: (task.metadata.salience ?? 2.0) * 0.5,
   };
@@ -190,16 +204,16 @@ export async function completeTask(
     completionUpdates.duration_minutes = durationMinutes;
   }
 
-  const { release, previousStatus } = await updateTask(id, completionUpdates, ctx);
+  const { release, previousStatus, metadata: written } = await updateTask(id, completionUpdates, ctx);
   const recorded = record.learned?.length || record.follow_ups?.length
     ? await recordForTask({ id: task.id, collection: task.collection }, record)
     : undefined;
   const nudge = captureNudge(task.id, task.metadata, recorded);
-  const extras = { ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
+  const m = written ?? task.metadata;
+  const extras = { metadata: m, ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
 
   // Handle recurring tasks: once, by whichever completion found it still open
   // (two sessions completing it at once must not create two next occurrences).
-  const m = task.metadata;
   if (isRecurring(m) && previousStatus !== 'complete') {
     const pattern = m.recurrence_pattern as RecurrencePattern;
     const interval = recurrenceInterval(m);
