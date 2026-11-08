@@ -215,8 +215,6 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
       let regenerated: { id: string; due_date: number; opens_at: number } | undefined;
       let nextLine = '';
       let existingNext: string | undefined;
-      // Where the writes land: the task's collection, or the one completeTask resolved it to.
-      let written = t.collection;
       if (status === 'complete') {
         const durationMinutes = int(flag(args, '--duration'), '--duration');
         const c = await completeTask(t.id, durationMinutes, { session }, { learned, follow_ups: followUps });
@@ -226,7 +224,6 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         if (c.regeneratedId && c.next) regenerated = { id: c.regeneratedId, ...c.next };
         nextLine = nextOccurrenceText(c);
         existingNext = c.existingNext;
-        written = c.collection ?? t.collection;
       } else {
         const reason = flag(args, '--reason');
         const fields = { ...(reason ? { blockedReason: reason } : {}) };
@@ -239,9 +236,9 @@ async function dispatch(sub: string | undefined, args: string[]): Promise<TaskCl
         }
         if (learned?.length || followUps?.length) recorded = await recordForTask({ id: t.id, collection: t.collection }, { learned, follow_ups: followUps });
       }
-      recordLastWrite(written);
+      recordLastWrite(t.collection);
       // A CLI process has no background sync: push the new status before exiting.
-      const pushed = await pushDocsNow(written, [t.id, ...(regenerated ? [regenerated.id] : [])]).catch(() => undefined);
+      const pushed = await pushDocsNow(t.collection, [t.id, ...(regenerated ? [regenerated.id] : [])]).catch(() => undefined);
       const exit = release?.kind === 'unshared' || (pushed && pushed.errors > 0) ? EXIT.unavailable : EXIT.ok;
       const text = release?.kind === 'released' ? `${t.id} -> ${status}; claim released`
         : release?.kind === 'held_by_other' ? `${t.id} -> ${status}; note: ${release.lease.holder.user} (session ${release.lease.holder.session}) still holds a claim on it`
