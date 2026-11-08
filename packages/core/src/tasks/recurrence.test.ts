@@ -224,13 +224,13 @@ describe('recurring tasks over the store', () => {
     it('gives a series created before templates its current notes', async () => {
       now(at(2027, 1, 4, 10));
       const { addDocument } = await import('../store/index.js');
-      await addDocument(C, 'tester-900', 'water the plants', {
-        type: 'task', id: 'tester-900', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly',
+      await addDocument(C, 'manual-900', 'water the plants', {
+        type: 'task', id: 'manual-900', status: 'pending', priority: 'low', is_recurring: true, recurrence_pattern: 'weekly',
         due_date: at(2027, 1, 4), notes: 'back porch\ndone, soil was dry', tags: '', created_at: 1, updated_at: 1,
       });
-      const r = await completeTask('tester-900');
+      const r = await completeTask('manual-900');
       expect((await getTask(r.regeneratedId!))!.metadata).toMatchObject({
-        notes: 'back porch\ndone, soil was dry', recurrence_anchor: at(2027, 1, 4), due_date: at(2027, 1, 11), recurrence_series: 'tester-900', lead_days: 2,
+        notes: 'back porch\ndone, soil was dry', recurrence_anchor: at(2027, 1, 4), due_date: at(2027, 1, 11), recurrence_series: 'manual-900', lead_days: 2,
       });
     });
   });
@@ -273,6 +273,17 @@ describe('recurring tasks over the store', () => {
       expect((await listTasksCounted({ collection: L, status: 'blocked' })).upcomingHidden).toBe(0);
       const tagged = await listTasksCounted({ collection: L, tags: ['needs-human'] });
       expect(tagged).toMatchObject({ tasks: [], upcomingHidden: 1 });
+    });
+
+    it('getDueTasks keeps upcoming occurrences: the dashboard\'s "Upcoming (7 days)" shows them', async () => {
+      now(at(2027, 5, 3, 12));
+      const { getDueTasks } = await import('./list.js');
+      const due = (await getDueTasks(true)).map(t => t.id);
+      const ids = (await listTasks({ collection: L, includeUpcoming: true })).map(t => t.id);
+      const upcoming = (await listTasks({ collection: L, includeUpcoming: true })).filter(t => isUpcoming(t.metadata)).map(t => t.id);
+      expect(upcoming.length).toBeGreaterThan(0);
+      for (const id of upcoming) expect(due).toContain(id);
+      expect(ids.length).toBeGreaterThan(upcoming.length);
     });
 
     it('a lead-time change takes effect at once', async () => {
@@ -369,13 +380,13 @@ describe('recurring tasks over the store', () => {
 
     it('an occurrence from before slots were stored keeps its due date as its slot when moved', async () => {
       now(at(2027, 11, 1, 9));
-      await addDocument(R, 'tester-950', 'sweep the porch', {
-        type: 'task', id: 'tester-950', status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: at(2027, 11, 8), created_at: 1, updated_at: 1,
+      await addDocument(R, 'manual-950', 'sweep the porch', {
+        type: 'task', id: 'manual-950', status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: at(2027, 11, 8), created_at: 1, updated_at: 1,
       });
-      await updateTask('tester-950', { due_date: at(2027, 11, 6) });
-      expect((await getTask('tester-950'))!.metadata.recurrence_slot).toBe(at(2027, 11, 8));
+      await updateTask('manual-950', { due_date: at(2027, 11, 6) });
+      expect((await getTask('manual-950'))!.metadata.recurrence_slot).toBe(at(2027, 11, 8));
       now(at(2027, 11, 6, 10));
-      expect(day((await completeTask('tester-950')).next!.due_date)).toEqual([2027, 11, 15]);
+      expect(day((await completeTask('manual-950')).next!.due_date)).toEqual([2027, 11, 15]);
     });
 
     it('stores opens_at on create, on lead and due changes and at regeneration; clears it on stop; ignores a stale one', async () => {
@@ -449,7 +460,7 @@ describe('recurring tasks over the store', () => {
       const second = (await completeTask(id)).regeneratedId!;
       const third = (await completeTask(second)).regeneratedId!;
       for (const u of [{ lead_days: 1 }, { series_notes: 'x' }, { recurrence_pattern: 'none' as const }, { recurrence_interval: 2 }]) {
-        await expect(updateTask(id, u)).rejects.toThrow(new RegExp(`${id} is a completed occurrence: change the series on ${third}, its open occurrence`));
+        await expect(updateTask(id, u)).rejects.toThrow(new RegExp(`${id} isn't the open occurrence of its series: change the series on ${third}`));
       }
       await updateTask(third, { recurrence_pattern: 'none' });
       await completeTask(third);
@@ -478,7 +489,7 @@ describe('recurring tasks over the store', () => {
     it('a bogus due date reads as none: true or "0x10"', async () => {
       now(at(2027, 11, 3, 9));
       for (const [i, bogus] of [true, '0x10'].entries()) {
-        const id = `tester-98${i}`;
+        const id = `manual-98${i}`;
         await addDocument(R, id, 'test the alarm', { type: 'task', id, status: 'pending', is_recurring: true, recurrence_pattern: 'weekly', due_date: bogus, created_at: 1, updated_at: 1 });
         expect(isUpcoming((await getTask(id))!.metadata)).toBe(false);
         await updateTask(id, { lead_days: 1 });
@@ -521,13 +532,13 @@ describe('recurring tasks over the store', () => {
 
     it('a series change on a recurring task with no due date gives it today; the reply line never shows an invalid date', async () => {
       now(at(2027, 11, 3, 9));
-      await addDocument(R, 'tester-960', 'oil the hinges', {
-        type: 'task', id: 'tester-960', status: 'pending', is_recurring: true, recurrence_pattern: 'monthly', created_at: 1, updated_at: 1,
+      await addDocument(R, 'manual-960', 'oil the hinges', {
+        type: 'task', id: 'manual-960', status: 'pending', is_recurring: true, recurrence_pattern: 'monthly', created_at: 1, updated_at: 1,
       });
-      expect(recurrenceLine((await getTask('tester-960'))!.metadata)).toBe('Repeats monthly, opens 7 day(s) before it is due.');
-      await updateTask('tester-960', { lead_days: 1 });
-      expect((await getTask('tester-960'))!.metadata).toMatchObject({ due_date: at(2027, 11, 3), recurrence_anchor: at(2027, 11, 3), recurrence_slot: at(2027, 11, 3), lead_days: 1 });
-      expect(recurrenceLine((await getTask('tester-960'))!.metadata)).not.toMatch(/Invalid/);
+      expect(recurrenceLine((await getTask('manual-960'))!.metadata)).toBe('Repeats monthly, opens 7 day(s) before it is due.');
+      await updateTask('manual-960', { lead_days: 1 });
+      expect((await getTask('manual-960'))!.metadata).toMatchObject({ due_date: at(2027, 11, 3), recurrence_anchor: at(2027, 11, 3), recurrence_slot: at(2027, 11, 3), lead_days: 1 });
+      expect(recurrenceLine((await getTask('manual-960'))!.metadata)).not.toMatch(/Invalid/);
     });
   });
 });

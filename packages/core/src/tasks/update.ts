@@ -6,7 +6,7 @@ import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
 
 import type { TaskOptions } from './create.js';
-import { createTaskWithMetadata, freshTaskId, getNextTaskId } from './create.js';
+import { createTaskWithMetadata, freshTaskId, localFreeTaskId } from './create.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 import { claimTask, releaseTaskClaim, TaskClaimedError, type ClaimOptions, type ClaimResult, type ReleaseResult } from './claim.js';
 import { pushDocsNow } from '../sync/push.js';
@@ -219,8 +219,9 @@ export async function completeTask(
   validateLearned(record.learned);
   const task = await getTask(id);
   if (!task) throw new Error(`Task ${id} not found`);
-  // Refused here (a collection removed from this machine) before anything is written.
-  const { collection } = await resolveWriteCollection(task.collection);
+  // The series lives where the task is. A collection removed from this machine refuses the completion before anything is written.
+  const collection = task.collection;
+  await resolveWriteCollection(collection);
   const { status: _s, ...rest } = fields;
   const given = { ...rest, ...(durationMinutes != null ? { duration_minutes: durationMinutes } : {}) };
 
@@ -239,7 +240,7 @@ export async function completeTask(
       const close = { salience: (current.salience ?? 2.0) * 0.5, completed_at: current.completed_at ?? Math.floor(Date.now() / 1000) };
       if (!isRecurring(metadata)) return close;
       successor = await successorOf(collection, task.id)
-        ?? await createSuccessor(collection, task.id, content, { ...metadata, ...close }, nextId ?? await getNextTaskId(0, true));
+        ?? await createSuccessor(collection, task.id, content, { ...metadata, ...close }, nextId ?? await localFreeTaskId());
       return { ...close, next_occurrence: successor.id };
     },
   });
@@ -272,7 +273,7 @@ async function createSuccessor(collection: string, id: string, title: string, m:
   const lead = leadDays(m);
   const tz = seriesZone(m);
   const slot = occurrenceSlot(m);
-  const anchor = metaTime(m.recurrence_anchor) || slot || todayDue();
+  const anchor = metaTime(m.recurrence_anchor) || slot || todayDue(storedZone(m));
   // The calendar slot is kept: late completion skips missed slots, early completion takes the one after this
   // occurrence's slot (where it was scheduled, even if its due date was moved).
   const nextDue = nextRecurrenceDue(anchor, pattern, interval, Math.max(slot, Math.floor(Date.now() / 1000)), tz);
@@ -301,16 +302,23 @@ async function createSuccessor(collection: string, id: string, title: string, m:
 }
 
 /**
- * A series change on a completed occurrence belongs on the open one: refused
- * naming it, also when the same call reopens this one. With nothing open,
+ * A series change belongs on the series' open occurrence: refused, naming
+ * it, on a task with an open successor (even one reopened) and on a
+ * completed one, also when the same call reopens it. With nothing open,
  * reopening makes this the open one; otherwise there is no series to change.
  */
 export async function checkSeriesUpdate(task: { id: string; collection: string; metadata: Record<string, any> }, updates: TaskUpdates): Promise<void> {
-  if (!seriesChanged(updates) || task.metadata.status !== 'complete') return;
+  if (!seriesChanged(updates)) return;
+  // An open occurrence after this one holds the series, whatever this one's status (it may have been reopened).
+  const next = await successorOf(task.collection, task.id);
+  if (next && next.status !== 'complete') throw notOpen(task.id, next.id);
+  if (task.metadata.status !== 'complete') return;
   const series = task.metadata.recurrence_series || task.id;
   const open = (await getDocumentsByFilter(task.collection, { type: 'task', recurrence_series: series }, 100_000))
     .find(d => d.id !== task.id && d.metadata.status !== 'complete' && d.metadata.archived !== true);
-  if (open) throw new RecurrenceError(`${task.id} is a completed occurrence: change the series on ${open.id}, its open occurrence`);
+  if (open) throw notOpen(task.id, open.id);
   if (updates.status !== undefined && updates.status !== 'complete') return;
   throw new RecurrenceError(`${task.id} is complete and no open occurrence follows it: there is no series left to change`);
 }
+
+const notOpen = (id: string, open: string) => new RecurrenceError(`${id} isn't the open occurrence of its series: change the series on ${open}`);

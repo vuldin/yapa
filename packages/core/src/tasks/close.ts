@@ -19,7 +19,7 @@ import { resolveWriteCollection } from '../sync/sentinel.js';
 import { KEPT_AS_NOTE_REASON, keepsRecordsElsewhere, RecordsElsewhereError } from '../memory/records-elsewhere.js';
 import { createTask, type TaskOptions } from './create.js';
 import { checkSeriesUpdate, getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
-import { isRecurring, recurrenceChanges, recurrenceNote } from './recurrence.js';
+import { isRecurring, recurrenceChanges, recurrenceSentence } from './recurrence.js';
 import { forgetMemory } from '../memory/forget.js';
 import { metadataList } from '../metadata-adapter.js';
 import { formatDuration, formatTaskDate, formatTaskDay } from './dates.js';
@@ -243,8 +243,7 @@ export function completedText(id: string, result: CompleteResult, opts: { durati
   if (next) text += ` → ${next}`;
   const lines = [text];
   if (opts.seriesChanged && result.metadata) {
-    const note = recurrenceNote(result.metadata);
-    lines.push(isRecurring(result.metadata) ? `${note[0].toUpperCase()}${note.slice(1)}.` : 'Series stopped: no next occurrence.');
+    lines.push(isRecurring(result.metadata) ? `${recurrenceSentence(result.metadata)}.` : 'Series stopped: no next occurrence.');
   }
   lines.push(releaseText(result.release), closeText(result));
   return lines.filter(Boolean).join('\n');

@@ -91,10 +91,14 @@ export async function listTasksCounted(filters: TaskListFilters = {}): Promise<{
   return { tasks: filters.limit !== undefined ? sorted.slice(0, filters.limit) : sorted, upcomingHidden };
 }
 
-/** Get tasks that are due today or overdue. */
+/**
+ * Open tasks with a due date, soonest first (overdue ones too, unless not
+ * `includeOverdue`). Recurring occurrences that haven't opened yet are
+ * included: they are what is coming.
+ */
 export async function getDueTasks(includeOverdue: boolean = true): Promise<Array<TaskListResult & { daysUntil: number }>> {
   const now = Math.floor(Date.now() / 1000);
-  const tasks = await listTasks({ includeComplete: false });
+  const tasks = await listTasks({ includeComplete: false, includeUpcoming: true });
 
   return tasks
     .filter(t => t.metadata.due_date)

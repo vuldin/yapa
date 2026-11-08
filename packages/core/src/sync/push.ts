@@ -432,8 +432,10 @@ export async function rekeyTask(collection: string, doc: DocumentResult, suggest
     return m;
   });
   await relinkOccurrences(collection, doc.id, newId);
+  // As relinked (its own recurrence_series may have named the old id): the retry pushes this.
+  const [after] = await getDocumentsByIds(collection, [newId]);
   process.stderr.write(`[yapa-sync] Task id ${doc.id} already belongs to a different task on the shared remote; renamed this task to ${newId}\n`);
-  return { ...doc, id: newId, metadata };
+  return { ...doc, id: newId, metadata: after?.metadata ?? metadata };
 }
 
 /**

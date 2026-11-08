@@ -198,8 +198,19 @@ export async function createTaskWithMetadata(
       (await getDocumentsByIds(collection, [at])).length ? undefined : writeTask(collection, at, title, options, recurring));
     if (made) return made;
     if (attempt >= ID_ATTEMPTS) throw new TaskIdTakenError(at);
-    id = await getNextTaskId(Number(at.slice(at.lastIndexOf('-') + 1)) || 0, true);
+    id = await localFreeTaskId(Number(at.slice(at.lastIndexOf('-') + 1)) || 0);
   }
+}
+
+/**
+ * The next task id above `floor` that no local collection uses, without
+ * asking the sync service (for use under a lock). The id is checked under
+ * its own lock again when written.
+ */
+export async function localFreeTaskId(floor = 0): Promise<string> {
+  let id = await getNextTaskId(floor, true);
+  for (let i = 1; i < ID_ATTEMPTS && (await idTaken(id)); i++) id = await getNextTaskId(Number(id.slice(id.lastIndexOf('-') + 1)) || 0, true);
+  return id;
 }
 
 /** No free id was found after ID_ATTEMPTS tries. */
@@ -238,7 +249,7 @@ async function writeTask(collection: string, id: string, title: string, options:
   };
   if (recurring) {
     const pattern = options.recurrence_pattern!;
-    const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue();
+    const due = options.due_date && options.due_date > 0 ? options.due_date : todayDue(options.recurrence_tz);
     const lead = options.lead_days ?? DEFAULT_LEAD_DAYS[pattern];
     const tz = options.recurrence_tz ?? localZone();
     Object.assign(metadata, {

@@ -92,6 +92,25 @@ describe('the next occurrence', () => {
     await expect(updateTask(next, { status: 'pending', recurrence_pattern: 'weekly' })).resolves.toBeDefined();
   });
 
+  it('a reopened occurrence with an open successor refuses series changes, naming it', async () => {
+    const id = await createTask('rotate the passwords', { recurrence_pattern: 'monthly' }, C);
+    const next = (await completeTask(id)).regeneratedId!;
+    await updateTask(id, { status: 'pending' });
+    await expect(updateTask(id, { recurrence_interval: 2 })).rejects.toThrow(new RegExp(`${id} isn't the open occurrence of its series: change the series on ${next}`));
+    expect((await getTask(id))!.metadata.recurrence_interval).toBe(1);
+  });
+
+  it('a recurring task created without a due date is due at the end of today in its zone', async () => {
+    const id = await createTask('call the Tokyo office', { recurrence_pattern: 'daily', recurrence_tz: 'Asia/Tokyo' }, C);
+    const due = (await getTask(id))!.metadata.due_date;
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo', hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
+      .formatToParts(new Date(due * 1000));
+    const get = (t: string) => Number(parts.find(p => p.type === t)!.value);
+    expect([get('hour'), get('minute'), get('second')]).toEqual([23, 59, 59]);
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(new Date());
+    expect(`${get('year')}-${String(get('month')).padStart(2, '0')}-${String(get('day')).padStart(2, '0')}`).toBe(today);
+  });
+
   it('a refused series change through decision_needed stores no decision', async () => {
     const id = await createTask('pick the review day', { recurrence_pattern: 'weekly' }, C);
     await completeTask(id);

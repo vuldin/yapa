@@ -8,7 +8,7 @@
  * occurrence is upcoming, and hidden from task lists, until lead_days before
  * the day it is due (opens_at).
  */
-import { formatTaskDate, formatTaskDay, parseRelativeDate } from './dates.js';
+import { formatTaskDate, formatTaskDay } from './dates.js';
 
 export const RECURRENCE_PATTERNS = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'] as const;
 export type RecurrencePattern = (typeof RECURRENCE_PATTERNS)[number];
@@ -217,11 +217,16 @@ export function recurrenceNote(m: Record<string, any>): string {
   return `repeats ${describeRecurrence(m)}, ${lead ? `opens ${lead} day(s) before it is due` : 'opens on the day it is due'}`;
 }
 
+/** recurrenceNote as the start of a sentence: "Repeats weekly, …", or ''. */
+export function recurrenceSentence(m: Record<string, any>): string {
+  const note = recurrenceNote(m);
+  return note && `${note[0].toUpperCase()}${note.slice(1)}`;
+}
+
 /** What a series does now, for a reply after creating or changing it. */
 export function recurrenceLine(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): string {
-  const repeats = recurrenceNote(m);
-  if (!repeats) return 'Not recurring: completing it creates no next occurrence.';
-  const head = `${repeats[0].toUpperCase()}${repeats.slice(1)}`;
+  const head = recurrenceSentence(m);
+  if (!head) return 'Not recurring: completing it creates no next occurrence.';
   const due = metaTime(m.due_date);
   if (!due) return `${head}.`;
   const upcoming = upcomingInfo(m, now);
@@ -234,8 +239,12 @@ export function hiddenUpcomingLine(n: number): string {
   return n ? `_${n} upcoming recurring task(s) hidden (not open yet): pass include_upcoming: true to show them._` : '';
 }
 
-/** Today, as a `due: "today"` phrase gives it (end of day). */
-export const todayDue = (): number => parseRelativeDate('today')!;
+/** Today's end of day, as a `due: "today"` phrase gives it, in `tz` (local time without one, or for a zone this machine doesn't know). */
+export function todayDue(tz?: string): number {
+  const zone = tz && zoneFormatter(tz) ? tz : undefined;
+  const w = wallClock(Math.floor(Date.now() / 1000), zone);
+  return fromWallClock({ ...w, h: 23, mi: 59, s: 59 }, zone);
+}
 
 export function checkInterval(v: unknown): number {
   if (!Number.isInteger(v) || (v as number) < 1) throw new RecurrenceError('recurrence_interval must be an integer of at least 1');
@@ -342,7 +351,7 @@ export function recurrenceChanges(id: string, cur: Record<string, any>, u: Recur
   const same = recurring && pattern === cur.recurrence_pattern;
   const out: Record<string, any> = {};
   if (p !== undefined || (iv !== undefined && iv !== recurrenceInterval(cur)) || (series && !(due > 0))) {
-    const d = due > 0 ? due : todayDue();
+    const d = due > 0 ? due : todayDue(storedZone(cur));
     Object.assign(out, {
       is_recurring: true,
       recurrence_pattern: pattern,

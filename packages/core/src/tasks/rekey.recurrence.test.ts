@@ -29,7 +29,8 @@ describe('a re-keyed occurrence keeps its successor', () => {
     const [doc] = await getDocumentsByIds(C, [id]);
     const moved = await rekeyTask(C, doc);
     expect(moved.id).not.toBe(id);
-    expect(moved.metadata.rekeyed_from).toBe(id);
+    // What the retry upsert pushes: the metadata as relinked, not as it was before.
+    expect(moved.metadata).toMatchObject({ rekeyed_from: id, recurrence_series: moved.id });
     expect((await getTask(next))!.metadata).toMatchObject({ previous_occurrence: moved.id, recurrence_series: moved.id });
     expect((await getTask(moved.id))!.metadata.recurrence_series).toBe(moved.id);
 

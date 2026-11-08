@@ -127,6 +127,6 @@ describe('completeTask and the next occurrence', () => {
     const [doc] = await getDocumentsByIds(C, [next]);
     await deleteDocument(C, next);
     await addDocument(C, 'tester-6000', doc.content, { ...doc.metadata, id: 'tester-6000', rekeyed_from: next });
-    await expect(updateTask(id, { lead_days: 1 })).rejects.toThrow(new RegExp(`${id} is a completed occurrence: change the series on tester-6000`));
+    await expect(updateTask(id, { lead_days: 1 })).rejects.toThrow(new RegExp(`${id} isn't the open occurrence of its series: change the series on tester-6000`));
   });
 });
