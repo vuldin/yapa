@@ -3,30 +3,37 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// The next occurrence's write fails once, as when the store is unavailable for a moment.
-const failNext = vi.hoisted(() => ({ on: false }));
+// One write fails on demand: the next occurrence's create, or the completion itself.
+const fail = vi.hoisted(() => ({ create: false, patch: false }));
 vi.mock('./create.js', async importOriginal => {
   const actual = await importOriginal<typeof import('./create.js')>();
   return {
     ...actual,
     createTaskWithMetadata: vi.fn(async (...args: Parameters<typeof actual.createTaskWithMetadata>) => {
-      if (failNext.on && args[3]?.id) {
-        failNext.on = false;
-        throw new Error('store unavailable');
-      }
+      if (fail.create) { fail.create = false; throw new Error('store unavailable'); }
       return actual.createTaskWithMetadata(...args);
+    }),
+  };
+});
+vi.mock('../store/index.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../store/index.js')>();
+  return {
+    ...actual,
+    patchDocument: vi.fn(async (...args: Parameters<typeof actual.patchDocument>) => {
+      if (fail.patch) { fail.patch = false; throw new Error('disk full'); }
+      return actual.patchDocument(...args);
     }),
   };
 });
 
 import { setConfig, resetConfig, createConfig } from '../config.js';
-import { setStore, resetStore, createLocalStore, addDocument, patchDocument } from '../store/index.js';
+import { setStore, resetStore, createLocalStore, addDocument, deleteDocument, getDocumentsByFilter, getDocumentsByIds } from '../store/index.js';
 import { createTask } from './create.js';
-import { completeTask, getTask } from './update.js';
-import { RegenerationError } from './recurrence.js';
+import { completeTask, getTask, updateTask } from './update.js';
 
 let dir: string;
 const C = 'private-retry';
+const successorsOf = async (id: string) => (await getDocumentsByFilter(C, { type: 'task' }, 1000)).filter(d => d.metadata.previous_occurrence === id);
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'yapa-regen-retry-'));
   setConfig(createConfig({ YAPA_USERNAME: 'tester' }));
@@ -39,45 +46,66 @@ afterAll(async () => {
 });
 
 describe('completeTask and the next occurrence', () => {
-  it('a failed create says so; completing again creates it with the reserved id, without closing the task again', async () => {
+  it('a failed create leaves the task open with nothing recorded; a plain retry completes it', async () => {
     const id = await createTask('water the garden', { recurrence_pattern: 'daily' }, C);
-    failNext.on = true;
-    const err = await completeTask(id).catch(e => e);
-    expect(err).toBeInstanceOf(RegenerationError);
-    expect(err.message).toMatch(/is complete, but its next occurrence could not be created \(store unavailable\): complete it again to retry/);
-    const done = (await getTask(id))!.metadata;
-    expect(done.status).toBe('complete');
-    const reserved = done.next_occurrence;
-    expect(reserved).toMatch(/^tester-\d+$/);
-    expect(await getTask(reserved)).toBeNull();
+    fail.create = true;
+    await expect(completeTask(id, undefined, {}, { learned: [{ content: 'the hose leaks at the tap', kind: 'finding' }] })).rejects.toThrow(/store unavailable/);
+    expect((await getTask(id))!.metadata).toMatchObject({ status: 'pending' });
+    expect((await getTask(id))!.metadata.next_occurrence).toBeUndefined();
+    expect(await getDocumentsByFilter(C, { type: 'memory' }, 100)).toHaveLength(0);
 
-    const retry = await completeTask(id);
-    expect(retry.regeneratedId).toBe(reserved);
-    expect(retry.nudge).toBeUndefined();
-    expect((await getTask(reserved))!.metadata).toMatchObject({ previous_occurrence: id, status: 'pending' });
-    expect((await getTask(id))!.metadata.salience).toBe(done.salience);
-    expect((await completeTask(id)).regeneratedId).toBeUndefined();
+    const r = await completeTask(id);
+    expect((await getTask(id))!.metadata).toMatchObject({ status: 'complete', next_occurrence: r.regeneratedId });
+    expect(await successorsOf(id)).toHaveLength(1);
   });
 
-  it('a task completed before 1.19 (no next_occurrence) and completed again creates nothing', async () => {
+  it('a failed completion write after the create leaves one successor once retried', async () => {
+    const id = await createTask('sweep the porch', { recurrence_pattern: 'weekly' }, C);
+    fail.patch = true;
+    await expect(completeTask(id)).rejects.toThrow(/disk full/);
+    expect((await getTask(id))!.metadata.status).toBe('pending');
+    const [made] = await successorsOf(id);
+    expect(made).toBeDefined();
+
+    const r = await completeTask(id);
+    expect(r.regeneratedId).toBe(made.id);
+    expect(await successorsOf(id)).toHaveLength(1);
+    expect((await getTask(id))!.metadata).toMatchObject({ status: 'complete', next_occurrence: made.id });
+  });
+
+  it('two completions at once create one successor', async () => {
+    const id = await createTask('feed the fish', { recurrence_pattern: 'daily' }, C);
+    await Promise.all([completeTask(id), completeTask(id)]);
+    expect(await successorsOf(id)).toHaveLength(1);
+  });
+
+  it('a deleted successor stays deleted when the completed task is updated again', async () => {
+    const id = await createTask('check the tyre pressure', { recurrence_pattern: 'monthly' }, C);
+    const r = await completeTask(id);
+    await deleteDocument(C, r.regeneratedId!);
+    expect((await completeTask(id, 20)).regeneratedId).toBeUndefined();
+    await updateTask(id, { duration_minutes: 25 });
+    expect(await successorsOf(id)).toHaveLength(0);
+    expect((await getTask(id))!.metadata.duration_minutes).toBe(25);
+  });
+
+  it('a task completed before 1.19 and completed again creates nothing', async () => {
     await addDocument(C, 'tester-970', 'clean the gutters', {
       type: 'task', id: 'tester-970', status: 'complete', is_recurring: true, recurrence_pattern: 'monthly',
       due_date: 1_900_000_000, completed_at: 1_899_000_000, salience: 1, created_at: 1, updated_at: 1,
     });
     expect((await completeTask('tester-970')).regeneratedId).toBeUndefined();
-    expect((await getTask('tester-970'))!.metadata).toMatchObject({ salience: 1 });
+    expect(await successorsOf('tester-970')).toHaveLength(0);
+    expect((await getTask('tester-970'))!.metadata.salience).toBe(1);
   });
 
-  it('a reservation left by a crash is completed with the same id', async () => {
-    const id = await createTask('check the smoke alarm', { recurrence_pattern: 'monthly' }, C);
-    await completeTask(id);
-    const next = (await getTask(id))!.metadata.next_occurrence as string;
-    const later = await completeTask(next);
-    const reservedId = 'tester-5000';
-    await patchDocument(C, next, { next_occurrence: reservedId });
-    await expect(getTask(reservedId)).resolves.toBeNull();
-    expect((await completeTask(next)).regeneratedId).toBe(reservedId);
-    expect((await getTask(reservedId))!.metadata.previous_occurrence).toBe(next);
-    expect(later.regeneratedId).not.toBe(reservedId);
+  it('the series-change check finds the open occurrence after a re-key', async () => {
+    const id = await createTask('back up the photos', { recurrence_pattern: 'weekly' }, C);
+    const next = (await completeTask(id)).regeneratedId!;
+    // Re-keyed by sync: the same task under a new id, still pointing back at its predecessor.
+    const [doc] = await getDocumentsByIds(C, [next]);
+    await deleteDocument(C, next);
+    await addDocument(C, 'tester-6000', doc.content, { ...doc.metadata, id: 'tester-6000', rekeyed_from: next });
+    await expect(updateTask(id, { lead_days: 1 })).rejects.toThrow(new RegExp(`${id} is a completed occurrence: change the series on tester-6000`));
   });
 });

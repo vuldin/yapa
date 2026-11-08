@@ -18,13 +18,6 @@ export const DEFAULT_LEAD_DAYS: Record<RecurrencePattern, number> = { daily: 0, 
 
 export class RecurrenceError extends Error {}
 
-/** The task was completed, but its next occurrence could not be created: completing it again retries. */
-export class RegenerationError extends RecurrenceError {
-  constructor(readonly taskId: string, cause: unknown) {
-    super(`${taskId} is complete, but its next occurrence could not be created (${cause instanceof Error ? cause.message : String(cause)}): complete it again to retry`);
-  }
-}
-
 export const isRecurrencePattern = (p: unknown): p is RecurrencePattern => RECURRENCE_PATTERNS.includes(p as RecurrencePattern);
 
 const MONTHS: Partial<Record<RecurrencePattern, number>> = { monthly: 1, quarterly: 3, yearly: 12 };
@@ -187,11 +180,20 @@ export function describeRecurrence(m: Record<string, any>): string {
   return `every ${n} ${unit}`;
 }
 
-/** For a listing: "upcoming: due Fri, Nov 14, opens Wed, Nov 12", or '' when the task is open. */
-export function upcomingNote(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): string {
-  if (!isUpcoming(m, now)) return '';
-  return `upcoming: due ${formatTaskDate(Number(m.due_date))}, opens ${formatTaskDay(opensAtOf(m))}`;
+/**
+ * For a listing: when an upcoming occurrence opens, and the note
+ * "upcoming: due Fri, Nov 14, opens Wed, Nov 12"; undefined when the task is
+ * open. The opening time is worked out once.
+ */
+export function upcomingInfo(m: Record<string, any>, now = Math.floor(Date.now() / 1000)): { opens_at: number; note: string } | undefined {
+  const due = metaTime(m.due_date);
+  if (!isRecurring(m) || !due || (m.status ?? 'pending') !== 'pending') return undefined;
+  const opens = opensAtOf(m);
+  return now < opens ? { opens_at: opens, note: `upcoming: due ${formatTaskDate(due)}, opens ${formatTaskDay(opens)}` } : undefined;
 }
+
+/** upcomingInfo's note, or '' when the task is open. */
+export const upcomingNote = (m: Record<string, any>, now = Math.floor(Date.now() / 1000)): string => upcomingInfo(m, now)?.note ?? '';
 
 /** "repeats weekly, opens 2 day(s) before it is due", or '' when not recurring. */
 export function recurrenceNote(m: Record<string, any>): string {
@@ -205,9 +207,10 @@ export function recurrenceLine(m: Record<string, any>, now = Math.floor(Date.now
   const repeats = recurrenceNote(m);
   if (!repeats) return 'Not recurring: completing it creates no next occurrence.';
   const head = `${repeats[0].toUpperCase()}${repeats.slice(1)}`;
-  const due = Number(m.due_date);
-  if (!(due > 0)) return `${head}.`;
-  const when = isUpcoming(m, now) ? `opens ${formatTaskDay(opensAtOf(m))} (hidden from task lists until then)` : 'open now';
+  const due = metaTime(m.due_date);
+  if (!due) return `${head}.`;
+  const upcoming = upcomingInfo(m, now);
+  const when = upcoming ? `opens ${formatTaskDay(upcoming.opens_at)} (hidden from task lists until then)` : 'open now';
   return `${head}; this occurrence is due ${formatTaskDate(due)}, ${when}.`;
 }
 
@@ -254,6 +257,7 @@ export interface SeriesInfo {
 /** A task's series, for listings and JSON; null when it isn't recurring. */
 export function seriesInfo(m: Record<string, any>, id: string, now = Math.floor(Date.now() / 1000)): SeriesInfo | null {
   if (!isRecurring(m)) return null;
+  const opens = metaTime(m.due_date) ? opensAtOf(m) : null;
   return {
     pattern: m.recurrence_pattern,
     interval: recurrenceInterval(m),
@@ -265,8 +269,8 @@ export function seriesInfo(m: Record<string, any>, id: string, now = Math.floor(
     next: m.next_occurrence || null,
     series_notes: m.recurrence_notes !== undefined ? String(m.recurrence_notes) : null,
     zone: seriesZone(m) ?? null,
-    upcoming: isUpcoming(m, now),
-    opens_at: metaTime(m.due_date) ? opensAtOf(m) : null,
+    upcoming: opens !== null && (m.status ?? 'pending') === 'pending' && now < opens,
+    opens_at: opens,
   };
 }
 

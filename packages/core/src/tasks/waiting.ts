@@ -58,7 +58,6 @@ export interface WaitingOptions {
   user?: string;
 }
 
-const list = metadataList;
 
 const firstLine = (s: string) => {
   const line = s.split('\n').find(l => l.trim()) ?? '';
@@ -92,7 +91,7 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
     const now = Math.floor(Date.now() / 1000);
     const open = tasks.filter(t => t.metadata.status !== 'complete' && t.metadata.archived !== true && !isUpcoming(t.metadata, now));
     const waitingOnIt = new Map<string, string[]>();
-    for (const t of open) for (const m of list(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
+    for (const t of open) for (const m of metadataList(t.metadata.waits_on)) waitingOnIt.set(m, [...(waitingOnIt.get(m) ?? []), t.id]);
 
     const seen = new Set<string>();
     for (const d of [...decisions, ...questions]) {
@@ -105,7 +104,7 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
       const item: WaitingItem = {
         id, collection, what: m.kind as 'decision' | 'question', title: firstLine(d.content), ...ownerWaitsOn(m.owner, by, known),
         by, since: Number(m.updated_at ?? m.created_at ?? 0), status: m.status ?? DEFAULT_STATUS[m.kind as MemoryKind],
-        ...(list(m.options).length ? { options: list(m.options) } : {}),
+        ...(metadataList(m.options).length ? { options: metadataList(m.options) } : {}),
         ...(m.recommendation ? { recommendation: String(m.recommendation) } : {}),
         ...(waitingOnIt.get(id)?.length ? { waiting_tasks: waitingOnIt.get(id) } : {}),
       };
@@ -115,7 +114,7 @@ export async function waitingOn(opts: WaitingOptions = {}): Promise<WaitingResul
     for (const t of open) {
       const m = t.metadata;
       const owner = m.origin_user ?? m.username ?? '';
-      const people = taskNeedsPeople(list(m.tags));
+      const people = taskNeedsPeople(metadataList(m.tags));
       if (people) {
         out.actions.push({
           id: t.id, collection, what: 'action', title: t.content, for: people, by: owner,

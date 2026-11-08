@@ -21,6 +21,7 @@ import { createTask, type TaskOptions } from './create.js';
 import { getTask, updateTask, type TaskUpdateContext, type TaskUpdateResult } from './update.js';
 import { isRecurring, recurrenceChanges, recurrenceNote } from './recurrence.js';
 import { forgetMemory } from '../memory/forget.js';
+import { metadataList } from '../metadata-adapter.js';
 import { formatDuration, formatTaskDate, formatTaskDay } from './dates.js';
 import type { CompleteResult } from './update.js';
 import type { ReleaseResult } from './claim.js';
@@ -63,8 +64,6 @@ export function keptAsNotesLine(r: Recorded | undefined): string {
   return ids.length ? `Kept ${ids.join(', ')} as ${ids.length === 1 ? 'a note' : 'notes'}, without a kind: ${KEPT_AS_NOTE_REASON}.` : '';
 }
 
-const list = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).filter(Boolean);
 
 /**
  * Validate everything first, then store: a bad item refuses the whole call
@@ -135,7 +134,7 @@ export async function requestDecision(
   });
   const r = await storeMemory(content, { collection: task.collection, typed });
   const decision = r.ids.length > 1 ? String(r.ids[0]).replace(/-0$/, '') : r.ids[0];
-  const waits = [...new Set([...list(task.metadata.waits_on), decision])];
+  const waits = [...new Set([...metadataList(task.metadata.waits_on), decision])];
   try {
     const u = await updateTask(task.id, { ...extra, status: 'pending', waits_on: waits }, ctx);
     return { ...u, decision };
@@ -174,7 +173,7 @@ export interface OpenWait {
  */
 export async function openWaits(metadata: Record<string, any>, collection?: string): Promise<OpenWait[]> {
   const out: OpenWait[] = [];
-  for (const start of list(metadata.waits_on)) {
+  for (const start of metadataList(metadata.waits_on)) {
     let id = start;
     let found = await findMemory(id, collection);
     for (let hops = 0; found?.metadata.archived === true && found.metadata.superseded_by && hops < 5; hops++) {
@@ -193,7 +192,7 @@ export const describeWaits = (w: OpenWait[]) =>
 
 /** The reply line when a task closes with nothing recorded for it. */
 export function captureNudge(taskId: string, metadata: Record<string, any>, recorded?: Recorded): string | undefined {
-  if (recorded?.memories.length || recorded?.follow_ups.length || list(metadata.memory_ids).length) return undefined;
+  if (recorded?.memories.length || recorded?.follow_ups.length || metadataList(metadata.memory_ids).length) return undefined;
   return `Nothing was recorded for ${taskId}: if it produced a finding, a decision or a follow-up, record it (memory_store with task_ids: ["${taskId}"], or task_create).`;
 }
 

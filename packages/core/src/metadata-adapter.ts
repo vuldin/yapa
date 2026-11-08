@@ -32,28 +32,28 @@ export function toChroma(metadata: Record<string, any>): RawMetadata {
   return result;
 }
 
-/** Free text that is always a string, even when it looks like JSON ("[2026] plan", a template starting with "{"). */
-const TEXT_FIELDS = new Set(['title', 'notes', 'recurrence_notes', 'blockedReason']);
+/** List fields: comma-separated, or JSON when an item holds a comma. */
+const ARRAY_FIELDS = new Set(['tags', 'depends_on', 'blocks', 'related_ids', 'claim_scope', 'task_ids', 'memory_ids', 'waits_on', 'options', 'disposition_ids']);
+/** Object-valued fields, stored as JSON (sync/sentinel.ts). */
+const OBJECT_FIELDS = new Set(['redirects']);
 
 /** A list field as stored (an array, or comma-separated), trimmed, without empty entries. */
 export const metadataList = (v: unknown): string[] =>
   (Array.isArray(v) ? v : typeof v === 'string' && v ? v.split(',') : []).map(String).map(s => s.trim()).filter(Boolean);
 
 /**
- * Convert ChromaDB format back to JavaScript objects.
- * Comma-separated strings -> Arrays (for known array fields), JSON strings -> Objects.
+ * Convert ChromaDB format back to JavaScript objects: only the fields
+ * toChroma encodes are decoded (list fields, comma-separated or JSON; the
+ * object fields, JSON). Every other string stays as written, even one that
+ * looks like JSON ("[2026] plan", a template starting with "{").
  */
 export function fromChroma(metadata: RawMetadata): Record<string, any> {
   const result: Record<string, any> = {};
-  const arrayFields = ['tags', 'depends_on', 'blocks', 'related_ids', 'claim_scope', 'task_ids', 'memory_ids', 'waits_on', 'options', 'disposition_ids'];
 
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value === 'string') {
-      if (TEXT_FIELDS.has(key)) {
-        result[key] = value;
-        continue;
-      }
-      if (value.startsWith('{') || value.startsWith('[')) {
+      const json = (ARRAY_FIELDS.has(key) && value.startsWith('[')) || (OBJECT_FIELDS.has(key) && value.startsWith('{'));
+      if (json) {
         try {
           result[key] = JSON.parse(value);
           continue;
@@ -62,7 +62,7 @@ export function fromChroma(metadata: RawMetadata): Record<string, any> {
         }
       }
 
-      if (arrayFields.includes(key)) {
+      if (ARRAY_FIELDS.has(key)) {
         if (value === '') {
           result[key] = [];
         } else if (value.includes(',')) {

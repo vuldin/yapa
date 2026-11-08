@@ -82,7 +82,6 @@ export interface NextResult {
   cleanup: CleanupItem[];
 }
 
-const norm = metadataList;
 
 /** Keys of this machine's expired (not yet pruned) leases in `collection`. */
 async function expiredLeaseKeys(collection: string): Promise<Set<string>> {
@@ -115,7 +114,7 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
   const liveScope = new Map<string, string>();
   for (const l of live) {
     for (const s of l.scope) if (s !== `key:${l.key}`) liveScope.set(s, l.key);
-    for (const s of norm(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
+    for (const s of metadataList(byId.get(l.key)?.metadata.claim_scope)) liveScope.set(s, l.key);
   }
 
   const openIds = new Set(open.map(d => d.id));
@@ -129,7 +128,7 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
   };
 
   for (const d of open) {
-    const tags = norm(d.metadata.tags);
+    const tags = metadataList(d.metadata.tags);
     if (opts.tags?.length && !opts.tags.every(t => tags.includes(t))) continue;
     if (opts.excludeTags?.some(t => tags.includes(t))) {
       skipped.push({ id: d.id, reason: `tagged ${opts.excludeTags.filter(t => tags.includes(t)).join(', ')}` });
@@ -171,7 +170,7 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
       }
     }
     const waiting: string[] = [];
-    for (const dep of norm(d.metadata.depends_on)) {
+    for (const dep of metadataList(d.metadata.depends_on)) {
       const s = await depStatus(dep);
       if (s !== undefined && s !== 'complete') waiting.push(dep);
     }
@@ -179,12 +178,12 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
       skipped.push({ id: d.id, reason: `waiting on ${waiting.join(', ')}` });
       continue;
     }
-    const waits = norm(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
+    const waits = metadataList(d.metadata.waits_on).length ? await openWaits(d.metadata, opts.collection) : [];
     if (waits.length) {
       skipped.push({ id: d.id, reason: describeWaits(waits) });
       continue;
     }
-    const near = [...new Set(norm(d.metadata.claim_scope).filter(s => liveScope.has(s)).map(s => liveScope.get(s)!))];
+    const near = [...new Set(metadataList(d.metadata.claim_scope).filter(s => liveScope.has(s)).map(s => liveScope.get(s)!))];
     ready.push({
       id: d.id,
       title: d.content,
@@ -192,7 +191,7 @@ export async function nextTasks(opts: NextOptions): Promise<NextResult> {
       priority: d.metadata.priority ?? 'medium',
       status,
       ...(d.metadata.due_date ? { due_date: Number(d.metadata.due_date) } : {}),
-      unblocks: norm(d.metadata.blocks).filter(b => openIds.has(b)).length,
+      unblocks: metadataList(d.metadata.blocks).filter(b => openIds.has(b)).length,
       near,
       lapsed: status === 'in_progress',
     });
@@ -245,8 +244,8 @@ async function cleanupItems(
   const items: CleanupItem[] = [];
   const want = (key: string) => !only || only.includes(key);
   const triageTag = (tags: string[]) => tags.includes('auto') || tags.includes('needs-human') || tags.some(t => t.startsWith('needs:'));
-  if (want('cleanup:triage') && open.some(d => triageTag(norm(d.metadata.tags)))) {
-    const untriaged = open.filter(d => !triageTag(norm(d.metadata.tags))).length;
+  if (want('cleanup:triage') && open.some(d => triageTag(metadataList(d.metadata.tags)))) {
+    const untriaged = open.filter(d => !triageTag(metadataList(d.metadata.tags))).length;
     if (untriaged) items.push({ key: 'cleanup:triage', title: `Triage ${untriaged} open task(s): tag each auto or needs-human (and needs:<user> when one person must take it)`, count: untriaged });
   }
   const findings = want('cleanup:findings') ? await staleFindings(collection) : [];

@@ -413,13 +413,14 @@ describe('recurring tasks over the store', () => {
       expect((await getTask(id))!.metadata.lead_days).toBe(2);
     });
 
-    it('records next_occurrence: reopening and completing again, or two completions at once, create one next occurrence', async () => {
+    it('one successor: reopening and completing again finds it, two completions at once create one', async () => {
       now(at(2027, 11, 1, 9));
       const id = await createTask('rotate the backup tapes', { recurrence_pattern: 'weekly' }, R);
       const first = await completeTask(id);
       expect((await getTask(id))!.metadata.next_occurrence).toBe(first.regeneratedId);
       await updateTask(id, { status: 'pending' });
-      expect((await completeTask(id)).regeneratedId).toBeUndefined();
+      expect((await completeTask(id)).regeneratedId).toBe(first.regeneratedId);
+      expect((await getDocumentsByFilter(R, { type: 'task' }, 1000)).filter(d => d.metadata.previous_occurrence === id)).toHaveLength(1);
 
       const both = await Promise.all([completeTask(first.regeneratedId!), completeTask(first.regeneratedId!)]);
       expect(both.filter(r => r.regeneratedId)).toHaveLength(1);

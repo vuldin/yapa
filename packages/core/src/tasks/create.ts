@@ -143,10 +143,6 @@ async function idTaken(id: string): Promise<boolean> {
 const ID_ATTEMPTS = 5;
 
 /** A task id no document uses yet: getNextTaskId, skipping any number found taken. */
-export async function reserveTaskId(): Promise<string> {
-  return freshTaskId();
-}
-
 async function freshTaskId(): Promise<string> {
   let floor = 0;
   let id = await getNextTaskId();
@@ -166,12 +162,11 @@ export async function createTask(
   return (await createTaskWithMetadata(title, options, requested)).id;
 }
 
-/** createTask, returning the collection it was written to and the metadata it wrote. `opts.id`: an id from reserveTaskId. */
+/** createTask, returning the collection it was written to and the metadata it wrote. */
 export async function createTaskWithMetadata(
   title: string,
   options: TaskOptions = {},
   requested: string = 'global',
-  opts: { id?: string } = {},
 ): Promise<{ id: string; collection: string; metadata: Record<string, any> }> {
   if (options.is_recurring === false && options.recurrence_pattern !== undefined) {
     throw new RecurrenceError('is_recurring false contradicts recurrence_pattern: leave one of them out');
@@ -188,7 +183,7 @@ export async function createTaskWithMetadata(
   // A collection merged away here is followed, never recreated.
   const { collection } = await resolveWriteCollection(requested);
   await getOrCreateCollection(collection);
-  const id = opts.id ?? await freshTaskId();
+  const id = await freshTaskId();
   const now = Math.floor(Date.now() / 1000);
 
   const metadata: Record<string, any> = {

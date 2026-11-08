@@ -56,7 +56,16 @@ describe('metadata-adapter round trip', () => {
     expect(roundTripped.verification_last_result).toBe('failed');
   });
 
-  it('drops null/undefined new fields (consistent with existing adapter behavior)', () => {
+  it('decodes only the fields it encodes: text that looks like JSON stays text', () => {
+    const input = {
+      kind: 'decision', recommendation: '["retry", "give up"]', exit_criteria: '{"p99_ms": 5}', title: '[2026] plan', notes: '{draft}',
+      options: ['retry, then give up', 'give up'], tags: ['a', 'b'], redirects: { 'project-old': 'project-new' },
+    };
+    const out = fromChroma(toChroma(input));
+    expect(out).toEqual(input);
+  });
+
+    it('drops null/undefined new fields (consistent with existing adapter behavior)', () => {
     const input = {
       salience: 1.0,
       trainable: null,
