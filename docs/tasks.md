@@ -36,7 +36,9 @@ task_complete id: alex-41
 
 **Notes.** `recurrence_notes` is the series template: the notes as they were when recurrence was set. Each new occurrence starts with the template, not with what was added to the last one, so a closing note stays with the occurrence it was written on. `task_update` with `notes` changes only the current occurrence; `series_notes` replaces the template. A series created before 1.19 has no template: its next occurrence starts from the last one's notes, which become the template from then on.
 
-**Links.** Every occurrence carries `recurrence_series` (the id of the series' first task) and, after the first, `previous_occurrence` (the one completed before it). `task_list` with an `id` shows both.
+**Links.** Every occurrence carries `recurrence_series` (the id of the series' first task) and, after the first, `previous_occurrence` (the one completed before it). A completed occurrence records `next_occurrence`, the one its completion created. `task_list` with an `id` shows all three.
+
+**Each occurrence gets one successor.** Reopening a completed occurrence and completing it again creates nothing new, and two sessions completing it at once create one. If the next occurrence can't be created (the store is unavailable, say), the completion still stands and the reply says so: complete the task again to retry. An occurrence completed before 1.19 has no `next_occurrence`, so reopening and completing it again creates another one.
 
 **Changing a series** with `task_update`:
 - `recurrence_pattern` makes a plain task recurring, or changes the period. Either way the series is re-anchored at the task's due date (today if it has none). A new pattern resets `recurrence_interval` to 1 and `lead_days` to the pattern's default unless you pass them.
