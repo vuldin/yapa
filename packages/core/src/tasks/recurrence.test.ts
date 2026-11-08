@@ -228,6 +228,8 @@ describe('recurring tasks over the store', () => {
       expect((await listTasksCounted({ collection: L })).upcomingHidden).toBe(2);
       expect((await listTasksCounted({ collection: L, includeUpcoming: true })).upcomingHidden).toBe(0);
       expect((await listTasksCounted({ collection: L, status: 'blocked' })).upcomingHidden).toBe(0);
+      const tagged = await listTasksCounted({ collection: L, tags: ['needs-human'] });
+      expect(tagged).toMatchObject({ tasks: [], upcomingHidden: 1 });
     });
 
     it('a lead-time change takes effect at once', async () => {

@@ -22,6 +22,8 @@ export interface TaskListFilters {
   includeArchived?: boolean;
   /** Also recurring occurrences that haven't opened yet (see tasks/recurrence.ts). */
   includeUpcoming?: boolean;
+  /** Only tasks carrying every one of these tags (applied before upcoming ones are counted). */
+  tags?: string[];
   /** Return at most this many (after sorting). Default: all of them. */
   limit?: number;
 }
@@ -59,6 +61,10 @@ export async function listTasksCounted(filters: TaskListFilters = {}): Promise<{
         if (!filters.includeComplete && task.metadata.status === 'complete') continue;
         // Deleted on the sync service by its owner, kept here archived.
         if (task.metadata.archived === true && !filters.includeArchived) continue;
+        if (filters.tags?.length) {
+          const tags = Array.isArray(task.metadata.tags) ? task.metadata.tags : String(task.metadata.tags ?? '').split(',');
+          if (!filters.tags.every(t => tags.includes(t))) continue;
+        }
         if (!filters.includeUpcoming && isUpcoming(task.metadata, now)) {
           upcomingHidden++;
           continue;

@@ -54,6 +54,8 @@ export interface TaskUpdateResult {
   previousStatus?: string;
   /** The task's metadata as this update wrote it. */
   metadata?: Record<string, any>;
+  /** The collection the task is in. */
+  collection?: string;
 }
 
 /** Caller context for an update: who is acting, and claim options for a move to in_progress. */
@@ -86,7 +88,7 @@ export async function updateTask(
   if (!task) throw new Error(`Task ${id} not found`);
   assertWritable(id, task.metadata);
   const prevStatus = task.metadata.status;
-  const result: TaskUpdateResult = { id };
+  const result: TaskUpdateResult = { id, collection: task.collection };
   // Refused before a claim is taken: nothing to undo.
   recurrenceChanges(task.id, task.metadata, updates as RecurrenceUpdate);
 
@@ -171,6 +173,8 @@ export interface CompleteResult {
   nudge?: string;
   /** The completed task's metadata as written. */
   metadata?: Record<string, any>;
+  /** The collection the task is in. */
+  collection?: string;
 }
 
 /**
@@ -210,7 +214,7 @@ export async function completeTask(
     : undefined;
   const nudge = captureNudge(task.id, task.metadata, recorded);
   const m = written ?? task.metadata;
-  const extras = { metadata: m, ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
+  const extras = { metadata: m, collection: task.collection, ...(release ? { release } : {}), ...(recorded ? { recorded } : {}), ...(nudge ? { nudge } : {}) };
 
   // Handle recurring tasks: once, by whichever completion found it still open
   // (two sessions completing it at once must not create two next occurrences).
