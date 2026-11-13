@@ -18,7 +18,7 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@yapa/core": "^1.0.0",
     "@yapa/service": "^1.0.0",
-    "hono": "4.13.13",
+    "hono": "4.13.18",
     "pg": "8.23.1",
     "zod": "^4.6.7"
   },
