@@ -48,6 +48,8 @@ function createConfig(env = process.env) {
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
     SESSION_SUMMARY_RETENTION_DAYS: ((v) => /^\d+$/.test(v.trim()) ? Number(v) : 90)(get(env, "SESSION_SUMMARY_RETENTION_DAYS", "90")),
+    MEMORY_EXPIRY_DAYS: ((v) => /^\d+$/.test(v.trim()) ? Number(v) : 180)(get(env, "MEMORY_EXPIRY_DAYS", "180")),
+    MEMORY_EXPIRY_MAX_SALIENCE: ((v) => Number.isFinite(v) ? v : 0.2)(parseFloat(get(env, "MEMORY_EXPIRY_MAX_SALIENCE", "0.2"))),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -60,6 +62,9 @@ function createConfig(env = process.env) {
     USERNAME: env.YAPA_USERNAME || osUsername(),
     SCOPE_FILE: scopeFile(env),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
+    JANITOR_ENABLED: get(env, "JANITOR_ENABLED", "true") !== "false",
+    JANITOR_MAX_PAIRS: Math.max(1, parseInt(get(env, "JANITOR_MAX_PAIRS", "20"), 10) || 20),
+    JANITOR_INTERVAL_MS: Math.max(36e5, parseInt(get(env, "JANITOR_INTERVAL_MS", "86400000"), 10) || 864e5),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
     FINDINGS_CLEANUP_THRESHOLD: parseInt(get(env, "FINDINGS_CLEANUP_THRESHOLD", "20"), 10),
@@ -1378,8 +1383,8 @@ var init_chunking = __esm({
 
 // packages/core/src/lifecycle.ts
 function touchDocument(metadata, now = Math.floor(Date.now() / 1e3)) {
-  const day = Math.floor(now / 86400);
-  const boostsToday = metadata.boost_day === day ? metadata.boosts_today ?? 0 : 0;
+  const day2 = Math.floor(now / 86400);
+  const boostsToday = metadata.boost_day === day2 ? metadata.boosts_today ?? 0 : 0;
   if (boostsToday >= getConfig().SALIENCE_MAX_BOOSTS_PER_DAY) {
     return { ...metadata, accessed_at: now };
   }
@@ -1387,7 +1392,7 @@ function touchDocument(metadata, now = Math.floor(Date.now() / 1e3)) {
     ...metadata,
     accessed_at: now,
     salience: Math.min(metadata.salience + SALIENCE_BOOST_ON_ACCESS, SALIENCE_MAX),
-    boost_day: day,
+    boost_day: day2,
     boosts_today: boostsToday + 1
   };
 }
@@ -2077,9 +2082,11 @@ var init_scope = __esm({
 function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
   return { ...metadata, ...extra, archived: true, updated_at: now, is_synced: false };
 }
+var ARCHIVE_REASON_KEYS;
 var init_archive = __esm({
   "packages/core/src/memory/archive.ts"() {
     "use strict";
+    ARCHIVE_REASON_KEYS = ["archived", "superseded_by", "compacted_into", "duplicate_of", "expired"];
   }
 });
 
@@ -2299,13 +2306,13 @@ async function untypeCollection(requested, opts = {}) {
     if (opts.dryRun) continue;
     await withDocLock(collection, id, async () => {
       const now = Math.floor(Date.now() / 1e3);
-      const day = new Date(now * 1e3).toISOString().slice(0, 10);
+      const day2 = new Date(now * 1e3).toISOString().slice(0, 10);
       const fresh = meta.parent_id ? (await getDocumentsByFilter2(collection, { parent_id: id }, 1e3)).sort((a, b) => (a.metadata.chunk_index ?? 0) - (b.metadata.chunk_index ?? 0)) : await getDocumentsByIds2(collection, [id]);
       for (const [i, d] of fresh.entries()) {
         const next = { ...d.metadata, updated_at: now, is_synced: false };
         for (const k of UNTYPED_KEYS) delete next[k];
         if (i === fresh.length - 1) {
-          const note = `${day} ${me}: typed fields removed (was a ${d.metadata.kind}${d.metadata.status ? `, ${d.metadata.status}` : ""}): this collection keeps its records in the project's own files.`;
+          const note = `${day2} ${me}: typed fields removed (was a ${d.metadata.kind}${d.metadata.status ? `, ${d.metadata.status}` : ""}): this collection keeps its records in the project's own files.`;
           await addDocument2(collection, d.id, `${d.content}
 
 ${note}`, next);
@@ -2394,6 +2401,7 @@ async function storeMemory(content, options = {}) {
   const now = Math.floor(Date.now() / 1e3);
   const sector = options.sector ?? detectSector(content);
   const salience = options.salience ?? SALIENCE_START;
+  const pin = options.pinned ? { pinned: true } : {};
   const chunks = chunkText(content);
   if (chunks.length === 1) {
     const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2405,6 +2413,7 @@ async function storeMemory(content, options = {}) {
       tags: options.tags ?? [],
       salience,
       sector,
+      ...pin,
       created_at: now,
       accessed_at: now
     };
@@ -2425,6 +2434,7 @@ async function storeMemory(content, options = {}) {
       tags: options.tags ?? [],
       salience,
       sector,
+      ...pin,
       created_at: now,
       accessed_at: now,
       chunk_index: chunk2.index,
@@ -4984,10 +4994,10 @@ function parseRelativeDate(phrase) {
       "december"
     ];
     const month = monthNames.indexOf(dateMatch[1].toLowerCase());
-    const day = parseInt(dateMatch[2]);
+    const day2 = parseInt(dateMatch[2]);
     const year = dateMatch[3] ? parseInt(dateMatch[3]) : now.getFullYear();
     if (month !== -1) {
-      const d = new Date(year, month, day, 23, 59, 59, 999);
+      const d = new Date(year, month, day2, 23, 59, 59, 999);
       return Math.floor(d.getTime() / 1e3);
     }
   }
@@ -5687,6 +5697,85 @@ var init_summary_retention = __esm({
   }
 });
 
+// packages/core/src/memory/curatable.ts
+function isPinned(metadata) {
+  return metadata?.pinned === true;
+}
+function isCuratable(metadata) {
+  if (!metadata) return false;
+  return metadata.archived !== true && !isMemoryKind(metadata.kind) && !isSessionSummary(metadata) && !isReadOnlyDoc(metadata) && !metadata.external_ref && !isPinned(metadata);
+}
+var init_curatable = __esm({
+  "packages/core/src/memory/curatable.ts"() {
+    "use strict";
+    init_syncable();
+    init_filters();
+    init_kinds();
+  }
+});
+
+// packages/core/src/memory/expiry.ts
+async function linkedFromOpenTasks(collection) {
+  const tasks = await getDocumentsByFilter2(collection, { type: "task" }, 1e5).catch(() => []);
+  const ids = /* @__PURE__ */ new Set();
+  for (const t of tasks) {
+    if (t.metadata.status === "complete") continue;
+    for (const id of [...metadataList(t.metadata.memory_ids), ...metadataList(t.metadata.waits_on)]) ids.add(id);
+  }
+  return ids;
+}
+async function sweepExpiredMemories(now = Math.floor(Date.now() / 1e3), options = {}) {
+  const { MEMORY_EXPIRY_DAYS: days, MEMORY_EXPIRY_MAX_SALIENCE: maxSalience } = getConfig();
+  const result = { candidates: [], archived: 0 };
+  if (!days) return result;
+  const cutoff = now - days * DAY3;
+  const names = options.collection ? [options.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const collection of names) {
+    const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e5).catch(() => []);
+    if (!docs.length) continue;
+    const groups = /* @__PURE__ */ new Map();
+    for (const d of docs) {
+      const key = String(d.metadata.parent_id ?? d.id);
+      groups.set(key, [...groups.get(key) ?? [], d]);
+    }
+    const linked = await linkedFromOpenTasks(collection);
+    const expired = [];
+    for (const [id, chunks] of groups) {
+      if (linked.has(id) || chunks.some((c) => linked.has(c.id))) continue;
+      if (!chunks.every((c) => isCuratable(c.metadata) && isOwnAuthor(c.metadata))) continue;
+      const lastActive = Math.max(...chunks.flatMap((c) => [num(c.metadata.created_at), num(c.metadata.updated_at), num(c.metadata.accessed_at)]));
+      if (!lastActive || lastActive > cutoff) continue;
+      const salience = Math.max(...chunks.map((c) => num(c.metadata.salience ?? 1)));
+      if (salience >= maxSalience) continue;
+      chunks.sort((a, b) => num(a.metadata.chunk_index) - num(b.metadata.chunk_index));
+      result.candidates.push({ id, collection, salience, last_active: lastActive, preview: chunks[0].content.slice(0, 120) });
+      expired.push(...chunks);
+    }
+    if (options.dryRun || !expired.length) continue;
+    const updates = expired.map((d) => ({ id: d.id, patch: metadataDelta(d.metadata, archivedMetadata(d.metadata, { expired: "age" }, now)) }));
+    try {
+      await patchDocuments2(collection, updates);
+      result.archived += updates.length;
+    } catch {
+    }
+  }
+  return result;
+}
+var DAY3, num;
+var init_expiry = __esm({
+  "packages/core/src/memory/expiry.ts"() {
+    "use strict";
+    init_config();
+    init_metadata_adapter();
+    init_store();
+    init_backend();
+    init_archive();
+    init_curatable();
+    DAY3 = 86400;
+    num = (v) => typeof v === "number" && Number.isFinite(v) ? v : Number(v) || 0;
+  }
+});
+
 // packages/core/src/memory/decay.ts
 async function lastSweepAt() {
   try {
@@ -5698,16 +5787,16 @@ async function lastSweepAt() {
 }
 async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   const collections = await listCollections2();
-  const fallbackAnchor = await lastSweepAt() ?? now - DAY3;
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY4;
   let decayedCount = 0;
   for (const collection of collections) {
     try {
       const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
       const updates = [];
       for (const doc of docs) {
-        if (isReadOnlyDoc(doc.metadata)) continue;
+        if (isReadOnlyDoc(doc.metadata) || isPinned(doc.metadata)) continue;
         const anchor = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
-        const days = (now - anchor) / DAY3;
+        const days = (now - anchor) / DAY4;
         if (days <= 0) continue;
         const lifecycleMeta = {
           salience: doc.metadata.salience ?? 1,
@@ -5728,11 +5817,15 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   }
   await sweepDeletedUpstream(now).catch(() => 0);
   await sweepSessionSummaries(now).catch(() => 0);
+  await sweepExpiredMemories(now).then((r) => {
+    if (r.archived) process.stderr.write(`[yapa] Expiry: archived ${r.candidates.length} inactive memor${r.candidates.length === 1 ? "y" : "ies"} (restore with memory_update restore)
+`);
+  }).catch(() => void 0);
   return decayedCount;
 }
 async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
   const last = await lastSweepAt();
-  return last === void 0 || now - last > DAY3;
+  return last === void 0 || now - last > DAY4;
 }
 async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
   const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
@@ -5742,7 +5835,7 @@ async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
     last_run: now
   });
 }
-var DECAY_SENTINEL_ID, DAY3, SWEEP_LIMIT;
+var DECAY_SENTINEL_ID, DAY4, SWEEP_LIMIT;
 var init_decay = __esm({
   "packages/core/src/memory/decay.ts"() {
     "use strict";
@@ -5750,9 +5843,11 @@ var init_decay = __esm({
     init_syncable();
     init_trash();
     init_summary_retention();
+    init_curatable();
+    init_expiry();
     init_lifecycle();
     DECAY_SENTINEL_ID = "__decay_sentinel__";
-    DAY3 = 86400;
+    DAY4 = 86400;
     SWEEP_LIMIT = 1e4;
   }
 });
@@ -5776,7 +5871,7 @@ function intersect(a, b) {
   return b.filter((t) => set.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => isCuratable(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -5785,7 +5880,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && !isReadOnlyDoc(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && isCuratable(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -5821,7 +5916,7 @@ async function applyCompaction(input2) {
   for (const id of input2.member_ids) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata) || isPinned(existing[0].metadata)) continue;
       await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
@@ -5849,7 +5944,7 @@ var init_compact = __esm({
     init_archive();
     init_store();
     init_store2();
-    init_kinds();
+    init_curatable();
     init_sentinel();
   }
 });
@@ -6569,9 +6664,9 @@ function claimsApply(_collection) {
 }
 function utc(t, now = Math.floor(Date.now() / 1e3)) {
   const iso = new Date(t * 1e3).toISOString();
-  const day = iso.slice(0, 10);
+  const day2 = iso.slice(0, 10);
   const hm = iso.slice(11, 16);
-  return day === new Date(now * 1e3).toISOString().slice(0, 10) ? `${hm} UTC` : `${day} ${hm} UTC`;
+  return day2 === new Date(now * 1e3).toISOString().slice(0, 10) ? `${hm} UTC` : `${day2} ${hm} UTC`;
 }
 function describeHolder(l, me = getConfig().USERNAME, mySession, now = Math.floor(Date.now() / 1e3)) {
   const who2 = l.holder.user === me ? mySession && l.holder.session === mySession ? "you (this session)" : `you (another session, ${l.holder.session})` : `${l.holder.user} (session ${l.holder.session.slice(0, 8)})`;
@@ -6969,6 +7064,12 @@ import { spawn } from "node:child_process";
 function setHostLLMCaller(caller) {
   hostCaller = caller;
 }
+function useSubscriptionModelIfNoKey() {
+  const config = getConfig();
+  if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
+    setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
+  }
+}
 async function callCurationLLM(options) {
   if (hostCaller) return hostCaller(options);
   const model = getCurationModel();
@@ -7138,7 +7239,11 @@ async function updateMemory(id, patch, collection) {
   const found = await locate(id, collection);
   if (!found || found.doc.metadata.type !== "memory") throw new MemoryNotFoundError(id);
   assertWritable(id, found.doc.metadata);
-  const { note, tags, content, ...typedPatch } = patch;
+  const { note, tags, content, salience, pinned, restore, ...typedPatch } = patch;
+  if (salience !== void 0 && !Number.isFinite(salience)) throw new Error(`salience must be a number between ${SALIENCE_FLOOR} and ${SALIENCE_MAX}`);
+  if (restore && found.doc.metadata.deleted_upstream) {
+    throw new Error(`${id} was deleted by its owner: keep a copy with trash (action keep) instead`);
+  }
   if (content !== void 0 && found.doc.metadata.parent_id) {
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
@@ -7152,13 +7257,18 @@ async function updateMemory(id, patch, collection) {
     let metadata2 = docs[docs.length - 1].metadata;
     for (const [i, d] of docs.entries()) {
       metadata2 = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+      if (salience !== void 0) Object.assign(metadata2, { salience: Math.min(Math.max(salience, SALIENCE_FLOOR), SALIENCE_MAX), decayed_at: now });
+      if (pinned === true) metadata2.pinned = true;
+      if (pinned === false) delete metadata2.pinned;
+      if (pinned !== void 0) metadata2.decayed_at = now;
+      if (restore) for (const k of ARCHIVE_REASON_KEYS) delete metadata2[k];
       const last = i === docs.length - 1;
       if ((note?.trim() || content !== void 0) && last) {
-        const day = new Date(now * 1e3).toISOString().slice(0, 10);
+        const day2 = new Date(now * 1e3).toISOString().slice(0, 10);
         const text = content ?? d.content;
         await addDocument2(found.collection, d.id, note?.trim() ? `${text}
 
-${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
+${day2} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
       } else {
         await patchDocument(found.collection, d.id, metadataDelta(d.metadata, metadata2));
       }
@@ -7174,6 +7284,7 @@ var init_update2 = __esm({
     "use strict";
     init_store();
     init_config();
+    init_archive();
     init_doc_lock();
     init_syncable();
     init_sentinel();
@@ -7193,7 +7304,7 @@ var init_update2 = __esm({
 async function staleFindings(collection, opts = {}) {
   const now = opts.now ?? Math.floor(Date.now() / 1e3);
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY4 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY5 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
 }
 async function wholeText(collection, f) {
   if (!f.metadata.parent_id) return f.content;
@@ -7392,7 +7503,7 @@ async function applySweep(collection, items, opts = {}, deps = {}) {
   }
   return items;
 }
-var DAY4, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
+var DAY5, author, isStale, SWEEP_PROMPT_VERSION, BATCH_ITEMS, BATCH_CHARS, ITEM_CHARS, NEIGHBOR_MAX_DISTANCE, NEIGHBOR_KINDS, SWEEP_SYSTEM_PROMPT, lasting;
 var init_sweep = __esm({
   "packages/core/src/memory/sweep.ts"() {
     "use strict";
@@ -7403,7 +7514,7 @@ var init_sweep = __esm({
     init_backend();
     init_provider();
     init_update2();
-    DAY4 = 86400;
+    DAY5 = 86400;
     author = (m) => String(m.origin_user ?? m.username ?? "");
     isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
     SWEEP_PROMPT_VERSION = "v1";
@@ -8649,32 +8760,35 @@ Return valid JSON only. No commentary. No markdown fences:
 });
 
 // packages/core/src/curation/janitor.ts
-async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
+function pairKey(a, b) {
+  return [a, b].sort().join("|");
+}
+async function findDuplicatePairs(collection, distanceThreshold, options = {}) {
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => pairable(d.metadata)).filter((d) => options.since === void 0 || changedAt(d.metadata) > options.since).sort((x, y) => changedAt(y.metadata) - changedAt(x.metadata)).slice(0, options.maxScan ?? 500);
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
-      if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
-      const key = [doc.id, n.id].sort().join("|");
-      if (seen.has(key)) continue;
+      if (n.id === doc.id || n.distance >= distanceThreshold || !pairable(n.metadata)) continue;
+      if (!isOwnAuthor(doc.metadata) && !isOwnAuthor(n.metadata)) continue;
+      const key = pairKey(doc.id, n.id);
+      if (seen.has(key) || options.skipPairs?.has(key)) continue;
       seen.add(key);
       pairs.push({
         collection,
         a: { id: doc.id, content: doc.content, metadata: doc.metadata },
-        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience },
+        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience, metadata: n.metadata ?? {} },
         distance: n.distance
       });
     }
   }
   return pairs.sort((x, y) => x.distance - y.distance);
 }
-async function archiveDuplicate(collection, loserId, winnerId) {
-  const existing = await getDocumentsByIds2(collection, [loserId]);
+async function archiveAs(collection, id, extra) {
+  const existing = await getDocumentsByIds2(collection, [id]);
   if (!existing.length) return;
-  await patchDocument(collection, loserId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId })));
+  await patchDocument(collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, extra)));
 }
 async function janitorSweep(options = {}) {
   const stats = {
@@ -8683,81 +8797,262 @@ async function janitorSweep(options = {}) {
     skippedDuplicates: 0,
     superseded: 0,
     keptDistinct: 0,
-    errors: 0
+    skippedNotOwned: 0,
+    errors: 0,
+    keptPairs: []
   };
   const maxPairs = options.maxPairs ?? 20;
   const threshold = options.distanceThreshold ?? getConfig().CONTRADICTION_DISTANCE_THRESHOLD;
   const collections = options.collection ? [options.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const all = [];
   for (const collection of collections) {
-    if (stats.pairsConsidered >= maxPairs) break;
-    let pairs;
     try {
-      pairs = await findDuplicatePairs(collection, threshold);
+      all.push(...await findDuplicatePairs(collection, threshold, options));
       stats.collectionsScanned++;
     } catch (e) {
       process.stderr.write(`[yapa-janitor] scan failed for ${collection}: ${e}
 `);
       stats.errors++;
-      continue;
     }
-    for (const pair of pairs) {
-      if (stats.pairsConsidered >= maxPairs) break;
-      stats.pairsConsidered++;
-      try {
-        const [candidate, neighbor] = (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1) ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }] : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
-        const decision = await resolveConflict(
-          candidate.content,
-          [neighbor],
-          options.call ? { call: options.call } : {}
-        );
-        if (decision.action === "skip") {
-          await archiveDuplicate(collection, candidate.id, neighbor.id);
-          stats.skippedDuplicates++;
-        } else if (decision.action === "supersede") {
-          const target = decision.targetId === candidate.id ? candidate : neighbor;
-          const other = decision.targetId === candidate.id ? neighbor : candidate;
-          await storeMemory(decision.mergedContent ?? candidate.content, {
-            collection,
-            salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
-            tags: ["janitor-merged"],
-            sector: "semantic",
-            supersedes: target.id,
-            metadata: {
-              source: "janitor",
-              resolver_prompt_version: RESOLVER_PROMPT_VERSION,
-              rationale: decision.rationale,
-              related_to: other.id
-            }
-          });
-          stats.superseded++;
-        } else {
-          stats.keptDistinct++;
+  }
+  all.sort((x, y) => x.distance - y.distance);
+  const changed = /* @__PURE__ */ new Set();
+  for (const pair of all) {
+    if (stats.pairsConsidered >= maxPairs) break;
+    if (changed.has(pair.a.id) || changed.has(pair.b.id)) continue;
+    const collection = pair.collection;
+    stats.pairsConsidered++;
+    try {
+      const aOwn = isOwnAuthor(pair.a.metadata);
+      const bOwn = isOwnAuthor(pair.b.metadata);
+      const aIsNeighbor = aOwn !== bOwn ? bOwn : (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1);
+      const [candidate, neighbor] = aIsNeighbor ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }] : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
+      const owns = (id) => id === pair.a.id ? aOwn : bOwn;
+      const decision = await resolveConflict(
+        candidate.content,
+        [neighbor],
+        options.call ? { call: options.call } : {}
+      );
+      if (decision.action === "skip") {
+        if (!owns(candidate.id)) {
+          stats.skippedNotOwned++;
+          continue;
         }
-      } catch (e) {
-        process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}
-`);
-        stats.errors++;
+        await archiveDuplicate(collection, candidate.id, neighbor.id);
+        changed.add(candidate.id);
+        stats.skippedDuplicates++;
+      } else if (decision.action === "supersede") {
+        const target = decision.targetId === candidate.id ? candidate : neighbor;
+        const other = decision.targetId === candidate.id ? neighbor : candidate;
+        if (!owns(target.id)) {
+          stats.skippedNotOwned++;
+          continue;
+        }
+        const merged = await storeMemory(decision.mergedContent ?? candidate.content, {
+          collection,
+          salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
+          tags: ["janitor-merged"],
+          sector: "semantic",
+          supersedes: target.id,
+          metadata: {
+            source: "janitor",
+            resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+            rationale: decision.rationale,
+            related_to: other.id
+          }
+        });
+        changed.add(target.id);
+        if (owns(other.id)) {
+          await archiveAs(collection, other.id, { superseded_by: merged.ids[0] });
+          changed.add(other.id);
+        }
+        stats.superseded++;
+      } else {
+        stats.keptDistinct++;
+        stats.keptPairs.push(pairKey(pair.a.id, pair.b.id));
       }
+    } catch (e) {
+      process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}
+`);
+      stats.errors++;
     }
   }
   if (stats.pairsConsidered > 0) {
     process.stderr.write(
-      `[yapa-janitor] sweep: ${stats.pairsConsidered} pairs \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.errors} error(s)
+      `[yapa-janitor] sweep: ${stats.pairsConsidered} pairs \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.skippedNotOwned} not yours, ${stats.errors} error(s)
 `
     );
   }
   return stats;
 }
+var pairable, changedAt, archiveDuplicate;
 var init_janitor = __esm({
   "packages/core/src/curation/janitor.ts"() {
     "use strict";
-    init_syncable();
-    init_kinds();
+    init_backend();
+    init_curatable();
     init_archive();
     init_config();
     init_store();
     init_store2();
     init_resolver();
+    pairable = (m) => !!m && isCuratable(m) && m.parent_id == null;
+    changedAt = (m) => Math.max(Number(m.created_at) || 0, Number(m.updated_at) || 0);
+    archiveDuplicate = (collection, loserId, winnerId) => archiveAs(collection, loserId, { duplicate_of: winnerId });
+  }
+});
+
+// packages/core/src/jobs.ts
+import { createHash as createHash4 } from "node:crypto";
+import { closeSync as closeSync2, mkdirSync as mkdirSync6, openSync as openSync2, readFileSync as readFileSync9, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync4, writeSync as writeSync2 } from "node:fs";
+import { dirname as dirname6, join as join7 } from "node:path";
+function readJson(path2) {
+  try {
+    return JSON.parse(readFileSync9(path2, "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeJson(path2, value) {
+  try {
+    mkdirSync6(dirname6(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    writeFileSync4(tmp, JSON.stringify(value) + "\n", { mode: 384 });
+    renameSync4(tmp, path2);
+  } catch {
+  }
+}
+function tryAcquireFileLock(lockPath, staleAfterMs, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const alive2 = opts.alive ?? pidAlive;
+  const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
+  for (let attempt2 = 0; attempt2 < 2; attempt2++) {
+    try {
+      mkdirSync6(dirname6(lockPath), { recursive: true, mode: 448 });
+      const fd = openSync2(lockPath, "wx", 384);
+      try {
+        writeSync2(fd, JSON.stringify(body));
+      } finally {
+        closeSync2(fd);
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const held2 = readJson(lockPath);
+        if (held2?.pid === process.pid && held2.started_at === now) rmSync4(lockPath, { force: true });
+      };
+    } catch (e) {
+      if (e.code !== "EEXIST") return () => {
+      };
+      const held2 = readJson(lockPath);
+      const stale2 = !held2 || !alive2(held2.pid) || now - held2.started_at > staleAfterMs || held2.started_at > now + 6e4;
+      if (!stale2 || attempt2 > 0) return void 0;
+      rmSync4(lockPath, { force: true });
+    }
+  }
+  return void 0;
+}
+function storeKey(config) {
+  const store = config.STORAGE === "local" ? `local:${config.LOCAL_STORE_PATH}` : `chroma:${config.CHROMA_URL}`;
+  return createHash4("sha256").update(JSON.stringify([store, config.USERNAME])).digest("hex").slice(0, 12);
+}
+function jobFiles(name, config = getConfig()) {
+  if (!config.SYNC_HEALTH_FILE) return void 0;
+  const dir = dirname6(config.SYNC_HEALTH_FILE);
+  const key = storeKey(config);
+  return { record: join7(dir, `job-${name}-${key}.json`), lock: join7(dir, `job-${name}-${key}.lock`) };
+}
+function readJobRecord(name, config = getConfig()) {
+  const f = jobFiles(name, config);
+  if (!f) return void 0;
+  const r = readJson(f.record);
+  return r && typeof r.finished_at === "number" ? r : void 0;
+}
+function jobDue(name, intervalMs, now = Date.now(), config = getConfig()) {
+  const r = readJobRecord(name, config);
+  if (!r) return true;
+  return now - r.finished_at >= intervalMs || r.finished_at > now + 6e4;
+}
+function tryAcquireJob(name, staleAfterMs, opts = {}, config = getConfig()) {
+  const f = jobFiles(name, config);
+  if (!f) return () => {
+  };
+  return tryAcquireFileLock(f.lock, staleAfterMs, opts);
+}
+function recordJob(name, run2, config = getConfig()) {
+  const f = jobFiles(name, config);
+  if (!f) return;
+  const prev = readJson(f.record);
+  const next = {
+    started_at: run2.startedAt,
+    finished_at: run2.finishedAt ?? Date.now(),
+    pid: process.pid,
+    runs: (typeof prev?.runs === "number" ? prev.runs : 0) + 1,
+    ...run2.version ? { version: run2.version } : {},
+    ...run2.result !== void 0 ? { result: run2.result } : {}
+  };
+  writeJson(f.record, next);
+}
+var init_jobs = __esm({
+  "packages/core/src/jobs.ts"() {
+    "use strict";
+    init_config();
+    init_fs_lock();
+  }
+});
+
+// packages/core/src/curation/janitor-schedule.ts
+function readJanitorRecord() {
+  return readJobRecord(JANITOR_JOB);
+}
+async function runJanitorIfDue(opts = {}) {
+  const config = getConfig();
+  if (!(opts.enabled ?? config.JANITOR_ENABLED)) return void 0;
+  const now = opts.now ?? Date.now();
+  if (!opts.force) {
+    if (!jobDue(JANITOR_JOB, config.JANITOR_INTERVAL_MS, now)) return void 0;
+    if (!jobFiles(JANITOR_JOB) && lastRunInProcess !== void 0 && now - lastRunInProcess < config.JANITOR_INTERVAL_MS) return void 0;
+  }
+  const release = tryAcquireJob(JANITOR_JOB, STALE_LOCK_MS, { now, version: opts.version });
+  if (!release) return void 0;
+  try {
+    if (!opts.force && !jobDue(JANITOR_JOB, config.JANITOR_INTERVAL_MS, now)) return void 0;
+    const prev = readJanitorRecord()?.result;
+    const maxPairs = opts.maxPairs ?? config.JANITOR_MAX_PAIRS;
+    if (!opts.call) useSubscriptionModelIfNoKey();
+    const stats = await janitorSweep({
+      maxPairs,
+      since: prev?.scan_from,
+      skipPairs: new Set(prev?.kept_pairs ?? []),
+      ...opts.call ? { call: opts.call } : {}
+    });
+    const complete = stats.errors === 0 && stats.pairsConsidered < maxPairs;
+    const { keptPairs, ...rest } = stats;
+    const result = {
+      stats: rest,
+      scan_from: complete ? Math.floor(now / 1e3) : prev?.scan_from,
+      kept_pairs: [...prev?.kept_pairs ?? [], ...keptPairs].slice(-MAX_KEPT_PAIRS)
+    };
+    recordJob(JANITOR_JOB, { startedAt: now, ...opts.now !== void 0 ? { finishedAt: now } : {}, version: opts.version, result });
+    lastRunInProcess = now;
+    if (stats.skippedDuplicates || stats.superseded) opts.onChange?.();
+    return stats;
+  } finally {
+    release();
+  }
+}
+var JANITOR_JOB, STALE_LOCK_MS, MAX_KEPT_PAIRS, lastRunInProcess;
+var init_janitor_schedule = __esm({
+  "packages/core/src/curation/janitor-schedule.ts"() {
+    "use strict";
+    init_config();
+    init_jobs();
+    init_janitor();
+    init_provider();
+    JANITOR_JOB = "janitor";
+    STALE_LOCK_MS = 2 * 36e5;
+    MAX_KEPT_PAIRS = 5e3;
   }
 });
 
@@ -8963,11 +9258,11 @@ Omit the disposition fields except for a finding. If nothing is settled, return 
 });
 
 // packages/core/src/curation/health.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync9 } from "node:fs";
-import { dirname as dirname6, join as join7 } from "node:path";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync10 } from "node:fs";
+import { dirname as dirname7, join as join8 } from "node:path";
 function captureHealthFile() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join7(dirname6(health), "capture-health.json") : "";
+  return health ? join8(dirname7(health), "capture-health.json") : "";
 }
 function dayKey(ms) {
   const d = new Date(ms);
@@ -8976,7 +9271,7 @@ function dayKey(ms) {
 function readCaptureHealth(path2 = captureHealthFile()) {
   if (!path2) return void 0;
   try {
-    const h = JSON.parse(readFileSync9(path2, "utf-8"));
+    const h = JSON.parse(readFileSync10(path2, "utf-8"));
     return h && typeof h.at === "number" && h.days && typeof h.days === "object" ? h : void 0;
   } catch {
     return void 0;
@@ -8986,36 +9281,36 @@ function applyCaptureEvent(h, e, now) {
   const days = {};
   const key = dayKey(now);
   for (const [k, v] of Object.entries(h?.days ?? {})) days[k] = { ...emptyDay(), ...v };
-  const day = days[key] ?? (days[key] = emptyDay());
+  const day2 = days[key] ?? (days[key] = emptyDay());
   const next = { ...h, days, at: now };
   const fail2 = (stage, err) => {
     next.last_error = { at: now, stage, message: message(err) };
   };
   if (e.kind === "turn") {
-    day.turns++;
-    day.stored += e.stored;
-    day.skipped += e.skipped;
-    day.settled += e.settled;
-    day.judged += e.judged ?? 0;
+    day2.turns++;
+    day2.stored += e.stored;
+    day2.skipped += e.skipped;
+    day2.settled += e.settled;
+    day2.judged += e.judged ?? 0;
     if (e.followThroughError !== void 0) {
-      day.follow_through_failed++;
+      day2.follow_through_failed++;
       fail2("follow-through", e.followThroughError);
     }
     if (e.storeError !== void 0) {
-      day.store_failed++;
+      day2.store_failed++;
       fail2("store", e.storeError);
     }
     if (e.followThroughError === void 0 && e.storeError === void 0) {
-      day.clean++;
+      day2.clean++;
       next.last_ok_at = now;
     }
   } else if (e.kind === "turn_failed") {
-    day.failed++;
+    day2.failed++;
     fail2("extractor", e.error);
   } else {
-    day.compactions++;
+    day2.compactions++;
     if (e.error !== void 0) {
-      day.compactions_failed++;
+      day2.compactions_failed++;
       fail2("compaction", e.error);
     } else {
       next.last_ok_at = now;
@@ -9027,7 +9322,7 @@ function applyCaptureEvent(h, e, now) {
 function recordCapture(e, now = Date.now(), path2 = captureHealthFile()) {
   if (!path2) return;
   try {
-    mkdirSync6(dirname6(path2), { recursive: true });
+    mkdirSync7(dirname7(path2), { recursive: true });
     withFileLockSync(lockFileFor(path2), () => writeJsonAtomic(path2, applyCaptureEvent(readCaptureHealth(path2), e, now)), { waitMs: 2e3 });
   } catch {
   }
@@ -9270,14 +9565,14 @@ var init_capture = __esm({
 });
 
 // packages/core/src/buckets/artifacts.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync10, writeFileSync as writeFileSync4 } from "fs";
-import { join as join8 } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync8, readdirSync as readdirSync4, readFileSync as readFileSync11, writeFileSync as writeFileSync5 } from "fs";
+import { join as join9 } from "path";
 function artifactDir(kind) {
-  return join8(getConfig().ARTIFACTS_DIR, kind);
+  return join9(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync2(dir)) mkdirSync7(dir, { recursive: true });
+  if (!existsSync2(dir)) mkdirSync8(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -9305,17 +9600,17 @@ function listVersions(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path2 = join8(dir, filename);
-  writeFileSync4(path2, content);
+  const path2 = join9(dir, filename);
+  writeFileSync5(path2, content);
   return path2;
 }
 function readArtifact(kind, filename) {
-  const path2 = join8(artifactDir(kind), filename);
+  const path2 = join9(artifactDir(kind), filename);
   if (!existsSync2(path2)) return null;
-  return readFileSync10(path2, "utf-8");
+  return readFileSync11(path2, "utf-8");
 }
 function artifactPath(kind, filename) {
-  return join8(artifactDir(kind), filename);
+  return join9(artifactDir(kind), filename);
 }
 var init_artifacts = __esm({
   "packages/core/src/buckets/artifacts.ts"() {
@@ -9996,9 +10291,8 @@ var init_pull = __esm({
 });
 
 // packages/core/src/sync/shared-cycle.ts
-import { createHash as createHash4 } from "node:crypto";
-import { closeSync as closeSync2, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
-import { dirname as dirname7, join as join9 } from "node:path";
+import { createHash as createHash5 } from "node:crypto";
+import { dirname as dirname8, join as join10 } from "node:path";
 function syncTargetKey(config = getConfig()) {
   let remote = "";
   if (config.SYNC_MCP_URL) remote = `mcp:${config.SYNC_MCP_URL}`;
@@ -10012,11 +10306,11 @@ function syncTargetKey(config = getConfig()) {
     }
   }
   const store = config.STORAGE === "local" ? `local:${config.LOCAL_STORE_PATH}` : `chroma:${config.CHROMA_URL}`;
-  return createHash4("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
+  return createHash5("sha256").update(JSON.stringify([remote, store, config.USERNAME])).digest("hex").slice(0, 12);
 }
 function sharedDir(config = getConfig()) {
   if (!config.SYNC_COORDINATE || !config.SYNC_HEALTH_FILE) return void 0;
-  return dirname7(config.SYNC_HEALTH_FILE);
+  return dirname8(config.SYNC_HEALTH_FILE);
 }
 function paths(config = getConfig()) {
   const dir = sharedDir(config);
@@ -10024,26 +10318,10 @@ function paths(config = getConfig()) {
   const key = syncTargetKey(config);
   return {
     dir,
-    record: join9(dir, `sync-cycle-${key}.json`),
-    lock: join9(dir, `sync-cycle-${key}.lock`),
-    pulls: join9(dir, `sync-pulls-${key}.json`)
+    record: join10(dir, `sync-cycle-${key}.json`),
+    lock: join10(dir, `sync-cycle-${key}.lock`),
+    pulls: join10(dir, `sync-pulls-${key}.json`)
   };
-}
-function readJson(path2) {
-  try {
-    return JSON.parse(readFileSync11(path2, "utf-8"));
-  } catch {
-    return void 0;
-  }
-}
-function writeJson(path2, value) {
-  try {
-    mkdirSync8(dirname7(path2), { recursive: true, mode: 448 });
-    const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    writeFileSync5(tmp, JSON.stringify(value) + "\n", { mode: 384 });
-    renameSync4(tmp, path2);
-  } catch {
-  }
 }
 function readCycleRecord(config = getConfig()) {
   const p = paths(config);
@@ -10060,36 +10338,8 @@ function tryAcquireCycle(opts = {}, config = getConfig()) {
   const p = paths(config);
   if (!p) return () => {
   };
-  const now = opts.now ?? Date.now();
-  const alive2 = opts.alive ?? pidAlive;
   const staleAfter = Math.max(2 * config.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
-  const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
-  for (let attempt2 = 0; attempt2 < 2; attempt2++) {
-    try {
-      mkdirSync8(p.dir, { recursive: true, mode: 448 });
-      const fd = openSync2(p.lock, "wx", 384);
-      try {
-        writeSync2(fd, JSON.stringify(body));
-      } finally {
-        closeSync2(fd);
-      }
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        const held2 = readJson(p.lock);
-        if (held2?.pid === process.pid && held2.started_at === now) rmSync4(p.lock, { force: true });
-      };
-    } catch (e) {
-      if (e.code !== "EEXIST") return () => {
-      };
-      const held2 = readJson(p.lock);
-      const stale2 = !held2 || !alive2(held2.pid) || now - held2.started_at > staleAfter || held2.started_at > now + 6e4;
-      if (!stale2 || attempt2 > 0) return void 0;
-      rmSync4(p.lock, { force: true });
-    }
-  }
-  return void 0;
+  return tryAcquireFileLock(p.lock, staleAfter, opts);
 }
 function recordCycle(run2, config = getConfig()) {
   const p = paths(config);
@@ -10132,6 +10382,7 @@ var init_shared_cycle = __esm({
     "use strict";
     init_fs_lock();
     init_config();
+    init_jobs();
     DUE_FRACTION = 0.9;
     MIN_STALE_LOCK_MS = 10 * 60 * 1e3;
   }
@@ -10139,7 +10390,7 @@ var init_shared_cycle = __esm({
 
 // packages/core/src/update-check.ts
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync12, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname8, join as join10 } from "node:path";
+import { dirname as dirname9, join as join11 } from "node:path";
 function compareVersions(a, b) {
   const pa = SEMVER.exec(String(a ?? "").trim());
   const pb = SEMVER.exec(String(b ?? "").trim());
@@ -10154,7 +10405,7 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join10(dirname8(health), "update-check.json") : void 0;
+  return health ? join11(dirname9(health), "update-check.json") : void 0;
 }
 function readUpdateState(path2 = updateStatePath()) {
   if (!path2) return void 0;
@@ -10168,7 +10419,7 @@ function readUpdateState(path2 = updateStatePath()) {
 function writeUpdateState(s, path2 = updateStatePath()) {
   if (!path2) return;
   try {
-    mkdirSync9(dirname8(path2), { recursive: true, mode: 448 });
+    mkdirSync9(dirname9(path2), { recursive: true, mode: 448 });
     const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync6(tmp, JSON.stringify(s) + "\n", { mode: 384 });
     renameSync5(tmp, path2);
@@ -10635,12 +10886,12 @@ ${jobResult.stdout}`);
 
 // packages/core/src/training/registry.ts
 import { existsSync as existsSync3, mkdirSync as mkdirSync10, readFileSync as readFileSync13, writeFileSync as writeFileSync7 } from "fs";
-import { join as join11 } from "path";
+import { join as join12 } from "path";
 function registryPath() {
-  return join11(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join12(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join11(getConfig().ARTIFACTS_DIR, "adapters");
+  const dir = join12(getConfig().ARTIFACTS_DIR, "adapters");
   if (!existsSync3(dir)) mkdirSync10(dir, { recursive: true });
 }
 function load() {
@@ -10828,9 +11079,9 @@ RULES
 });
 
 // packages/core/src/training/index.ts
-import { createHash as createHash5 } from "crypto";
+import { createHash as createHash6 } from "crypto";
 import { existsSync as existsSync4, mkdirSync as mkdirSync11, readFileSync as readFileSync15, writeFileSync as writeFileSync8 } from "fs";
-import { join as join12 } from "path";
+import { join as join13 } from "path";
 function getBackend() {
   switch (getConfig().TRAINING_BACKEND) {
     case "fireworks":
@@ -10840,12 +11091,12 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join12(getConfig().ARTIFACTS_DIR, "training-runs");
+  const dir = join13(getConfig().ARTIFACTS_DIR, "training-runs");
   if (!existsSync4(dir)) mkdirSync11(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
-  return createHash5("sha256").update(content, "utf-8").digest("hex");
+  return createHash6("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -10874,7 +11125,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join12(dir, filename);
+  const previewPath = join13(dir, filename);
   writeFileSync8(previewPath, jsonl);
   return {
     manifestVersion,
@@ -11562,13 +11813,13 @@ var init_external = __esm({
 
 // packages/core/src/last-write.ts
 import { mkdirSync as mkdirSync12, readdirSync as readdirSync5, readFileSync as readFileSync17, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname9, join as join13 } from "node:path";
+import { dirname as dirname10, join as join14 } from "node:path";
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join13(dirname9(health), "last-write") : "";
+  return health ? join14(dirname10(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -11601,7 +11852,7 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync5(dir)) {
-      const p = join13(dir, name);
+      const p = join14(dir, name);
       try {
         if (now - statSync3(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
@@ -11623,13 +11874,13 @@ var init_last_write = __esm({
 
 // packages/core/src/session-record.ts
 import { readdirSync as readdirSync6, readFileSync as readFileSync18, rmSync as rmSync6, statSync as statSync4 } from "node:fs";
-import { dirname as dirname10, join as join14 } from "node:path";
+import { dirname as dirname11, join as join15 } from "node:path";
 function sessionRecordDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join14(dirname10(health), "sessions") : "";
+  return health ? join15(dirname11(health), "sessions") : "";
 }
 function sessionRecordFile(session, dir = sessionRecordDir()) {
-  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join15(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function sessionId(explicit) {
   const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
@@ -11686,7 +11937,7 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      const p = join14(dir, name);
+      const p = join15(dir, name);
       if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
           if (now - statSync4(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
@@ -11741,6 +11992,7 @@ __export(src_exports, {
   HOOK_CHILD_ENV: () => HOOK_CHILD_ENV,
   HttpBackend: () => HttpBackend,
   IdTokenProvider: () => IdTokenProvider,
+  JANITOR_JOB: () => JANITOR_JOB,
   KEPT_AS_NOTE_REASON: () => KEPT_AS_NOTE_REASON,
   KIND_STATUSES: () => KIND_STATUSES,
   LocalCoordinationError: () => LocalCoordinationError,
@@ -11939,11 +12191,13 @@ __export(src_exports, {
   importLegacyScope: () => importLegacyScope,
   includesUser: () => includesUser,
   isCoordinationUnavailable: () => isCoordinationUnavailable,
+  isCuratable: () => isCuratable,
   isCycleFatal: () => isCycleFatal,
   isDetectionStale: () => isDetectionStale,
   isMemoryKind: () => isMemoryKind,
   isOpenTyped: () => isOpenTyped,
   isOwnAuthor: () => isOwnAuthor,
+  isPinned: () => isPinned,
   isPushable: () => isPushable,
   isReadOnlyDoc: () => isReadOnlyDoc,
   isRecurrencePattern: () => isRecurrencePattern,
@@ -11955,6 +12209,8 @@ __export(src_exports, {
   isSyncableCollection: () => isSyncableCollection,
   isUpcoming: () => isUpcoming,
   janitorSweep: () => janitorSweep,
+  jobDue: () => jobDue,
+  jobFiles: () => jobFiles,
   journalAppend: () => journalAppend,
   journalConsolidate: () => journalConsolidate,
   judgeAggregate: () => judgeAggregate,
@@ -12015,6 +12271,7 @@ __export(src_exports, {
   opensAtOf: () => opensAtOf,
   ownUsernames: () => ownUsernames,
   ownerWaitsOn: () => ownerWaitsOn,
+  pairKey: () => pairKey,
   parseAggregateJudge: () => parseAggregateJudge,
   parseClassifierResponse: () => parseClassifierResponse,
   parseDataRules: () => parseDataRules,
@@ -12051,6 +12308,9 @@ __export(src_exports, {
   readCaptureHealth: () => readCaptureHealth,
   readCycleRecord: () => readCycleRecord,
   readHoldoutFile: () => readHoldoutFile,
+  readJanitorRecord: () => readJanitorRecord,
+  readJobRecord: () => readJobRecord,
+  readJson: () => readJson,
   readLastWrite: () => readLastWrite,
   readManifestSource: () => readManifestSource,
   readScopeSettings: () => readScopeSettings,
@@ -12061,6 +12321,7 @@ __export(src_exports, {
   recordCapture: () => recordCapture,
   recordCycle: () => recordCycle,
   recordForTask: () => recordForTask,
+  recordJob: () => recordJob,
   recordLastWrite: () => recordLastWrite,
   recordPull: () => recordPull,
   recordSessionScope: () => recordSessionScope,
@@ -12103,6 +12364,7 @@ __export(src_exports, {
   retryUnsharedClaims: () => retryUnsharedClaims,
   routeMemory: () => routeMemory,
   runDecaySweep: () => runDecaySweep,
+  runJanitorIfDue: () => runJanitorIfDue,
   runScopeAction: () => runScopeAction,
   scheduleSyncSoon: () => scheduleSyncSoon,
   scopeFileVersion: () => scopeFileVersion,
@@ -12144,6 +12406,7 @@ __export(src_exports, {
   suggestCompaction: () => suggestCompaction,
   summarizeCapture: () => summarizeCapture,
   sweepDeletedUpstream: () => sweepDeletedUpstream,
+  sweepExpiredMemories: () => sweepExpiredMemories,
   sweepFindings: () => sweepFindings,
   sweepLockDebris: () => sweepLockDebris,
   sweepSessionSummaries: () => sweepSessionSummaries,
@@ -12170,6 +12433,8 @@ __export(src_exports, {
   trainingThresholds: () => trainingThresholds,
   trainingTrigger: () => trainingTrigger,
   tryAcquireCycle: () => tryAcquireCycle,
+  tryAcquireFileLock: () => tryAcquireFileLock,
+  tryAcquireJob: () => tryAcquireJob,
   typedForCollection: () => typedForCollection,
   typedLabel: () => typedLabel,
   untypeCollection: () => untypeCollection,
@@ -12183,6 +12448,7 @@ __export(src_exports, {
   updateSyncPullTimestamp: () => updateSyncPullTimestamp,
   updateSyncSubscriptions: () => updateSyncSubscriptions,
   updateTask: () => updateTask,
+  useSubscriptionModelIfNoKey: () => useSubscriptionModelIfNoKey,
   usersIn: () => usersIn,
   validateLearned: () => validateLearned,
   verifyAdapterAgainstManifest: () => verifyAdapterAgainstManifest,
@@ -12194,6 +12460,7 @@ __export(src_exports, {
   withFileLock: () => withFileLock,
   withFileLockSync: () => withFileLockSync,
   writeArtifact: () => writeArtifact,
+  writeJson: () => writeJson,
   writeJsonAtomic: () => writeJsonAtomic,
   writeSystemPromptCompanion: () => writeSystemPromptCompanion,
   writeTrainingManifest: () => writeTrainingManifest
@@ -12234,6 +12501,8 @@ var init_src = __esm({
     init_extractor();
     init_resolver();
     init_janitor();
+    init_janitor_schedule();
+    init_jobs();
     init_capture();
     init_provider();
     init_prompts();
@@ -12271,9 +12540,11 @@ var init_src = __esm({
     init_kinds();
     init_sweep();
     init_summary_retention();
+    init_expiry();
     init_owners();
     init_known_users();
     init_update2();
+    init_curatable();
     init_external();
     init_records_elsewhere();
     init_links();
@@ -12326,7 +12597,7 @@ __export(statusline_exports, {
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync as mkdirSync13, readFileSync as readFileSync20, realpathSync as realpathSync2, renameSync as renameSync7, rmSync as rmSync7, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname11, join as join16, resolve } from "node:path";
+import { dirname as dirname12, join as join17, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function newer(a, b) {
   const pa = SEMVER2.exec(String(a ?? "").trim());
@@ -12415,7 +12686,7 @@ function readLastWrite2(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync20(join17(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -12457,7 +12728,7 @@ function readSessionRecord(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
+      const r = JSON.parse(readFileSync20(join17(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.json`), "utf-8"));
       if (r && typeof r.version === "string" && typeof r.pid === "number" && alive(r.pid) && (!best || r.started_at > best.started_at)) best = r;
     } catch {
     }
@@ -12469,7 +12740,7 @@ function readSessionScope(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const r = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
+      const r = JSON.parse(readFileSync20(join17(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.scope`), "utf-8"));
       if (typeof r?.collection === "string" && typeof r.at === "number" && (!best || r.at > best.at)) best = r;
     } catch {
     }
@@ -12481,7 +12752,7 @@ function readSessionStarting(dir, sessions) {
   for (const s of new Set(sessions)) {
     if (!s || !/^[A-Za-z0-9._:-]{1,128}$/.test(s)) continue;
     try {
-      const at = JSON.parse(readFileSync20(join16(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
+      const at = JSON.parse(readFileSync20(join17(dir, `${s.replace(/[^A-Za-z0-9._-]/g, "_")}.starting`), "utf-8"))?.at;
       if (typeof at === "number" && (best === void 0 || at > best)) best = at;
     } catch {
     }
@@ -12570,7 +12841,7 @@ function removeStatusLine(settings, script) {
   return next;
 }
 function defaultSettingsPath() {
-  return join16(process.env.CLAUDE_CONFIG_DIR ?? join16(homedir4(), ".claude"), "settings.json");
+  return join17(process.env.CLAUDE_CONFIG_DIR ?? join17(homedir4(), ".claude"), "settings.json");
 }
 function readSettings(path2) {
   try {
@@ -12581,7 +12852,7 @@ function readSettings(path2) {
   }
 }
 function writeSettings(path2, settings) {
-  mkdirSync13(dirname11(path2), { recursive: true });
+  mkdirSync13(dirname12(path2), { recursive: true });
   const tmp = `${path2}.${process.pid}.tmp`;
   writeFileSync10(tmp, JSON.stringify(settings, null, 2) + "\n");
   renameSync7(tmp, path2);
@@ -12612,14 +12883,14 @@ function copyScript(from, to) {
     if (readFileSync20(to).equals(src)) return false;
   } catch {
   }
-  mkdirSync13(dirname11(to), { recursive: true, mode: 448 });
+  mkdirSync13(dirname12(to), { recursive: true, mode: 448 });
   const tmp = `${to}.${process.pid}.tmp`;
   copyFileSync(from, tmp);
   renameSync7(tmp, to);
   return true;
 }
 function setRemovedMarker(dir, removed) {
-  const p = join16(dir, REMOVED_MARKER);
+  const p = join17(dir, REMOVED_MARKER);
   try {
     if (removed) {
       mkdirSync13(dir, { recursive: true, mode: 448 });
@@ -12646,13 +12917,13 @@ async function main(args, self2) {
   if (args.includes("--install")) {
     process.stdout.write(`Status line added to ${installStatusLine(self2, settings)}
 `);
-    setRemovedMarker(dirname11(self2), false);
+    setRemovedMarker(dirname12(self2), false);
     return;
   }
   if (args.includes("--uninstall")) {
     process.stdout.write(`Status line removed from ${uninstallStatusLine(settings, self2)}
 `);
-    setRemovedMarker(dirname11(self2), true);
+    setRemovedMarker(dirname12(self2), true);
     return;
   }
   const input2 = await readStdin();
@@ -12663,12 +12934,12 @@ async function main(args, self2) {
     const out = (r.stdout ?? "").replace(/\s+$/, "");
     if (r.status === 0 && out) process.stdout.write(out + "\n");
   }
-  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join16(dirname11(self2), "sync-health.json");
-  const update = readUpdate(join16(dirname11(healthPath), "update-check.json"));
+  const healthPath = process.env.YAPA_SYNC_HEALTH_FILE || join17(dirname12(self2), "sync-health.json");
+  const update = readUpdate(join17(dirname12(healthPath), "update-check.json"));
   const info = stdinInfo(input2);
   const ids = [info.session, process.env.CLAUDE_CODE_SESSION_ID];
-  const last = readLastWrite2(join16(dirname11(healthPath), "last-write"), ids);
-  const sessionsDir = join16(dirname11(healthPath), "sessions");
+  const last = readLastWrite2(join17(dirname12(healthPath), "last-write"), ids);
+  const sessionsDir = join17(dirname12(healthPath), "sessions");
   const session = sessionInfo(readSessionRecord(sessionsDir, ids), info.ageMs, readSessionStarting(sessionsDir, ids));
   const collection = last?.collection ?? readSessionScope(sessionsDir, ids);
   const color = !process.env.NO_COLOR;
@@ -12678,7 +12949,7 @@ async function main(args, self2) {
     update,
     collection,
     session,
-    captureFailing: captureFailingAt(join16(dirname11(healthPath), "capture-health.json"), Date.now())
+    captureFailing: captureFailingAt(join17(dirname12(healthPath), "capture-health.json"), Date.now())
   }) + "\n");
 }
 function isMain(argv1, self2) {
@@ -12693,7 +12964,7 @@ var SCRIPT_VERSION, SEMVER2, DEFAULT_INTERVAL_MS, STALE_INTERVALS, WRAP_TIMEOUT_
 var init_statusline = __esm({
   "packages/mcp/src/cli/statusline.ts"() {
     "use strict";
-    SCRIPT_VERSION = true ? "1.19.0" : void 0;
+    SCRIPT_VERSION = true ? "1.20.0" : void 0;
     SEMVER2 = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
     DEFAULT_INTERVAL_MS = 3e5;
     STALE_INTERVALS = 3;
@@ -12722,7 +12993,7 @@ var YAPA_VERSION;
 var init_version = __esm({
   "packages/mcp/src/version.ts"() {
     "use strict";
-    YAPA_VERSION = true ? "1.19.0" : fromPackage();
+    YAPA_VERSION = true ? "1.20.0" : fromPackage();
   }
 });
 
@@ -12751,7 +13022,7 @@ __export(hooks_exports, {
 });
 import { existsSync as existsSync5, mkdirSync as mkdirSync14, readFileSync as readFileSync21, readdirSync as readdirSync7, rmSync as rmSync8, statSync as statSync6, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname12, join as join17 } from "node:path";
+import { dirname as dirname13, join as join18 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
@@ -12830,11 +13101,11 @@ function syncDownLine(health = readSyncHealth()) {
 }
 function statusLineScriptPath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join17(dirname12(health), "statusline.mjs") : void 0;
+  return health ? join18(dirname13(health), "statusline.mjs") : void 0;
 }
 function bundledStatusLineScript() {
-  const here = dirname12(fileURLToPath2(import.meta.url));
-  return ["statusline.mjs", "statusline.js"].map((f) => join17(here, f)).find((p) => existsSync5(p));
+  const here = dirname13(fileURLToPath2(import.meta.url));
+  return ["statusline.mjs", "statusline.js"].map((f) => join18(here, f)).find((p) => existsSync5(p));
 }
 function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defaultSettingsPath()) {
   const to = statusLineScriptPath();
@@ -12848,8 +13119,8 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
   refreshSyncHealthNames(isSyncConfigured(getConfig()));
   if (hasStatusLine(settingsPath, to)) return void 0;
   if (getConfig().STATUSLINE) {
-    const added = join17(dirname12(to), "statusline-added");
-    if (existsSync5(join17(dirname12(to), REMOVED_MARKER)) || existsSync5(added) || !existsSync5(to)) return void 0;
+    const added = join18(dirname13(to), "statusline-added");
+    if (existsSync5(join18(dirname13(to), REMOVED_MARKER)) || existsSync5(added) || !existsSync5(to)) return void 0;
     try {
       installStatusLine(to, settingsPath);
       try {
@@ -12865,7 +13136,7 @@ function prepareStatusLine(from = bundledStatusLineScript(), settingsPath = defa
     }
   }
   if (!isSyncConfigured(getConfig())) return void 0;
-  const marker = join17(dirname12(to), "statusline-hint");
+  const marker = join18(dirname13(to), "statusline-hint");
   if (existsSync5(marker)) return void 0;
   try {
     writeFileSync11(marker, `${(/* @__PURE__ */ new Date()).toISOString()}
@@ -12884,13 +13155,13 @@ function updateLine() {
   return `_YAPA ${state.latest} is out (running ${YAPA_VERSION}). Tell the user once; to update: ${how}._`;
 }
 function stateDir() {
-  const base = process.env.CLAUDE_PLUGIN_DATA || join17(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
-  const dir = join17(base, "sessions");
+  const base = process.env.CLAUDE_PLUGIN_DATA || join18(tmpdir2(), `yapa-hooks-${process.getuid?.() ?? "user"}`);
+  const dir = join18(base, "sessions");
   mkdirSync14(dir, { recursive: true });
   return dir;
 }
 function stateFile2(sessionId2, kind) {
-  return join17(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
+  return join18(stateDir(), `${sessionId2.replace(/[^A-Za-z0-9_-]/g, "_")}.${kind}`);
 }
 function readTurn(sessionId2) {
   try {
@@ -12941,7 +13212,7 @@ function sweepRecalled(now = Date.now()) {
     const dir = stateDir();
     for (const f of readdirSync7(dir)) {
       if (!f.endsWith(".recalled")) continue;
-      const path2 = join17(dir, f);
+      const path2 = join18(dir, f);
       if (now - statSync6(path2).mtimeMs > RECALLED_MAX_AGE_MS) rmSync8(path2, { force: true });
     }
   } catch {
@@ -13213,9 +13484,7 @@ async function stop(input2) {
   const turn = readTurn(input2.session_id);
   const userText2 = turn?.prompt ?? "";
   if (!assistantText || userText2.length + assistantText.length < config.CAPTURE_MIN_CHARS) return;
-  if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
-    setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
-  }
+  useSubscriptionModelIfNoKey();
   try {
     const { collection } = await detectCollection(input2.cwd);
     const result = await captureTurn(
@@ -13307,7 +13576,7 @@ __export(install_hooks_exports, {
 });
 import { mkdirSync as mkdirSync15, readFileSync as readFileSync22, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname as dirname13, join as join18 } from "node:path";
+import { dirname as dirname14, join as join19 } from "node:path";
 function isYapaHook(h) {
   return typeof h?.command === "string" && /\bhook\s+[a-z-]+$/.test(h.command) && h.command.includes(MARKER);
 }
@@ -13334,7 +13603,7 @@ function removeHooks(settings) {
   return next;
 }
 function defaultSettingsPath2() {
-  return join18(process.env.CLAUDE_CONFIG_DIR ?? join18(homedir5(), ".claude"), "settings.json");
+  return join19(process.env.CLAUDE_CONFIG_DIR ?? join19(homedir5(), ".claude"), "settings.json");
 }
 function selfCommand() {
   return `node ${process.argv[1]}`;
@@ -13349,7 +13618,7 @@ function readSettings2(path2) {
 }
 function installHooks(path2 = defaultSettingsPath2(), command = selfCommand()) {
   const merged = mergeHooks(readSettings2(path2), command);
-  mkdirSync15(dirname13(path2), { recursive: true });
+  mkdirSync15(dirname14(path2), { recursive: true });
   writeFileSync12(path2, JSON.stringify(merged, null, 2) + "\n");
   return path2;
 }
@@ -13808,11 +14077,20 @@ async function input(args) {
   set("tags", csv(flag2(args, "--tags")));
   set("content", flag2(args, "--content"));
   set("note", flag2(args, "--note"));
+  const salience = flag2(args, "--salience");
+  if (salience !== void 0) {
+    if (!Number.isFinite(Number(salience))) throw new UsageError2("--salience must be a number");
+    out.salience = Number(salience);
+  }
+  if (args.includes("--pin") && args.includes("--unpin")) throw new UsageError2("--pin and --unpin together");
+  if (args.includes("--pin")) out.pinned = true;
+  if (args.includes("--unpin")) out.pinned = false;
+  if (args.includes("--restore")) out.restore = true;
   return out;
 }
 function split(i) {
-  const { content, note, tags, ...typed } = i;
-  return { content, note, tags, typed };
+  const { content, note, tags, salience, pinned, restore, ...typed } = i;
+  return { content, note, tags, life: { salience, pinned, restore }, typed };
 }
 async function listWhole(args) {
   const collection = flag2(args, "--collection");
@@ -13877,15 +14155,26 @@ async function runMemory(sub, args) {
       case "update": {
         const id = positional(args);
         if (!id) throw new UsageError2("memory id required");
-        const { content, note, tags, typed } = split(await input(args));
-        const r = await updateMemory(id, { ...typed, ...content !== void 0 ? { content } : {}, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, flag2(args, "--collection"));
+        const { content, note, tags, life, typed } = split(await input(args));
+        const r = await updateMemory(id, { ...typed, ...content !== void 0 ? { content } : {}, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {}, ...life }, flag2(args, "--collection"));
         recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
+      }
+      case "expire": {
+        const apply = args.includes("--apply");
+        const r = await sweepExpiredMemories(void 0, { collection: flag2(args, "--collection"), dryRun: !apply });
+        const n = r.candidates.length;
+        const lines = r.candidates.map((c) => `${c.id} [${c.collection}] salience ${c.salience.toFixed(2)}, last active ${new Date(c.last_active * 1e3).toISOString().slice(0, 10)}: ${c.preview.replace(/\s+/g, " ")}`);
+        return {
+          exit: 0,
+          json: { ok: true, applied: apply, ...r },
+          text: [`${n} memor${n === 1 ? "y" : "ies"} ${apply ? "archived" : "would be archived"}`, ...lines].join("\n")
+        };
       }
       case "sweep-findings": {
         const collection = flag2(args, "--collection");
         if (!collection) throw new UsageError2("--collection is required");
-        const num = (name) => {
+        const num2 = (name) => {
           const v = flag2(args, name);
           if (v === void 0) return void 0;
           const n = Number(v);
@@ -13912,11 +14201,8 @@ async function runMemory(sub, args) {
           await applySweep(collection, items, { allOwners });
           r = { collection, considered: items.length, items, applied: true };
         } else {
-          const config = getConfig();
-          if (config.CURATION_LLM_PROVIDER === "anthropic" && !config.ANTHROPIC_API_KEY) {
-            setConfig({ ...config, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config.CURATION_MODEL || "haiku" });
-          }
-          r = await sweepFindings({ collection, apply, allOwners, limit: num("--limit"), minAgeDays: num("--min-age-days") });
+          useSubscriptionModelIfNoKey();
+          r = await sweepFindings({ collection, apply, allOwners, limit: num2("--limit"), minAgeDays: num2("--min-age-days") });
           if (save2) writeFileSync13(save2, JSON.stringify(r, null, 2));
         }
         if (r.applied) recordLastWrite(collection);
@@ -13969,7 +14255,7 @@ var init_memory = __esm({
   "packages/mcp/src/cli/memory.ts"() {
     "use strict";
     init_src();
-    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n       yapa memory untype --collection C [--dry-run]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which of your open findings older than --min-age-days (default 2) are\n  only progress notes or superseded by a newer note, and lists them (--save FILE keeps the list). --apply --from FILE\n  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\nuntype turns your typed memories without an external ref (--ref) into notes, in a collection marked as keeping its\n  records elsewhere (yapa scope records-elsewhere add C): copies made before it was marked. --dry-run lists them.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
+    MEMORY_USAGE = "Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--salience N] [--pin | --unpin] [--restore] [--stdin-json]\n       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n       yapa memory untype --collection C [--dry-run]\n       yapa memory expire [--collection C] [--apply]\n       yapa waiting       [--collection C] [--for U | --everyone]\nTyped fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n  --exit-criteria TEXT --tags a,b. --stdin-json reads the same fields (and content, note) as one JSON object.\nsweep-findings asks the curation model which of your open findings older than --min-age-days (default 2) are\n  only progress notes or superseded by a newer note, and lists them (--save FILE keeps the list). --apply --from FILE\n  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\nuntype turns your typed memories without an external ref (--ref) into notes, in a collection marked as keeping its\n  records elsewhere (yapa scope records-elsewhere add C): copies made before it was marked. --dry-run lists them.\nexpire lists your ordinary notes the daily sweep archives for age: not recalled or changed for YAPA_MEMORY_EXPIRY_DAYS\n  (default 180) and below salience YAPA_MEMORY_EXPIRY_MAX_SALIENCE (0.2). --apply archives them now.\nPrints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n";
     UsageError2 = class extends Error {
     };
     csv = (v) => v === void 0 ? void 0 : v.split(",").map((x) => x.trim()).filter(Boolean);
@@ -13995,7 +14281,8 @@ var init_memory = __esm({
       "--min-age-days",
       "--from",
       "--save",
-      "--ids"
+      "--ids",
+      "--salience"
     ]);
   }
 });
@@ -14034,6 +14321,52 @@ var init_capture2 = __esm({
     "use strict";
     init_src();
     CAPTURE_USAGE = "Usage: yapa capture status [--days N] [--text]\n";
+  }
+});
+
+// packages/mcp/src/cli/janitor.ts
+var janitor_exports = {};
+__export(janitor_exports, {
+  JANITOR_USAGE: () => JANITOR_USAGE,
+  janitorStatus: () => janitorStatus,
+  runJanitorCli: () => runJanitorCli,
+  statsLine: () => statsLine
+});
+function statsLine(s) {
+  return `${s.pairsConsidered} pair(s) judged: ${s.skippedDuplicates} duplicate(s) archived, ${s.superseded} superseded, ${s.keptDistinct} kept distinct, ${s.skippedNotOwned} left as teammates', ${s.errors} error(s)`;
+}
+function janitorStatus(now = Date.now()) {
+  const config = getConfig();
+  const r = readJanitorRecord();
+  const next = r ? r.finished_at + config.JANITOR_INTERVAL_MS : now;
+  const lines = [
+    `Janitor: ${config.JANITOR_ENABLED ? "on" : "off"} (every ${Math.round(config.JANITOR_INTERVAL_MS / 36e5)} h, up to ${config.JANITOR_MAX_PAIRS} pairs)`,
+    r ? `Last run: ${day(r.finished_at)} UTC, ${r.result ? statsLine(r.result.stats) : "no result recorded"}` : "Last run: never",
+    ...config.JANITOR_ENABLED ? [`Next due: ${next <= now ? "now (runs at the next hourly check)" : `${day(next)} UTC`}`] : []
+  ];
+  return { json: { ok: true, enabled: config.JANITOR_ENABLED, last: r ?? null, next_due: config.JANITOR_ENABLED ? next : null }, text: lines.join("\n") };
+}
+async function runJanitorCli(sub) {
+  if (sub === "status") return { exit: 0, ...janitorStatus() };
+  if (sub === "run") {
+    try {
+      const stats = await runJanitorIfDue({ force: true, enabled: true });
+      if (!stats) return { exit: 0, json: { ok: true, ran: false }, text: "Another session is running the janitor now" };
+      const { keptPairs: _k, ...rest } = stats;
+      return { exit: 0, json: { ok: true, ran: true, stats: rest }, text: statsLine(rest) };
+    } catch (e) {
+      return { exit: 1, json: { ok: false, error: String(e) }, text: `Janitor error: ${e}` };
+    }
+  }
+  return { exit: 2, json: { ok: false, error: JANITOR_USAGE.trim() }, text: JANITOR_USAGE.trim() };
+}
+var JANITOR_USAGE, day;
+var init_janitor2 = __esm({
+  "packages/mcp/src/cli/janitor.ts"() {
+    "use strict";
+    init_src();
+    JANITOR_USAGE = "Usage: yapa janitor status|run [--text]\n";
+    day = (ms) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
   }
 });
 
@@ -14110,13 +14443,13 @@ var init_scope2 = __esm({
 });
 
 // packages/mcp/src/cli/index.ts
-import { dirname as dirname14, join as join19 } from "node:path";
+import { dirname as dirname15, join as join20 } from "node:path";
 
 // packages/mcp/src/cli/env.ts
 init_src();
 import { readFileSync as readFileSync19 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 var PLUGIN_OPTION_PREFIX = "CLAUDE_PLUGIN_OPTION_";
 function resolveHostEnv(env, claudeConfig, cwd) {
   const add = {};
@@ -14131,7 +14464,7 @@ function resolveHostEnv(env, claudeConfig, cwd) {
     }
   }
   if (env.CLAUDE_PLUGIN_ROOT) {
-    if (env.CLAUDE_PLUGIN_DATA) offer("YAPA_MODEL_CACHE_DIR", join15(env.CLAUDE_PLUGIN_DATA, "models"));
+    if (env.CLAUDE_PLUGIN_DATA) offer("YAPA_MODEL_CACHE_DIR", join16(env.CLAUDE_PLUGIN_DATA, "models"));
     return add;
   }
   const projectEnv = cwd ? claudeConfig?.projects?.[cwd]?.mcpServers?.yapa?.env : void 0;
@@ -14155,8 +14488,8 @@ function pluginSettingsEnv(env, settings) {
 }
 function adoptCliEnv(cwd) {
   try {
-    const dir = process.env.CLAUDE_CONFIG_DIR ?? join15(homedir3(), ".claude");
-    const settings = JSON.parse(readFileSync19(join15(dir, "settings.json"), "utf-8"));
+    const dir = process.env.CLAUDE_CONFIG_DIR ?? join16(homedir3(), ".claude");
+    const settings = JSON.parse(readFileSync19(join16(dir, "settings.json"), "utf-8"));
     const add = pluginSettingsEnv(process.env, settings);
     if (Object.keys(add).length) {
       Object.assign(process.env, add);
@@ -14170,8 +14503,8 @@ function adoptCliEnv(cwd) {
 function adoptLegacyScope(env = process.env) {
   let options;
   try {
-    const dir = env.CLAUDE_CONFIG_DIR ?? join15(homedir3(), ".claude");
-    options = JSON.parse(readFileSync19(join15(dir, "settings.json"), "utf-8"))?.pluginConfigs?.["yapa@yapa"]?.options;
+    const dir = env.CLAUDE_CONFIG_DIR ?? join16(homedir3(), ".claude");
+    options = JSON.parse(readFileSync19(join16(dir, "settings.json"), "utf-8"))?.pluginConfigs?.["yapa@yapa"]?.options;
   } catch {
     options = void 0;
   }
@@ -14196,7 +14529,7 @@ function adoptHostEnv(cwd) {
   let claudeConfig;
   try {
     const dir = process.env.CLAUDE_CONFIG_DIR ?? homedir3();
-    claudeConfig = JSON.parse(readFileSync19(join15(dir, ".claude.json"), "utf-8"));
+    claudeConfig = JSON.parse(readFileSync19(join16(dir, ".claude.json"), "utf-8"));
   } catch {
     claudeConfig = void 0;
   }
@@ -14205,7 +14538,7 @@ function adoptHostEnv(cwd) {
 }
 
 // packages/mcp/src/cli/index.ts
-var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder\n       yapa scope <command> [options]            list and change the folder rules: project roots, customers, mappings (yapa scope help)\n";
+var USAGE = "Usage: yapa hook <session-start|user-prompt-submit|stop|post-compact|session-end>\n         (reads Claude Code hook JSON from stdin)\n       yapa hooks install [--settings <path>]    add YAPA hooks to Claude Code settings\n       yapa hooks uninstall [--settings <path>]  remove them\n       yapa hooks print                          show the hooks block without writing it\n       yapa statusline install [--settings <path>]  show sync health in the Claude Code status line\n       yapa statusline uninstall [--settings <path>]  remove it (restores a status line it wrapped)\n       yapa statusline show                      print the status line segment now\n       yapa coord <command> [options]            leases and counters on the sync service (yapa coord help)\n       yapa task <command> [options]             list, pick, claim and release tasks (yapa task help)\n       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n       yapa janitor status|run                   the duplicate janitor: last run and next due, or run it now\n       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder\n       yapa scope <command> [options]            list and change the folder rules: project roots, customers, mappings (yapa scope help)\n";
 var COORD_USAGE = "Usage: yapa coord acquire   --collection C --key K [--session S] [--scope a,b] [--ttl SECONDS] [--title T] [--reclaim]\n       yapa coord heartbeat [--collection C [--keys a,b]] [--session S]\n       yapa coord release   --collection C --key K [--session S] [--outcome done|blocked|pending]\n       yapa coord list      --collection C [--include-expired]\n       yapa coord counter-next --collection C --name N [--floor N]\n       yapa coord task-id   [--floor N]\n--session defaults to $YAPA_SESSION, then the Claude Code session ($CLAUDE_CODE_SESSION_ID). Prints one JSON object on stdout (--text: a short summary).\nShared collections are coordinated by the sync service; private-*, local-* and global (and every collection with sync off) by this machine.\nExit: 0 done, 3 refused (held or overlapping), 4 unavailable (the service for a shared collection; nothing shared: fall back locally),\n      2 bad arguments, 1 other error.\n";
 function usage() {
   process.stderr.write(USAGE);
@@ -14282,24 +14615,24 @@ async function runStatusLineCommand(action, args) {
       sl.copyScript(from, script);
       process.stdout.write(`Status line added to ${sl.installStatusLine(script, path2)} (runs ${script})
 `);
-      sl.setRemovedMarker(dirname14(script), false);
+      sl.setRemovedMarker(dirname15(script), false);
       return;
     }
     case "uninstall":
       process.stdout.write(`Status line removed from ${sl.uninstallStatusLine(path2, script)}
 `);
-      if (script) sl.setRemovedMarker(dirname14(script), true);
+      if (script) sl.setRemovedMarker(dirname15(script), true);
       return;
     case "show": {
       const { YAPA_VERSION: YAPA_VERSION2 } = await Promise.resolve().then(() => (init_version(), version_exports));
       const health = getConfig2().SYNC_HEALTH_FILE;
-      const update = health ? sl.readUpdate(join19(dirname14(health), "update-check.json")) : void 0;
+      const update = health ? sl.readUpdate(join20(dirname15(health), "update-check.json")) : void 0;
       process.stdout.write(sl.renderSegment(sl.readHealth(health), Date.now(), {
         color: !process.env.NO_COLOR,
         version: YAPA_VERSION2,
         remote: getConfig2().REMOTE_NAME || void 0,
         update,
-        captureFailing: health ? sl.captureFailingAt(join19(dirname14(health), "capture-health.json"), Date.now()) : false
+        captureFailing: health ? sl.captureFailingAt(join20(dirname15(health), "capture-health.json"), Date.now()) : false
       }) + "\n");
       return;
     }
@@ -14411,6 +14744,13 @@ async function main2() {
     adoptCliEnv(process.cwd());
     const { runCapture: runCapture3 } = await Promise.resolve().then(() => (init_capture2(), capture_exports));
     const r = runCapture3(sub, rest);
+    process.stdout.write((rest.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
+    await exitAfterFlush(r.exit);
+  }
+  if (command === "janitor") {
+    adoptCliEnv(process.cwd());
+    const { runJanitorCli: runJanitorCli2 } = await Promise.resolve().then(() => (init_janitor2(), janitor_exports));
+    const r = await runJanitorCli2(sub);
     process.stdout.write((rest.includes("--text") ? r.text : JSON.stringify(r.json)) + "\n");
     await exitAfterFlush(r.exit);
   }
