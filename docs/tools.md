@@ -18,8 +18,8 @@ walkthrough and its tools.
 | Tool | Description |
 |------|-------------|
 | `setup_instructions` | Generate behavioral instructions for CLAUDE.md / AGENTS.md |
-| `memory_store` | Store memory with content, tags, salience, sector, collection; optionally typed (`kind`: finding, decision, limitation, question, idea, with status, owner, options, links; see [Findings, decisions and what waits on people](tasks.md#findings-decisions-and-what-waits-on-people)) |
-| `memory_update` | Change a memory in place: status, owner, links, a dated note (records a decision, answers a question, resolves a finding) |
+| `memory_store` | Store memory with content, tags, salience, sector, collection, `pinned`; optionally typed (`kind`: finding, decision, limitation, question, idea, with status, owner, options, links; see [Findings, decisions and what waits on people](tasks.md#findings-decisions-and-what-waits-on-people)) |
+| `memory_update` | Change a memory in place: status, owner, links, a dated note (records a decision, answers a question, resolves a finding); `salience`, `pinned`, or `restore` to un-archive |
 | `memory_recall` | Semantic search ranked by distance + salience, with optional collection/tag/score filters |
 | `memory_forget` | Delete memory by ID |
 | `memory_list` | List memories with metadata filters (tag, sector, kind, status, owner, classifier scores) |

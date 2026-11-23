@@ -5,7 +5,7 @@ import { archivedMetadata } from './archive.js';
 import { getDocumentsByFilter, getDocumentsByIds, metadataDelta, patchDocument, queryDocuments } from '../store/index.js';
 
 import { storeMemory } from './store.js';
-import { isMemoryKind } from './kinds.js';
+import { isCuratable, isPinned } from './curatable.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
 
 export interface CompactionGroup {
@@ -50,7 +50,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
   // Typed memories (findings, decisions, ...) keep their own identity and
   // status: a decision folded into a summary could no longer be waited on.
   const all = (await getDocumentsByFilter(collection, { type: 'memory' }, 10000))
-    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
+    .filter(d => isCuratable(d.metadata));
 
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
 
@@ -66,10 +66,7 @@ export async function suggestCompaction(collection: string): Promise<CompactionG
     const matches = neighbors.filter(n =>
       n.id !== seed.id &&
       !consumed.has(n.id) &&
-      n.metadata.archived !== true &&
-      !isMemoryKind(n.metadata.kind) &&
-      !isSessionSummary(n.metadata) &&
-      !isReadOnlyDoc(n.metadata) &&
+      isCuratable(n.metadata) &&
       n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE,
     );
 
@@ -131,7 +128,7 @@ export async function applyCompaction(input: ApplyCompactionInput): Promise<Appl
   for (const id of input.member_ids) {
     try {
       const existing = await getDocumentsByIds(input.collection, [id]);
-      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata) || isPinned(existing[0].metadata)) continue;
       await patchDocument(input.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {

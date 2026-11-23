@@ -11,3 +11,6 @@ export function archivedMetadata(
 ): Record<string, any> {
   return { ...metadata, ...extra, archived: true, updated_at: now, is_synced: false };
 }
+
+/** Keys that say why a document was archived; restoring a memory clears them. */
+export const ARCHIVE_REASON_KEYS = ['archived', 'superseded_by', 'compacted_into', 'duplicate_of', 'expired'] as const;

@@ -7,7 +7,10 @@ Not all memories are equally important. YAPA scores each memory by salience (0.0
 - **Decay** is time-based: `salience × rate^days` since the memory was last decayed (`decayed_at`), with `rate` = 0.98/day for episodic memories (half-life ~34 days) and √0.98 for semantic facts (~69 days). Sweeps run at most once per 24h (checked hourly), and re-running one decays nothing extra, so the curve doesn't depend on how often you open a session.
 - **Boosts** (+0.1) happen only when a recall hit is relevant (cosine distance < `YAPA_SALIENCE_BOOST_MAX_DISTANCE`, default 0.5) — merely being surfaced by the per-prompt hook doesn't count — and at most `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` (3) times per memory per day.
 - **Ranking**: `cosine distance − 0.15 × normalized salience`, so salience breaks ties between similarly relevant memories rather than overriding relevance.
-- Salience is per machine: boosts and decay reflect each user's own usage and don't sync.
+- **Setting it yourself:** `memory_store` takes `salience` (default 1.0). Later, `memory_update` with `salience` changes it, clamped to 0.05-5, and decay counts from that moment. From a shell: `yapa memory update ID --salience 3`.
+- **Pinning:** `pinned: true` on `memory_store` or `memory_update` (`yapa memory update ID --pin`, `--unpin`) marks a memory as one to keep. It never decays, and compaction, the janitor and expiry leave it alone. Labels in recall and lists show `pinned`.
+- **Restoring:** `memory_update` with `restore: true` (`--restore`) un-archives a memory archived by compaction, the janitor, a supersede or expiry, so recall and lists show it again. A copy whose owner deleted it is kept with `trash` instead.
+- **Sharing:** salience and the pin travel with a memory when it syncs. A boost or decay changes only your copy until the memory is next pushed for another reason. Setting salience or pinning is an edit: it pushes, so teammates see the new value.
 
 ## Chunking
 
@@ -60,7 +63,7 @@ agent then:
 
 1. Calls `compaction_suggest({ collection })` — returns groups of ≥`YAPA_COMPACTION_MIN_GROUP_SIZE` similar memories (similarity gated by `YAPA_COMPACTION_SIMILARITY_DISTANCE`, default `0.30`).
 2. For each group, drafts a one-paragraph rolling summary.
-3. Calls `compaction_apply({ collection, member_ids, summary })` — writes the summary at salience 2.0 with tag `compacted`, then marks each member with `archived: true` and `compacted_into: <summary-id>`.
+3. Calls `compaction_apply({ collection, member_ids, summary })` — writes the summary at salience 2.0 with tag `compacted`, then marks each member with `archived: true` and `compacted_into: <summary-id>`. Pinned memories are never suggested or archived.
 
 `memory_recall` and `memory_list` filter `archived: true` out by default. Pass `include_archived: true` to inspect them.
 
