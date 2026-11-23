@@ -314,6 +314,7 @@ export function registerTools(ctx: Context): void {
       content: { type: 'string', required: true, description: 'The memory content to store' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization' },
       salience: { type: 'number', description: 'Importance score (0.0-5.0, default 1.0)' },
+      pinned: { type: 'boolean', description: 'Pin it: it never decays, and compaction, the janitor and expiry leave it alone' },
       supersedes: { type: 'string', description: 'ID of an existing memory this one corrects/replaces — the old memory is archived (filtered from recall, recoverable), never hard-deleted' },
       sector: { type: 'string', enum: ['semantic', 'episodic'], description: 'Memory type (auto-detected if omitted)' },
       collection: { type: 'string', description: 'Collection name (default: global)' },
@@ -363,6 +364,7 @@ export function registerTools(ctx: Context): void {
       const result = await storeMemory(args.content, {
         tags: args.tags,
         salience: args.salience,
+        pinned: args.pinned,
         sector: args.sector,
         collection: target.collection,
         supersedes: args.supersedes,
@@ -391,12 +393,16 @@ export function registerTools(ctx: Context): void {
     description:
       'Change a memory in place: status, owner, links or other typed fields, and optionally a dated note '
       + 'appended to its text. Record a needed decision with status "accepted" (or "rejected") and the choice '
-      + 'as the note; tasks waiting on it become ready again. Answer a question with status "answered".',
+      + 'as the note; tasks waiting on it become ready again. Answer a question with status "answered". '
+      + 'Change its importance with salience, pin it so it never fades or gets curated away, or restore an archived one.',
     parameters: {
       id: { type: 'string', required: true, description: 'Memory ID' },
       collection: { type: 'string', description: 'Collection (default: searched)' },
       note: { type: 'string', description: 'Appended as "<date> <user>: <note>"' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Replace the tags' },
+      salience: { type: 'number', description: 'New importance (0.05-5); decay counts from now' },
+      pinned: { type: 'boolean', description: 'true pins it (never decays; compaction, the janitor and expiry skip it), false unpins' },
+      restore: { type: 'boolean', description: 'true un-archives it, so recall and lists show it again' },
       ...typedParams,
     },
     output: {
@@ -416,6 +422,9 @@ export function registerTools(ctx: Context): void {
         ...pickTyped(args),
         ...(args.note !== undefined ? { note: args.note } : {}),
         ...(args.tags ? { tags: args.tags } : {}),
+        salience: args.salience,
+        pinned: args.pinned,
+        restore: args.restore,
       }, args.collection ? (await writeTarget(args.collection, exec)).collection : undefined);
       const label = typedLabel(r.metadata);
       return { id: r.id, collection: r.collection, ...(label ? { label } : {}) };

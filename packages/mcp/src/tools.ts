@@ -236,17 +236,18 @@ export function registerTools(server: McpServer): void {
       content: z.string().describe('The memory content to store'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
       salience: z.number().optional().describe('Importance score (0.0-5.0, default 1.0)'),
+      pinned: z.boolean().optional().describe('Pin it: it never decays, and compaction, the janitor and expiry leave it alone'),
       sector: z.enum(['semantic', 'episodic']).optional().describe('Memory type (auto-detected if omitted)'),
       supersedes: z.string().optional().describe('ID of an existing memory this one corrects/replaces — the old memory is archived (filtered from recall, recoverable), never hard-deleted'),
       collection: z.string().optional().describe('Collection name (default: global)'),
       ...TYPED_PARAMS,
     },
-    async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
+    async ({ content, tags, salience, pinned, sector, collection, supersedes, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       let result;
       const target = await writeTarget(collection ?? 'global');
       try {
-        result = await storeMemory(content, { tags, salience, sector, collection: target.collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
+        result = await storeMemory(content, { tags, salience, pinned, sector, collection: target.collection, supersedes, ...(Object.keys(typed).length ? { typed } : {}) });
         recordLastWrite(target.collection);
       } catch (e) {
         return typedError(e);
@@ -305,7 +306,7 @@ export function registerTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: 'No memories found.' }] };
       }
       const text = results.map(r =>
-        `**${r.id}**${typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : ''} (${r.collection ?? 'unknown'}, salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, distance: ${r.distance.toFixed(3)})\n${r.content}`
+        `**${r.id}**${typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : ''} (${r.collection ?? 'unknown'}, salience: ${r.metadata.salience?.toFixed(2) ?? '?'}${r.metadata.pinned ? ', pinned' : ''}${r.metadata.archived ? ', archived' : ''}, distance: ${r.distance.toFixed(3)})\n${r.content}`
       ).join('\n\n---\n\n');
       return { content: [{ type: 'text' as const, text }] };
     },
@@ -364,7 +365,7 @@ export function registerTools(server: McpServer): void {
         const promoted = r.metadata.promoted_to ? ` promoted: ${r.metadata.promoted_to}` : '';
         const selected = r.metadata.selected_for ? ` selected: ${r.metadata.selected_for}` : '';
         const label = typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : '';
-        return `- **${r.id}**${label} [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}, sector: ${r.metadata.sector ?? '?'}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`;
+        return `- **${r.id}**${label} [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? '?'}${r.metadata.pinned ? ', pinned' : ''}${r.metadata.archived ? ', archived' : ''}, sector: ${r.metadata.sector ?? '?'}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`;
       }).join('\n');
       return { content: [{ type: 'text' as const, text }] };
     },
@@ -372,19 +373,22 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     'memory_update',
-    'Change a memory in place: its status, owner, links or other typed fields, and optionally a dated note appended to its text. Record a decision that was needed with status "accepted" (or "rejected") and the choice as the note; tasks waiting on it become ready again. Answer a question with status "answered". Resolve a finding with a disposition. The id stays the same, unlike supersedes.',
+    'Change a memory in place: its status, owner, links or other typed fields, and optionally a dated note appended to its text. Record a decision that was needed with status "accepted" (or "rejected") and the choice as the note; tasks waiting on it become ready again. Answer a question with status "answered". Resolve a finding with a disposition. Change its importance with salience, pin it so it never fades or gets curated away, or restore an archived one. The id stays the same, unlike supersedes.',
     {
       id: z.string().describe('Memory ID'),
       collection: z.string().optional().describe('Collection (default: searched)'),
       note: z.string().optional().describe('Appended as "<date> <user>: <note>", e.g. the choice made'),
       tags: z.array(z.string()).optional().describe('Replace the tags'),
+      salience: z.number().min(0).max(5).optional().describe('New importance (0.05-5); decay counts from now'),
+      pinned: z.boolean().optional().describe('true pins it (never decays; compaction, the janitor and expiry skip it), false unpins'),
+      restore: z.boolean().optional().describe('true un-archives it, so recall and lists show it again'),
       ...TYPED_PARAMS,
     },
-    async ({ id, collection, note, tags, ...typedArgs }) => {
+    async ({ id, collection, note, tags, salience, pinned, restore, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== undefined));
       try {
         const target = collection ? await writeTarget(collection) : undefined;
-        const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, target?.collection);
+        const r = await updateMemory(id, { ...typed, ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}), salience, pinned, restore }, target?.collection);
         recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
         const moved = target?.redirectedFrom ? ` (${redirectNote(target)})` : '';

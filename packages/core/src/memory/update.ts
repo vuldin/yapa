@@ -8,7 +8,8 @@
  * @module @yapa/core/memory/update
  */
 import { addDocument, getDocumentsByFilter, getDocumentsByIds, listCollections, metadataDelta, patchDocument } from '../store/index.js';
-import { getConfig } from '../config.js';
+import { getConfig, SALIENCE_FLOOR, SALIENCE_MAX } from '../config.js';
+import { ARCHIVE_REASON_KEYS } from './archive.js';
 import { withDocLock } from '../doc-lock.js';
 import { assertWritable } from '../sync/syncable.js';
 import { resolveWriteCollection } from '../sync/sentinel.js';
@@ -23,6 +24,12 @@ export interface MemoryUpdate extends TypedFields {
   tags?: string[];
   /** Replace the text (single-chunk memories only; a long rewrite is a new memory that supersedes this one). */
   content?: string;
+  /** Set the salience (clamped to the floor..max range); decay counts from now. */
+  salience?: number;
+  /** Pin (never decays; compaction, the janitor and expiry leave it alone) or unpin. */
+  pinned?: boolean;
+  /** Un-archive: the memory shows in recall and lists again. */
+  restore?: boolean;
 }
 
 export interface MemoryUpdateResult {
@@ -55,7 +62,11 @@ export async function updateMemory(id: string, patch: MemoryUpdate, collection?:
   const found = await locate(id, collection);
   if (!found || found.doc.metadata.type !== 'memory') throw new MemoryNotFoundError(id);
   assertWritable(id, found.doc.metadata);
-  const { note, tags, content, ...typedPatch } = patch;
+  const { note, tags, content, salience, pinned, restore, ...typedPatch } = patch;
+  if (salience !== undefined && !Number.isFinite(salience)) throw new Error(`salience must be a number between ${SALIENCE_FLOOR} and ${SALIENCE_MAX}`);
+  if (restore && found.doc.metadata.deleted_upstream) {
+    throw new Error(`${id} was deleted by its owner: keep a copy with trash (action keep) instead`);
+  }
   if (content !== undefined && found.doc.metadata.parent_id) {
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
@@ -75,6 +86,10 @@ export async function updateMemory(id: string, patch: MemoryUpdate, collection?:
     let metadata: Record<string, any> = docs[docs.length - 1].metadata;
     for (const [i, d] of docs.entries()) {
       metadata = { ...d.metadata, ...typed, ...(tags ? { tags } : {}), updated_at: now, is_synced: false };
+      if (salience !== undefined) Object.assign(metadata, { salience: Math.min(Math.max(salience, SALIENCE_FLOOR), SALIENCE_MAX), decayed_at: now });
+      if (pinned === true) metadata.pinned = true;
+      if (pinned === false) delete metadata.pinned;
+      if (restore) for (const k of ARCHIVE_REASON_KEYS) delete metadata[k];
       const last = i === docs.length - 1;
       if ((note?.trim() || content !== undefined) && last) {
         const day = new Date(now * 1000).toISOString().slice(0, 10);

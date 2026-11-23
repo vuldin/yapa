@@ -36,6 +36,12 @@ describe('runDecaySweep (wall-clock)', () => {
     expect(await sal('b')).toBeCloseTo(2 * Math.sqrt(0.98));
   });
 
+  it('leaves pinned memories alone', async () => {
+    await add('p', { decayed_at: NOW - 30 * DAY, pinned: true });
+    await runDecaySweep(NOW);
+    expect(await sal('p')).toBe(2);
+  });
+
   it('is idempotent: an immediate re-run decays nothing more', async () => {
     await add('a', { decayed_at: NOW - 3 * DAY });
     await runDecaySweep(NOW);

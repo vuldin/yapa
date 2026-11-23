@@ -14,6 +14,8 @@ export interface StoreOptions {
   salience?: number;
   sector?: 'semantic' | 'episodic';
   collection?: string;
+  /** Pinned: never decays, and compaction, the janitor and expiry leave it alone. */
+  pinned?: boolean;
   /**
    * Extra metadata merged into the stored document(s) — provenance for
    * host-driven capture (e.g. `{ source: 'auto-capture', session_id, turn }`).
@@ -147,6 +149,7 @@ export async function storeMemory(
   const now = Math.floor(Date.now() / 1000);
   const sector = options.sector ?? detectSector(content);
   const salience = options.salience ?? SALIENCE_START;
+  const pin = options.pinned ? { pinned: true } : {};
 
   const chunks = chunkText(content);
 
@@ -160,6 +163,7 @@ export async function storeMemory(
       tags: options.tags ?? [],
       salience,
       sector,
+      ...pin,
       created_at: now,
       accessed_at: now,
     };
@@ -182,6 +186,7 @@ export async function storeMemory(
       tags: options.tags ?? [],
       salience,
       sector,
+      ...pin,
       created_at: now,
       accessed_at: now,
       chunk_index: chunk.index,

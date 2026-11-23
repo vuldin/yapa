@@ -2,6 +2,7 @@ import { getDocumentsByFilter, patchDocuments, listCollections } from '../store/
 import { isReadOnlyDoc } from '../sync/syncable.js';
 import { sweepDeletedUpstream } from './trash.js';
 import { sweepSessionSummaries } from './summary-retention.js';
+import { isPinned } from './curatable.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
 const DECAY_SENTINEL_ID = '__decay_sentinel__';
@@ -42,7 +43,7 @@ export async function runDecaySweep(now: number = Math.floor(Date.now() / 1000))
       // ChromaDB, single file flush on the local store) instead of N rewrites.
       const updates: Array<{ id: string; patch: Record<string, any> }> = [];
       for (const doc of docs) {
-        if (isReadOnlyDoc(doc.metadata)) continue;
+        if (isReadOnlyDoc(doc.metadata) || isPinned(doc.metadata)) continue;
         const anchor = typeof doc.metadata.decayed_at === 'number' ? doc.metadata.decayed_at : fallbackAnchor;
         const days = (now - anchor) / DAY;
         if (days <= 0) continue;

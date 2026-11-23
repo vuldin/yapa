@@ -18,7 +18,7 @@ import {
 export const MEMORY_USAGE =
   'Usage: yapa memory list   [--collection C] [--kind K] [--status S] [--owner U] [--tag a,b] [--include-archived] [--limit N]\n' +
   '       yapa memory put    --collection C --ref R [typed fields] (--content TEXT | --stdin-json)\n' +
-  '       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--stdin-json]\n' +
+  '       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--salience N] [--pin | --unpin] [--restore] [--stdin-json]\n' +
   '       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n' +
   '       yapa memory untype --collection C [--dry-run]\n' +
   '       yapa waiting       [--collection C] [--for U | --everyone]\n' +
@@ -55,7 +55,7 @@ const csv = (v: string | undefined) => (v === undefined ? undefined : v.split(',
 
 const VALUE_FLAGS = new Set([
   '--collection', '--kind', '--status', '--owner', '--tag', '--limit', '--ref', '--content', '--note', '--task-ids', '--option',
-  '--recommendation', '--disposition', '--disposition-ids', '--disposition-reason', '--exit-criteria', '--tags', '--for', '--min-age-days', '--from', '--save', '--ids',
+  '--recommendation', '--disposition', '--disposition-ids', '--disposition-reason', '--exit-criteria', '--tags', '--for', '--min-age-days', '--from', '--save', '--ids', '--salience',
 ]);
 
 function positional(args: string[]): string | undefined {
@@ -68,7 +68,7 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-interface Input extends TypedFields { content?: string; note?: string; tags?: string[] }
+interface Input extends TypedFields { content?: string; note?: string; tags?: string[]; salience?: number; pinned?: boolean; restore?: boolean }
 
 async function input(args: string[]): Promise<Input> {
   if (args.includes('--stdin-json')) {
@@ -96,12 +96,21 @@ async function input(args: string[]): Promise<Input> {
   set('tags', csv(flag(args, '--tags')));
   set('content', flag(args, '--content'));
   set('note', flag(args, '--note'));
+  const salience = flag(args, '--salience');
+  if (salience !== undefined) {
+    if (!Number.isFinite(Number(salience))) throw new UsageError('--salience must be a number');
+    out.salience = Number(salience);
+  }
+  if (args.includes('--pin') && args.includes('--unpin')) throw new UsageError('--pin and --unpin together');
+  if (args.includes('--pin')) out.pinned = true;
+  if (args.includes('--unpin')) out.pinned = false;
+  if (args.includes('--restore')) out.restore = true;
   return out;
 }
 
-function split(i: Input): { content?: string; note?: string; tags?: string[]; typed: TypedFields } {
-  const { content, note, tags, ...typed } = i;
-  return { content, note, tags, typed };
+function split(i: Input): { content?: string; note?: string; tags?: string[]; life: Pick<Input, 'salience' | 'pinned' | 'restore'>; typed: TypedFields } {
+  const { content, note, tags, salience, pinned, restore, ...typed } = i;
+  return { content, note, tags, life: { salience, pinned, restore }, typed };
 }
 
 /** Memories as whole documents: chunks of one memory joined in order. */
@@ -171,8 +180,8 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
       case 'update': {
         const id = positional(args);
         if (!id) throw new UsageError('memory id required');
-        const { content, note, tags, typed } = split(await input(args));
-        const r = await updateMemory(id, { ...typed, ...(content !== undefined ? { content } : {}), ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}) }, flag(args, '--collection'));
+        const { content, note, tags, life, typed } = split(await input(args));
+        const r = await updateMemory(id, { ...typed, ...(content !== undefined ? { content } : {}), ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}), ...life }, flag(args, '--collection'));
         recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
       }
