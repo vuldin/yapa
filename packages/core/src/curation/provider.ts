@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { getConfig, getCurationModel } from '../config.js';
+import { getConfig, getCurationModel, setConfig } from '../config.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -28,6 +28,18 @@ let hostCaller: HostLLMCaller | undefined;
 /** Install (or clear, with `undefined`) the host LLM caller. */
 export function setHostLLMCaller(caller: HostLLMCaller | undefined): void {
   hostCaller = caller;
+}
+
+/**
+ * Subscription users have no API key: route the default `anthropic` provider
+ * through `claude -p` (haiku unless a model is set). A host-installed caller
+ * still wins at call time.
+ */
+export function useSubscriptionModelIfNoKey(): void {
+  const config = getConfig();
+  if (config.CURATION_LLM_PROVIDER === 'anthropic' && !config.ANTHROPIC_API_KEY) {
+    setConfig({ ...config, CURATION_LLM_PROVIDER: 'claude-cli', CURATION_MODEL: config.CURATION_MODEL || 'haiku' });
+  }
 }
 
 /**

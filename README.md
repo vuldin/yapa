@@ -11,7 +11,7 @@ YAPA gives your AI agent memory and tasks that last across sessions. It remember
 YAPA has two frontends over the same core:
 
 - **Claude Code plugin** — the MCP server, the always-on hooks, the status line and skills in one install. The same server also runs under other MCP hosts (Cursor, OpenCode, `claude mcp add`).
-- **DeepSeek Harness (DSH) plugin** — a native cordis plugin: the tools with a `yapa_` prefix (all but leases and counters, plus status and storage import), context injected at the turn seam, capture of every turn, and a daily contradiction janitor. No hooks and no MCP subprocess.
+- **DeepSeek Harness (DSH) plugin** — a native cordis plugin: the tools with a `yapa_` prefix (all but leases and counters, plus status and storage import), context injected at the turn seam, capture of every turn, and the daily contradiction janitor (which the Claude Code plugin runs too). No hooks and no MCP subprocess.
 
 ## Install
 

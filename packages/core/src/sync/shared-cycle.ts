@@ -19,9 +19,9 @@
  */
 import { createHash } from 'node:crypto';
 import { pidAlive } from '../fs-lock.js';
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfig, type YapaConfig } from '../config.js';
+import { readJson, tryAcquireFileLock, writeJson, type Release } from '../jobs.js';
 
 export interface CycleRecord {
   /** When the last full cycle started and finished (epoch ms). */
@@ -34,12 +34,6 @@ export interface CycleRecord {
   version?: string;
   /** Full cycles recorded on this machine for this target. */
   cycles: number;
-}
-
-interface LockFile {
-  pid: number;
-  started_at: number;
-  version?: string;
 }
 
 /** Fraction of the interval after which a cycle is due again (jitter absorbs the rest). */
@@ -81,25 +75,6 @@ function paths(config: YapaConfig = getConfig()) {
   };
 }
 
-function readJson<T>(path: string): T | undefined {
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as T;
-  } catch {
-    return undefined;
-  }
-}
-
-function writeJson(path: string, value: unknown): void {
-  try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    writeFileSync(tmp, JSON.stringify(value) + '\n', { mode: 0o600 });
-    renameSync(tmp, path);
-  } catch {
-    // best effort: a missing record only means an extra cycle
-  }
-}
-
 export function readCycleRecord(config: YapaConfig = getConfig()): CycleRecord | undefined {
   const p = paths(config);
   if (!p) return undefined;
@@ -114,7 +89,7 @@ export function shouldRunCycle(now: number = Date.now(), config: YapaConfig = ge
   return now - r.finished_at >= config.SYNC_INTERVAL_MS * DUE_FRACTION || r.finished_at > now + 60_000; // clock went back
 }
 
-export type Release = () => void;
+export type { Release };
 
 /**
  * Take the machine-wide cycle lock. Returns a release function, or undefined
@@ -126,36 +101,8 @@ export function tryAcquireCycle(
 ): Release | undefined {
   const p = paths(config);
   if (!p) return () => {};
-  const now = opts.now ?? Date.now();
-  const alive = opts.alive ?? pidAlive;
   const staleAfter = Math.max(2 * config.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
-  const body: LockFile = { pid: process.pid, started_at: now, ...(opts.version ? { version: opts.version } : {}) };
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      mkdirSync(p.dir, { recursive: true, mode: 0o700 });
-      const fd = openSync(p.lock, 'wx', 0o600);
-      try {
-        writeSync(fd, JSON.stringify(body));
-      } finally {
-        closeSync(fd);
-      }
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        const held = readJson<LockFile>(p.lock);
-        if (held?.pid === process.pid && held.started_at === now) rmSync(p.lock, { force: true });
-      };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') return () => {}; // cannot lock here: behave as before
-      const held = readJson<LockFile>(p.lock);
-      const stale = !held || !alive(held.pid) || now - held.started_at > staleAfter || held.started_at > now + 60_000;
-      if (!stale || attempt > 0) return undefined;
-      rmSync(p.lock, { force: true }); // two takers may both get here: both run, which is harmless
-    }
-  }
-  return undefined;
+  return tryAcquireFileLock(p.lock, staleAfter, opts);
 }
 
 /** Note a finished full cycle (manual or timed). */

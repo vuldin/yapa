@@ -28,7 +28,7 @@ walkthrough and its tools.
 | `compaction_apply` | Replace a group with a summary memory and archive the originals |
 | `journal_append` | Append a one-line draft entry to the current session's journal |
 | `journal_consolidate` | Roll session drafts into a single `journal`-tagged memory at session end |
-| `janitor_now` | Run the contradiction janitor: resolve near-duplicate pairs (archive duplicates, supersede stale memories, keep distinct facts) |
+| `janitor_now` | Run the contradiction janitor now: resolve near-duplicate pairs of your memories (archive duplicates, supersede stale memories, keep distinct facts). It also runs daily ([The janitor](memory.md#the-janitor)) |
 | `task_create` | Create task with title, priority, due date, tags, collection; `recurrence_pattern` (`daily`, `weekly`, `monthly`, `quarterly`, `yearly`), `recurrence_interval` and `lead_days` make it [recurring](tasks.md#recurring-tasks) |
 | `task_list` | List tasks with filters; pass `id` for a single task with full detail (notes, dependencies, recurrence). Recurring occurrences that haven't opened yet are left out (and counted) unless `include_upcoming` |
 | `task_update` | Update task fields (including renaming via `title`); `status: in_progress` claims a task in a shared collection (see [Task claims](tasks.md#task-claims)); `decision_needed` records a person's choice the task then waits on; `learned` / `follow_ups` record what it produced; `recurrence_pattern` (or `none`), `recurrence_interval`, `lead_days` and `series_notes` set, change or stop [recurrence](tasks.md#recurring-tasks); `status: complete` completes the task as `task_complete` does |

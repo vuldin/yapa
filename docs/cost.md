@@ -69,6 +69,10 @@ After each turn, YAPA asks a small model (Claude Haiku, through `claude -p` when
 
 Measured once: an extractor call on 6.2KB of turn text, plus its 3.3KB system prompt, used about 4.1k input tokens, 1.2k of them from cache, and 4 output tokens. It cost $0.0006. Estimated from turn sizes in the transcripts, a turn's three calls come to about 13k Haiku tokens, $0.002–0.003 a turn, or about $0.03 an hour at 13 turns. On a Claude subscription this counts against your plan's usage instead of dollars.
 
+## The janitor
+
+Once a day the janitor judges up to 20 near-duplicate pairs with the same Haiku resolver, one small call a pair: at most about 20 calls, a few cents a day at API prices, or a little of a subscription's usage through `claude -p`. Finding the pairs is local: one similarity search per memory changed since the last complete run, on the CPU.
+
 ## Semantic search and MiniLM
 
 No LLM reads an embedding. YAPA turns each memory and each prompt into a vector and picks the closest memories with arithmetic (cosine distance) on the CPU. Only the few memories it picks enter the session: about 130 tokens a hit, and about 520 a prompt with the recall header.

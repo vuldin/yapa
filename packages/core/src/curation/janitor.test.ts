@@ -4,11 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createLocalStore } from '../store/local-adapter.js';
+import { getConfig } from '../config.js';
 import { setStore, resetStore } from '../store/index.js';
 import { storeMemory } from '../memory/store.js';
 import { recallMemory, settleRecallBoosts } from '../memory/recall.js';
-import { getDocumentsByIds } from '../store/index.js';
-import { janitorSweep, findDuplicatePairs } from './janitor.js';
+import { getDocumentsByIds, getStore } from '../store/index.js';
+import { janitorSweep, findDuplicatePairs, pairKey } from './janitor.js';
 
 let dir: string;
 
@@ -122,5 +123,50 @@ describe('janitorSweep', () => {
       call: async () => '{"action":"add","rationale":"x"}',
     });
     expect(stats.pairsConsidered).toBe(1);
+  });
+});
+
+describe('janitorSweep ownership and eligibility', () => {
+  const add = (id: string, content: string, md: Record<string, any> = {}) =>
+    getStore().addDocument('global', id, content, { type: 'memory', username: getConfig().USERNAME, salience: 1, created_at: 100, ...md });
+  const opts = { collection: 'global', distanceThreshold: 2.0 };
+
+  it('archives your copy, not a teammate\'s, when the same fact is in both', async () => {
+    await add('theirs', 'The deploy token expires every 24 hours.', { username: 'dana', origin_user: 'dana', salience: 0.5 });
+    const mine = await storeMemory('Deploy tokens expire every 24h.', { salience: 3 });
+    const stats = await janitorSweep({ ...opts, call: async () => '{"action":"skip","rationale":"same fact"}' });
+    expect(stats.skippedDuplicates).toBe(1);
+    expect(await archivedFlag(mine.ids[0])).toMatchObject({ archived: true, duplicate_of: 'theirs' });
+    expect((await archivedFlag('theirs'))!.archived).toBeUndefined();
+  });
+
+  it('leaves a teammate\'s memory alone when a supersede targets it', async () => {
+    await add('theirs', 'Service X runs on port 8000.', { username: 'dana', origin_user: 'dana' });
+    await storeMemory('Service X now runs on port 9000.');
+    const stats = await janitorSweep({ ...opts, call: async () => '{"action":"supersede","target_id":"theirs","merged_content":"Service X runs on port 9000.","rationale":"newer"}' });
+    expect(stats.skippedNotOwned).toBe(1);
+    expect((await archivedFlag('theirs'))!.archived).toBeUndefined();
+  });
+
+  it('does not pair two teammates\' memories, or pinned, summary and chunked ones', async () => {
+    await add('d1', 'Cluster A uses TLS.', { username: 'dana', origin_user: 'dana' });
+    await add('d2', 'Cluster A has TLS on.', { username: 'dana', origin_user: 'dana' });
+    expect(await findDuplicatePairs('global', 2.0)).toEqual([]);
+    await add('p', 'Cluster A uses TLS everywhere.', { pinned: true });
+    await add('s', 'Cluster A: TLS session summary.', { source: 'compaction' });
+    await add('c-0', 'Cluster A TLS chunk.', { parent_id: 'c', chunk_index: 0 });
+    expect(await findDuplicatePairs('global', 2.0)).toEqual([]);
+  });
+
+  it('only looks from memories changed since, and skips pairs judged distinct', async () => {
+    await add('old1', 'Broker count is three.', { created_at: 100 });
+    await add('old2', 'There are three brokers.', { created_at: 100 });
+    expect(await findDuplicatePairs('global', 2.0, { since: 200 })).toEqual([]);
+    await add('new', 'Three brokers in the cluster.', { created_at: 300 });
+    const pairs = await findDuplicatePairs('global', 2.0, { since: 200 });
+    expect(pairs.length).toBeGreaterThan(0);
+    expect(pairs.every(p => p.a.id === 'new')).toBe(true);
+    const skip = new Set(pairs.map(p => pairKey(p.a.id, p.b.id)));
+    expect(await findDuplicatePairs('global', 2.0, { since: 200, skipPairs: skip })).toEqual([]);
   });
 });

@@ -20,6 +20,8 @@ import {
   startSync,
   startUpdateChecks,
   stopSync,
+  runJanitorIfDue,
+  scheduleSyncSoon,
   flushPendingSync,
   consolidateSessionEverywhere,
   recordSessionStart,
@@ -127,6 +129,19 @@ async function main(): Promise<void> {
 
   // Is a newer YAPA out? Daily, in the background (update-check.json, read by the status line).
   startUpdateChecks(YAPA_VERSION);
+
+  // The duplicate janitor: one run a day across all sessions (a shared record
+  // and lock). The first check waits, so short sessions and startup stay
+  // light; a `claude -p` the hooks start never runs it.
+  if (getConfig().JANITOR_ENABLED && process.env.YAPA_HOOK_CHILD !== '1') {
+    const janitor = () => {
+      runJanitorIfDue({
+        version: YAPA_VERSION,
+        onChange: () => { if (getConfig().SYNC_ENABLED) scheduleSyncSoon(); },
+      }).catch(e => process.stderr.write(`[yapa] Janitor skipped: ${e}\n`));
+    };
+    setTimeout(() => { janitor(); setInterval(janitor, 3600_000).unref(); }, 10 * 60_000).unref();
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

@@ -53,6 +53,7 @@ describe('sweepExpiredMemories', () => {
     await add('summary', { source: 'compaction' });
     await add('remote', { read_only: true });
     await add('theirs', { username: 'dana', origin_user: 'dana' });
+    await add('published', { external_ref: 'LIM-001' });
     const r = await sweepExpiredMemories(NOW);
     expect(r.candidates).toEqual([]);
   });

@@ -10,9 +10,9 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
-  getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings, applySweep, type SweepItem, type SweepResult,
+  getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, sweepFindings, applySweep, type SweepItem, type SweepResult,
   recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, SharedCollectionNotAllowedError, redirectNote, type TypedFields,
-  RecordsElsewhereError, untypeCollection, sweepExpiredMemories,
+  RecordsElsewhereError, untypeCollection, sweepExpiredMemories, useSubscriptionModelIfNoKey,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -230,10 +230,7 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
           await applySweep(collection, items, { allOwners });
           r = { collection, considered: items.length, items, applied: true };
         } else {
-          const config = getConfig();
-          if (config.CURATION_LLM_PROVIDER === 'anthropic' && !config.ANTHROPIC_API_KEY) {
-            setConfig({ ...config, CURATION_LLM_PROVIDER: 'claude-cli', CURATION_MODEL: config.CURATION_MODEL || 'haiku' });
-          }
+          useSubscriptionModelIfNoKey();
           r = await sweepFindings({ collection, apply, allOwners, limit: num('--limit'), minAgeDays: num('--min-age-days') });
           if (save) writeFileSync(save, JSON.stringify(r, null, 2));
         }

@@ -20,6 +20,7 @@
         "YAPA_REMOTE_NAME": "${user_config.remote_name}",
         "YAPA_STATUSLINE": "${user_config.statusline}",
         "YAPA_RESPONSE_CAPTURE": "${user_config.response_capture}",
+        "YAPA_JANITOR_ENABLED": "${user_config.janitor_enabled}",
         "YAPA_MODEL_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/models"
       }
     }
