@@ -80,6 +80,11 @@ export interface YapaConfig {
 
   // Contradiction detection
   CONTRADICTION_DISTANCE_THRESHOLD: number;
+  /** Run the duplicate janitor in the background (Claude Code's MCP server, DSH). */
+  JANITOR_ENABLED: boolean;
+  /** Resolver calls per janitor run. */
+  JANITOR_MAX_PAIRS: number;
+  JANITOR_INTERVAL_MS: number;
   CONTRADICTION_MAX_RESULTS: number;
 
   // Compaction
@@ -282,6 +287,9 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SCOPE_FILE: scopeFile(env),
 
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, 'CONTRADICTION_DISTANCE_THRESHOLD', '0.25')),
+    JANITOR_ENABLED: get(env, 'JANITOR_ENABLED', 'true') !== 'false',
+    JANITOR_MAX_PAIRS: Math.max(1, parseInt(get(env, 'JANITOR_MAX_PAIRS', '20'), 10) || 20),
+    JANITOR_INTERVAL_MS: Math.max(3_600_000, parseInt(get(env, 'JANITOR_INTERVAL_MS', '86400000'), 10) || 86_400_000),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, 'CONTRADICTION_MAX_RESULTS', '3'), 10),
 
     COMPACTION_THRESHOLD: parseInt(get(env, 'COMPACTION_THRESHOLD', '50'), 10),

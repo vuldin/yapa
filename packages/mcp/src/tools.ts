@@ -61,6 +61,8 @@ import {
   getTask,
   recordLastWrite,
   janitorSweep,
+  readJanitorRecord,
+  useSubscriptionModelIfNoKey,
   journalAppend,
   journalConsolidate,
   listCollections,
@@ -509,18 +511,21 @@ export function registerTools(server: McpServer): void {
   // --- Curation ---
   server.tool(
     'janitor_now',
-    'Run the contradiction janitor: scan for near-duplicate memory pairs and judge each with the conservative resolver — duplicates are archived (recoverable via include_archived), stale memories are superseded by merged updates, distinct facts are kept. Bounded by maxPairs per run.',
+    'Run the contradiction janitor now: scan for near-duplicate memory pairs and judge each with the conservative resolver — duplicates are archived (recoverable via include_archived), stale memories are superseded by merged updates, distinct facts are kept. Only your own memories change. Bounded by maxPairs per run. It also runs daily in the background unless turned off.',
     {
       collection: z.string().optional().describe('Restrict the sweep to this collection (default: all)'),
       maxPairs: z.number().optional().describe('Max pairs to judge this run (default 20)'),
     },
     async ({ collection, maxPairs }) => {
       try {
+        useSubscriptionModelIfNoKey();
         const stats = await janitorSweep({
           ...(collection && { collection }),
           ...(maxPairs !== undefined && { maxPairs: Math.max(1, Math.min(200, maxPairs)) }),
         });
-        const text = `Janitor sweep complete: ${stats.pairsConsidered} pairs judged across ${stats.collectionsScanned} collection(s) — ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.errors} error(s).`;
+        const last = readJanitorRecord();
+        const text = `Janitor sweep complete: ${stats.pairsConsidered} pairs judged across ${stats.collectionsScanned} collection(s) — ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.skippedNotOwned} left as teammates', ${stats.errors} error(s).`
+          + (last ? `\nLast automatic run: ${new Date(last.finished_at).toISOString()}.` : getConfig().JANITOR_ENABLED ? '\nNo automatic run yet.' : '\nAutomatic runs are off.');
         return { content: [{ type: 'text' as const, text }] };
       } catch (e) {
         return { content: [{ type: 'text' as const, text: `Janitor error: ${e}` }] };

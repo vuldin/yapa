@@ -18,6 +18,7 @@ Set at install (`claude plugin install yapa@yapa --config key=value`, repeatable
 | `statusline` | on | Add YAPA's status line to `~/.claude/settings.json` at session start (an existing one is kept; removing YAPA's keeps it removed) |
 | `status_label` | _(empty)_ | Deprecated: use `remote_name` (still read when that is empty) |
 | `response_capture` | on | After each turn: capture durable findings (typed: finding, decision made, limitation, question, idea) and record what the turn settles in open decisions, questions and findings (see hooks below) |
+| `janitor_enabled` | on | Once a day, judge up to 20 pairs of your near-duplicate memories and archive or merge the duplicates ([The janitor](memory.md#the-janitor)) |
 
 ## Environment variables
 
@@ -57,7 +58,7 @@ All options use the `YAPA_` prefix and are set as environment variables in your 
 | `YAPA_HOOK_PULL_WINDOW_MS` | The prompt hook skips its pull when any session pulled that collection this recently (`0` = always pull) | `30000` |
 | `YAPA_SESSION_START_MAX_CHARS` | Character budget for the session-start context (1,000–10,000; Claude Code shows the model at most 10,000 characters of hook context). Crowded sections shrink to fit | `9000` |
 | `YAPA_RESPONSE_CAPTURE` | After each turn (Stop hook): capture typed findings and record what the turn settles in open decisions and questions | `true` |
-| `YAPA_CURATION_LLM_PROVIDER` | Aux model for capture/curation: `anthropic` \| `openai` \| `fireworks` \| `ollama` \| `claude-cli` | `anthropic` (hooks fall back to `claude-cli` without a key) |
+| `YAPA_CURATION_LLM_PROVIDER` | Aux model for capture/curation: `anthropic` \| `openai` \| `fireworks` \| `ollama` \| `claude-cli` | `anthropic` (the hooks and the janitor fall back to `claude-cli` without a key) |
 | `YAPA_MODEL_CACHE_DIR` | Where the in-process embedder caches model weights | library default |
 
 Empty values count as unset (Claude Code substitutes `""` for plugin options you never configured).

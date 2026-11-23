@@ -53,6 +53,8 @@ export * from './curation/classifier.js';
 export * from './curation/extractor.js';
 export * from './curation/resolver.js';
 export * from './curation/janitor.js';
+export * from './curation/janitor-schedule.js';
+export * from './jobs.js';
 export * from './curation/capture.js';
 export * from './curation/provider.js';
 export * from './curation/prompts.js';

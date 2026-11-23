@@ -45,12 +45,41 @@ agent decides:
 `memory_forget` (hard delete) is reserved for memories that should never have
 existed.
 
-**Under DSH**, contradiction handling is also automatic: the response-capture
-pipeline routes every auto-captured candidate with near neighbors through a
-conservative LLM resolver (skip / add / supersede), and a daily **janitor
-sweep** resolves duplicate pairs already in the store (`yapa_janitor_now` /
-`janitor_now` runs it on demand). The resolver only supersedes when a fact
+Contradiction handling is also automatic. The capture after each turn routes
+every auto-captured candidate with near neighbors through a conservative LLM
+resolver (skip / add / supersede). The resolver only supersedes when a fact
 clearly changed; when unsure it keeps both.
+
+### The janitor
+
+Once a day, in Claude Code and under DSH, the **janitor** resolves duplicate
+pairs already in the store:
+- **Pairs:** it pairs ordinary notes closer than
+  `YAPA_CONTRADICTION_DISTANCE_THRESHOLD`, closest first across all
+  collections, and judges up to `YAPA_JANITOR_MAX_PAIRS` (20) a day with the
+  same resolver.
+- **Verdicts:** the same fact twice archives the weaker copy
+  (`duplicate_of`); an update stores a merged memory and archives the old one
+  (`superseded_by`); distinct facts stay.
+- **What it changes:** only your own memories. When the pair is yours and a
+  teammate's, yours is the one that can go. Typed, pinned, read-only and
+  published (`external_ref`) memories, session summaries and pieces of long
+  memories are never paired.
+- **Runs are incremental:** only memories created or changed since the last
+  complete run look for neighbors, and pairs judged distinct aren't judged
+  again. A run that used its whole budget or hit an error starts from the
+  same point next time.
+- **One run per machine:** every session shares a record and a lock beside
+  the sync health file, so there is one run a day however many sessions are
+  open. The first check comes 10 minutes after a session starts, then hourly.
+- **Model:** without an API key it uses `claude -p` with Haiku, like the
+  capture after each turn.
+
+`yapa janitor status` shows the last run and when the next is due, and
+`yapa janitor run` runs it now. `janitor_now` (`yapa_janitor_now` under DSH)
+runs a sweep on demand. Turn the daily run off with the `janitor_enabled`
+plugin option (`YAPA_JANITOR_ENABLED=false`). Archived memories can be
+restored with `memory_update` `restore: true`.
 
 Tunables:
 
@@ -58,6 +87,9 @@ Tunables:
 |---------|---------|---------|
 | `YAPA_CONTRADICTION_DISTANCE_THRESHOLD` | `0.25` | Distance under which two memories are considered conflicting |
 | `YAPA_CONTRADICTION_MAX_RESULTS` | `3` | Max conflicts surfaced per write |
+| `YAPA_JANITOR_ENABLED` | `true` | Run the janitor daily in the background |
+| `YAPA_JANITOR_MAX_PAIRS` | `20` | Pairs the janitor judges per run |
+| `YAPA_JANITOR_INTERVAL_MS` | `86400000` | Time between janitor runs (at least an hour) |
 
 ## End-of-session journal
 
