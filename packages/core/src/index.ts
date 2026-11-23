@@ -96,6 +96,7 @@ export * from './training/verification.js';
 export * from './memory/kinds.js';
 export * from './memory/sweep.js';
 export * from './memory/summary-retention.js';
+export * from './memory/expiry.js';
 export * from './memory/owners.js';
 export * from './memory/known-users.js';
 export * from './memory/update.js';

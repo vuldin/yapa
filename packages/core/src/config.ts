@@ -55,6 +55,10 @@ export interface YapaConfig {
   DELETED_RETENTION_DAYS: number;
   /** Days your own compaction summaries are kept before the decay sweep archives them; 0 keeps them forever. */
   SESSION_SUMMARY_RETENTION_DAYS: number;
+  /** Archive your own ordinary notes inactive this many days (0: never). */
+  MEMORY_EXPIRY_DAYS: number;
+  /** ...and only once their salience is below this. */
+  MEMORY_EXPIRY_MAX_SALIENCE: number;
   SALIENCE_RANKING_WEIGHT: number;
   /** Only recall hits closer than this cosine distance count as "use" and boost salience. */
   SALIENCE_BOOST_MAX_DISTANCE: number;
@@ -261,6 +265,8 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     SALIENCE_DECAY_RATE: parseFloat(get(env, 'SALIENCE_DECAY_RATE', '0.98')),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, 'DELETED_RETENTION_DAYS', '30')) || 30),
     SESSION_SUMMARY_RETENTION_DAYS: ((v: string) => (/^\d+$/.test(v.trim()) ? Number(v) : 90))(get(env, 'SESSION_SUMMARY_RETENTION_DAYS', '90')),
+    MEMORY_EXPIRY_DAYS: ((v: string) => (/^\d+$/.test(v.trim()) ? Number(v) : 180))(get(env, 'MEMORY_EXPIRY_DAYS', '180')),
+    MEMORY_EXPIRY_MAX_SALIENCE: ((v: number) => (Number.isFinite(v) ? v : 0.2))(parseFloat(get(env, 'MEMORY_EXPIRY_MAX_SALIENCE', '0.2'))),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, 'SALIENCE_RANKING_WEIGHT', '0.15')),
