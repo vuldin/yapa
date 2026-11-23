@@ -7297,6 +7297,8 @@ function createConfig(env = process.env) {
     SALIENCE_DECAY_RATE: parseFloat(get(env, "SALIENCE_DECAY_RATE", "0.98")),
     DELETED_RETENTION_DAYS: Math.max(0, Number(get(env, "DELETED_RETENTION_DAYS", "30")) || 30),
     SESSION_SUMMARY_RETENTION_DAYS: ((v) => /^\d+$/.test(v.trim()) ? Number(v) : 90)(get(env, "SESSION_SUMMARY_RETENTION_DAYS", "90")),
+    MEMORY_EXPIRY_DAYS: ((v) => /^\d+$/.test(v.trim()) ? Number(v) : 180)(get(env, "MEMORY_EXPIRY_DAYS", "180")),
+    MEMORY_EXPIRY_MAX_SALIENCE: ((v) => Number.isFinite(v) ? v : 0.2)(parseFloat(get(env, "MEMORY_EXPIRY_MAX_SALIENCE", "0.2"))),
     // 0.15 on cosine distances keeps the historic balance of 0.3 on the 2x
     // squared-L2 distances legacy Chroma collections reported.
     SALIENCE_RANKING_WEIGHT: parseFloat(get(env, "SALIENCE_RANKING_WEIGHT", "0.15")),
@@ -7309,6 +7311,9 @@ function createConfig(env = process.env) {
     USERNAME: env.YAPA_USERNAME || osUsername(),
     SCOPE_FILE: scopeFile(env),
     CONTRADICTION_DISTANCE_THRESHOLD: parseFloat(get(env, "CONTRADICTION_DISTANCE_THRESHOLD", "0.25")),
+    JANITOR_ENABLED: get(env, "JANITOR_ENABLED", "true") !== "false",
+    JANITOR_MAX_PAIRS: Math.max(1, parseInt(get(env, "JANITOR_MAX_PAIRS", "20"), 10) || 20),
+    JANITOR_INTERVAL_MS: Math.max(36e5, parseInt(get(env, "JANITOR_INTERVAL_MS", "86400000"), 10) || 864e5),
     CONTRADICTION_MAX_RESULTS: parseInt(get(env, "CONTRADICTION_MAX_RESULTS", "3"), 10),
     COMPACTION_THRESHOLD: parseInt(get(env, "COMPACTION_THRESHOLD", "50"), 10),
     FINDINGS_CLEANUP_THRESHOLD: parseInt(get(env, "FINDINGS_CLEANUP_THRESHOLD", "20"), 10),
@@ -12387,7 +12392,7 @@ var init_claim = __esm({
 });
 
 // packages/mcp/src/version.ts
-var YAPA_VERSION = true ? "1.19.0" : fromPackage();
+var YAPA_VERSION = true ? "1.20.0" : fromPackage();
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -42167,6 +42172,7 @@ init_store();
 function archivedMetadata(metadata, extra, now = Math.floor(Date.now() / 1e3)) {
   return { ...metadata, ...extra, archived: true, updated_at: now, is_synced: false };
 }
+var ARCHIVE_REASON_KEYS = ["archived", "superseded_by", "compacted_into", "duplicate_of", "expired"];
 
 // packages/core/src/memory/store.ts
 init_config();
@@ -42415,6 +42421,7 @@ async function storeMemory(content, options = {}) {
   const now = Math.floor(Date.now() / 1e3);
   const sector = options.sector ?? detectSector(content);
   const salience = options.salience ?? SALIENCE_START;
+  const pin = options.pinned ? { pinned: true } : {};
   const chunks = chunkText(content);
   if (chunks.length === 1) {
     const id = `mem-${getConfig().USERNAME}-${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -42426,6 +42433,7 @@ async function storeMemory(content, options = {}) {
       tags: options.tags ?? [],
       salience,
       sector,
+      ...pin,
       created_at: now,
       accessed_at: now
     };
@@ -42446,6 +42454,7 @@ async function storeMemory(content, options = {}) {
       tags: options.tags ?? [],
       salience,
       sector,
+      ...pin,
       created_at: now,
       accessed_at: now,
       chunk_index: chunk2.index,
@@ -42839,9 +42848,73 @@ async function sweepSessionSummaries(now = Math.floor(Date.now() / 1e3)) {
   return n;
 }
 
+// packages/core/src/memory/curatable.ts
+init_syncable();
+function isPinned(metadata) {
+  return metadata?.pinned === true;
+}
+function isCuratable(metadata) {
+  if (!metadata) return false;
+  return metadata.archived !== true && !isMemoryKind(metadata.kind) && !isSessionSummary(metadata) && !isReadOnlyDoc(metadata) && !metadata.external_ref && !isPinned(metadata);
+}
+
+// packages/core/src/memory/expiry.ts
+init_config();
+init_metadata_adapter();
+init_store();
+init_backend();
+var DAY3 = 86400;
+var num = (v) => typeof v === "number" && Number.isFinite(v) ? v : Number(v) || 0;
+async function linkedFromOpenTasks(collection) {
+  const tasks = await getDocumentsByFilter2(collection, { type: "task" }, 1e5).catch(() => []);
+  const ids = /* @__PURE__ */ new Set();
+  for (const t of tasks) {
+    if (t.metadata.status === "complete") continue;
+    for (const id of [...metadataList(t.metadata.memory_ids), ...metadataList(t.metadata.waits_on)]) ids.add(id);
+  }
+  return ids;
+}
+async function sweepExpiredMemories(now = Math.floor(Date.now() / 1e3), options = {}) {
+  const { MEMORY_EXPIRY_DAYS: days, MEMORY_EXPIRY_MAX_SALIENCE: maxSalience } = getConfig();
+  const result = { candidates: [], archived: 0 };
+  if (!days) return result;
+  const cutoff = now - days * DAY3;
+  const names = options.collection ? [options.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  for (const collection of names) {
+    const docs = await getDocumentsByFilter2(collection, { type: "memory" }, 1e5).catch(() => []);
+    if (!docs.length) continue;
+    const groups = /* @__PURE__ */ new Map();
+    for (const d of docs) {
+      const key = String(d.metadata.parent_id ?? d.id);
+      groups.set(key, [...groups.get(key) ?? [], d]);
+    }
+    const linked = await linkedFromOpenTasks(collection);
+    const expired = [];
+    for (const [id, chunks] of groups) {
+      if (linked.has(id) || chunks.some((c) => linked.has(c.id))) continue;
+      if (!chunks.every((c) => isCuratable(c.metadata) && isOwnAuthor(c.metadata))) continue;
+      const lastActive = Math.max(...chunks.flatMap((c) => [num(c.metadata.created_at), num(c.metadata.updated_at), num(c.metadata.accessed_at)]));
+      if (!lastActive || lastActive > cutoff) continue;
+      const salience = Math.max(...chunks.map((c) => num(c.metadata.salience ?? 1)));
+      if (salience >= maxSalience) continue;
+      chunks.sort((a, b) => num(a.metadata.chunk_index) - num(b.metadata.chunk_index));
+      result.candidates.push({ id, collection, salience, last_active: lastActive, preview: chunks[0].content.slice(0, 120) });
+      expired.push(...chunks);
+    }
+    if (options.dryRun || !expired.length) continue;
+    const updates = expired.map((d) => ({ id: d.id, patch: metadataDelta(d.metadata, archivedMetadata(d.metadata, { expired: "age" }, now)) }));
+    try {
+      await patchDocuments2(collection, updates);
+      result.archived += updates.length;
+    } catch {
+    }
+  }
+  return result;
+}
+
 // packages/core/src/memory/decay.ts
 var DECAY_SENTINEL_ID = "__decay_sentinel__";
-var DAY3 = 86400;
+var DAY4 = 86400;
 var SWEEP_LIMIT = 1e4;
 async function lastSweepAt() {
   try {
@@ -42853,16 +42926,16 @@ async function lastSweepAt() {
 }
 async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   const collections = await listCollections2();
-  const fallbackAnchor = await lastSweepAt() ?? now - DAY3;
+  const fallbackAnchor = await lastSweepAt() ?? now - DAY4;
   let decayedCount = 0;
   for (const collection of collections) {
     try {
       const docs = await getDocumentsByFilter2(collection.name, { type: "memory" }, SWEEP_LIMIT);
       const updates = [];
       for (const doc of docs) {
-        if (isReadOnlyDoc(doc.metadata)) continue;
+        if (isReadOnlyDoc(doc.metadata) || isPinned(doc.metadata)) continue;
         const anchor2 = typeof doc.metadata.decayed_at === "number" ? doc.metadata.decayed_at : fallbackAnchor;
-        const days = (now - anchor2) / DAY3;
+        const days = (now - anchor2) / DAY4;
         if (days <= 0) continue;
         const lifecycleMeta = {
           salience: doc.metadata.salience ?? 1,
@@ -42883,11 +42956,15 @@ async function runDecaySweep(now = Math.floor(Date.now() / 1e3)) {
   }
   await sweepDeletedUpstream(now).catch(() => 0);
   await sweepSessionSummaries(now).catch(() => 0);
+  await sweepExpiredMemories(now).then((r) => {
+    if (r.archived) process.stderr.write(`[yapa] Expiry: archived ${r.candidates.length} inactive memor${r.candidates.length === 1 ? "y" : "ies"} (restore with memory_update restore)
+`);
+  }).catch(() => void 0);
   return decayedCount;
 }
 async function shouldRunDecay(now = Math.floor(Date.now() / 1e3)) {
   const last = await lastSweepAt();
-  return last === void 0 || now - last > DAY3;
+  return last === void 0 || now - last > DAY4;
 }
 async function markDecayRun(now = Math.floor(Date.now() / 1e3)) {
   const { addDocument: addDocument3, getOrCreateCollection: getOrCreateCollection3 } = await Promise.resolve().then(() => (init_store(), store_exports));
@@ -42921,7 +42998,7 @@ function intersect(a, b) {
   return b.filter((t) => set2.has(t));
 }
 async function suggestCompaction(collection) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isSessionSummary(d.metadata) && !isReadOnlyDoc(d.metadata));
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => isCuratable(d.metadata));
   if (all.length < getConfig().COMPACTION_MIN_GROUP_SIZE) return [];
   all.sort((a, b) => (b.metadata.salience ?? 0) - (a.metadata.salience ?? 0));
   const consumed = /* @__PURE__ */ new Set();
@@ -42930,7 +43007,7 @@ async function suggestCompaction(collection) {
     if (consumed.has(seed.id)) continue;
     const neighbors = await queryDocuments2(collection, seed.content, 20, { type: "memory" });
     const matches = neighbors.filter(
-      (n) => n.id !== seed.id && !consumed.has(n.id) && n.metadata.archived !== true && !isMemoryKind(n.metadata.kind) && !isSessionSummary(n.metadata) && !isReadOnlyDoc(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
+      (n) => n.id !== seed.id && !consumed.has(n.id) && isCuratable(n.metadata) && n.distance < getConfig().COMPACTION_SIMILARITY_DISTANCE
     );
     if (matches.length + 1 < getConfig().COMPACTION_MIN_GROUP_SIZE) continue;
     const memberIds = [seed.id, ...matches.map((m) => m.id)];
@@ -42966,7 +43043,7 @@ async function applyCompaction(input2) {
   for (const id of input2.member_ids) {
     try {
       const existing = await getDocumentsByIds2(input2.collection, [id]);
-      if (!existing.length || isReadOnlyDoc(existing[0].metadata)) continue;
+      if (!existing.length || isReadOnlyDoc(existing[0].metadata) || isPinned(existing[0].metadata)) continue;
       await patchDocument(input2.collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { compacted_into: summaryId })));
       archivedIds.push(id);
     } catch (e) {
@@ -43472,6 +43549,12 @@ init_backend();
 init_config();
 import { spawn } from "node:child_process";
 var hostCaller;
+function useSubscriptionModelIfNoKey() {
+  const config2 = getConfig();
+  if (config2.CURATION_LLM_PROVIDER === "anthropic" && !config2.ANTHROPIC_API_KEY) {
+    setConfig({ ...config2, CURATION_LLM_PROVIDER: "claude-cli", CURATION_MODEL: config2.CURATION_MODEL || "haiku" });
+  }
+}
 async function callCurationLLM(options) {
   if (hostCaller) return hostCaller(options);
   const model = getCurationModel();
@@ -43645,7 +43728,11 @@ async function updateMemory(id, patch, collection) {
   const found = await locate(id, collection);
   if (!found || found.doc.metadata.type !== "memory") throw new MemoryNotFoundError(id);
   assertWritable(id, found.doc.metadata);
-  const { note, tags, content, ...typedPatch } = patch;
+  const { note, tags, content, salience, pinned, restore, ...typedPatch } = patch;
+  if (salience !== void 0 && !Number.isFinite(salience)) throw new Error(`salience must be a number between ${SALIENCE_FLOOR} and ${SALIENCE_MAX}`);
+  if (restore && found.doc.metadata.deleted_upstream) {
+    throw new Error(`${id} was deleted by its owner: keep a copy with trash (action keep) instead`);
+  }
   if (content !== void 0 && found.doc.metadata.parent_id) {
     throw new Error(`${id} is stored in several chunks: store the new text as a new memory with supersedes: "${id}"`);
   }
@@ -43659,6 +43746,11 @@ async function updateMemory(id, patch, collection) {
     let metadata2 = docs[docs.length - 1].metadata;
     for (const [i, d] of docs.entries()) {
       metadata2 = { ...d.metadata, ...typed, ...tags ? { tags } : {}, updated_at: now, is_synced: false };
+      if (salience !== void 0) Object.assign(metadata2, { salience: Math.min(Math.max(salience, SALIENCE_FLOOR), SALIENCE_MAX), decayed_at: now });
+      if (pinned === true) metadata2.pinned = true;
+      if (pinned === false) delete metadata2.pinned;
+      if (pinned !== void 0) metadata2.decayed_at = now;
+      if (restore) for (const k of ARCHIVE_REASON_KEYS) delete metadata2[k];
       const last = i === docs.length - 1;
       if ((note?.trim() || content !== void 0) && last) {
         const day = new Date(now * 1e3).toISOString().slice(0, 10);
@@ -43677,12 +43769,12 @@ ${day} ${getConfig().USERNAME}: ${note.trim()}` : text, metadata2);
 }
 
 // packages/core/src/memory/sweep.ts
-var DAY4 = 86400;
+var DAY5 = 86400;
 var isStale = (m) => m.archived !== true && (m.status ?? "open") === "open" && !m.disposition;
 async function staleFindings(collection, opts = {}) {
   const now = opts.now ?? Math.floor(Date.now() / 1e3);
   const docs = await getDocumentsByFilter2(collection, { type: "memory", kind: "finding" }, 5e3).catch(() => []);
-  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY4 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
+  return docs.filter((f) => isStale(f.metadata) && Number(f.metadata.created_at ?? now) <= now - (opts.minAgeDays ?? 2) * DAY5 && Number(f.metadata.chunk_index ?? 0) === 0 && (opts.allOwners || isOwnAuthor(f.metadata)));
 }
 
 // packages/core/src/tasks/next.ts
@@ -44674,36 +44766,42 @@ function extractJsonObject(raw) {
 }
 
 // packages/core/src/curation/janitor.ts
-init_syncable();
+init_backend();
 init_config();
 init_store();
-async function findDuplicatePairs(collection, distanceThreshold) {
-  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
+function pairKey(a, b) {
+  return [a, b].sort().join("|");
+}
+var pairable = (m) => !!m && isCuratable(m) && m.parent_id == null;
+var changedAt = (m) => Math.max(Number(m.created_at) || 0, Number(m.updated_at) || 0);
+async function findDuplicatePairs(collection, distanceThreshold, options = {}) {
+  const all = (await getDocumentsByFilter2(collection, { type: "memory" }, 1e4)).filter((d) => pairable(d.metadata)).filter((d) => options.since === void 0 || changedAt(d.metadata) > options.since).sort((x, y) => changedAt(y.metadata) - changedAt(x.metadata)).slice(0, options.maxScan ?? 500);
   const seen = /* @__PURE__ */ new Set();
   const pairs = [];
   for (const doc of all) {
     const neighbors = await queryDocuments2(collection, doc.content, 4, { type: "memory" }).catch(() => []);
     for (const n of neighbors) {
-      if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
-      const key = [doc.id, n.id].sort().join("|");
-      if (seen.has(key)) continue;
+      if (n.id === doc.id || n.distance >= distanceThreshold || !pairable(n.metadata)) continue;
+      if (!isOwnAuthor(doc.metadata) && !isOwnAuthor(n.metadata)) continue;
+      const key = pairKey(doc.id, n.id);
+      if (seen.has(key) || options.skipPairs?.has(key)) continue;
       seen.add(key);
       pairs.push({
         collection,
         a: { id: doc.id, content: doc.content, metadata: doc.metadata },
-        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience },
+        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience, metadata: n.metadata ?? {} },
         distance: n.distance
       });
     }
   }
   return pairs.sort((x, y) => x.distance - y.distance);
 }
-async function archiveDuplicate(collection, loserId, winnerId) {
-  const existing = await getDocumentsByIds2(collection, [loserId]);
+async function archiveAs(collection, id, extra) {
+  const existing = await getDocumentsByIds2(collection, [id]);
   if (!existing.length) return;
-  await patchDocument(collection, loserId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId })));
+  await patchDocument(collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, extra)));
 }
+var archiveDuplicate = (collection, loserId, winnerId) => archiveAs(collection, loserId, { duplicate_of: winnerId });
 async function janitorSweep(options = {}) {
   const stats = {
     collectionsScanned: 0,
@@ -44711,70 +44809,236 @@ async function janitorSweep(options = {}) {
     skippedDuplicates: 0,
     superseded: 0,
     keptDistinct: 0,
-    errors: 0
+    skippedNotOwned: 0,
+    errors: 0,
+    keptPairs: []
   };
   const maxPairs = options.maxPairs ?? 20;
   const threshold = options.distanceThreshold ?? getConfig().CONTRADICTION_DISTANCE_THRESHOLD;
   const collections = options.collection ? [options.collection] : (await listCollections2().catch(() => [])).map((c) => c.name);
+  const all = [];
   for (const collection of collections) {
-    if (stats.pairsConsidered >= maxPairs) break;
-    let pairs;
     try {
-      pairs = await findDuplicatePairs(collection, threshold);
+      all.push(...await findDuplicatePairs(collection, threshold, options));
       stats.collectionsScanned++;
     } catch (e) {
       process.stderr.write(`[yapa-janitor] scan failed for ${collection}: ${e}
 `);
       stats.errors++;
-      continue;
     }
-    for (const pair of pairs) {
-      if (stats.pairsConsidered >= maxPairs) break;
-      stats.pairsConsidered++;
-      try {
-        const [candidate, neighbor] = (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1) ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }] : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
-        const decision = await resolveConflict(
-          candidate.content,
-          [neighbor],
-          options.call ? { call: options.call } : {}
-        );
-        if (decision.action === "skip") {
-          await archiveDuplicate(collection, candidate.id, neighbor.id);
-          stats.skippedDuplicates++;
-        } else if (decision.action === "supersede") {
-          const target = decision.targetId === candidate.id ? candidate : neighbor;
-          const other = decision.targetId === candidate.id ? neighbor : candidate;
-          await storeMemory(decision.mergedContent ?? candidate.content, {
-            collection,
-            salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
-            tags: ["janitor-merged"],
-            sector: "semantic",
-            supersedes: target.id,
-            metadata: {
-              source: "janitor",
-              resolver_prompt_version: RESOLVER_PROMPT_VERSION,
-              rationale: decision.rationale,
-              related_to: other.id
-            }
-          });
-          stats.superseded++;
-        } else {
-          stats.keptDistinct++;
+  }
+  all.sort((x, y) => x.distance - y.distance);
+  const changed = /* @__PURE__ */ new Set();
+  for (const pair of all) {
+    if (stats.pairsConsidered >= maxPairs) break;
+    if (changed.has(pair.a.id) || changed.has(pair.b.id)) continue;
+    const collection = pair.collection;
+    stats.pairsConsidered++;
+    try {
+      const aOwn = isOwnAuthor(pair.a.metadata);
+      const bOwn = isOwnAuthor(pair.b.metadata);
+      const aIsNeighbor = aOwn !== bOwn ? bOwn : (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1);
+      const [candidate, neighbor] = aIsNeighbor ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }] : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
+      const owns = (id) => id === pair.a.id ? aOwn : bOwn;
+      const decision = await resolveConflict(
+        candidate.content,
+        [neighbor],
+        options.call ? { call: options.call } : {}
+      );
+      if (decision.action === "skip") {
+        if (!owns(candidate.id)) {
+          stats.skippedNotOwned++;
+          continue;
         }
-      } catch (e) {
-        process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}
-`);
-        stats.errors++;
+        await archiveDuplicate(collection, candidate.id, neighbor.id);
+        changed.add(candidate.id);
+        stats.skippedDuplicates++;
+      } else if (decision.action === "supersede") {
+        const target = decision.targetId === candidate.id ? candidate : neighbor;
+        const other = decision.targetId === candidate.id ? neighbor : candidate;
+        if (!owns(target.id)) {
+          stats.skippedNotOwned++;
+          continue;
+        }
+        const merged = await storeMemory(decision.mergedContent ?? candidate.content, {
+          collection,
+          salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
+          tags: ["janitor-merged"],
+          sector: "semantic",
+          supersedes: target.id,
+          metadata: {
+            source: "janitor",
+            resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+            rationale: decision.rationale,
+            related_to: other.id
+          }
+        });
+        changed.add(target.id);
+        if (owns(other.id)) {
+          await archiveAs(collection, other.id, { superseded_by: merged.ids[0] });
+          changed.add(other.id);
+        }
+        stats.superseded++;
+      } else {
+        stats.keptDistinct++;
+        stats.keptPairs.push(pairKey(pair.a.id, pair.b.id));
       }
+    } catch (e) {
+      process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}
+`);
+      stats.errors++;
     }
   }
   if (stats.pairsConsidered > 0) {
     process.stderr.write(
-      `[yapa-janitor] sweep: ${stats.pairsConsidered} pairs \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.errors} error(s)
+      `[yapa-janitor] sweep: ${stats.pairsConsidered} pairs \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.skippedNotOwned} not yours, ${stats.errors} error(s)
 `
     );
   }
   return stats;
+}
+
+// packages/core/src/curation/janitor-schedule.ts
+init_config();
+
+// packages/core/src/jobs.ts
+init_config();
+init_fs_lock();
+import { createHash as createHash3 } from "node:crypto";
+import { closeSync as closeSync2, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync10, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync5, writeSync as writeSync2 } from "node:fs";
+import { dirname as dirname6, join as join8 } from "node:path";
+function readJson(path2) {
+  try {
+    return JSON.parse(readFileSync10(path2, "utf-8"));
+  } catch {
+    return void 0;
+  }
+}
+function writeJson(path2, value) {
+  try {
+    mkdirSync7(dirname6(path2), { recursive: true, mode: 448 });
+    const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    writeFileSync5(tmp, JSON.stringify(value) + "\n", { mode: 384 });
+    renameSync4(tmp, path2);
+  } catch {
+  }
+}
+function tryAcquireFileLock(lockPath, staleAfterMs, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const alive = opts.alive ?? pidAlive;
+  const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
+  for (let attempt2 = 0; attempt2 < 2; attempt2++) {
+    try {
+      mkdirSync7(dirname6(lockPath), { recursive: true, mode: 448 });
+      const fd = openSync2(lockPath, "wx", 384);
+      try {
+        writeSync2(fd, JSON.stringify(body));
+      } finally {
+        closeSync2(fd);
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const held2 = readJson(lockPath);
+        if (held2?.pid === process.pid && held2.started_at === now) rmSync4(lockPath, { force: true });
+      };
+    } catch (e) {
+      if (e.code !== "EEXIST") return () => {
+      };
+      const held2 = readJson(lockPath);
+      const stale2 = !held2 || !alive(held2.pid) || now - held2.started_at > staleAfterMs || held2.started_at > now + 6e4;
+      if (!stale2 || attempt2 > 0) return void 0;
+      rmSync4(lockPath, { force: true });
+    }
+  }
+  return void 0;
+}
+function storeKey(config2) {
+  const store = config2.STORAGE === "local" ? `local:${config2.LOCAL_STORE_PATH}` : `chroma:${config2.CHROMA_URL}`;
+  return createHash3("sha256").update(JSON.stringify([store, config2.USERNAME])).digest("hex").slice(0, 12);
+}
+function jobFiles(name, config2 = getConfig()) {
+  if (!config2.SYNC_HEALTH_FILE) return void 0;
+  const dir = dirname6(config2.SYNC_HEALTH_FILE);
+  const key = storeKey(config2);
+  return { record: join8(dir, `job-${name}-${key}.json`), lock: join8(dir, `job-${name}-${key}.lock`) };
+}
+function readJobRecord(name, config2 = getConfig()) {
+  const f = jobFiles(name, config2);
+  if (!f) return void 0;
+  const r = readJson(f.record);
+  return r && typeof r.finished_at === "number" ? r : void 0;
+}
+function jobDue(name, intervalMs, now = Date.now(), config2 = getConfig()) {
+  const r = readJobRecord(name, config2);
+  if (!r) return true;
+  return now - r.finished_at >= intervalMs || r.finished_at > now + 6e4;
+}
+function tryAcquireJob(name, staleAfterMs, opts = {}, config2 = getConfig()) {
+  const f = jobFiles(name, config2);
+  if (!f) return () => {
+  };
+  return tryAcquireFileLock(f.lock, staleAfterMs, opts);
+}
+function recordJob(name, run2, config2 = getConfig()) {
+  const f = jobFiles(name, config2);
+  if (!f) return;
+  const prev = readJson(f.record);
+  const next = {
+    started_at: run2.startedAt,
+    finished_at: run2.finishedAt ?? Date.now(),
+    pid: process.pid,
+    runs: (typeof prev?.runs === "number" ? prev.runs : 0) + 1,
+    ...run2.version ? { version: run2.version } : {},
+    ...run2.result !== void 0 ? { result: run2.result } : {}
+  };
+  writeJson(f.record, next);
+}
+
+// packages/core/src/curation/janitor-schedule.ts
+var JANITOR_JOB = "janitor";
+var STALE_LOCK_MS = 2 * 36e5;
+var MAX_KEPT_PAIRS = 5e3;
+var lastRunInProcess;
+function readJanitorRecord() {
+  return readJobRecord(JANITOR_JOB);
+}
+async function runJanitorIfDue(opts = {}) {
+  const config2 = getConfig();
+  if (!(opts.enabled ?? config2.JANITOR_ENABLED)) return void 0;
+  const now = opts.now ?? Date.now();
+  if (!opts.force) {
+    if (!jobDue(JANITOR_JOB, config2.JANITOR_INTERVAL_MS, now)) return void 0;
+    if (!jobFiles(JANITOR_JOB) && lastRunInProcess !== void 0 && now - lastRunInProcess < config2.JANITOR_INTERVAL_MS) return void 0;
+  }
+  const release = tryAcquireJob(JANITOR_JOB, STALE_LOCK_MS, { now, version: opts.version });
+  if (!release) return void 0;
+  try {
+    if (!opts.force && !jobDue(JANITOR_JOB, config2.JANITOR_INTERVAL_MS, now)) return void 0;
+    const prev = readJanitorRecord()?.result;
+    const maxPairs = opts.maxPairs ?? config2.JANITOR_MAX_PAIRS;
+    if (!opts.call) useSubscriptionModelIfNoKey();
+    const stats = await janitorSweep({
+      maxPairs,
+      since: prev?.scan_from,
+      skipPairs: new Set(prev?.kept_pairs ?? []),
+      ...opts.call ? { call: opts.call } : {}
+    });
+    const complete = stats.errors === 0 && stats.pairsConsidered < maxPairs;
+    const { keptPairs, ...rest } = stats;
+    const result = {
+      stats: rest,
+      scan_from: complete ? Math.floor(now / 1e3) : prev?.scan_from,
+      kept_pairs: [...prev?.kept_pairs ?? [], ...keptPairs].slice(-MAX_KEPT_PAIRS)
+    };
+    recordJob(JANITOR_JOB, { startedAt: now, ...opts.now !== void 0 ? { finishedAt: now } : {}, version: opts.version, result });
+    lastRunInProcess = now;
+    if (stats.skippedDuplicates || stats.superseded) opts.onChange?.();
+    return stats;
+  } finally {
+    release();
+  }
 }
 
 // packages/core/src/curation/capture.ts
@@ -44800,14 +45064,14 @@ init_store();
 
 // packages/core/src/buckets/artifacts.ts
 init_config();
-import { existsSync as existsSync3, mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync10, writeFileSync as writeFileSync5 } from "fs";
-import { join as join8 } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync8, readdirSync as readdirSync4, readFileSync as readFileSync11, writeFileSync as writeFileSync6 } from "fs";
+import { join as join9 } from "path";
 function artifactDir(kind) {
-  return join8(getConfig().ARTIFACTS_DIR, kind);
+  return join9(getConfig().ARTIFACTS_DIR, kind);
 }
 function ensureArtifactDir(kind) {
   const dir = artifactDir(kind);
-  if (!existsSync3(dir)) mkdirSync7(dir, { recursive: true });
+  if (!existsSync3(dir)) mkdirSync8(dir, { recursive: true });
   return dir;
 }
 function nextVersion(kind) {
@@ -44825,12 +45089,12 @@ function nextVersion(kind) {
 }
 function writeArtifact(kind, filename, content) {
   const dir = ensureArtifactDir(kind);
-  const path2 = join8(dir, filename);
-  writeFileSync5(path2, content);
+  const path2 = join9(dir, filename);
+  writeFileSync6(path2, content);
   return path2;
 }
 function artifactPath(kind, filename) {
-  return join8(artifactDir(kind), filename);
+  return join9(artifactDir(kind), filename);
 }
 
 // packages/core/src/buckets/router.ts
@@ -45479,9 +45743,8 @@ init_health();
 // packages/core/src/sync/shared-cycle.ts
 init_fs_lock();
 init_config();
-import { createHash as createHash3 } from "node:crypto";
-import { closeSync as closeSync2, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync6, writeSync as writeSync2 } from "node:fs";
-import { dirname as dirname6, join as join9 } from "node:path";
+import { createHash as createHash4 } from "node:crypto";
+import { dirname as dirname7, join as join10 } from "node:path";
 var DUE_FRACTION = 0.9;
 var MIN_STALE_LOCK_MS = 10 * 60 * 1e3;
 function syncTargetKey(config2 = getConfig()) {
@@ -45497,11 +45760,11 @@ function syncTargetKey(config2 = getConfig()) {
     }
   }
   const store = config2.STORAGE === "local" ? `local:${config2.LOCAL_STORE_PATH}` : `chroma:${config2.CHROMA_URL}`;
-  return createHash3("sha256").update(JSON.stringify([remote, store, config2.USERNAME])).digest("hex").slice(0, 12);
+  return createHash4("sha256").update(JSON.stringify([remote, store, config2.USERNAME])).digest("hex").slice(0, 12);
 }
 function sharedDir(config2 = getConfig()) {
   if (!config2.SYNC_COORDINATE || !config2.SYNC_HEALTH_FILE) return void 0;
-  return dirname6(config2.SYNC_HEALTH_FILE);
+  return dirname7(config2.SYNC_HEALTH_FILE);
 }
 function paths(config2 = getConfig()) {
   const dir = sharedDir(config2);
@@ -45509,26 +45772,10 @@ function paths(config2 = getConfig()) {
   const key = syncTargetKey(config2);
   return {
     dir,
-    record: join9(dir, `sync-cycle-${key}.json`),
-    lock: join9(dir, `sync-cycle-${key}.lock`),
-    pulls: join9(dir, `sync-pulls-${key}.json`)
+    record: join10(dir, `sync-cycle-${key}.json`),
+    lock: join10(dir, `sync-cycle-${key}.lock`),
+    pulls: join10(dir, `sync-pulls-${key}.json`)
   };
-}
-function readJson(path2) {
-  try {
-    return JSON.parse(readFileSync11(path2, "utf-8"));
-  } catch {
-    return void 0;
-  }
-}
-function writeJson(path2, value) {
-  try {
-    mkdirSync8(dirname6(path2), { recursive: true, mode: 448 });
-    const tmp = `${path2}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    writeFileSync6(tmp, JSON.stringify(value) + "\n", { mode: 384 });
-    renameSync4(tmp, path2);
-  } catch {
-  }
 }
 function readCycleRecord(config2 = getConfig()) {
   const p = paths(config2);
@@ -45545,36 +45792,8 @@ function tryAcquireCycle(opts = {}, config2 = getConfig()) {
   const p = paths(config2);
   if (!p) return () => {
   };
-  const now = opts.now ?? Date.now();
-  const alive = opts.alive ?? pidAlive;
   const staleAfter = Math.max(2 * config2.SYNC_INTERVAL_MS, MIN_STALE_LOCK_MS);
-  const body = { pid: process.pid, started_at: now, ...opts.version ? { version: opts.version } : {} };
-  for (let attempt2 = 0; attempt2 < 2; attempt2++) {
-    try {
-      mkdirSync8(p.dir, { recursive: true, mode: 448 });
-      const fd = openSync2(p.lock, "wx", 384);
-      try {
-        writeSync2(fd, JSON.stringify(body));
-      } finally {
-        closeSync2(fd);
-      }
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        const held2 = readJson(p.lock);
-        if (held2?.pid === process.pid && held2.started_at === now) rmSync4(p.lock, { force: true });
-      };
-    } catch (e) {
-      if (e.code !== "EEXIST") return () => {
-      };
-      const held2 = readJson(p.lock);
-      const stale2 = !held2 || !alive(held2.pid) || now - held2.started_at > staleAfter || held2.started_at > now + 6e4;
-      if (!stale2 || attempt2 > 0) return void 0;
-      rmSync4(p.lock, { force: true });
-    }
-  }
-  return void 0;
+  return tryAcquireFileLock(p.lock, staleAfter, opts);
 }
 function recordCycle(run2, config2 = getConfig()) {
   const p = paths(config2);
@@ -45599,7 +45818,7 @@ init_sentinel();
 // packages/core/src/update-check.ts
 init_config();
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync12, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname7, join as join10 } from "node:path";
+import { dirname as dirname8, join as join11 } from "node:path";
 var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
 var FETCH_TIMEOUT_MS = 5e3;
 var SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
@@ -45617,7 +45836,7 @@ function compareVersions(a, b) {
 }
 function updateStatePath() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join10(dirname7(health), "update-check.json") : void 0;
+  return health ? join11(dirname8(health), "update-check.json") : void 0;
 }
 function readUpdateState(path2 = updateStatePath()) {
   if (!path2) return void 0;
@@ -45631,7 +45850,7 @@ function readUpdateState(path2 = updateStatePath()) {
 function writeUpdateState(s, path2 = updateStatePath()) {
   if (!path2) return;
   try {
-    mkdirSync9(dirname7(path2), { recursive: true, mode: 448 });
+    mkdirSync9(dirname8(path2), { recursive: true, mode: 448 });
     const tmp = `${path2}.${process.pid}.tmp`;
     writeFileSync7(tmp, JSON.stringify(s) + "\n", { mode: 384 });
     renameSync5(tmp, path2);
@@ -45916,9 +46135,9 @@ init_device();
 // packages/core/src/training/index.ts
 init_config();
 init_store();
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash5 } from "crypto";
 import { existsSync as existsSync5, mkdirSync as mkdirSync11, readFileSync as readFileSync15, writeFileSync as writeFileSync9 } from "fs";
-import { join as join12 } from "path";
+import { join as join13 } from "path";
 
 // packages/core/src/training/fireworks.ts
 init_config();
@@ -46081,12 +46300,12 @@ function extractJobIdFromText(stdout) {
 // packages/core/src/training/registry.ts
 init_config();
 import { existsSync as existsSync4, mkdirSync as mkdirSync10, readFileSync as readFileSync13, writeFileSync as writeFileSync8 } from "fs";
-import { join as join11 } from "path";
+import { join as join12 } from "path";
 function registryPath() {
-  return join11(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
+  return join12(getConfig().ARTIFACTS_DIR, "adapters", "registry.json");
 }
 function ensureDir() {
-  const dir = join11(getConfig().ARTIFACTS_DIR, "adapters");
+  const dir = join12(getConfig().ARTIFACTS_DIR, "adapters");
   if (!existsSync4(dir)) mkdirSync10(dir, { recursive: true });
 }
 function load() {
@@ -46267,12 +46486,12 @@ function getBackend() {
   }
 }
 function previewDir() {
-  const dir = join12(getConfig().ARTIFACTS_DIR, "training-runs");
+  const dir = join13(getConfig().ARTIFACTS_DIR, "training-runs");
   if (!existsSync5(dir)) mkdirSync11(dir, { recursive: true });
   return dir;
 }
 function sha256(content) {
-  return createHash4("sha256").update(content, "utf-8").digest("hex");
+  return createHash5("sha256").update(content, "utf-8").digest("hex");
 }
 async function trainingDatasetPreview(manifestVersion) {
   const manifestName = `v${manifestVersion}.jsonl`;
@@ -46301,7 +46520,7 @@ async function trainingDatasetPreview(manifestVersion) {
   const exampleCount = results.reduce((n, r) => n + r.examples.length, 0);
   const dir = previewDir();
   const filename = `preview-v${manifestVersion}-${Date.now()}.jsonl`;
-  const previewPath = join12(dir, filename);
+  const previewPath = join13(dir, filename);
   writeFileSync9(previewPath, jsonl);
   return {
     manifestVersion,
@@ -46871,15 +47090,15 @@ init_sentinel();
 init_config();
 init_coordination();
 import { mkdirSync as mkdirSync12, readdirSync as readdirSync5, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync3, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname8, join as join13 } from "node:path";
+import { dirname as dirname9, join as join14 } from "node:path";
 var PRUNE_AFTER_MS = 7 * 24 * 3600 * 1e3;
 var pruned = false;
 function lastWriteDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join13(dirname8(health), "last-write") : "";
+  return health ? join14(dirname9(health), "last-write") : "";
 }
 function lastWriteFile(session, dir = lastWriteDir()) {
-  return join13(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function recordLastWrite(collection, opts = {}) {
   const session = currentSession(opts.session ?? process.env.CLAUDE_CODE_SESSION_ID);
@@ -46903,7 +47122,7 @@ function pruneLastWrites(dir = lastWriteDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync5(dir)) {
-      const p = join13(dir, name);
+      const p = join14(dir, name);
       try {
         if (now - statSync3(p).mtimeMs > PRUNE_AFTER_MS) rmSync5(p, { force: true });
       } catch {
@@ -46920,14 +47139,14 @@ init_doc_lock();
 init_config();
 init_fs_lock();
 import { readdirSync as readdirSync6, readFileSync as readFileSync17, rmSync as rmSync6, statSync as statSync4 } from "node:fs";
-import { dirname as dirname9, join as join14 } from "node:path";
+import { dirname as dirname10, join as join15 } from "node:path";
 var PRUNE_AFTER_MS2 = 7 * 24 * 3600 * 1e3;
 function sessionRecordDir() {
   const health = getConfig().SYNC_HEALTH_FILE;
-  return health ? join14(dirname9(health), "sessions") : "";
+  return health ? join15(dirname10(health), "sessions") : "";
 }
 function sessionRecordFile(session, dir = sessionRecordDir()) {
-  return join14(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  return join15(dir, `${session.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 function sessionId(explicit) {
   const v = explicit ?? process.env.CLAUDE_CODE_SESSION_ID;
@@ -46961,7 +47180,7 @@ function pruneSessionRecords(dir = sessionRecordDir(), now = Date.now()) {
   if (!dir) return;
   try {
     for (const name of readdirSync6(dir)) {
-      const p = join14(dir, name);
+      const p = join15(dir, name);
       if (name.endsWith(".starting") || name.endsWith(".scope")) {
         try {
           if (now - statSync4(p).mtimeMs > (name.endsWith(".scope") ? PRUNE_AFTER_MS2 : 24 * 3600 * 1e3)) rmSync6(p, { force: true });
@@ -47177,17 +47396,18 @@ ${result.instructions}`
       content: external_exports.string().describe("The memory content to store"),
       tags: external_exports.array(external_exports.string()).optional().describe("Tags for categorization"),
       salience: external_exports.number().optional().describe("Importance score (0.0-5.0, default 1.0)"),
+      pinned: external_exports.boolean().optional().describe("Pin it: it never decays, and compaction, the janitor and expiry leave it alone"),
       sector: external_exports.enum(["semantic", "episodic"]).optional().describe("Memory type (auto-detected if omitted)"),
       supersedes: external_exports.string().optional().describe("ID of an existing memory this one corrects/replaces \u2014 the old memory is archived (filtered from recall, recoverable), never hard-deleted"),
       collection: external_exports.string().optional().describe("Collection name (default: global)"),
       ...TYPED_PARAMS
     },
-    async ({ content, tags, salience, sector, collection, supersedes, ...typedArgs }) => {
+    async ({ content, tags, salience, pinned, sector, collection, supersedes, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       let result;
       const target = await writeTarget(collection ?? "global");
       try {
-        result = await storeMemory(content, { tags, salience, sector, collection: target.collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
+        result = await storeMemory(content, { tags, salience, pinned, sector, collection: target.collection, supersedes, ...Object.keys(typed).length ? { typed } : {} });
         recordLastWrite(target.collection);
       } catch (e) {
         return typedError(e);
@@ -47245,7 +47465,7 @@ ${result.instructions}`
         return { content: [{ type: "text", text: "No memories found." }] };
       }
       const text = results.map(
-        (r) => `**${r.id}**${typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : ""} (${r.collection ?? "unknown"}, salience: ${r.metadata.salience?.toFixed(2) ?? "?"}, distance: ${r.distance.toFixed(3)})
+        (r) => `**${r.id}**${typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : ""} (${r.collection ?? "unknown"}, salience: ${r.metadata.salience?.toFixed(2) ?? "?"}${r.metadata.pinned ? ", pinned" : ""}${r.metadata.archived ? ", archived" : ""}, distance: ${r.distance.toFixed(3)})
 ${r.content}`
       ).join("\n\n---\n\n");
       return { content: [{ type: "text", text }] };
@@ -47277,6 +47497,7 @@ ${r.content}`
       owner: external_exports.string().optional().describe("Only typed memories for this owner"),
       limit: external_exports.number().optional().describe("Max results (default 50)"),
       include_promoted: external_exports.boolean().optional().describe("Include memories already promoted to system-prompt or training buckets. Default: false."),
+      include_archived: external_exports.boolean().optional().describe("Include archived memories (superseded, compacted, duplicates, expired); restore one with memory_update restore. Default: false."),
       filters: external_exports.object({
         trainable_min: external_exports.number().min(0).max(1).optional().describe("Minimum trainable score (0-1)"),
         durability_min: external_exports.number().min(0).max(1).optional().describe("Minimum durability score (0-1)"),
@@ -47284,7 +47505,7 @@ ${r.content}`
         classified: external_exports.boolean().optional().describe("If true, only classified memories. If false, only unclassified.")
       }).optional().describe("Optional range filters on classifier scores")
     },
-    async ({ collection, tags, sector, kind, status, owner, limit, include_promoted, filters }) => {
+    async ({ collection, tags, sector, kind, status, owner, limit, include_promoted, include_archived, filters }) => {
       const results = await listMemories({
         collection,
         tags,
@@ -47294,6 +47515,7 @@ ${r.content}`
         owner,
         limit,
         include_promoted,
+        include_archived,
         filters
       });
       if (results.length === 0) {
@@ -47303,26 +47525,29 @@ ${r.content}`
         const promoted = r.metadata.promoted_to ? ` promoted: ${r.metadata.promoted_to}` : "";
         const selected = r.metadata.selected_for ? ` selected: ${r.metadata.selected_for}` : "";
         const label = typedLabel(r.metadata) ? ` ${typedLabel(r.metadata)}` : "";
-        return `- **${r.id}**${label} [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? "?"}, sector: ${r.metadata.sector ?? "?"}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? "..." : ""}`;
+        return `- **${r.id}**${label} [${r.collection}] (salience: ${r.metadata.salience?.toFixed(2) ?? "?"}${r.metadata.pinned ? ", pinned" : ""}${r.metadata.archived ? ", archived" : ""}, sector: ${r.metadata.sector ?? "?"}${selected}${promoted}): ${r.content.slice(0, 100)}${r.content.length > 100 ? "..." : ""}`;
       }).join("\n");
       return { content: [{ type: "text", text }] };
     }
   );
   server2.tool(
     "memory_update",
-    'Change a memory in place: its status, owner, links or other typed fields, and optionally a dated note appended to its text. Record a decision that was needed with status "accepted" (or "rejected") and the choice as the note; tasks waiting on it become ready again. Answer a question with status "answered". Resolve a finding with a disposition. The id stays the same, unlike supersedes.',
+    'Change a memory in place: its status, owner, links or other typed fields, and optionally a dated note appended to its text. Record a decision that was needed with status "accepted" (or "rejected") and the choice as the note; tasks waiting on it become ready again. Answer a question with status "answered". Resolve a finding with a disposition. Change its importance with salience, pin it so it never fades or gets curated away, or restore an archived one. The id stays the same, unlike supersedes.',
     {
       id: external_exports.string().describe("Memory ID"),
       collection: external_exports.string().optional().describe("Collection (default: searched)"),
       note: external_exports.string().optional().describe('Appended as "<date> <user>: <note>", e.g. the choice made'),
       tags: external_exports.array(external_exports.string()).optional().describe("Replace the tags"),
+      salience: external_exports.number().min(0).max(5).optional().describe("New importance (0.05-5); decay counts from now"),
+      pinned: external_exports.boolean().optional().describe("true pins it (never decays; compaction, the janitor and expiry skip it), false unpins"),
+      restore: external_exports.boolean().optional().describe("true un-archives it, so recall and lists show it again"),
       ...TYPED_PARAMS
     },
-    async ({ id, collection, note, tags, ...typedArgs }) => {
+    async ({ id, collection, note, tags, salience, pinned, restore, ...typedArgs }) => {
       const typed = Object.fromEntries(Object.entries(typedArgs).filter(([, v]) => v !== void 0));
       try {
         const target = collection ? await writeTarget(collection) : void 0;
-        const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {} }, target?.collection);
+        const r = await updateMemory(id, { ...typed, ...note !== void 0 ? { note } : {}, ...tags ? { tags } : {}, salience, pinned, restore }, target?.collection);
         recordLastWrite(r.collection);
         const label = typedLabel(r.metadata);
         const moved = target?.redirectedFrom ? ` (${redirectNote(target)})` : "";
@@ -47435,18 +47660,21 @@ ${redirectNote(target)}` : "";
   );
   server2.tool(
     "janitor_now",
-    "Run the contradiction janitor: scan for near-duplicate memory pairs and judge each with the conservative resolver \u2014 duplicates are archived (recoverable via include_archived), stale memories are superseded by merged updates, distinct facts are kept. Bounded by maxPairs per run.",
+    "Run the contradiction janitor now: scan for near-duplicate memory pairs and judge each with the conservative resolver \u2014 duplicates are archived (recoverable via include_archived), stale memories are superseded by merged updates, distinct facts are kept. Only your own memories change. Bounded by maxPairs per run. It also runs daily in the background unless turned off.",
     {
       collection: external_exports.string().optional().describe("Restrict the sweep to this collection (default: all)"),
       maxPairs: external_exports.number().optional().describe("Max pairs to judge this run (default 20)")
     },
     async ({ collection, maxPairs }) => {
       try {
+        useSubscriptionModelIfNoKey();
         const stats = await janitorSweep({
           ...collection && { collection },
           ...maxPairs !== void 0 && { maxPairs: Math.max(1, Math.min(200, maxPairs)) }
         });
-        const text = `Janitor sweep complete: ${stats.pairsConsidered} pairs judged across ${stats.collectionsScanned} collection(s) \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.errors} error(s).`;
+        const last = readJanitorRecord();
+        const text = `Janitor sweep complete: ${stats.pairsConsidered} pairs judged across ${stats.collectionsScanned} collection(s) \u2014 ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, ${stats.keptDistinct} kept distinct, ${stats.skippedNotOwned} left as teammates', ${stats.errors} error(s).` + (last ? `
+Last automatic run: ${new Date(last.finished_at).toISOString()}.` : getConfig().JANITOR_ENABLED ? "\nNo automatic run yet." : "\nAutomatic runs are off.");
         return { content: [{ type: "text", text }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Janitor error: ${e}` }] };
@@ -48692,7 +48920,7 @@ Context: when a "# YAPA Context" or "# YAPA Recall" block is injected (Claude Co
 
 Scope: the "**Scope:**" line names the active collection. If it says AMBIGUOUS, ask the user which collection to use before storing anything. Always pass the collection explicitly. Before creating a new collection, confirm its name with the user (collection_list shows what exists). Hits marked "from <collection>" come from another project or customer: check them when troubleshooting, and say where an answer came from. private-*, local-* and global never sync (global is personal; team knowledge goes in a shared collection). A new shared collection can only be created from a session under a project root; if a write is refused, use a private- name or ask the user. Change the folder rules (scope tool) only when the user asks. Combine or rename collections with collection_merge, never collection_delete.
 
-Capture as you go, not at the end: memory_store (salience >= 2) when a root cause is found, a config value, endpoint or credential location is learned, the user states a preference, decision or correction, a non-obvious fact turns up, a fix took real effort, or a decision or commitment surfaces. Give it a kind: finding (a result, root cause or trap), decision (accepted; or needed, with options, a recommendation and the owner, when only a person can choose: never leave that only in chat), limitation (with exit_criteria), question (with the owner who must answer), or idea. Settle potential_conflicts before moving on: supersede (supersedes) or coexist. Don't store conversation state, or what git or an existing memory already holds. Record a person's answer with memory_update. Tell the user about items waiting on them (waiting). Where a project keeps these records in its own files, follow its instructions; in a collection marked that way, YAPA stores a kind only on what the project publishes (memory put --ref) and keeps the rest as notes.
+Capture as you go, not at the end: memory_store (salience >= 2) when a root cause is found, a config value, endpoint or credential location is learned, the user states a preference, decision or correction, a non-obvious fact turns up, a fix took real effort, or a decision or commitment surfaces. Give it a kind: finding (a result, root cause or trap), decision (accepted; or needed, with options, a recommendation and the owner, when only a person can choose: never leave that only in chat), limitation (with exit_criteria), question (with the owner who must answer), or idea. Settle potential_conflicts before moving on: supersede (supersedes) or coexist. Don't store conversation state, or what git or an existing memory already holds. Record a person's answer with memory_update; pin (pinned) what the user says must not fade. Tell the user about items waiting on them (waiting). Where a project keeps these records in its own files, follow its instructions; in a collection marked that way, YAPA stores a kind only on what the project publishes (memory put --ref) and keeps the rest as notes.
 
 Tasks: task_create before multi-step or long-lived work, for a follow-up, or when something can't finish this turn. Set in_progress when you start: it claims the task. Before starting a task someone else has claimed, tell the user. If refused, say who holds it and offer other work; reclaim only your own other session, after the user confirms; if the claim is not shared, say others may start it too. Finish with task_complete, recording learned and follow_ups in the same call. When blocked, task_update with status blocked and a reason, or decision_needed when a person must choose. When the scope changes, amend the task instead of creating a duplicate. Tags: auto (an unattended session may do it), needs-human, needs:<user>. "by <user>" marks a teammate's item: coordinate before changing their tasks. Pass on any "**YAPA claim:**" line to the user.
 
@@ -48701,13 +48929,13 @@ Leases (lease, yapa coord): only when the project's own instructions call for th
 // packages/mcp/src/cli/env.ts
 import { readFileSync as readFileSync18 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 var PLUGIN_OPTION_PREFIX = "CLAUDE_PLUGIN_OPTION_";
 function adoptLegacyScope(env = process.env) {
   let options;
   try {
-    const dir = env.CLAUDE_CONFIG_DIR ?? join15(homedir4(), ".claude");
-    options = JSON.parse(readFileSync18(join15(dir, "settings.json"), "utf-8"))?.pluginConfigs?.["yapa@yapa"]?.options;
+    const dir = env.CLAUDE_CONFIG_DIR ?? join16(homedir4(), ".claude");
+    options = JSON.parse(readFileSync18(join16(dir, "settings.json"), "utf-8"))?.pluginConfigs?.["yapa@yapa"]?.options;
   } catch {
     options = void 0;
   }
@@ -49021,6 +49249,21 @@ async function main() {
 `));
   }
   startUpdateChecks(YAPA_VERSION);
+  if (getConfig().JANITOR_ENABLED && process.env.YAPA_HOOK_CHILD !== "1") {
+    const janitor = () => {
+      runJanitorIfDue({
+        version: YAPA_VERSION,
+        onChange: () => {
+          if (getConfig().SYNC_ENABLED) scheduleSyncSoon();
+        }
+      }).catch((e) => process.stderr.write(`[yapa] Janitor skipped: ${e}
+`));
+    };
+    setTimeout(() => {
+      janitor();
+      setInterval(janitor, 36e5).unref();
+    }, 10 * 6e4).unref();
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

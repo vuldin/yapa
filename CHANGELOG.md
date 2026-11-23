@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.20.0 (2026-11-23)
+
+Memories now leave when they stop mattering and stay when you say so. You can set a memory's salience after storing it, pin it so it never fades, and restore one that was archived. Your own notes that go unused for 180 days are archived by the daily sweep. The duplicate janitor now runs once a day in Claude Code too, and only ever changes your own memories.
+
+**Upgrading:** update the plugin and restart Claude Code. There's no schema change. Two things start running on their own after the update:
+- **Expiry.** The first daily sweep archives your own ordinary notes that nobody has recalled or changed for 180 days and that have faded below salience 0.2. They aren't deleted. Run `yapa memory expire` before restarting to see what it will take. `memory_update` with `restore: true` brings any of them back, and pinning keeps a memory as it is. Set `YAPA_MEMORY_EXPIRY_DAYS=0` to turn expiry off.
+- **The janitor.** Once a day it judges up to 20 pairs of your near-duplicate memories with Haiku, through `claude -p` when there's no API key. A large store takes a couple of weeks to work through its backlog. Turn it off with the `janitor_enabled` plugin option.
+
+Archiving syncs, so teammates on any version stop seeing what you archived. Only clients on 1.20 run expiry and the janitor themselves.
+
+### Features
+- **Set salience after storing.**
+  - `memory_update` takes `salience`, clamped to 0.05–5, and decay counts from the edit.
+  - From a shell: `yapa memory update ID --salience 3`.
+- **Pin a memory.**
+  - `pinned: true` on `memory_store` or `memory_update` (`--pin`, `--unpin`).
+  - A pinned memory never decays, and compaction, the janitor and expiry leave it alone.
+  - Recall and list labels show `pinned`.
+- **Restore an archived memory.**
+  - `memory_update` with `restore: true` (`--restore`) un-archives a memory archived by compaction, a supersede, the janitor or expiry.
+  - A copy whose owner deleted it is refused; `trash` keeps those.
+  - `memory_list` takes `include_archived` to find them.
+- **Salience and pins are shared, like tags.** Setting either is an edit, so it syncs and teammates see the new value.
+- **Expiry.** The daily decay sweep archives your own ordinary notes that are inactive for `YAPA_MEMORY_EXPIRY_DAYS` (180) and below `YAPA_MEMORY_EXPIRY_MAX_SALIENCE` (0.2). These are kept:
+  - typed, pinned, read-only and teammates' memories;
+  - memories a project publishes (`external_ref`);
+  - session summaries;
+  - notes an open task links to.
+
+  A long memory is decided as a whole. An expired memory gets `expired: "age"`. `yapa memory expire` lists what the next sweep would archive; `--apply` archives it now.
+- **The janitor runs daily in Claude Code.**
+  - It runs once per machine a day across all sessions, with a shared record and lock beside the sync health file.
+  - The first check comes 10 minutes after a session starts, then hourly.
+  - Configure it with the plugin option `janitor_enabled` (default on), or `YAPA_JANITOR_ENABLED`, `YAPA_JANITOR_MAX_PAIRS` (20) and `YAPA_JANITOR_INTERVAL_MS`.
+  - DSH uses the same scheduler, so restarts no longer reset its day.
+- **`yapa janitor status`** shows the last run and when the next is due. **`yapa janitor run`** runs it now. `janitor_now` also reports the last automatic run.
+- **Incremental janitor runs.**
+  - Only memories created or changed since the last complete run look for neighbors.
+  - Pairs judged distinct aren't judged again.
+  - A run that used its budget or hit an error starts from the same point next time.
+  - The closest pairs go first, across all collections.
+
+### Fixes
+- The janitor no longer archives or supersedes a teammate's memory. When a pair is yours and theirs, yours is the copy that can go.
+- The janitor no longer pairs pinned or published (`external_ref`) memories, session summaries, or pieces of long memories. Compaction skips pinned and published memories too.
+- When the janitor merges two of your memories, it archives both into the merged one, instead of leaving one beside it.
+- `janitor_now` works without an API key; it uses `claude -p` like the capture after each turn.
+- Unpinning a memory doesn't apply the decay it skipped while pinned.
+- `memory_list` takes `include_archived`, as the docs said.
+- The docs no longer say salience doesn't sync; it travels with the memory.
+
 ## 1.19.0 (2026-11-08)
 
 Recurring tasks now keep their place in the calendar, stay out of the way until they're nearly due, and start each occurrence from the series' own notes. They can repeat quarterly, yearly or every N periods, and `task_update` can set, change and stop a series.
