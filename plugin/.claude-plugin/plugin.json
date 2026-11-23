@@ -104,6 +104,12 @@
       "title": "Auto-capture findings",
       "description": "After each turn, a small model (claude -p haiku, or your configured curation provider) stores durable findings, typed as findings, decisions, questions and so on, and records what the turn settles in open decisions and questions. Off: only what the agent stores itself.",
       "default": true
+    },
+    "janitor_enabled": {
+      "type": "boolean",
+      "title": "Daily duplicate janitor",
+      "description": "Once a day, a small model (claude -p haiku, or your configured curation provider) judges up to 20 pairs of your near-duplicate memories: same fact twice archives the weaker copy, an update replaces the older one, distinct facts stay. Only your own memories change, and archived ones can be restored. Off: run it only with the janitor_now tool.",
+      "default": true
     }
   }
 }

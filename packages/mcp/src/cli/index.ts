@@ -17,6 +17,7 @@ const USAGE =
   '       yapa memory <command> [options]           list, put and update typed memories (yapa memory help)\n' +
   '       yapa waiting [--for U | --everyone]       decisions, questions and steps waiting on a person\n' +
   '       yapa capture status [--days N]            whether the per-turn capture is working (counts, failures, last error)\n' +
+  '       yapa janitor status|run                   the duplicate janitor: last run and next due, or run it now\n' +
   '       yapa scope [--cwd DIR] [--text]           the collection YAPA uses for a folder\n' +
   '       yapa scope <command> [options]            list and change the folder rules: project roots, customers, mappings (yapa scope help)\n';
 
@@ -245,6 +246,13 @@ async function main(): Promise<void> {
     adoptCliEnv(process.cwd());
     const { runCapture } = await import('./capture.js');
     const r = runCapture(sub, rest);
+    process.stdout.write((rest.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
+    await exitAfterFlush(r.exit);
+  }
+  if (command === 'janitor') {
+    adoptCliEnv(process.cwd());
+    const { runJanitorCli } = await import('./janitor.js');
+    const r = await runJanitorCli(sub);
     process.stdout.write((rest.includes('--text') ? r.text : JSON.stringify(r.json)) + '\n');
     await exitAfterFlush(r.exit);
   }

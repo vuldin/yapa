@@ -11,7 +11,7 @@ YAPA gives your AI agent memory and tasks that last across sessions. It remember
 YAPA has two frontends over the same core:
 
 - **Claude Code plugin** — the MCP server, the always-on hooks, the status line and skills in one install. The same server also runs under other MCP hosts (Cursor, OpenCode, `claude mcp add`).
-- **DeepSeek Harness (DSH) plugin** — a native cordis plugin: the tools with a `yapa_` prefix (all but leases and counters, plus status and storage import), context injected at the turn seam, capture of every turn, and a daily contradiction janitor. No hooks and no MCP subprocess.
+- **DeepSeek Harness (DSH) plugin** — a native cordis plugin: the tools with a `yapa_` prefix (all but leases and counters, plus status and storage import), context injected at the turn seam, capture of every turn, and the daily contradiction janitor (which the Claude Code plugin runs too). No hooks and no MCP subprocess.
 
 ## Install
 
@@ -91,7 +91,7 @@ Every hook fails open: on error the session continues without YAPA's context.
 
 ### Memory
 
-Each memory has a salience score that rises when it's used and decays with time, and it weights recall ranking. Nothing is deleted by decay; low-salience memories just surface less. Long content is split into overlapping chunks that are searched on their own. A write that comes close to an existing memory returns it as a possible conflict, and the agent supersedes it (the old one is archived, recoverable) or keeps both. When a collection grows large, YAPA suggests compacting groups of similar memories into rolling summaries. Embeddings run in-process (MiniLM by default, no API key), or through an HTTP provider. Details: [Memory](docs/memory.md).
+Each memory has a salience score that rises when it's used and decays with time, and it weights recall ranking. Your ordinary notes that nobody has recalled or changed for 180 days and that have faded to low salience are archived, never deleted, and can be restored. Pin a memory to keep it as it is. Long content is split into overlapping chunks that are searched on their own. A write that comes close to an existing memory returns it as a possible conflict, and the agent supersedes it (the old one is archived, recoverable) or keeps both. When a collection grows large, YAPA suggests compacting groups of similar memories into rolling summaries. Embeddings run in-process (MiniLM by default, no API key), or through an HTTP provider. Details: [Memory](docs/memory.md).
 
 ### Tasks and what waits on people
 

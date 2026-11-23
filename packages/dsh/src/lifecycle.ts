@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis';
 // ctx.interval augmentation.
 import type {} from '@deepseek-ai/cordis-plugin-timer';
 import {
-  janitorSweep,
+  runJanitorIfDue,
   journalConsolidate,
   markDecayRun,
   runDecaySweep,
@@ -22,7 +22,7 @@ import {
 import type { ResolvedConfig } from './config.js';
 
 const DECAY_CHECK_INTERVAL_MS = 60 * 60 * 1000; // hourly due-check
-const JANITOR_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily contradiction sweep
+const JANITOR_CHECK_INTERVAL_MS = 60 * 60 * 1000; // hourly due-check; one run a day across processes
 
 const log = (msg: string) => process.stderr.write(`[yapa] ${msg}\n`);
 
@@ -65,15 +65,16 @@ export function registerLifecycle(ctx: Context, getResolved: () => ResolvedConfi
   // --- Contradiction janitor ----------------------------------------------------
   // Daily sweep for duplicate/contradictory pairs that predate (or bypass) the
   // capture-time resolver. Conservative, bounded, fail-open; manual trigger via
-  // the `yapa_janitor_now` tool.
+  // the `yapa_janitor_now` tool. Core keeps the record and lock, so restarts
+  // don't reset the day and two processes never sweep at once.
   let janitorRunning = false;
   const runJanitor = async () => {
     const cfg = getResolved();
     if (!cfg.janitorEnabled || janitorRunning) return;
     janitorRunning = true;
     try {
-      const stats = await janitorSweep({ maxPairs: cfg.janitorMaxPairs });
-      if (stats.superseded > 0 || stats.skippedDuplicates > 0) {
+      const stats = await runJanitorIfDue({ enabled: true, maxPairs: cfg.janitorMaxPairs });
+      if (stats && (stats.superseded > 0 || stats.skippedDuplicates > 0)) {
         log(`Janitor: ${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded (${stats.pairsConsidered} pairs judged)`);
       }
     } catch (e) {
@@ -82,7 +83,7 @@ export function registerLifecycle(ctx: Context, getResolved: () => ResolvedConfi
       janitorRunning = false;
     }
   };
-  ctx.interval(() => void runJanitor(), JANITOR_INTERVAL_MS);
+  ctx.interval(() => void runJanitor(), JANITOR_CHECK_INTERVAL_MS);
 
   // --- Background sync ---------------------------------------------------------
   // Core's startSync/stopSync own the interval; we scope start/stop to this

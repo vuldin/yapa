@@ -14,10 +14,16 @@
  * distance (most-likely-duplicates first). Fail-open per pair: a resolver
  * error skips that pair and keeps both.
  *
+ * Only what automatic curation may touch is paired (memory/curatable.ts),
+ * whole memories only (no chunks of long ones), and only your own memory is
+ * ever archived or superseded: archiving syncs, so a teammate's stays theirs.
+ * `since` limits the memories that look for neighbours to ones created or
+ * changed after it, and `skipPairs` drops pairs already judged distinct.
+ *
  * @module yapa/curation/janitor
  */
-import { isReadOnlyDoc } from '../sync/syncable.js';
-import { isMemoryKind } from '../memory/kinds.js';
+import { isOwnAuthor } from '../sync/backend.js';
+import { isCuratable } from '../memory/curatable.js';
 import { archivedMetadata } from '../memory/archive.js';
 import { getConfig } from '../config.js';
 import { getDocumentsByFilter, getDocumentsByIds, listCollections, metadataDelta, patchDocument, queryDocuments } from '../store/index.js';
@@ -31,7 +37,11 @@ export interface JanitorStats {
   skippedDuplicates: number;
   superseded: number;
   keptDistinct: number;
+  /** Pairs left alone because the memory that would change is a teammate's. */
+  skippedNotOwned: number;
   errors: number;
+  /** Keys (pairKey) of the pairs judged distinct this run. */
+  keptPairs: string[];
 }
 
 export interface JanitorOptions {
@@ -43,12 +53,26 @@ export interface JanitorOptions {
   call?: HostLLMCaller;
   /** Restrict to one collection (default: all). */
   collection?: string;
+  /** Unix seconds: only memories created or changed after this look for neighbours. */
+  since?: number;
+  /** Memories per collection that look for neighbours, newest first (default 500). */
+  maxScan?: number;
+  /** Pair keys to leave out (judged distinct before). */
+  skipPairs?: ReadonlySet<string>;
 }
+
+/** Order-independent key of a pair of memory ids. */
+export function pairKey(a: string, b: string): string {
+  return [a, b].sort().join('|');
+}
+
+const pairable = (m: Record<string, any> | undefined | null) => !!m && isCuratable(m) && m.parent_id == null;
+const changedAt = (m: Record<string, any>) => Math.max(Number(m.created_at) || 0, Number(m.updated_at) || 0);
 
 interface Pair {
   collection: string;
   a: { id: string; content: string; metadata: Record<string, any> };
-  b: ResolverNeighbor;
+  b: ResolverNeighbor & { metadata: Record<string, any> };
   distance: number;
 }
 
@@ -61,12 +85,16 @@ interface Pair {
 export async function findDuplicatePairs(
   collection: string,
   distanceThreshold: number,
+  options: Pick<JanitorOptions, 'since' | 'maxScan' | 'skipPairs'> = {},
 ): Promise<Pair[]> {
   // Typed memories (findings, decisions, ...) are never merged: a merge
   // would change the id tasks wait on and drop the status. Nor are records
-  // the remote owns (read_only): they are not ours to archive.
+  // the remote owns (read_only), pinned memories or session summaries.
   const all = (await getDocumentsByFilter(collection, { type: 'memory' }, 10000))
-    .filter(d => d.metadata.archived !== true && !isMemoryKind(d.metadata.kind) && !isReadOnlyDoc(d.metadata));
+    .filter(d => pairable(d.metadata))
+    .filter(d => options.since === undefined || changedAt(d.metadata) > options.since)
+    .sort((x, y) => changedAt(y.metadata) - changedAt(x.metadata))
+    .slice(0, options.maxScan ?? 500);
 
   const seen = new Set<string>();
   const pairs: Pair[] = [];
@@ -74,15 +102,16 @@ export async function findDuplicatePairs(
     const neighbors = await queryDocuments(collection, doc.content, 4, { type: 'memory' })
       .catch(() => []);
     for (const n of neighbors) {
-      if (n.id === doc.id || n.distance >= distanceThreshold) continue;
-      if (n.metadata?.archived === true || isMemoryKind(n.metadata?.kind) || isReadOnlyDoc(n.metadata)) continue;
-      const key = [doc.id, n.id].sort().join('|');
-      if (seen.has(key)) continue;
+      if (n.id === doc.id || n.distance >= distanceThreshold || !pairable(n.metadata)) continue;
+      // Neither side is ours: nothing this run could change.
+      if (!isOwnAuthor(doc.metadata) && !isOwnAuthor(n.metadata)) continue;
+      const key = pairKey(doc.id, n.id);
+      if (seen.has(key) || options.skipPairs?.has(key)) continue;
       seen.add(key);
       pairs.push({
         collection,
         a: { id: doc.id, content: doc.content, metadata: doc.metadata },
-        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience },
+        b: { id: n.id, content: n.content, distance: n.distance, salience: n.metadata?.salience, metadata: n.metadata ?? {} },
         distance: n.distance,
       });
     }
@@ -108,7 +137,9 @@ export async function janitorSweep(options: JanitorOptions = {}): Promise<Janito
     skippedDuplicates: 0,
     superseded: 0,
     keptDistinct: 0,
+    skippedNotOwned: 0,
     errors: 0,
+    keptPairs: [],
   };
   const maxPairs = options.maxPairs ?? 20;
   const threshold = options.distanceThreshold ?? getConfig().CONTRADICTION_DISTANCE_THRESHOLD;
@@ -117,67 +148,80 @@ export async function janitorSweep(options: JanitorOptions = {}): Promise<Janito
     ? [options.collection]
     : (await listCollections().catch(() => [])).map(c => c.name);
 
+  // Closest pairs first across every collection, so one large collection
+  // doesn't take the whole budget while likelier duplicates wait elsewhere.
+  const all: Pair[] = [];
   for (const collection of collections) {
-    if (stats.pairsConsidered >= maxPairs) break;
-    let pairs: Pair[];
     try {
-      pairs = await findDuplicatePairs(collection, threshold);
+      all.push(...await findDuplicatePairs(collection, threshold, options));
       stats.collectionsScanned++;
     } catch (e) {
       process.stderr.write(`[yapa-janitor] scan failed for ${collection}: ${e}\n`);
       stats.errors++;
-      continue;
     }
+  }
+  all.sort((x, y) => x.distance - y.distance);
 
-    for (const pair of pairs) {
-      if (stats.pairsConsidered >= maxPairs) break;
-      stats.pairsConsidered++;
-      try {
-        // The resolver's candidate/neighbor framing: treat the higher-salience
-        // (usually older, more-established) memory as the neighbor under
-        // review and the other as the candidate. Conservative bias applies
-        // either way.
-        const [candidate, neighbor] =
-          (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1)
-            ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }]
-            : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
+  // A memory archived or replaced earlier in this run is out of later pairs.
+  const changed = new Set<string>();
+  for (const pair of all) {
+    if (stats.pairsConsidered >= maxPairs) break;
+    if (changed.has(pair.a.id) || changed.has(pair.b.id)) continue;
+    const collection = pair.collection;
+    stats.pairsConsidered++;
+    try {
+      // The resolver's candidate/neighbor framing: treat the higher-salience
+      // (usually older, more-established) memory as the neighbor under
+      // review and the other as the candidate. When only one side is yours,
+      // it is the candidate: the one a duplicate verdict archives.
+      const aOwn = isOwnAuthor(pair.a.metadata);
+      const bOwn = isOwnAuthor(pair.b.metadata);
+      const aIsNeighbor = aOwn !== bOwn ? bOwn : (pair.a.metadata.salience ?? 1) >= (pair.b.salience ?? 1);
+      const [candidate, neighbor] = aIsNeighbor
+        ? [{ id: pair.b.id, content: pair.b.content }, { id: pair.a.id, content: pair.a.content, distance: pair.distance, salience: pair.a.metadata.salience }]
+        : [{ id: pair.a.id, content: pair.a.content }, { id: pair.b.id, content: pair.b.content, distance: pair.distance, salience: pair.b.salience }];
+      const owns = (id: string) => (id === pair.a.id ? aOwn : bOwn);
 
-        const decision = await resolveConflict(
-          candidate.content,
-          [neighbor],
-          options.call ? { call: options.call } : {},
-        );
+      const decision = await resolveConflict(
+        candidate.content,
+        [neighbor],
+        options.call ? { call: options.call } : {},
+      );
 
-        if (decision.action === 'skip') {
-          // Same fact twice: retire the lower-salience candidate as duplicate.
-          await archiveDuplicate(collection, candidate.id, neighbor.id);
-          stats.skippedDuplicates++;
-        } else if (decision.action === 'supersede') {
-          // Resolver targets one of the pair; store merged content and let
-          // storeMemory archive the stale side.
-          const target = decision.targetId === candidate.id ? candidate : neighbor;
-          const other = decision.targetId === candidate.id ? neighbor : candidate;
-          await storeMemory(decision.mergedContent ?? candidate.content, {
-            collection,
-            salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
-            tags: ['janitor-merged'],
-            sector: 'semantic',
-            supersedes: target.id,
-            metadata: {
-              source: 'janitor',
-              resolver_prompt_version: RESOLVER_PROMPT_VERSION,
-              rationale: decision.rationale,
-              related_to: other.id,
-            },
-          });
-          stats.superseded++;
-        } else {
-          stats.keptDistinct++;
-        }
-      } catch (e) {
-        process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}\n`);
-        stats.errors++;
+      if (decision.action === 'skip') {
+        // Same fact twice: retire the lower-salience candidate as duplicate.
+        if (!owns(candidate.id)) { stats.skippedNotOwned++; continue; }
+        await archiveDuplicate(collection, candidate.id, neighbor.id);
+        changed.add(candidate.id);
+        stats.skippedDuplicates++;
+      } else if (decision.action === 'supersede') {
+        // Resolver targets one of the pair; store merged content and let
+        // storeMemory archive the stale side.
+        const target = decision.targetId === candidate.id ? candidate : neighbor;
+        const other = decision.targetId === candidate.id ? neighbor : candidate;
+        if (!owns(target.id)) { stats.skippedNotOwned++; continue; }
+        await storeMemory(decision.mergedContent ?? candidate.content, {
+          collection,
+          salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
+          tags: ['janitor-merged'],
+          sector: 'semantic',
+          supersedes: target.id,
+          metadata: {
+            source: 'janitor',
+            resolver_prompt_version: RESOLVER_PROMPT_VERSION,
+            rationale: decision.rationale,
+            related_to: other.id,
+          },
+        });
+        changed.add(target.id);
+        stats.superseded++;
+      } else {
+        stats.keptDistinct++;
+        stats.keptPairs.push(pairKey(pair.a.id, pair.b.id));
       }
+    } catch (e) {
+      process.stderr.write(`[yapa-janitor] pair resolution failed in ${collection}: ${e}\n`);
+      stats.errors++;
     }
   }
 
@@ -185,7 +229,7 @@ export async function janitorSweep(options: JanitorOptions = {}): Promise<Janito
     process.stderr.write(
       `[yapa-janitor] sweep: ${stats.pairsConsidered} pairs — `
       + `${stats.skippedDuplicates} duplicates archived, ${stats.superseded} superseded, `
-      + `${stats.keptDistinct} kept distinct, ${stats.errors} error(s)\n`,
+      + `${stats.keptDistinct} kept distinct, ${stats.skippedNotOwned} not yours, ${stats.errors} error(s)\n`,
     );
   }
   return stats;

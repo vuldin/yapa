@@ -2,7 +2,7 @@
 
 ## Salience
 
-Not all memories are equally important. YAPA scores each memory by salience (0.05 floor to 5.0 max), boosts it when it's actually used, and decays it with wall-clock time. Salience also weights retrieval ranking, so higher-salience memories surface ahead of lower-salience ones at similar vector distance. Nothing is deleted — low-salience memories just surface less often.
+Not all memories are equally important. YAPA scores each memory by salience (0.05 floor to 5.0 max), boosts it when it's actually used, and decays it with wall-clock time. Salience also weights retrieval ranking, so higher-salience memories surface ahead of lower-salience ones at similar vector distance. Low-salience memories surface less often, and your own long-inactive notes are eventually archived (see [Expiry](#expiry)); nothing is deleted.
 
 - **Decay** is time-based: `salience × rate^days` since the memory was last decayed (`decayed_at`), with `rate` = 0.98/day for episodic memories (half-life ~34 days) and √0.98 for semantic facts (~69 days). Sweeps run at most once per 24h (checked hourly), and re-running one decays nothing extra, so the curve doesn't depend on how often you open a session.
 - **Boosts** (+0.1) happen only when a recall hit is relevant (cosine distance < `YAPA_SALIENCE_BOOST_MAX_DISTANCE`, default 0.5) — merely being surfaced by the per-prompt hook doesn't count — and at most `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` (3) times per memory per day.
@@ -11,6 +11,19 @@ Not all memories are equally important. YAPA scores each memory by salience (0.0
 - **Pinning:** `pinned: true` on `memory_store` or `memory_update` (`yapa memory update ID --pin`, `--unpin`) marks a memory as one to keep. It never decays, and compaction, the janitor and expiry leave it alone. Labels in recall and lists show `pinned`.
 - **Restoring:** `memory_update` with `restore: true` (`--restore`) un-archives a memory archived by compaction, the janitor, a supersede or expiry, so recall and lists show it again. A copy whose owner deleted it is kept with `trash` instead.
 - **Sharing:** salience and the pin travel with a memory when it syncs. A boost or decay changes only your copy until the memory is next pushed for another reason. Setting salience or pinning is an edit: it pushes, so teammates see the new value.
+
+## Expiry
+
+The daily decay sweep also archives your own ordinary notes that are no longer used: nobody has recalled or changed them for `YAPA_MEMORY_EXPIRY_DAYS` (default 180) and their salience has decayed below `YAPA_MEMORY_EXPIRY_MAX_SALIENCE` (default 0.2). An episodic note starting at 1.0 gets there after about 80 days of decay, a semantic one after about 160. These are kept:
+- typed memories (findings, decisions, limitations, questions, ideas);
+- pinned ones;
+- session summaries, which have their own retention (`YAPA_SESSION_SUMMARY_RETENTION_DAYS`);
+- read-only memories, and teammates' memories;
+- notes an open task links to (`memory_ids` or `waits_on`).
+
+A long memory is decided as a whole, across its chunks. An expired memory gets `archived: true` and `expired: "age"`. It syncs, so teammates' copies hide too. `memory_list` and `memory_recall` with `include_archived` still find it, and `memory_update` with `restore: true` brings it back.
+
+`yapa memory expire [--collection C]` lists what the next sweep would archive. `--apply` archives it now. Set `YAPA_MEMORY_EXPIRY_DAYS=0` to turn expiry off.
 
 ## Chunking
 
@@ -32,12 +45,41 @@ agent decides:
 `memory_forget` (hard delete) is reserved for memories that should never have
 existed.
 
-**Under DSH**, contradiction handling is also automatic: the response-capture
-pipeline routes every auto-captured candidate with near neighbors through a
-conservative LLM resolver (skip / add / supersede), and a daily **janitor
-sweep** resolves duplicate pairs already in the store (`yapa_janitor_now` /
-`janitor_now` runs it on demand). The resolver only supersedes when a fact
+Contradiction handling is also automatic. The capture after each turn routes
+every auto-captured candidate with near neighbors through a conservative LLM
+resolver (skip / add / supersede). The resolver only supersedes when a fact
 clearly changed; when unsure it keeps both.
+
+### The janitor
+
+Once a day, in Claude Code and under DSH, the **janitor** resolves duplicate
+pairs already in the store:
+- **Pairs:** it pairs ordinary notes closer than
+  `YAPA_CONTRADICTION_DISTANCE_THRESHOLD`, closest first across all
+  collections, and judges up to `YAPA_JANITOR_MAX_PAIRS` (20) a day with the
+  same resolver.
+- **Verdicts:** the same fact twice archives the weaker copy
+  (`duplicate_of`); an update stores a merged memory and archives the old one
+  (`superseded_by`); distinct facts stay.
+- **What it changes:** only your own memories. When the pair is yours and a
+  teammate's, yours is the one that can go. Typed, pinned, read-only and
+  published (`external_ref`) memories, session summaries and pieces of long
+  memories are never paired.
+- **Runs are incremental:** only memories created or changed since the last
+  complete run look for neighbors, and pairs judged distinct aren't judged
+  again. A run that used its whole budget or hit an error starts from the
+  same point next time.
+- **One run per machine:** every session shares a record and a lock beside
+  the sync health file, so there is one run a day however many sessions are
+  open. The first check comes 10 minutes after a session starts, then hourly.
+- **Model:** without an API key it uses `claude -p` with Haiku, like the
+  capture after each turn.
+
+`yapa janitor status` shows the last run and when the next is due, and
+`yapa janitor run` runs it now. `janitor_now` (`yapa_janitor_now` under DSH)
+runs a sweep on demand. Turn the daily run off with the `janitor_enabled`
+plugin option (`YAPA_JANITOR_ENABLED=false`). Archived memories can be
+restored with `memory_update` `restore: true`.
 
 Tunables:
 
@@ -45,6 +87,9 @@ Tunables:
 |---------|---------|---------|
 | `YAPA_CONTRADICTION_DISTANCE_THRESHOLD` | `0.25` | Distance under which two memories are considered conflicting |
 | `YAPA_CONTRADICTION_MAX_RESULTS` | `3` | Max conflicts surfaced per write |
+| `YAPA_JANITOR_ENABLED` | `true` | Run the janitor daily in the background |
+| `YAPA_JANITOR_MAX_PAIRS` | `20` | Pairs the janitor judges per run |
+| `YAPA_JANITOR_INTERVAL_MS` | `86400000` | Time between janitor runs (at least an hour) |
 
 ## End-of-session journal
 

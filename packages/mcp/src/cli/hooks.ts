@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   getConfig,
   setConfig,
+  useSubscriptionModelIfNoKey,
   createConfig,
   recallMemory,
   shownKey,
@@ -739,10 +740,7 @@ export async function stop(input: StopInput): Promise<void> {
   const userText = turn?.prompt ?? '';
   if (!assistantText || userText.length + assistantText.length < config.CAPTURE_MIN_CHARS) return;
 
-  // Subscription users have no API key: route the aux call through `claude -p`.
-  if (config.CURATION_LLM_PROVIDER === 'anthropic' && !config.ANTHROPIC_API_KEY) {
-    setConfig({ ...config, CURATION_LLM_PROVIDER: 'claude-cli', CURATION_MODEL: config.CURATION_MODEL || 'haiku' });
-  }
+  useSubscriptionModelIfNoKey();
 
   try {
     const { collection } = await detectCollection(input.cwd);
