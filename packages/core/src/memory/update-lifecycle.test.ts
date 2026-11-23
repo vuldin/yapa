@@ -41,13 +41,16 @@ describe('updateMemory salience, pin and restore', () => {
     await expect(updateMemory('m', { salience: Number.NaN }, C)).rejects.toThrow(/salience/);
   });
 
-  it('pins and unpins', async () => {
-    await getStore().addDocument(C, 'm', 'a note', { type: 'memory', salience: 1 });
+  it('pins and unpins; time pinned never counts as decay', async () => {
+    await getStore().addDocument(C, 'm', 'a note', { type: 'memory', salience: 1, decayed_at: 1 });
     await updateMemory('m', { pinned: true }, C);
     expect((await meta('m')).pinned).toBe(true);
     expect(isCuratable(await meta('m'))).toBe(false);
+    expect((await meta('m')).decayed_at).toBeGreaterThan(1);
+    await getStore().addDocument(C, 'm', 'a note', { ...(await meta('m')), decayed_at: 1 });
     await updateMemory('m', { pinned: false }, C);
     expect((await meta('m')).pinned).toBeUndefined();
+    expect((await meta('m')).decayed_at).toBeGreaterThan(1);
     expect(isCuratable(await meta('m'))).toBe(true);
   });
 

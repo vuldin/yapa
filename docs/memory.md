@@ -8,7 +8,7 @@ Not all memories are equally important. YAPA scores each memory by salience (0.0
 - **Boosts** (+0.1) happen only when a recall hit is relevant (cosine distance < `YAPA_SALIENCE_BOOST_MAX_DISTANCE`, default 0.5) — merely being surfaced by the per-prompt hook doesn't count — and at most `YAPA_SALIENCE_MAX_BOOSTS_PER_DAY` (3) times per memory per day.
 - **Ranking**: `cosine distance − 0.15 × normalized salience`, so salience breaks ties between similarly relevant memories rather than overriding relevance.
 - **Setting it yourself:** `memory_store` takes `salience` (default 1.0). Later, `memory_update` with `salience` changes it, clamped to 0.05-5, and decay counts from that moment. From a shell: `yapa memory update ID --salience 3`.
-- **Pinning:** `pinned: true` on `memory_store` or `memory_update` (`yapa memory update ID --pin`, `--unpin`) marks a memory as one to keep. It never decays, and compaction, the janitor and expiry leave it alone. Labels in recall and lists show `pinned`.
+- **Pinning:** `pinned: true` on `memory_store` or `memory_update` (`yapa memory update ID --pin`, `--unpin`) marks a memory as one to keep. It never decays (after unpinning, decay counts from then), and compaction, the janitor and expiry leave it alone. Labels in recall and lists show `pinned`.
 - **Restoring:** `memory_update` with `restore: true` (`--restore`) un-archives a memory archived by compaction, the janitor, a supersede or expiry, so recall and lists show it again. A copy whose owner deleted it is kept with `trash` instead.
 - **Sharing:** salience and the pin travel with a memory when it syncs. A boost or decay changes only your copy until the memory is next pushed for another reason. Setting salience or pinning is an edit: it pushes, so teammates see the new value.
 
@@ -59,8 +59,8 @@ pairs already in the store:
   collections, and judges up to `YAPA_JANITOR_MAX_PAIRS` (20) a day with the
   same resolver.
 - **Verdicts:** the same fact twice archives the weaker copy
-  (`duplicate_of`); an update stores a merged memory and archives the old one
-  (`superseded_by`); distinct facts stay.
+  (`duplicate_of`); an update stores a merged memory and archives both of
+  yours (`superseded_by`); distinct facts stay.
 - **What it changes:** only your own memories. When the pair is yours and a
   teammate's, yours is the one that can go. Typed, pinned, read-only and
   published (`external_ref`) memories, session summaries and pieces of long

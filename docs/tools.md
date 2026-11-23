@@ -22,7 +22,7 @@ walkthrough and its tools.
 | `memory_update` | Change a memory in place: status, owner, links, a dated note (records a decision, answers a question, resolves a finding); `salience`, `pinned`, or `restore` to un-archive |
 | `memory_recall` | Semantic search ranked by distance + salience, with optional collection/tag/score filters |
 | `memory_forget` | Delete memory by ID |
-| `memory_list` | List memories with metadata filters (tag, sector, kind, status, owner, classifier scores) |
+| `memory_list` | List memories with metadata filters (tag, sector, kind, status, owner, classifier scores); `include_archived` lists archived ones too |
 | `waiting` | Everything waiting on a person: decisions to make, questions to answer, steps only a person can take, blocked tasks (default: what waits on you) |
 | `compaction_suggest` | Group similar non-archived memories for rolling-summary consolidation |
 | `compaction_apply` | Replace a group with a summary memory and archive the originals |

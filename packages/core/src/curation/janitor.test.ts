@@ -54,7 +54,7 @@ describe('janitorSweep', () => {
 
   it('stores merged content and archives the stale memory on supersede', async () => {
     const old = await storeMemory('Service X runs on port 8000.', { salience: 2.0 });
-    await storeMemory('Service X now runs on port 9000.', { salience: 2.0 });
+    const newer = await storeMemory('Service X now runs on port 9000.', { salience: 2.0 });
 
     const stats = await janitorSweep({
       collection: 'global',
@@ -69,6 +69,9 @@ describe('janitorSweep', () => {
 
     expect(stats.superseded).toBe(1);
     expect(await archivedFlag(old.ids[0])).toMatchObject({ archived: true });
+    // The other side is folded into the merged memory too, not left beside it.
+    expect(await archivedFlag(newer.ids[0])).toMatchObject({ archived: true });
+    expect((await archivedFlag(newer.ids[0]))!.superseded_by).toMatch(/^mem-/);
 
     const recalled = await recallMemory('service X port', { collection: 'global', nResults: 10 });
     const contents = recalled.map(r => r.content).join('\n');
