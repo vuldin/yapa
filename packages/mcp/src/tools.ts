@@ -341,6 +341,7 @@ export function registerTools(server: McpServer): void {
       owner: z.string().optional().describe('Only typed memories for this owner'),
       limit: z.number().optional().describe('Max results (default 50)'),
       include_promoted: z.boolean().optional().describe('Include memories already promoted to system-prompt or training buckets. Default: false.'),
+      include_archived: z.boolean().optional().describe('Include archived memories (superseded, compacted, duplicates, expired); restore one with memory_update restore. Default: false.'),
       filters: z.object({
         trainable_min: z.number().min(0).max(1).optional().describe('Minimum trainable score (0-1)'),
         durability_min: z.number().min(0).max(1).optional().describe('Minimum durability score (0-1)'),
@@ -348,7 +349,7 @@ export function registerTools(server: McpServer): void {
         classified: z.boolean().optional().describe('If true, only classified memories. If false, only unclassified.'),
       }).optional().describe('Optional range filters on classifier scores'),
     },
-    async ({ collection, tags, sector, kind, status, owner, limit, include_promoted, filters }) => {
+    async ({ collection, tags, sector, kind, status, owner, limit, include_promoted, include_archived, filters }) => {
       const results = await listMemories({
         collection,
         tags,
@@ -358,6 +359,7 @@ export function registerTools(server: McpServer): void {
         owner,
         limit,
         include_promoted,
+        include_archived,
         filters,
       });
       if (results.length === 0) {

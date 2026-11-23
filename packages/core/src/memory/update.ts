@@ -89,6 +89,8 @@ export async function updateMemory(id: string, patch: MemoryUpdate, collection?:
       if (salience !== undefined) Object.assign(metadata, { salience: Math.min(Math.max(salience, SALIENCE_FLOOR), SALIENCE_MAX), decayed_at: now });
       if (pinned === true) metadata.pinned = true;
       if (pinned === false) delete metadata.pinned;
+      // Decay skips a pinned memory, so its time pinned never counts later.
+      if (pinned !== undefined) metadata.decayed_at = now;
       if (restore) for (const k of ARCHIVE_REASON_KEYS) delete metadata[k];
       const last = i === docs.length - 1;
       if ((note?.trim() || content !== undefined) && last) {

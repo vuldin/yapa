@@ -119,12 +119,15 @@ export async function findDuplicatePairs(
   return pairs.sort((x, y) => x.distance - y.distance);
 }
 
-/** Archive `loserId` as a duplicate of `winnerId` (metadata-only, reversible). */
-async function archiveDuplicate(collection: string, loserId: string, winnerId: string): Promise<void> {
-  const existing = await getDocumentsByIds(collection, [loserId]);
+/** Archive `id` with the reason in `extra` (metadata-only, reversible). */
+async function archiveAs(collection: string, id: string, extra: Record<string, any>): Promise<void> {
+  const existing = await getDocumentsByIds(collection, [id]);
   if (!existing.length) return;
-  await patchDocument(collection, loserId, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, { duplicate_of: winnerId })));
+  await patchDocument(collection, id, metadataDelta(existing[0].metadata, archivedMetadata(existing[0].metadata, extra)));
 }
+
+/** Archive `loserId` as a duplicate of `winnerId`. */
+const archiveDuplicate = (collection: string, loserId: string, winnerId: string) => archiveAs(collection, loserId, { duplicate_of: winnerId });
 
 /**
  * Run one janitor sweep. Returns stats; never throws per-pair failures
@@ -200,7 +203,7 @@ export async function janitorSweep(options: JanitorOptions = {}): Promise<Janito
         const target = decision.targetId === candidate.id ? candidate : neighbor;
         const other = decision.targetId === candidate.id ? neighbor : candidate;
         if (!owns(target.id)) { stats.skippedNotOwned++; continue; }
-        await storeMemory(decision.mergedContent ?? candidate.content, {
+        const merged = await storeMemory(decision.mergedContent ?? candidate.content, {
           collection,
           salience: Math.max(pair.a.metadata.salience ?? 1, pair.b.salience ?? 1),
           tags: ['janitor-merged'],
@@ -214,6 +217,12 @@ export async function janitorSweep(options: JanitorOptions = {}): Promise<Janito
           },
         });
         changed.add(target.id);
+        // The merged memory carries both, so the other side goes too when
+        // it's yours; a teammate's stays.
+        if (owns(other.id)) {
+          await archiveAs(collection, other.id, { superseded_by: merged.ids[0] });
+          changed.add(other.id);
+        }
         stats.superseded++;
       } else {
         stats.keptDistinct++;
