@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import {
   getConfig, getDocumentsByFilter, listMemories, MemoryNotFoundError, putExternal, TypedMemoryError, setConfig, sweepFindings, applySweep, type SweepItem, type SweepResult,
   recordLastWrite, updateMemory, waitingOn, formatWaiting, resolveWriteCollection, sessionFolder, SharedCollectionNotAllowedError, redirectNote, type TypedFields,
-  RecordsElsewhereError, untypeCollection,
+  RecordsElsewhereError, untypeCollection, sweepExpiredMemories,
 } from '@yapa/core';
 
 export const MEMORY_USAGE =
@@ -21,6 +21,7 @@ export const MEMORY_USAGE =
   '       yapa memory update ID [--collection C] [typed fields] [--note TEXT] [--salience N] [--pin | --unpin] [--restore] [--stdin-json]\n' +
   '       yapa memory sweep-findings --collection C [--save FILE] [--apply [--from FILE [--ids a,b]]] [--limit N] [--min-age-days N] [--all-owners]\n' +
   '       yapa memory untype --collection C [--dry-run]\n' +
+  '       yapa memory expire [--collection C] [--apply]\n' +
   '       yapa waiting       [--collection C] [--for U | --everyone]\n' +
   'Typed fields: --kind finding|decision|limitation|question|idea --status S --owner U --task-ids a,b\n' +
   '  --option TEXT (repeat) --recommendation TEXT --disposition D --disposition-ids a,b --disposition-reason TEXT\n' +
@@ -30,6 +31,8 @@ export const MEMORY_USAGE =
   '  resolves exactly the saved list as no-action (--ids: some of it); --apply alone judges and resolves in one step.\n' +
   'untype turns your typed memories without an external ref (--ref) into notes, in a collection marked as keeping its\n' +
   '  records elsewhere (yapa scope records-elsewhere add C): copies made before it was marked. --dry-run lists them.\n' +
+  'expire lists your ordinary notes the daily sweep archives for age: not recalled or changed for YAPA_MEMORY_EXPIRY_DAYS\n' +
+  '  (default 180) and below salience YAPA_MEMORY_EXPIRY_MAX_SALIENCE (0.2). --apply archives them now.\n' +
   'Prints one JSON object (--text: a short summary). Exit: 0 done, 2 bad arguments, 1 other error.\n';
 
 export interface MemoryCliResult {
@@ -184,6 +187,17 @@ export async function runMemory(sub: string | undefined, args: string[]): Promis
         const r = await updateMemory(id, { ...typed, ...(content !== undefined ? { content } : {}), ...(note !== undefined ? { note } : {}), ...(tags ? { tags } : {}), ...life }, flag(args, '--collection'));
         recordLastWrite(r.collection);
         return { exit: 0, json: { ok: true, id: r.id, collection: r.collection, metadata: r.metadata }, text: `updated ${r.id}` };
+      }
+      case 'expire': {
+        const apply = args.includes('--apply');
+        const r = await sweepExpiredMemories(undefined, { collection: flag(args, '--collection'), dryRun: !apply });
+        const n = r.candidates.length;
+        const lines = r.candidates.map(c => `${c.id} [${c.collection}] salience ${c.salience.toFixed(2)}, last active ${new Date(c.last_active * 1000).toISOString().slice(0, 10)}: ${c.preview.replace(/\s+/g, ' ')}`);
+        return {
+          exit: 0,
+          json: { ok: true, applied: apply, ...r },
+          text: [`${n} memor${n === 1 ? 'y' : 'ies'} ${apply ? 'archived' : 'would be archived'}`, ...lines].join('\n'),
+        };
       }
       case 'sweep-findings': {
         const collection = flag(args, '--collection');

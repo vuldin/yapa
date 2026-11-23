@@ -3,6 +3,7 @@ import { isReadOnlyDoc } from '../sync/syncable.js';
 import { sweepDeletedUpstream } from './trash.js';
 import { sweepSessionSummaries } from './summary-retention.js';
 import { isPinned } from './curatable.js';
+import { sweepExpiredMemories } from './expiry.js';
 import { applyDecay, type LifecycleMetadata } from '../lifecycle.js';
 
 const DECAY_SENTINEL_ID = '__decay_sentinel__';
@@ -69,6 +70,9 @@ export async function runDecaySweep(now: number = Math.floor(Date.now() / 1000))
   // Copies archived after their owner deleted them upstream, past retention.
   await sweepDeletedUpstream(now).catch(() => 0);
   await sweepSessionSummaries(now).catch(() => 0);
+  await sweepExpiredMemories(now).then(r => {
+    if (r.archived) process.stderr.write(`[yapa] Expiry: archived ${r.candidates.length} inactive memor${r.candidates.length === 1 ? 'y' : 'ies'} (restore with memory_update restore)\n`);
+  }).catch(() => undefined);
   return decayedCount;
 }
 
