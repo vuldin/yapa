@@ -14,7 +14,7 @@
     "new-static-key": "node scripts/new-static-key.mjs"
   },
   "dependencies": {
-    "@hono/node-server": "2.1.4",
+    "@hono/node-server": "2.1.6",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@yapa/core": "^1.0.0",
     "@yapa/service": "^1.0.0",
